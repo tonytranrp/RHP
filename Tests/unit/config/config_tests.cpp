@@ -15,7 +15,9 @@
 #include <rhp/net/endpoint.hpp>
 #include <rhp/net/loopback/loopback.hpp>
 #include <rhp/net/tcp/tcp.hpp>
+#include <rhp/security/ed25519.hpp>
 #include <rhp/security/psk_keyring.hpp>
+#include <rhp/security/signer.hpp>
 #include <rhp/wire/codec/msgpack.hpp>
 
 namespace config_tests_fixtures {
@@ -56,7 +58,7 @@ TEST_CASE("config: Rhp::config<> is the documented default chain", "[config]") {
     STATIC_REQUIRE_FALSE(Rhp::configuration<int>);
 }
 
-TEST_CASE("config: links set slots, later links win, the rest keeps defaults", "[config]") {
+TEST_CASE("config: links set slots / later links win / the rest keeps defaults", "[config]") {
     using cfg = Rhp::config<>                   //
         ::transport<Rhp::net::loopback>         //
         ::io<Rhp::exec::zero_threads>           //
@@ -89,4 +91,17 @@ TEST_CASE("config: every slot is concept-checked", "[config]") {
     STATIC_REQUIRE(Rhp::net::transport<Rhp::net::tcp>);
     STATIC_REQUIRE(Rhp::net::transport<Rhp::net::loopback>);
     STATIC_REQUIRE(Rhp::exec::clock_source<game_clock>);
+}
+
+TEST_CASE("config: the signer slot defaults to Ed25519 and can be switched off by type", "[config]") {
+    using defaults = Rhp::config<>;
+    STATIC_REQUIRE(std::is_same_v<defaults::signer_t, Rhp::security::ed25519>);
+    STATIC_REQUIRE(std::is_same_v<defaults::signing_key_t, Rhp::security::signing_key>);
+    STATIC_REQUIRE(std::is_same_v<defaults::trust_t, Rhp::security::trusted_signers>);
+    using off = defaults::signer<Rhp::security::unsigned_scripts>::transport<Rhp::net::loopback>;
+    STATIC_REQUIRE(std::is_same_v<off::signer_t, Rhp::security::unsigned_scripts>);
+    STATIC_REQUIRE(std::is_same_v<off::transport_t, Rhp::net::loopback>);
+    // The later link wins.
+    using back = off::signer<Rhp::security::ed25519>;
+    STATIC_REQUIRE(std::is_same_v<back::signer_t, Rhp::security::ed25519>);
 }

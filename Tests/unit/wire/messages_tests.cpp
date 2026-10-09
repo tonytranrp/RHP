@@ -48,7 +48,7 @@ TEST_CASE("messages: handshake round trips", "[wire][messages]") {
     CHECK(w2.heartbeat_ms == 2000);
 }
 
-TEST_CASE("messages: envelope keeps req, idem and body", "[wire][messages]") {
+TEST_CASE("messages: envelope keeps req / idem and body", "[wire][messages]") {
     const wire::envelope e{7, 99, value{"x"}};
     const auto e2 = roundtrip(e);
     CHECK(e2.req == 7);
@@ -128,7 +128,7 @@ TEST_CASE("messages: replies round trip", "[wire][messages]") {
     CHECK(emit.data == value{1.5});
 }
 
-TEST_CASE("messages: errors cross the wire, unknown codes become runtime", "[wire][messages]") {
+TEST_CASE("messages: errors cross the wire / unknown codes become runtime", "[wire][messages]") {
     Rhp::error e = Rhp::make_error(errc::kForbidden, "needs patch", "game.gravity");
     e.traceback = "stack";
     auto back = Rhp::from_value<Rhp::error>(Rhp::to_value(e));
@@ -138,4 +138,36 @@ TEST_CASE("messages: errors cross the wire, unknown codes become runtime", "[wir
     REQUIRE(unknown);
     CHECK(unknown->code == errc::kRuntime);
     CHECK(unknown->message == "m");
+}
+
+TEST_CASE("messages: Stage 4 fields: signatures / pins / blob chunks", "[wire][messages]") {
+    const value sig{value::map{{value{"signer"}, value{"dev"}}, {value{"sig"}, value{value::bytes(64, std::byte{7})}}}};
+    const auto exec = roundtrip(wire::exec_request{"return 1", "exec", sig});
+    CHECK(exec.signature == sig);
+    CHECK(roundtrip(wire::exec_request{"return 1"}).signature.is_nil());
+    CHECK(roundtrip(wire::load_request{"m", "return {}", sig}).signature == sig);
+    CHECK(roundtrip(wire::reload_request{wire::module_ref{"m"}, "return {}", sig}).signature == sig);
+
+    wire::module_status s;
+    s.id = Rhp::module_id{3};
+    s.name = "kept";
+    s.state = "active";
+    s.pinned = true;
+    CHECK(roundtrip(s).pinned);
+
+    const wire::blob_chunk chunk{42, "configs", "game.ini", 10, 4, value::bytes{std::byte{1}, std::byte{2}}};
+    const auto back = roundtrip(chunk);
+    CHECK(back.transfer == 42);
+    CHECK(back.sink == "configs");
+    CHECK(back.name == "game.ini");
+    CHECK(back.total == 10);
+    CHECK(back.offset == 4);
+    CHECK(back.data == chunk.data);
+    CHECK_FALSE(Rhp::from_value<wire::blob_chunk>(value{value::map{{value{"transfer"}, value{1}}}}));
+
+    // Blobs are open to every role at the wire: each sink checks its own.
+    CHECK(wire::required_role(wire::op::kBlob) == Rhp::role::kObserve);
+    CHECK(wire::required_role(wire::op::kPin) == Rhp::role::kAdmin);
+    CHECK(wire::required_role(wire::op::kUnpin) == Rhp::role::kAdmin);
+    CHECK(wire::kProtocolRevision == 2);
 }

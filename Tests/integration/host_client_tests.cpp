@@ -27,6 +27,7 @@
 #include <rhp/net/loopback/loopback.hpp>
 #include <rhp/net/tcp/tcp.hpp>
 #include <rhp/script/lib.hpp>
+#include <rhp/security/ed25519.hpp>
 #include <rhp/security/key.hpp>
 #include <rhp/security/keyring.hpp>
 #include <rhp/security/psk_keyring.hpp>
@@ -63,6 +64,7 @@ struct keys {
     Rhp::security::key admin = *Rhp::security::key::generate();
     Rhp::security::key patch = *Rhp::security::key::generate();
     Rhp::security::key observe = *Rhp::security::key::generate();
+    Rhp::security::ed25519_secret_key developer = *Rhp::security::ed25519_secret_key::generate();
 
     [[nodiscard]] Rhp::security::keyring ring() const {
         return Rhp::security::keyring{{"admin", admin, Rhp::role::kAdmin}, {"patch", patch, Rhp::role::kPatch}, {"observe", observe, Rhp::role::kObserve}};
@@ -70,13 +72,16 @@ struct keys {
     [[nodiscard]] Rhp::security::psk_identity as_admin() const { return {"admin", admin}; }
     [[nodiscard]] Rhp::security::psk_identity as_patch() const { return {"patch", patch}; }
     [[nodiscard]] Rhp::security::psk_identity as_observe() const { return {"observe", observe}; }
+    // Every script is signed by one developer key the hosts trust.
+    [[nodiscard]] Rhp::security::trusted_signers trusted() const { return Rhp::security::trusted_signers{{"dev", developer.public_key()}}; }
+    [[nodiscard]] Rhp::security::signing_key signer() const { return {"dev", developer}; }
 };
 
 // A host whose pump runs on its own thread (the "game thread"), started after installing libs.
 template <class Cfg>
 class running_host {
 public:
-    running_host(Rhp::endpoint ep, const keys& k, Rhp::host_options options = {}) : host_(std::move(ep), k.ring(), options) {
+    running_host(Rhp::endpoint ep, const keys& k, Rhp::host_options options = {}) : host_(std::move(ep), k.ring(), k.trusted(), options) {
         if constexpr (std::is_same_v<typename Cfg::errors_t, Rhp::errors::throwing>) {
             host_.template install<test_lib>();
         } else {
@@ -168,7 +173,7 @@ TEST_CASE("host+client: exec returns values and errors", "[integration][exec]") 
     keys k;
     const auto at = Rhp::endpoint::listen("itest.exec", 1);
     running_host<loopback_cfg> host{at, k};
-    Rhp::client<loopback_cfg> c{host.dial_at(at), k.as_patch()};
+    Rhp::client<loopback_cfg> c{host.dial_at(at), k.as_patch(), k.signer()};
     REQUIRE(c.connect());
     CHECK(c.info().identity == "patch");
     CHECK(c.info().granted == Rhp::role::kPatch);
@@ -201,9 +206,9 @@ TEST_CASE("host+client: roles gate requests and bindings", "[integration][roles]
     keys k;
     const auto at = Rhp::endpoint::listen("itest.roles", 1);
     running_host<loopback_cfg> host{at, k};
-    Rhp::client<loopback_cfg> observer{host.dial_at(at), k.as_observe()};
-    Rhp::client<loopback_cfg> patcher{host.dial_at(at), k.as_patch()};
-    Rhp::client<loopback_cfg> admin{host.dial_at(at), k.as_admin()};
+    Rhp::client<loopback_cfg> observer{host.dial_at(at), k.as_observe(), k.signer()};
+    Rhp::client<loopback_cfg> patcher{host.dial_at(at), k.as_patch(), k.signer()};
+    Rhp::client<loopback_cfg> admin{host.dial_at(at), k.as_admin(), k.signer()};
 
     CHECK(observer.exec<int>("return itest.value") == 0);
     CHECK(observer.exec("itest.value = 1").error().code == errc::kForbidden);
@@ -232,7 +237,7 @@ TEST_CASE("host+client: the module lifecycle over the wire", "[integration][life
     keys k;
     const auto at = Rhp::endpoint::listen("itest.lifecycle", 1);
     running_host<loopback_cfg> host{at, k};
-    Rhp::client<loopback_cfg> c{host.dial_at(at), k.as_patch()};
+    Rhp::client<loopback_cfg> c{host.dial_at(at), k.as_patch(), k.signer()};
 
     auto mod = c.load("itest.counter", "local M = {} itest.value = 10 function M.add(n) itest.value = itest.value + n return itest.value end return M");
     REQUIRE(mod);
@@ -285,7 +290,7 @@ TEST_CASE("host+client: require; force unload; faults", "[integration][lifecycle
     keys k;
     const auto at = Rhp::endpoint::listen("itest.require", 1);
     running_host<loopback_cfg> host{at, k};
-    Rhp::client<loopback_cfg> c{host.dial_at(at), k.as_patch()};
+    Rhp::client<loopback_cfg> c{host.dial_at(at), k.as_patch(), k.signer()};
     auto base = c.load("itest.base", "return {n = 7}");
     REQUIRE(base);
     auto user = c.load("itest.user", "local b = require('itest.base') return {get = function() return b.n end}");
@@ -305,7 +310,7 @@ TEST_CASE("host+client: print and rhp.emit reach the requester", "[integration][
     const auto at = Rhp::endpoint::listen("itest.output", 1);
     running_host<loopback_cfg> host{at, k};
     inbox seen;
-    Rhp::client<loopback_cfg> c{host.dial_at(at), k.as_patch(), seen.options()};
+    Rhp::client<loopback_cfg> c{host.dial_at(at), k.as_patch(), k.signer(), seen.options()};
     REQUIRE(c.exec("print('one', 2) rhp.emit({kind = 'pos', x = 1}) return 0"));
     REQUIRE(eventually([&] { return seen.has_line("one\t2"); }));
     REQUIRE(eventually([&] {
@@ -320,7 +325,7 @@ TEST_CASE("host+client: print and rhp.emit reach the requester", "[integration][
 
     // A timer prints later, outside any request: every session of the identity hears it.
     inbox other;
-    Rhp::client<loopback_cfg> second{host.dial_at(at), k.as_patch(), other.options()};
+    Rhp::client<loopback_cfg> second{host.dial_at(at), k.as_patch(), k.signer(), other.options()};
     REQUIRE(second.connect());
     REQUIRE(c.exec("rhp.timer(10, function() print('tick') end)"));
     CHECK(eventually([&] { return seen.has_line("tick") && other.has_line("tick"); }));
@@ -330,7 +335,7 @@ TEST_CASE("host+client: a request that suspends is answered when it finishes", "
     keys k;
     const auto at = Rhp::endpoint::listen("itest.wait", 1);
     running_host<loopback_cfg> host{at, k};
-    Rhp::client<loopback_cfg> c{host.dial_at(at), k.as_patch()};
+    Rhp::client<loopback_cfg> c{host.dial_at(at), k.as_patch(), k.signer()};
     CHECK(c.exec<int>("local f = rhp.frame() rhp.wait(3) return rhp.frame() - f") == 3);
     auto mod = c.load("itest.slow", "rhp.wait(2) return {ready = true}");
     REQUIRE(mod);
@@ -345,7 +350,7 @@ TEST_CASE("host+client: cancel stops a running loop and a suspended wait", "[int
     keys k;
     const auto at = Rhp::endpoint::listen("itest.cancel", 1);
     running_host<loopback_cfg> host{at, k};
-    Rhp::client<loopback_cfg> c{host.dial_at(at), k.as_patch()};
+    Rhp::client<loopback_cfg> c{host.dial_at(at), k.as_patch(), k.signer()};
     REQUIRE(c.connect());
 
     SECTION("an infinite loop holding the pump thread") {
@@ -377,10 +382,10 @@ TEST_CASE("host+client: disconnect reverts the identity; shared sessions keep it
     const auto at = Rhp::endpoint::listen("itest.disconnect", 1);
     {
         running_host<loopback_cfg> host{at, k};
-        Rhp::client<loopback_cfg> watcher{host.dial_at(at), k.as_observe()};
+        Rhp::client<loopback_cfg> watcher{host.dial_at(at), k.as_observe(), k.signer()};
         {
-            auto first = std::make_unique<Rhp::client<loopback_cfg>>(host.dial_at(at), k.as_patch());
-            Rhp::client<loopback_cfg> second{host.dial_at(at), k.as_patch()};
+            auto first = std::make_unique<Rhp::client<loopback_cfg>>(host.dial_at(at), k.as_patch(), k.signer());
+            Rhp::client<loopback_cfg> second{host.dial_at(at), k.as_patch(), k.signer()};
             REQUIRE(first->exec("itest.value = 99 shared = 'yes'"));
             REQUIRE(second.connect());
             REQUIRE(watcher.connect());
@@ -402,7 +407,7 @@ TEST_CASE("host+client: a host that goes away fails the client's calls", "[integ
     keys k;
     const auto at = Rhp::endpoint::listen("itest.hostgone", 1);
     auto host = std::make_unique<running_host<loopback_cfg>>(at, k);
-    Rhp::client<loopback_cfg> c{host->dial_at(at), k.as_patch()};
+    Rhp::client<loopback_cfg> c{host->dial_at(at), k.as_patch(), k.signer()};
     REQUIRE(c.exec("return 1"));
     host.reset();
     auto r = c.exec("return 1");
@@ -413,7 +418,7 @@ TEST_CASE("host+client: a host that goes away fails the client's calls", "[integ
 
 TEST_CASE("host+client: connection failures", "[integration][connect]") {
     keys k;
-    Rhp::client<loopback_cfg> nobody{Rhp::endpoint::dial("itest.nobody", 1), k.as_patch()};
+    Rhp::client<loopback_cfg> nobody{Rhp::endpoint::dial("itest.nobody", 1), k.as_patch(), k.signer()};
     CHECK(nobody.connect().error().code == errc::kNotFound);
 
     const auto at = Rhp::endpoint::listen("itest.connect", 1);
@@ -424,8 +429,9 @@ TEST_CASE("host+client: connection failures", "[integration][connect]") {
     CHECK(stranger.connect().error().code == errc::kAuth);
     CHECK(host->sessions() == 0);
 
-    Rhp::client<loopback_cfg> listening{Rhp::endpoint::listen("itest.connect", 1), k.as_patch()};
-    CHECK(listening.connect().error().code == errc::kInvalidArgument); // reverse mode is Stage 4
+    // Reverse mode: a client listening on a channel the host already holds can't.
+    Rhp::client<loopback_cfg> listening{Rhp::endpoint::listen("itest.connect", 1), k.as_patch(), k.signer()};
+    CHECK(listening.connect().error().code == errc::kAlreadyLoaded);
 }
 
 TEST_CASE("host: listen failures are reported by port()", "[integration][host]") {
@@ -434,8 +440,8 @@ TEST_CASE("host: listen failures are reported by port()", "[integration][host]")
     CHECK(first.port());
     Rhp::host<loopback_cfg> second{Rhp::endpoint::listen("itest.port", 1), k.ring()};
     CHECK(second.port().error().code == errc::kAlreadyLoaded);
-    Rhp::host<loopback_cfg> dialing{Rhp::endpoint::dial("itest.port", 1), k.ring()};
-    CHECK(dialing.port().error().code == errc::kInvalidArgument);
+    Rhp::host<loopback_cfg> dialing{Rhp::endpoint::dial("itest.port_reverse", 1), k.ring()}; // reverse mode: dials, no port
+    CHECK(dialing.port() == 0);
     CHECK(first.install<test_lib>());
     CHECK(first.install<test_lib>().error().code == errc::kAlreadyLoaded);
 }
@@ -445,7 +451,7 @@ TEST_CASE("host+client: a result larger than a frame is an error, not a dead ses
     keys k;
     const auto at = Rhp::endpoint::listen("itest.big", 1);
     running_host<small_cfg> host{at, k};
-    Rhp::client<small_cfg> c{host.dial_at(at), k.as_patch()};
+    Rhp::client<small_cfg> c{host.dial_at(at), k.as_patch(), k.signer()};
     auto big = c.exec("return string.rep('x', 100000)");
     REQUIRE_FALSE(big);
     CHECK(big.error().code == errc::kLimitExceeded);
@@ -461,7 +467,7 @@ TEST_CASE("host+client: throwing error mode", "[integration][errors]") {
     keys k;
     const auto at = Rhp::endpoint::listen("itest.throwing", 1);
     running_host<throwing_cfg> host{at, k};
-    Rhp::client<throwing_cfg> c{host.dial_at(at), k.as_patch()};
+    Rhp::client<throwing_cfg> c{host.dial_at(at), k.as_patch(), k.signer()};
     const int answer = c.exec<int>("return 41 + 1");
     CHECK(answer == 42);
     const Rhp::value_list list = c.exec("return 1, 2");
@@ -480,7 +486,7 @@ TEST_CASE("host+client: zero_threads on both ends", "[integration][threads]") {
     keys k;
     const auto at = Rhp::endpoint::listen("itest.zero", 1);
     running_host<quiet_cfg> host{at, k};                      // pump() polls the network
-    Rhp::client<quiet_cfg> c{host.dial_at(at), k.as_patch()}; // calls run the network while waiting
+    Rhp::client<quiet_cfg> c{host.dial_at(at), k.as_patch(), k.signer()}; // calls run the network while waiting
     CHECK(c.exec<int>("return 7") == 7);
     CHECK(c.exec<int>("rhp.wait(2) return 8") == 8);
 }
@@ -492,7 +498,7 @@ TEST_CASE("host+client: over TCP on 127.0.0.1", "[integration][tcp]") {
         running_host<tcp_cfg> host{at, k};
         const auto dial = host.dial_at(at);
         CHECK(dial.port != 0);
-        Rhp::client<tcp_cfg> c{dial, k.as_patch()};
+        Rhp::client<tcp_cfg> c{dial, k.as_patch(), k.signer()};
         CHECK(c.exec<int>("return 40 + 2") == 42);
         auto mod = c.load("itest.tcp", "itest.value = 5 return {}");
         REQUIRE(mod);
@@ -529,7 +535,7 @@ TEST_CASE("host: unauthenticated connections are capped", "[integration][host]")
     // An authenticated client still gets in once one of them leaves.
     raw[0].reset();
     std::this_thread::sleep_for(50ms);
-    Rhp::client<capped_cfg> c{host.dial_at(at), k.as_patch()};
+    Rhp::client<capped_cfg> c{host.dial_at(at), k.as_patch(), k.signer()};
     CHECK(c.exec<int>("return 1") == 1);
 }
 
@@ -544,7 +550,9 @@ struct raw_client final : Rhp::session::handler {
     std::vector<Rhp::wire::envelope> replies;
     std::vector<Rhp::wire::op> codes;
 
-    raw_client(const Rhp::endpoint& at, const Rhp::security::psk_identity& who) {
+    Rhp::security::signing_key key;
+
+    raw_client(const Rhp::endpoint& at, const Rhp::security::psk_identity& who, Rhp::security::signing_key signer) : key(std::move(signer)) {
         Rhp::session::options opts;
         opts.codec = Rhp::wire::codec_ops_for<Rhp::wire::msgpack>;
         Rhp::net::loopback::dial(io, at, [this, opts, who](Rhp::result<std::unique_ptr<Rhp::net::link>> l) {
@@ -563,7 +571,9 @@ struct raw_client final : Rhp::session::handler {
     void on_closed(Rhp::session::session&, const Rhp::error&) override { closed = true; }
 
     void exec(std::uint64_t req, std::uint64_t idem, std::string source) {
-        const value body = Rhp::to_value(Rhp::wire::exec_request{std::move(source), "exec"});
+        auto signature = key.sign(source);
+        REQUIRE(signature);
+        const value body = Rhp::to_value(Rhp::wire::exec_request{std::move(source), "exec", std::move(*signature)});
         REQUIRE(s->send(Rhp::wire::op::kExec, Rhp::to_value(Rhp::wire::envelope{req, idem, body})));
     }
 
@@ -578,7 +588,7 @@ TEST_CASE("host: a retried request (same idempotency key) runs once", "[integrat
     keys k;
     const auto at = Rhp::endpoint::listen("itest.idem", 1);
     running_host<loopback_cfg> host{at, k};
-    raw_client c{host.dial_at(at), k.as_patch()};
+    raw_client c{host.dial_at(at), k.as_patch(), k.signer()};
     const std::string counter = "counter = (counter or 0) + 1 return counter";
     c.exec(1, 777, counter);
     REQUIRE(c.wait_replies(1));
@@ -597,7 +607,7 @@ TEST_CASE("host: a reply too large to cache refuses its retry instead of running
     keys k;
     const auto at = Rhp::endpoint::listen("itest.idem_big", 1);
     running_host<loopback_cfg> host{at, k, Rhp::host_options{.idempotency_cache = 256, .idempotency_bytes = 1024}};
-    raw_client c{host.dial_at(at), k.as_patch()};
+    raw_client c{host.dial_at(at), k.as_patch(), k.signer()};
     const std::string big = "runs = (runs or 0) + 1 return string.rep('x', 4000)";
     c.exec(1, 900, big);
     REQUIRE(c.wait_replies(1));
@@ -616,7 +626,7 @@ TEST_CASE("host: a full inbox or outbox loses nothing", "[integration][host]") {
     const auto at = Rhp::endpoint::listen("itest.rings", 1);
     running_host<loopback_cfg> host{at, k, Rhp::host_options{.inbox_capacity = 2}};
     inbox seen;
-    Rhp::client<loopback_cfg> c{host.dial_at(at), k.as_patch(), seen.options()};
+    Rhp::client<loopback_cfg> c{host.dial_at(at), k.as_patch(), k.signer(), seen.options()};
     // 300 prints and a result go through a 2-slot outbox in one pump().
     auto r = c.exec("for i = 1, 300 do print('line ' .. i) end return 1, 2, 3");
     REQUIRE(r);
@@ -648,13 +658,13 @@ TEST_CASE("host: a request whose session closed before it ran never runs", "[int
     const auto at = Rhp::endpoint::listen("itest.dead_start", 1);
     running_host<loopback_cfg> host{at, k};
     {
-        raw_client c{host.dial_at(at), k.as_patch()};
+        raw_client c{host.dial_at(at), k.as_patch(), k.signer()};
         c.exec(1, 0, "while true do end");
         c.s->close(Rhp::make_error(errc::kCancelled, "gone"));
         rhp_test::poll_for({&c.io}, 20ms); // let the close go out
     }
     // The pump thread is free: a new client is served.
-    Rhp::client<loopback_cfg> next{host.dial_at(at), k.as_admin()};
+    Rhp::client<loopback_cfg> next{host.dial_at(at), k.as_admin(), k.signer()};
     CHECK(next.exec<int>("return 5") == 5);
     CHECK(eventually([&] { return host->identities() == 1; }));
 }
@@ -663,7 +673,7 @@ TEST_CASE("host+client: cancel reaches a loop whenever it lands", "[integration]
     keys k;
     const auto at = Rhp::endpoint::listen("itest.cancel_storm", 1);
     running_host<loopback_cfg> host{at, k};
-    Rhp::client<loopback_cfg> c{host.dial_at(at), k.as_patch()};
+    Rhp::client<loopback_cfg> c{host.dial_at(at), k.as_patch(), k.signer()};
     REQUIRE(c.connect());
     for (int round = 0; round < 20; ++round) {
         std::atomic<bool> done{false};
@@ -691,7 +701,7 @@ TEST_CASE("host+client: an idle zero_threads client stays connected while it pol
     keys k;
     const auto at = Rhp::endpoint::listen("itest.zero_idle", 1);
     running_host<fast_host_cfg> host{at, k};
-    Rhp::client<fast_cfg> c{host.dial_at(at), k.as_patch()};
+    Rhp::client<fast_cfg> c{host.dial_at(at), k.as_patch(), k.signer()};
     REQUIRE(c.exec("x = 42"));
     const auto until = std::chrono::steady_clock::now() + 400ms; // > 10 heartbeats
     while (std::chrono::steady_clock::now() < until) {
