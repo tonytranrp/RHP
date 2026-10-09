@@ -12,6 +12,8 @@
 #include <utility>
 #include <vector>
 
+#include <rhp/core/error.hpp>
+#include <rhp/core/ids.hpp>
 #include <rhp/core/result.hpp>
 #include <rhp/core/value.hpp>
 
@@ -271,6 +273,64 @@ struct convert<std::map<K, V>> {
             out.insert_or_assign(std::move(*key), std::move(*mapped));
         }
         return out;
+    }
+};
+
+// Ids travel as their integer.
+template <class Tag, class Rep>
+struct convert<strong_id<Tag, Rep>> {
+    static value to_value(const strong_id<Tag, Rep>& id) { return convert<Rep>::to_value(id.value()); }
+    static result<strong_id<Tag, Rep>> from_value(const value& v) {
+        auto raw = convert<Rep>::from_value(v);
+        if (!raw) {
+            return std::unexpected{std::move(raw).error()};
+        }
+        return strong_id<Tag, Rep>{*raw};
+    }
+};
+
+// {code = "forbidden", message = ..., where = ..., traceback = ...}; empty strings are left out.
+// Unknown code names decode as kRuntime, so a newer peer's codes still arrive as errors.
+template <>
+struct convert<error> {
+    static value to_value(const error& err) {
+        value::map m;
+        m.emplace_back("code", value{to_string(err.code)});
+        if (!err.message.empty()) {
+            m.emplace_back("message", value{err.message});
+        }
+        if (!err.where.empty()) {
+            m.emplace_back("where", value{err.where});
+        }
+        if (!err.traceback.empty()) {
+            m.emplace_back("traceback", value{err.traceback});
+        }
+        return value{std::move(m)};
+    }
+
+    static result<error> from_value(const value& v) {
+        if (!v.is_map()) {
+            return detail::type_mismatch("error map", v);
+        }
+        error err;
+        err.code = errc::kRuntime;
+        if (const auto* code = v.find("code"); code != nullptr && code->is_string()) {
+            const std::string& name = *code->get_if<std::string>();
+            for (auto c = static_cast<std::uint16_t>(errc::kOk); c <= static_cast<std::uint16_t>(kLastErrc); ++c) {
+                if (to_string(static_cast<errc>(c)) == name) {
+                    err.code = static_cast<errc>(c);
+                    break;
+                }
+            }
+        }
+        const auto text = [&v](std::string_view key) -> std::string {
+            const auto* s = v.find(key);
+            return s != nullptr && s->is_string() ? *s->get_if<std::string>() : std::string{};
+        };
+        err.message = text("message");
+        err.where = text("where");
+        err.traceback = text("traceback");
+        return err;
     }
 };
 

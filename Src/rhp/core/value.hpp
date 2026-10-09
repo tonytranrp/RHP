@@ -95,6 +95,9 @@ private:
 
 inline constexpr value::nil_t nil{};
 
+// What a script returns: every value of its return list.
+using value_list = std::vector<value>;
+
 [[nodiscard]] std::string_view to_string(value::kind k) noexcept;
 
 inline const value* value::find(const value& key) const noexcept {
