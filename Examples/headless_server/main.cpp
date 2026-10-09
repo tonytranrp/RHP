@@ -27,6 +27,7 @@
 #include <filesystem>
 #include <format>
 #include <fstream>
+#include <initializer_list>
 #include <optional>
 #include <print>
 #include <string>
@@ -139,7 +140,10 @@ struct options {
         } else if (arg == "--stop-file") {
             o.stop_file = *v;
         } else if (arg == "--seconds") {
-            std::from_chars(v->data(), v->data() + v->size(), o.seconds);
+            if (std::from_chars(v->data(), v->data() + v->size(), o.seconds).ec != std::errc{} || o.seconds < 0) {
+                std::println(stderr, "bad --seconds {}", *v);
+                return std::nullopt;
+            }
         } else {
             std::println(stderr, "unknown option {}", arg);
             return std::nullopt;
@@ -150,6 +154,29 @@ struct options {
         return std::nullopt;
     }
     return o;
+}
+
+// Letters, digits, '.', '_' and '-'; not starting with '.'; not a Windows device name (CON, NUL, COM1, ...).
+[[nodiscard]] bool safe_file_name(const std::string& name) {
+    if (name.empty() || name.size() > 128 || name.front() == '.') {
+        return false;
+    }
+    for (const char c : name) {
+        const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-';
+        if (!ok) {
+            return false;
+        }
+    }
+    std::string stem = name.substr(0, name.find('.'));
+    for (char& c : stem) {
+        c = static_cast<char>(c >= 'a' && c <= 'z' ? c - 'a' + 'A' : c);
+    }
+    for (const std::string_view device : {"CON", "PRN", "AUX", "NUL"}) {
+        if (stem == device) {
+            return false;
+        }
+    }
+    return !((stem.starts_with("COM") || stem.starts_with("LPT")) && stem.size() == 4 && stem[3] >= '0' && stem[3] <= '9');
 }
 
 // The endpoint to listen on, or (reverse mode) to dial.
@@ -194,13 +221,14 @@ int main(int argc, char** argv) {
     }
 
     using cfg = Rhp::config<>::logger<Rhp::core::stderr_logger>;
+    // Declared before the host so it outlives it: the reverts the host does when it shuts down are logged too.
+    Rhp::event::subscription audit;
     Rhp::host<cfg> host{*ep, std::move(*keys), std::move(signers)};
     if (auto installed = host.install<game::game_lib>(); !installed) {
         std::println(stderr, "{}", installed.error());
         return 1;
     }
 
-    Rhp::event::subscription audit;
     if (!o->audit.empty()) {
         const Rhp::audit::file_sink sink{o->audit};
         if (auto ok = sink.ok(); !ok) {
@@ -214,10 +242,10 @@ int main(int argc, char** argv) {
         std::filesystem::create_directories(o->blobs, ec);
         const std::filesystem::path dir{o->blobs};
         (void)host.on_blob("files", [dir](const Rhp::blob_view& b) -> Rhp::result<void> {
-            // Only a plain file name: a blob can't write outside the folder.
+            // Only a plain file name: a blob can't write outside the folder (or to a device name).
             const std::filesystem::path name = std::filesystem::path{std::string{b.name}}.filename();
-            if (name.empty() || name == "." || name == "..") {
-                return Rhp::fail(Rhp::errc::kInvalidArgument, "the blob needs a file name", "files");
+            if (!safe_file_name(name.string())) {
+                return Rhp::fail(Rhp::errc::kInvalidArgument, std::format("'{}' is not an accepted file name", b.name), "files");
             }
             std::ofstream out{dir / name, std::ios::binary | std::ios::trunc};
             out.write(reinterpret_cast<const char*>(b.bytes.data()), static_cast<std::streamsize>(b.bytes.size()));

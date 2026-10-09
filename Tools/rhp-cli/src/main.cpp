@@ -47,6 +47,9 @@ std::atomic<bool> g_interrupted{false};
 
 extern "C" void on_interrupt(int) {
     g_interrupted.store(true);
+    // The MSVC runtime resets a handler to SIG_DFL before calling it: without this the second
+    // Ctrl+C would kill rhp-cli (and the host would revert this session's work).
+    std::signal(SIGINT, on_interrupt);
 }
 
 [[nodiscard]] bool stdout_is_terminal() {
@@ -215,6 +218,7 @@ int repl(const connection_options& o) {
                 break;
             }
         }
+        (void)sh.finish();
         return sh.failures() == 0 ? 0 : 1;
     }
 
@@ -242,7 +246,11 @@ int repl(const connection_options& o) {
         g_interrupted.store(false);
         const char* input = rx.input(sh.continuing() ? "...> " : "rhp> ");
         if (input == nullptr) {
-            if (errno == EAGAIN) { // Ctrl+C at the prompt: drop the line
+            if (errno == EAGAIN) { // Ctrl+C at the prompt: drop the line (and unfinished multi-line Lua)
+                if (sh.continuing()) {
+                    sh.reset();
+                    (*conn->out)(rhp_cli::style::kInfo, "(multi-line input dropped)");
+                }
                 continue;
             }
             break; // Ctrl+D / end of input
@@ -410,6 +418,9 @@ int main(int argc, char** argv) {
     if (run_cmd->parsed()) {
         if (pin || !module.empty()) {
             ok = sh.load_file(module.empty() ? rhp_cli::module_name_for(file) : module, file, false, pin);
+            if (ok && !pin) {
+                (*c->out)(rhp_cli::style::kInfo, "not pinned: the module is reverted when rhp-cli exits (add --pin to keep it)");
+            }
         } else if (const auto source = rhp_cli::read_text_file(file)) {
             ok = sh.exec(*source);
         } else {
@@ -423,7 +434,9 @@ int main(int argc, char** argv) {
     } else if (blob_cmd->parsed()) {
         ok = sh.send_blob(sink, file, module);
     } else if (watch_cmd->parsed()) {
-        sh.watch(folder);
+        if (!sh.watch(folder)) {
+            return 1;
+        }
         while (!g_interrupted.load()) {
             std::this_thread::sleep_for(std::chrono::milliseconds{100});
         }

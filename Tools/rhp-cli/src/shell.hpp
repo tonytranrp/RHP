@@ -56,7 +56,7 @@ using printer = std::function<void(style, std::string_view)>;
 [[nodiscard]] inline Rhp::module_ref parse_module(std::string_view text) {
     std::string_view digits = text.starts_with('#') ? text.substr(1) : text;
     std::uint64_t id = 0;
-    bool numeric = !digits.empty();
+    bool numeric = !digits.empty() && digits.size() <= 18; // ids fit; longer digit runs are names
     for (const char c : digits) {
         if (c < '0' || c > '9') {
             numeric = false;
@@ -117,17 +117,19 @@ public:
         if (cmd == "help" || cmd == "?") {
             help();
         } else if (cmd == "exec") {
-            const auto at = line.find("exec");
-            run_lua(std::string{line.substr(at + 4)});
+            const auto at = line.find_first_not_of(" \t");
+            run_lua(std::string{line.substr(at).starts_with("exec") ? line.substr(at + 4) : line});
         } else if (cmd == "load" || cmd == "reload") {
             if (need(2, std::format("{} <module> <file.lua>", cmd))) {
                 (void)load_file(arg(1), arg(2), cmd == "reload");
             }
         } else if (cmd == "call") {
             if (need(2, "call <module> <function> [args...]")) {
+                // Quoted arguments stay strings: "42" is text, 42 a number.
+                const auto quoted = split_words(line, true);
                 std::vector<Rhp::value> args;
-                for (std::size_t i = 3; i < words.size(); ++i) {
-                    args.push_back(parse_literal(words[i]));
+                for (std::size_t i = 3; i < quoted.size(); ++i) {
+                    args.push_back(parse_literal(quoted[i]));
                 }
                 report_values(client_.call(parse_module(arg(1)), arg(2), args));
             }
@@ -184,7 +186,7 @@ public:
             }
         } else if (cmd == "watch") {
             if (need(1, "watch <folder>")) {
-                watch(arg(1));
+                (void)watch(arg(1));
             }
         } else if (cmd == "unwatch") {
             unwatch();
@@ -199,6 +201,19 @@ public:
     }
 
     [[nodiscard]] bool continuing() const noexcept { return !buffer_.empty(); }
+
+    // Drops unfinished multi-line Lua (Ctrl+C at a continuation prompt).
+    void reset() noexcept { buffer_.clear(); }
+
+    // End of input: unfinished Lua is an error (never run, never silently dropped). False if there was some.
+    bool finish() {
+        if (buffer_.empty()) {
+            return true;
+        }
+        buffer_.clear();
+        error("unfinished Lua at the end of input (an open block, bracket or string)");
+        return false;
+    }
 
     // Runs Lua in the scratch module and prints what it returned. True on success.
     bool exec(std::string_view source) {
@@ -293,12 +308,12 @@ public:
     }
 
     // Reloads <folder>/*.lua whenever one is saved (module name = file stem). Replaces an earlier watch.
-    void watch(const std::string& folder) {
+    bool watch(const std::string& folder) {
         unwatch();
         std::error_code ec;
         if (!std::filesystem::is_directory(folder, ec)) {
             error(std::format("{} is not a folder", folder));
-            return;
+            return false;
         }
         info(std::format("watching {} (save a .lua file to reload it; `unwatch` stops)", folder));
         watcher_ = std::jthread{[this, folder](std::stop_token stop) {
@@ -315,6 +330,7 @@ public:
                 }
             }
         }};
+        return true;
     }
 
     void unwatch() {

@@ -26,7 +26,8 @@ namespace rhp_cli {
 
 // Splits a command line into words; "double quotes" group words (\" is a quote inside them; other
 // backslashes are kept, so Windows paths work).
-[[nodiscard]] std::vector<std::string> split_words(std::string_view line);
+// With `keep_quotes` a quoted word keeps its quotes (so `call` can tell "42" from 42).
+[[nodiscard]] std::vector<std::string> split_words(std::string_view line, bool keep_quotes = false);
 
 // A call argument: 42, -1.5, "text", 'text', true, false, nil; anything else is a string.
 [[nodiscard]] Rhp::value parse_literal(std::string_view text);
