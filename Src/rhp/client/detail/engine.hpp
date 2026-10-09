@@ -1,9 +1,11 @@
 #pragma once
 
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <span>
 #include <stop_token>
 #include <string>
 #include <string_view>
@@ -21,7 +23,8 @@
 namespace Rhp {
 
 struct client_options {
-    // How long connect() (or the first call) waits for the handshake.
+    // How long connect() (or the first call) waits for the handshake — in reverse mode, for a host
+    // to dial in and finish it.
     std::chrono::milliseconds connect_timeout{10'000};
     // How long a call waits for its reply; 0 = until the reply or the session ends (the
     // heartbeat ends a session whose host stopped answering).
@@ -32,6 +35,10 @@ struct client_options {
     std::function<void(std::uint64_t request, std::string_view line)> on_output{};
     // Every rhp.emit(value), with its request and module. Same thread rules as on_output.
     std::function<void(std::uint64_t request, module_id module, const value& v)> on_emit{};
+    // Bytes per blob chunk (each one request, at most limits.max_frame minus framing) and how
+    // many chunks may be in flight at once.
+    std::size_t blob_chunk = 1u << 20;
+    std::size_t blob_window = 4;
 };
 
 } // namespace Rhp
@@ -56,18 +63,32 @@ struct engine_deleter {
 
 using engine_ptr = std::unique_ptr<engine, engine_deleter>;
 
+// Gets the kResult body of a request, or the error it ended with.
+using completion = std::function<void(result<value>)>;
+
 [[nodiscard]] engine_ptr make_engine(setup s);
-// Dials (once) and waits for the handshake.
+// Dials (once) — or, in reverse mode, listens and waits for a host to dial in — and waits for the
+// handshake.
 [[nodiscard]] result<void> connect(engine& e);
+// Reverse mode: starts listening (once) and returns the bound port. kInvalidArgument when dialing.
+[[nodiscard]] result<std::uint16_t> port(engine& e);
 // Sends one request and waits for its kResult body (or the kError it gets).
 [[nodiscard]] result<value> request(engine& e, wire::op code, value body);
-// Asks the host to stop every request of this client in flight. Any thread; doesn't wait.
-void cancel(engine& e) noexcept;
+// Sends one request without waiting; `done` runs once with the outcome, on the network thread
+// (or right away on this thread if the client is already closed). Connects first if needed.
+// Returns the request id (for cancel_request).
+std::uint64_t submit(engine& e, wire::op code, value body, completion done);
+// Sends a blob to a host sink in chunks (a window of them in flight) and waits for the verdict.
+[[nodiscard]] result<void> blob(engine& e, std::string_view sink, std::string_view name, std::span<const std::byte> data);
+// Asks the host to stop every request of this client in flight (0) or one. Any thread; doesn't wait.
+void cancel(engine& e, std::uint64_t req = 0) noexcept;
 // Closes the session (the host reverts this identity if it was its last session) and waits briefly
 // for the close to go out.
 void close(engine& e) noexcept;
 // zero_threads: runs whatever the network has ready, without blocking. No-op with an I/O thread.
 void poll(engine& e);
+// zero_threads: what an async result's get() runs while it waits; empty with an I/O thread.
+[[nodiscard]] std::function<void(std::chrono::milliseconds)> pump_fn(engine& e);
 void run_io(engine& e, std::stop_token stop);
 
 struct session_info {

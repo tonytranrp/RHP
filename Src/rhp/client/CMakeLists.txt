@@ -9,6 +9,7 @@ rhp_add_module(client
     HEADERS
         client.hpp
         detail/engine.hpp
+        pending.hpp
     SOURCES
         ${rhp_client_sources}
     DEPS
