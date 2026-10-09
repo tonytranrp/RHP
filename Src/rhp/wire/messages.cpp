@@ -195,7 +195,7 @@ result<module_ref> Rhp::convert<module_ref>::from_value(const value& v) {
 }
 
 value Rhp::convert<exec_request>::to_value(const exec_request& m) {
-    return map_builder{}.set("source", m.source).set("chunk", m.chunk).done();
+    return map_builder{}.set("source", m.source).set("chunk", m.chunk).set("signature", m.signature).done();
 }
 
 result<exec_request> Rhp::convert<exec_request>::from_value(const value& v) {
@@ -204,11 +204,11 @@ result<exec_request> Rhp::convert<exec_request>::from_value(const value& v) {
     }
     RHP_WIRE_READ(source, field<std::string>(v, "source", "exec"));
     RHP_WIRE_READ(chunk, field_or<std::string>(v, "chunk", "exec", "exec"));
-    return exec_request{std::move(*source), std::move(*chunk)};
+    return exec_request{std::move(*source), std::move(*chunk), field_value(v, "signature")};
 }
 
 value Rhp::convert<load_request>::to_value(const load_request& m) {
-    return map_builder{}.set("name", m.name).set("source", m.source).done();
+    return map_builder{}.set("name", m.name).set("source", m.source).set("signature", m.signature).done();
 }
 
 result<load_request> Rhp::convert<load_request>::from_value(const value& v) {
@@ -217,7 +217,7 @@ result<load_request> Rhp::convert<load_request>::from_value(const value& v) {
     }
     RHP_WIRE_READ(name, field<std::string>(v, "name", "load"));
     RHP_WIRE_READ(source, field<std::string>(v, "source", "load"));
-    return load_request{std::move(*name), std::move(*source)};
+    return load_request{std::move(*name), std::move(*source), field_value(v, "signature")};
 }
 
 value Rhp::convert<call_request>::to_value(const call_request& m) {
@@ -242,7 +242,7 @@ result<call_request> Rhp::convert<call_request>::from_value(const value& v) {
 }
 
 value Rhp::convert<reload_request>::to_value(const reload_request& m) {
-    return map_builder{}.set("module", m.module).set("source", m.source).done();
+    return map_builder{}.set("module", m.module).set("source", m.source).set("signature", m.signature).done();
 }
 
 result<reload_request> Rhp::convert<reload_request>::from_value(const value& v) {
@@ -251,7 +251,7 @@ result<reload_request> Rhp::convert<reload_request>::from_value(const value& v) 
     }
     RHP_WIRE_READ(module, field<module_ref>(v, "module", "reload"));
     RHP_WIRE_READ(source, field<std::string>(v, "source", "reload"));
-    return reload_request{std::move(*module), std::move(*source)};
+    return reload_request{std::move(*module), std::move(*source), field_value(v, "signature")};
 }
 
 value Rhp::convert<rollback_request>::to_value(const rollback_request& m) {
@@ -316,6 +316,37 @@ result<cancel_request> Rhp::convert<cancel_request>::from_value(const value& v) 
     return cancel_request{*target};
 }
 
+value Rhp::convert<blob_chunk>::to_value(const blob_chunk& m) {
+    return map_builder{}
+        .set("transfer", m.transfer)
+        .set("sink", m.sink)
+        .set("name", m.name)
+        .set("total", m.total)
+        .set("offset", m.offset)
+        .set("data", value{m.data})
+        .done();
+}
+
+result<blob_chunk> Rhp::convert<blob_chunk>::from_value(const value& v) {
+    if (!v.is_map()) {
+        return not_a_map("blob", v);
+    }
+    RHP_WIRE_READ(transfer, field<std::uint64_t>(v, "transfer", "blob"));
+    RHP_WIRE_READ(sink, field<std::string>(v, "sink", "blob"));
+    RHP_WIRE_READ(name, field_or<std::string>(v, "name", "blob", {}));
+    RHP_WIRE_READ(total, field<std::uint64_t>(v, "total", "blob"));
+    RHP_WIRE_READ(offset, field<std::uint64_t>(v, "offset", "blob"));
+    value::bytes data;
+    if (const value* d = v.find("data"); d != nullptr && !d->is_nil()) {
+        const auto* bytes = d->get_if<value::bytes>();
+        if (bytes == nullptr) {
+            return Rhp::fail(Rhp::errc::kProtocol, "blob.data must be bytes", "wire");
+        }
+        data = *bytes;
+    }
+    return blob_chunk{*transfer, std::move(*sink), std::move(*name), *total, *offset, std::move(data)};
+}
+
 // ---- replies -------------------------------------------------------------------------------------
 
 value Rhp::convert<revert_summary>::to_value(const revert_summary& m) {
@@ -345,7 +376,8 @@ value Rhp::convert<module_status>::to_value(const module_status& m) {
         .set("source_hash", m.source_hash)
         .set("revisions", m.revisions)
         .set("reloading", m.reloading)
-        .set("dependencies", m.dependencies);
+        .set("dependencies", m.dependencies)
+        .set("pinned", m.pinned);
     if (m.fault) {
         b.set("fault", *m.fault);
     }
@@ -369,6 +401,7 @@ result<module_status> Rhp::convert<module_status>::from_value(const value& v) {
     RHP_WIRE_READ(revisions, field_or<std::uint64_t>(v, "revisions", what, 0));
     RHP_WIRE_READ(reloading, field_or<bool>(v, "reloading", what, false));
     RHP_WIRE_READ(dependencies, field_or<std::vector<Rhp::module_id>>(v, "dependencies", what, {}));
+    RHP_WIRE_READ(pinned, field_or<bool>(v, "pinned", what, false));
     s.id = *id;
     s.name = std::move(*name);
     s.state = std::move(*state);
@@ -380,6 +413,7 @@ result<module_status> Rhp::convert<module_status>::from_value(const value& v) {
     s.revisions = *revisions;
     s.reloading = *reloading;
     s.dependencies = std::move(*dependencies);
+    s.pinned = *pinned;
     if (const value* f = v.find("fault"); f != nullptr && !f->is_nil()) {
         RHP_WIRE_READ(fault, Rhp::from_value<Rhp::error>(*f));
         s.fault = std::move(*fault);
