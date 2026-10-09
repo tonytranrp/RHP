@@ -172,6 +172,7 @@ public:
     void pump();
     [[nodiscard]] request_id last_request() const noexcept { return last_request_; }
     [[nodiscard]] std::size_t suspended() const noexcept;
+    [[nodiscard]] bool pending(request_id request) const noexcept { return requests_.contains(request); }
     [[nodiscard]] std::uint64_t frame() const noexcept { return frame_; }
     [[nodiscard]] std::size_t memory_used() const noexcept { return memory_used_; }
     [[nodiscard]] const ledger& effects() const noexcept { return ledger_; }

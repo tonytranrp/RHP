@@ -22,3 +22,16 @@ One folder per module. Each module is its own CMake target (`Rhp::<module>`), de
 6. **Files are listed explicitly** in each `CMakeLists.txt` — no globbing.
 7. **`.cpp` files exist for a reason:** a dependency wall, a heavy table, or code that shouldn't be in every includer.
 8. `rhp.hpp` includes every public header; keep it in sync when adding one.
+9. **Layer 4–5 code stays out of templates.** `Rhp::host<Cfg>` / `Rhp::client<Cfg>` type-erase their config into function pointers and run engines compiled once (`host.cpp`, `client.cpp`); the session layer only sees abstract interfaces.
+
+| Module | Layer | Third-party (PRIVATE, `.cpp` only) |
+|---|---|---|
+| `utils`, `core` | 0, 1 | — |
+| `platform` | 2 | OS headers (`bcrypt`, `sys/random.h`) |
+| `wire` | 2 | — (own MessagePack codec) |
+| `net` | 3 | Asio |
+| `security` | 3 | Monocypher |
+| `exec` | 3 | — (header-only) |
+| `script` | 3 | Lua |
+| `session` | 4 | — |
+| `config`, `host`, `client` | 5 | — |

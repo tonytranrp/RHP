@@ -45,3 +45,4 @@ pump() ─▶ queued events ─▶ due timers ─▶ ready requests (round robin
 
 - A failing request faults its module; a scratch (exec) request reverts only its own effects.
 - Lifecycle operations from inside a run are deferred to the end of the outermost operation.
+- `sandbox_options::on_output` (print with its request and module) and `sandbox::pending(request)` exist for `Rhp::host`, which answers network requests that suspended once `on_result` reports them.

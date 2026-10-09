@@ -790,7 +790,9 @@ void sandbox_impl::report_fault(const effect_owner& owner, error err) noexcept {
 }
 
 void sandbox_impl::output_line(std::string_view line) {
-    if (options_.output) {
+    if (options_.on_output) {
+        options_.on_output(current_.request, current_.module, line);
+    } else if (options_.output) {
         options_.output(line);
     } else {
         std::fwrite(line.data(), 1, line.size(), stdout);
@@ -2090,6 +2092,10 @@ request_id sandbox::last_request() const noexcept {
 
 std::size_t sandbox::suspended() const noexcept {
     return impl_->suspended();
+}
+
+bool sandbox::pending(request_id request) const noexcept {
+    return impl_->pending(request);
 }
 
 std::uint64_t sandbox::frame() const noexcept {

@@ -58,11 +58,11 @@ struct module_info {
     bool scratch = false;    // the identity's exec() module
     std::size_t effects = 0; // live ledger entries
     std::size_t irreversible_effects = 0;
-    std::optional<error> fault; // why it is kFaulted
-    revision_id revision{};        // current revision (1 = first load); 0 for the scratch module
-    std::uint32_t source_hash = 0; // CRC-32C of the current revision's source
-    std::size_t revisions = 0;     // revisions kept for rollback, current included
-    bool reloading = false;        // a new revision is loading next to the current one
+    std::optional<error> fault;            // why it is kFaulted
+    revision_id revision{};                // current revision (1 = first load); 0 for the scratch module
+    std::uint32_t source_hash = 0;         // CRC-32C of the current revision's source
+    std::size_t revisions = 0;             // revisions kept for rollback, current included
+    bool reloading = false;                // a new revision is loading next to the current one
     std::vector<module_id> dependencies{}; // modules this one require()s
 };
 
@@ -83,6 +83,9 @@ struct sandbox_options {
     std::pmr::memory_resource* memory = nullptr;
     // Receives each print() line (without the newline); empty = standard output.
     std::function<void(std::string_view)> output{};
+    // Receives each print() line with the request and module that printed it (0 when none runs);
+    // when set, `output` is not called.
+    std::function<void(request_id, module_id, std::string_view)> on_output{};
     // Receives each rhp.emit(value) as it happens, with the request and module that emitted it.
     std::function<void(request_id, module_id, const value&)> on_emit{};
     // Receives the result of every request that suspended before finishing (see exec()).
@@ -212,6 +215,8 @@ public:
     [[nodiscard]] request_id last_request() const noexcept;
     // Requests suspended right now.
     [[nodiscard]] std::size_t suspended() const noexcept;
+    // True while `request` has started and not finished (it is suspended or running).
+    [[nodiscard]] bool pending(request_id request) const noexcept;
     // pump() calls so far (rhp.frame()).
     [[nodiscard]] std::uint64_t frame() const noexcept;
 

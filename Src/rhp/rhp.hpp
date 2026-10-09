@@ -3,6 +3,8 @@
 // RHP — Remote Hot Patch. One include for everything the library offers.
 // Modules arrive stage by stage; this header grows with them.
 
+#include <rhp/client/client.hpp>
+#include <rhp/config/config.hpp>
 #include <rhp/core/convert.hpp>
 #include <rhp/core/error.hpp>
 #include <rhp/core/errors_mode.hpp>
@@ -12,6 +14,16 @@
 #include <rhp/core/result.hpp>
 #include <rhp/core/role.hpp>
 #include <rhp/core/value.hpp>
+#include <rhp/exec/executor.hpp>
+#include <rhp/exec/io_runner.hpp>
+#include <rhp/host/host.hpp>
+#include <rhp/net/endpoint.hpp>
+#include <rhp/net/io_context.hpp>
+#include <rhp/net/link.hpp>
+#include <rhp/net/loopback/loopback.hpp>
+#include <rhp/net/tcp/tcp.hpp>
+#include <rhp/platform/os.hpp>
+#include <rhp/platform/random.hpp>
 #include <rhp/script/ledger.hpp>
 #include <rhp/script/lib.hpp>
 #include <rhp/script/lua_event.hpp>
@@ -20,6 +32,11 @@
 #include <rhp/script/sandbox.hpp>
 #include <rhp/script/stack.hpp>
 #include <rhp/script/stubs.hpp>
+#include <rhp/security/authenticator.hpp>
+#include <rhp/security/key.hpp>
+#include <rhp/security/keyring.hpp>
+#include <rhp/security/psk_keyring.hpp>
+#include <rhp/session/session.hpp>
 #include <rhp/utils/byte_buffer.hpp>
 #include <rhp/utils/crc32c.hpp>
 #include <rhp/utils/fixed_string.hpp>
@@ -29,3 +46,8 @@
 #include <rhp/utils/spsc_ring.hpp>
 #include <rhp/utils/type_list.hpp>
 #include <rhp/utils/units.hpp>
+#include <rhp/wire/codec.hpp>
+#include <rhp/wire/codec/msgpack.hpp>
+#include <rhp/wire/frame.hpp>
+#include <rhp/wire/messages.hpp>
+#include <rhp/wire/ops.hpp>

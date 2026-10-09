@@ -116,6 +116,10 @@ std::size_t sandbox::suspended() const noexcept {
     return 0;
 }
 
+bool sandbox::pending(request_id) const noexcept {
+    return false;
+}
+
 std::uint64_t sandbox::frame() const noexcept {
     return 0;
 }
