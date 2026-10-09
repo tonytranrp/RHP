@@ -3,7 +3,9 @@
 // RHP — Remote Hot Patch. One include for everything the library offers.
 // Modules arrive stage by stage; this header grows with them.
 
+#include <rhp/audit/sinks.hpp>
 #include <rhp/client/client.hpp>
+#include <rhp/client/pending.hpp>
 #include <rhp/config/config.hpp>
 #include <rhp/core/convert.hpp>
 #include <rhp/core/error.hpp>
@@ -14,6 +16,8 @@
 #include <rhp/core/result.hpp>
 #include <rhp/core/role.hpp>
 #include <rhp/core/value.hpp>
+#include <rhp/event/events.hpp>
+#include <rhp/event/hub.hpp>
 #include <rhp/exec/executor.hpp>
 #include <rhp/exec/io_runner.hpp>
 #include <rhp/host/host.hpp>
@@ -33,9 +37,13 @@
 #include <rhp/script/stack.hpp>
 #include <rhp/script/stubs.hpp>
 #include <rhp/security/authenticator.hpp>
+#include <rhp/security/ed25519.hpp>
+#include <rhp/security/hash.hpp>
+#include <rhp/security/identity_file.hpp>
 #include <rhp/security/key.hpp>
 #include <rhp/security/keyring.hpp>
 #include <rhp/security/psk_keyring.hpp>
+#include <rhp/security/signer.hpp>
 #include <rhp/session/session.hpp>
 #include <rhp/utils/byte_buffer.hpp>
 #include <rhp/utils/crc32c.hpp>

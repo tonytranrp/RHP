@@ -1,8 +1,10 @@
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <exception>
 #include <format>
 #include <functional>
 #include <limits>
@@ -10,6 +12,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <random>
 #include <set>
 #include <stop_token>
 #include <string>
@@ -24,13 +27,18 @@
 #include <rhp/core/result.hpp>
 #include <rhp/core/role.hpp>
 #include <rhp/core/value.hpp>
+#include <rhp/event/events.hpp>
+#include <rhp/event/hub.hpp>
 #include <rhp/host/detail/engine.hpp>
 #include <rhp/net/io_context.hpp>
 #include <rhp/net/link.hpp>
 #include <rhp/platform/os.hpp>
+#include <rhp/platform/random.hpp>
 #include <rhp/script/ledger.hpp>
 #include <rhp/script/sandbox.hpp>
+#include <rhp/security/hash.hpp>
 #include <rhp/session/session.hpp>
+#include <rhp/utils/scope_guard.hpp>
 #include <rhp/utils/spsc_ring.hpp>
 #include <rhp/wire/messages.hpp>
 #include <rhp/wire/ops.hpp>
@@ -50,7 +58,7 @@ struct session_cancels {
 
 // Shared by the network thread and the pump thread for one identity: the only way the network
 // reaches a sandbox (cancel, which is thread-safe on the sandbox). `box` is cleared, under the
-// mutex, before the sandbox is destroyed.
+// mutex, before the sandbox is destroyed (or once the identity has no session left).
 struct cancel_relay {
     struct suspended_request {
         request_id id;
@@ -119,7 +127,8 @@ struct inbound {
     enum class kind : std::uint8_t {
         kOpened,
         kRequest,
-        kClosed
+        kClosed,
+        kAuthFailed
     };
 
     kind what = kind::kRequest;
@@ -131,6 +140,9 @@ struct inbound {
     std::uint64_t req = 0;
     std::uint64_t arrival = 0; // per-session order in which the network received requests
     value body;
+    std::string peer;     // kOpened, kClosed, kAuthFailed
+    std::string platform; // kOpened
+    error reason;         // kClosed, kAuthFailed
 };
 
 // Pump thread → network thread.
@@ -172,7 +184,7 @@ struct outbound {
     return {r.undone, r.irreversible, r.failures, r.deferred};
 }
 
-[[nodiscard]] wire::module_status describe(const script::module_info& m) {
+[[nodiscard]] wire::module_status describe(const script::module_info& m, bool pinned) {
     wire::module_status s;
     s.id = m.id;
     s.name = m.name;
@@ -186,7 +198,29 @@ struct outbound {
     s.reloading = m.reloading;
     s.dependencies = m.dependencies;
     s.fault = m.fault;
+    s.pinned = pinned;
     return s;
+}
+
+// Requests the audit log reports (event::script_executed): everything that runs code or changes
+// state. Introspection, cancel and blobs (event::blob_received) are left out.
+[[nodiscard]] bool audited(wire::op code) noexcept {
+    switch (code) {
+    case wire::op::kList:
+    case wire::op::kStatus:
+    case wire::op::kDescribe:
+    case wire::op::kCancel:
+    case wire::op::kBlob: return false;
+    default: return true;
+    }
+}
+
+[[nodiscard]] std::string ref_text(const wire::module_ref& ref) {
+    return ref.name.empty() ? std::format("#{}", ref.id) : ref.name;
+}
+
+[[nodiscard]] event::time_point now() {
+    return std::chrono::system_clock::now();
 }
 
 } // namespace
@@ -204,8 +238,19 @@ public:
         session_options_.limits = setup_.limits;
         session_options_.codec = setup_.codec;
         session_options_.platform = std::string{platform::kOsName};
-        if (setup_.ep.direction != net::endpoint::mode::kListen) {
-            listen_error_ = make_error(errc::kInvalidArgument, "a Stage 3 host listens; reverse mode (a host that dials) arrives in Stage 4", "host");
+        if (auto seed = platform::random_array<8>()) {
+            std::uint64_t k = 0;
+            for (const std::byte b : *seed) {
+                k = (k << 8) | std::to_integer<std::uint64_t>(b);
+            }
+            rng_.seed(k);
+        }
+        if (setup_.ep.direction == net::endpoint::mode::kDial) {
+            // Reverse mode: the host dials a listening client, and keeps dialing.
+            reverse_ = true;
+            enforce_cancels();
+            log(log_level::kInfo, std::format("host dialing {} over {} (reverse mode)", setup_.ep, setup_.transport.name));
+            dial_out();
             return;
         }
         auto listener = setup_.transport.listen(io_, setup_.ep, [this](std::unique_ptr<net::link> link) { accept(std::move(link)); });
@@ -222,6 +267,7 @@ public:
     // The network is stopped (or never ran on another thread) when this runs.
     ~engine() {
         enforce_timer_.cancel();
+        redial_timer_.cancel();
         listener_.reset();
         sessions_.clear(); // aborts the links: no callbacks after this
         for (auto& [name, id] : identities_) {
@@ -244,6 +290,13 @@ public:
     [[nodiscard]] std::size_t ready_sessions() const noexcept { return ready_sessions_.load(std::memory_order_acquire); }
     [[nodiscard]] std::size_t identity_count() const noexcept { return identity_count_.load(std::memory_order_acquire); }
 
+    void set_enabled(bool on) noexcept {
+        enabled_.store(on, std::memory_order_release);
+        log(log_level::kWarn, on ? "host enabled" : "host disabled: new connections are closed, requests answered kDisabled");
+    }
+
+    [[nodiscard]] bool is_enabled() const noexcept { return enabled_.load(std::memory_order_acquire); }
+
     result<void> install(std::string_view name, installer fn) {
         for (const auto& [n, f] : installers_) {
             if (n == name) {
@@ -256,6 +309,17 @@ public:
                 log(log_level::kWarn, std::format("install {} into identity {}: {}", name, identity, ok.error()));
             }
         }
+        return {};
+    }
+
+    result<void> add_blob_sink(std::string_view name, blob_fn fn, role need) {
+        if (name.empty() || !fn) {
+            return fail(errc::kInvalidArgument, "a blob sink needs a name and a function", "host.on_blob");
+        }
+        if (blob_sinks_.contains(name)) {
+            return fail(errc::kAlreadyLoaded, std::format("a blob sink named '{}' is already registered", name), "host.on_blob");
+        }
+        blob_sinks_.emplace(std::string{name}, blob_sink{std::move(fn), need});
         return {};
     }
 
@@ -298,11 +362,29 @@ private:
         std::map<request_id, pending_reply> waiting; // suspended network requests
         session_id current_session;                  // the network request inside a sandbox call
         std::uint64_t current_req = 0;
+        std::set<module_id> pinned; // kept when the last session ends
+    };
+
+    // A blob arriving on one session (one at a time).
+    struct blob_transfer {
+        std::uint64_t id = 0;
+        std::string sink;
+        std::string name;
+        std::uint64_t total = 0;
+        std::vector<std::byte> data;
     };
 
     struct pump_session {
         std::string identity;
         role granted = role::kObserve;
+        std::string peer;
+        std::optional<blob_transfer> blob;
+        std::uint64_t failed_transfer = 0; // later chunks of a refused blob are refused quietly
+    };
+
+    struct blob_sink {
+        blob_fn fn;
+        role need = role::kAdmin;
     };
 
     // ---- network thread: sessions ----------------------------------------------------------------------
@@ -332,15 +414,29 @@ private:
     };
 
     void accept(std::unique_ptr<net::link> link) {
-        if (pending_handshakes_ >= setup_.limits.pending_handshakes) {
-            log(log_level::kWarn, std::format("refusing {}: {} handshakes already pending", link->peer(), pending_handshakes_));
-            link->close();
-            closing_links_.push_back(std::move(link)); // dies once the next connection arrives or the host does
-            if (closing_links_.size() > 64) {
-                closing_links_.pop_front();
-            }
+        if (!is_enabled()) {
+            log(log_level::kInfo, std::format("refusing {}: the host is disabled", link->peer()));
+            park(std::move(link));
             return;
         }
+        if (pending_handshakes_ >= setup_.limits.pending_handshakes) {
+            log(log_level::kWarn, std::format("refusing {}: {} handshakes already pending", link->peer(), pending_handshakes_));
+            park(std::move(link));
+            return;
+        }
+        (void)start_session(std::move(link));
+    }
+
+    // Closes a link we won't serve; it dies once the next connection arrives or the host does.
+    void park(std::unique_ptr<net::link> link) {
+        link->close();
+        closing_links_.push_back(std::move(link));
+        if (closing_links_.size() > 64) {
+            closing_links_.pop_front();
+        }
+    }
+
+    session_id start_session(std::unique_ptr<net::link> link) {
         const session_id id = session_ids_.next();
         auto handshake = setup_.begin_handshake();
         io_session rec;
@@ -349,6 +445,35 @@ private:
         sessions_.emplace(id, std::move(rec));
         ++pending_handshakes_;
         s.start();
+        return id;
+    }
+
+    // ---- network thread: reverse mode -------------------------------------------------------------------
+
+    void dial_out() {
+        setup_.transport.dial(io_, setup_.ep, [this](result<std::unique_ptr<net::link>> link) {
+            if (!link) {
+                log(log_level::kDebug, std::format("dialing {} failed: {}", setup_.ep, link.error()));
+                redial();
+                return;
+            }
+            if (!is_enabled()) {
+                park(std::move(*link));
+                redial();
+                return;
+            }
+            outgoing_ = start_session(std::move(*link));
+        });
+    }
+
+    // Capped exponential backoff with full jitter: a random delay in [0, min(max, min · 2^n)].
+    void redial() {
+        const std::uint32_t lo = setup_.limits.backoff_min_ms == 0 ? 1 : setup_.limits.backoff_min_ms;
+        const std::uint32_t hi = setup_.limits.backoff_max_ms < lo ? lo : setup_.limits.backoff_max_ms;
+        const std::uint64_t ceiling = std::min<std::uint64_t>(hi, static_cast<std::uint64_t>(lo) << std::min<std::uint32_t>(attempts_, 20));
+        ++attempts_;
+        std::uniform_int_distribution<std::uint64_t> pick{1, ceiling};
+        redial_timer_.start(std::chrono::milliseconds{pick(rng_)}, [this] { dial_out(); });
     }
 
     void on_ready(session::session& s) override {
@@ -356,6 +481,9 @@ private:
         auto it = sessions_.find(s.id());
         if (it == sessions_.end()) {
             return;
+        }
+        if (s.id() == outgoing_) {
+            attempts_ = 0;
         }
         it->second.ready = true;
         it->second.identity = s.identity();
@@ -372,6 +500,8 @@ private:
         in.identity = s.identity();
         in.granted = s.granted();
         in.relay = ident.relay;
+        in.peer = s.peer();
+        in.platform = s.peer_platform();
         to_pump(std::move(in));
     }
 
@@ -451,7 +581,7 @@ private:
                 }
                 if (--ident->second.sessions == 0) {
                     // The identity's last session; pump() reverts the rest. Its relay stays on the
-                    // enforce timer until pump() has destroyed the sandbox.
+                    // enforce timer until pump() has let go of the sandbox.
                     orphans_.push_back(ident->second.relay);
                     io_identities_.erase(ident);
                 }
@@ -460,12 +590,25 @@ private:
             in.what = inbound::kind::kClosed;
             in.session = id;
             in.identity = identity;
+            in.peer = s.peer();
+            in.reason = why;
             to_pump(std::move(in));
         } else {
             --pending_handshakes_;
             log(log_level::kInfo, std::format("connection from {} closed before authenticating: {}", s.peer(), why));
+            if (setup_.events != nullptr && setup_.events->wants(event::kind_of<event::auth_failed>)) {
+                inbound in;
+                in.what = inbound::kind::kAuthFailed;
+                in.peer = s.peer();
+                in.reason = why;
+                to_pump(std::move(in));
+            }
         }
         sessions_.erase(it); // allowed inside on_closed
+        if (reverse_ && id == outgoing_) {
+            outgoing_ = {};
+            redial();
+        }
     }
 
     void cancel_from_network(session::session& s, const value& body, std::uint64_t arrival) {
@@ -500,7 +643,7 @@ private:
         if (inbox_backlog_.empty() && inbox_.try_push(std::move(in))) {
             return true;
         }
-        if (inbox_backlog_.size() >= kMaxBacklog && in.what == inbound::kind::kRequest) {
+        if (inbox_backlog_.size() >= kMaxBacklog && (in.what == inbound::kind::kRequest || in.what == inbound::kind::kAuthFailed)) {
             return false;
         }
         inbox_backlog_.push_back(std::move(in));
@@ -574,6 +717,27 @@ private:
         return sent.has_value();
     }
 
+    // ---- pump thread: events -----------------------------------------------------------------------------
+
+    template <event::host_event E>
+    [[nodiscard]] bool wants() const {
+        return setup_.events != nullptr && setup_.events->wants(event::kind_of<E>);
+    }
+
+    // A handler that throws is logged, never allowed to break pump().
+    void publish(event::any e) {
+        if (setup_.events == nullptr) {
+            return;
+        }
+        try {
+            setup_.events->publish(e);
+        } catch (const std::exception& ex) {
+            log(log_level::kError, std::format("an event handler threw: {}", ex.what()));
+        } catch (...) {
+            log(log_level::kError, "an event handler threw");
+        }
+    }
+
     // ---- pump thread: requests ---------------------------------------------------------------------------
 
     void process(std::vector<inbound>& batch) {
@@ -582,12 +746,17 @@ private:
             case inbound::kind::kOpened: opened(in); break;
             case inbound::kind::kClosed: closed(in); break;
             case inbound::kind::kRequest: request(in); break;
+            case inbound::kind::kAuthFailed:
+                if (wants<event::auth_failed>()) {
+                    publish(event::auth_failed{now(), std::move(in.peer), std::move(in.reason)});
+                }
+                break;
             }
         }
     }
 
     void opened(inbound& in) {
-        pump_sessions_[in.session] = pump_session{in.identity, in.granted};
+        pump_sessions_[in.session] = pump_session{in.identity, in.granted, in.peer, std::nullopt, 0};
         auto it = identities_.find(in.identity);
         if (it == identities_.end()) {
             identity_runtime rt;
@@ -607,12 +776,29 @@ private:
             it = identities_.emplace(in.identity, std::move(rt)).first;
             identity_count_.store(identities_.size(), std::memory_order_release);
             log(log_level::kInfo, std::format("identity {} ({}) has a sandbox", in.identity, in.granted));
+        } else if (it->second.relay != in.relay) {
+            // The identity outlived its sessions (pinned modules) and the network made a new relay
+            // for the one that just arrived: hand it the sandbox.
+            identity_runtime& rt = it->second;
+            {
+                const std::scoped_lock lock{rt.relay->mutex};
+                rt.relay->box = nullptr;
+            }
+            rt.relay = in.relay;
+            const std::scoped_lock lock{rt.relay->mutex};
+            rt.relay->box = rt.box.get();
         }
         it->second.sessions.insert(in.session);
+        if (wants<event::session_opened>()) {
+            publish(event::session_opened{now(), in.session, in.identity, in.granted, std::move(in.peer), std::move(in.platform)});
+        }
     }
 
-    void closed(const inbound& in) {
+    void closed(inbound& in) {
         pump_sessions_.erase(in.session);
+        if (wants<event::session_closed>()) {
+            publish(event::session_closed{now(), in.session, in.identity, in.peer, in.reason});
+        }
         const auto it = identities_.find(in.identity);
         if (it == identities_.end()) {
             return;
@@ -626,14 +812,19 @@ private:
             std::erase_if(rt.relay->suspended, [&](const auto& entry) { return entry.first.first == in.session.value(); });
             rt.relay->cancels.erase(in.session.value());
         }
-        if (rt.sessions.empty()) {
-            teardown(rt);
-            identities_.erase(it);
-            identity_count_.store(identities_.size(), std::memory_order_release);
+        if (!rt.sessions.empty()) {
+            return;
         }
+        if (!rt.pinned.empty()) {
+            release(rt);
+            return;
+        }
+        teardown(rt);
+        identities_.erase(it);
+        identity_count_.store(identities_.size(), std::memory_order_release);
     }
 
-    // Disconnect = revert: the identity's last session is gone.
+    // Disconnect = revert: the identity's last session is gone (or the host is).
     void teardown(identity_runtime& rt) {
         {
             const std::scoped_lock lock{rt.relay->mutex};
@@ -643,8 +834,51 @@ private:
         }
         const script::revert_report report = rt.box->revert_all();
         rt.box.reset();
+        rt.pinned.clear();
         log(log_level::kInfo, std::format("identity {} reverted: {} effects undone, {} irreversible, {} failures", rt.name, report.undone, report.irreversible,
                                           report.failures.size()));
+        if (wants<event::identity_reverted>()) {
+            publish(event::identity_reverted{now(), rt.name, report.undone, report.irreversible, report.failures.size(), 0});
+        }
+    }
+
+    // The identity's last session ended but an admin pinned some of its modules: keep those (and
+    // every module they require), revert and unload the rest, keep the sandbox.
+    void release(identity_runtime& rt) {
+        {
+            const std::scoped_lock lock{rt.relay->mutex};
+            rt.relay->box = nullptr; // no session is left to cancel anything
+            rt.relay->suspended.clear();
+            rt.relay->cancels.clear();
+        }
+        const std::vector<script::module_info> modules = rt.box->list();
+        std::set<module_id> keep = rt.pinned;
+        for (bool grew = true; grew;) {
+            grew = false;
+            for (const script::module_info& m : modules) {
+                if (keep.contains(m.id)) {
+                    for (const module_id dep : m.dependencies) {
+                        grew = keep.insert(dep).second || grew;
+                    }
+                }
+            }
+        }
+        script::revert_report report;
+        for (const script::module_info& m : modules) {
+            if (m.scratch || keep.contains(m.id)) {
+                continue;
+            }
+            if (auto r = rt.box->unload(m.id, script::force)) {
+                report += std::move(*r);
+            }
+        }
+        if (auto r = rt.box->revert(rt.box->scratch_module())) {
+            report += std::move(*r);
+        }
+        log(log_level::kInfo, std::format("identity {} released: {} effects undone, {} pinned modules kept", rt.name, report.undone, rt.pinned.size()));
+        if (wants<event::identity_reverted>()) {
+            publish(event::identity_reverted{now(), rt.name, report.undone, report.irreversible, report.failures.size(), rt.pinned.size()});
+        }
     }
 
     script::sandbox_options sandbox_options_for(const std::string& identity, role granted) {
@@ -720,7 +954,13 @@ private:
 
     void reply(session_id s, std::uint64_t req, value body) { to_network({s, wire::op::kResult, req, std::move(body)}); }
 
-    void reply_error(session_id s, std::uint64_t req, const error& err) { to_network({s, wire::op::kError, req, Rhp::to_value(err)}); }
+    void reply_error(session_id s, std::uint64_t req, const error& err) {
+        // The request being audited right now failed: its audit record says why.
+        if (audit_ != nullptr && s == audit_session_ && req == audit_req_ && audit_->outcome.code == errc::kOk) {
+            audit_->outcome = err;
+        }
+        to_network({s, wire::op::kError, req, Rhp::to_value(err)});
+    }
 
     void to_network(outbound out) { outbox_backlog_.push_back(std::move(out)); }
 
@@ -745,6 +985,23 @@ private:
             return ref.id;
         }
         return box.find(ref.name);
+    }
+
+    // Who signed `source`: the signer's name, "" for unsigned code an observe session may run, or
+    // kBadSignature. Records the source's hash and signer in the audit record.
+    [[nodiscard]] result<std::string> check_signature(const pump_session& sess, std::string_view module, std::string_view source, const value& signature) {
+        if (audit_ != nullptr) {
+            audit_->module = module;
+            audit_->hash = security::to_hex(security::blake2b_256(source));
+        }
+        auto who = setup_.verify ? setup_.verify(source, signature) : result<std::string>{std::string{}};
+        if (!who && signature.is_nil() && sess.granted == role::kObserve) {
+            who = std::string{}; // observe can't mutate anything: unsigned code is allowed
+        }
+        if (who && audit_ != nullptr) {
+            audit_->signer = *who;
+        }
+        return who;
     }
 
     // Runs one sandbox operation as the network request `in`; a request that suspends is answered
@@ -806,18 +1063,45 @@ private:
         if (ps == pump_sessions_.end()) {
             return; // the session ended before its request ran
         }
+        pump_session& sess = ps->second;
+
+        // The audit record of this request, reported when request() returns (reply_error fills in
+        // the outcome; a suspended request reports how it started).
+        std::optional<event::script_executed> audit;
+        if (audited(in.code) && wants<event::script_executed>()) {
+            audit.emplace();
+            audit->time = now();
+            audit->session = in.session;
+            audit->identity = sess.identity;
+            audit->granted = sess.granted;
+            audit->op = std::string{wire::to_string(in.code)};
+        }
+        audit_ = audit ? &*audit : nullptr;
+        audit_session_ = in.session;
+        audit_req_ = in.req;
+        const utils::scope_guard report{[&] {
+            audit_ = nullptr;
+            if (audit) {
+                publish(std::move(*audit));
+            }
+        }};
+
+        if (!is_enabled()) {
+            reply_error(in.session, in.req, make_error(errc::kDisabled, "the host is disabled", std::string{wire::to_string(in.code)}));
+            return;
+        }
         const auto need = wire::required_role(in.code);
         if (!need) {
             reply_error(in.session, in.req, make_error(errc::kProtocol, std::format("{} is not a request", in.code), "host"));
             return;
         }
-        if (!allows(ps->second.granted, *need)) {
+        if (!allows(sess.granted, *need)) {
             reply_error(in.session, in.req,
-                        make_error(errc::kForbidden, std::format("{} needs role {}, {} has {}", in.code, *need, ps->second.identity, ps->second.granted),
+                        make_error(errc::kForbidden, std::format("{} needs role {}, {} has {}", in.code, *need, sess.identity, sess.granted),
                                    std::string{wire::to_string(in.code)}));
             return;
         }
-        const auto it = identities_.find(ps->second.identity);
+        const auto it = identities_.find(sess.identity);
         if (it == identities_.end()) {
             return;
         }
@@ -826,12 +1110,19 @@ private:
         {
             const std::scoped_lock lock{rt.relay->mutex};
             if (rt.relay->dead(in.session)) {
+                if (audit) {
+                    audit->outcome = make_error(errc::kCancelled, "its session ended before it ran", "host");
+                }
                 return; // its session ended before it could run: nobody to answer
             }
             if (rt.relay->covers(in.session, in.req, in.arrival)) {
                 reply_error(in.session, in.req, make_error(errc::kCancelled, "cancelled before it started", std::string{wire::to_string(in.code)}));
                 return;
             }
+        }
+        if (in.code == wire::op::kBlob) {
+            blob(sess, in);
+            return;
         }
         const running_scope running{*rt.relay, in};
 
@@ -842,6 +1133,9 @@ private:
             auto m = Rhp::from_value<wire::exec_request>(in.body);
             if (!m) {
                 return bad_request(m.error());
+            }
+            if (auto who = check_signature(sess, "", m->source, m->signature); !who) {
+                return bad_request(who.error());
             }
             run_tracked(rt, in, {}, [&]() -> result<value> {
                 auto r = box.exec(m->source, m->chunk);
@@ -856,6 +1150,9 @@ private:
             auto m = Rhp::from_value<wire::load_request>(in.body);
             if (!m) {
                 return bad_request(m.error());
+            }
+            if (auto who = check_signature(sess, m->name, m->source, m->signature); !who) {
+                return bad_request(who.error());
             }
             // The module id is only known once load() returns: track it through `loaded`.
             module_id loaded;
@@ -879,6 +1176,9 @@ private:
             auto m = Rhp::from_value<wire::call_request>(in.body);
             if (!m) {
                 return bad_request(m.error());
+            }
+            if (audit) {
+                audit->module = ref_text(m->module);
             }
             auto mod = resolve(box, m->module);
             if (!mod) {
@@ -904,12 +1204,18 @@ private:
                     return bad_request(m.error());
                 }
                 reload = std::move(*m);
+                if (auto who = check_signature(sess, ref_text(reload->module), reload->source, reload->signature); !who) {
+                    return bad_request(who.error());
+                }
             } else {
                 auto m = Rhp::from_value<wire::rollback_request>(in.body);
                 if (!m) {
                     return bad_request(m.error());
                 }
                 rollback = std::move(*m);
+                if (audit) {
+                    audit->module = ref_text(rollback->module);
+                }
             }
             auto mod = resolve(box, reload ? reload->module : rollback->module);
             if (!mod) {
@@ -917,7 +1223,9 @@ private:
             }
             target = *mod;
             run_tracked(rt, in, target, [&]() -> result<value> {
-                auto r = reload ? box.reload(target, reload->source) : box.rollback(target, rollback->steps > std::numeric_limits<std::size_t>::max() ? std::numeric_limits<std::size_t>::max() : static_cast<std::size_t>(rollback->steps));
+                auto r = reload ? box.reload(target, reload->source)
+                                : box.rollback(target, rollback->steps > std::numeric_limits<std::size_t>::max() ? std::numeric_limits<std::size_t>::max()
+                                                                                                                 : static_cast<std::size_t>(rollback->steps));
                 if (!r) {
                     return std::unexpected{std::move(r).error()};
                 }
@@ -927,7 +1235,9 @@ private:
         }
         case wire::op::kUnload:
         case wire::op::kRevert:
-        case wire::op::kStatus: {
+        case wire::op::kStatus:
+        case wire::op::kPin:
+        case wire::op::kUnpin: {
             wire::module_ref ref;
             bool forced = false;
             if (in.code == wire::op::kUnload) {
@@ -944,16 +1254,34 @@ private:
                 }
                 ref = std::move(m->module);
             }
+            if (audit) {
+                audit->module = ref_text(ref);
+            }
             auto mod = resolve(box, ref);
             if (!mod) {
                 return bad_request(mod.error());
             }
+            const auto info = box.status(*mod);
+            if (!info) {
+                return bad_request(make_error(errc::kNotFound, std::format("no module {}", *mod), std::string{wire::to_string(in.code)}));
+            }
             if (in.code == wire::op::kStatus) {
-                const auto info = box.status(*mod);
-                if (!info) {
-                    return bad_request(make_error(errc::kNotFound, std::format("no module {}", *mod), "status"));
+                return reply(in.session, in.req, Rhp::to_value(describe(*info, rt.pinned.contains(*mod))));
+            }
+            if (in.code == wire::op::kPin || in.code == wire::op::kUnpin) {
+                if (info->scratch) {
+                    return bad_request(make_error(errc::kInvalidArgument, "the scratch module can't be pinned (load a module)", std::string{wire::to_string(in.code)}));
                 }
-                return reply(in.session, in.req, Rhp::to_value(describe(*info)));
+                if (in.code == wire::op::kPin) {
+                    rt.pinned.insert(*mod);
+                } else {
+                    rt.pinned.erase(*mod);
+                }
+                log(log_level::kInfo, std::format("{} {} module {} ({})", sess.identity, in.code == wire::op::kPin ? "pinned" : "unpinned", info->name, *mod));
+                return reply(in.session, in.req, value{});
+            }
+            if (rt.pinned.contains(*mod)) {
+                return bad_request(make_error(errc::kForbidden, std::format("module {} is pinned: unpin it first", info->name), std::string{wire::to_string(in.code)}));
             }
             auto r = in.code == wire::op::kRevert ? box.revert(*mod) : forced ? box.unload(*mod, script::force)
                                                                               : box.unload(*mod);
@@ -967,6 +1295,9 @@ private:
             auto m = Rhp::from_value<wire::tag_request>(in.body);
             if (!m) {
                 return bad_request(m.error());
+            }
+            if (audit) {
+                audit->module = m->tag;
             }
             if (in.code == wire::op::kCheckpoint) {
                 auto r = box.checkpoint(m->tag);
@@ -982,25 +1313,129 @@ private:
             return reply(in.session, in.req, Rhp::to_value(summarize(*r)));
         }
         case wire::op::kRevertAll: {
-            // The panic button: every module of every identity.
+            // The panic button: every module of every identity, pinned ones included.
             script::revert_report total;
+            std::vector<std::string> sessionless;
             for (auto& [name, other] : identities_) {
                 total += other.box->revert_all();
+                other.pinned.clear();
+                if (other.sessions.empty()) {
+                    sessionless.push_back(name);
+                }
             }
-            log(log_level::kWarn, std::format("revert_all by {}: {} effects undone", ps->second.identity, total.undone));
+            for (const std::string& name : sessionless) {
+                if (const auto gone = identities_.find(name); gone != identities_.end()) {
+                    teardown(gone->second);
+                    identities_.erase(gone);
+                }
+            }
+            identity_count_.store(identities_.size(), std::memory_order_release);
+            log(log_level::kWarn, std::format("revert_all by {}: {} effects undone", sess.identity, total.undone));
             return reply(in.session, in.req, Rhp::to_value(summarize(total)));
         }
         case wire::op::kList: {
             value::array modules;
             for (const script::module_info& m : box.list()) {
-                modules.push_back(Rhp::to_value(describe(m)));
+                modules.push_back(Rhp::to_value(describe(m, rt.pinned.contains(m.id))));
             }
             return reply(in.session, in.req, value{std::move(modules)});
         }
         case wire::op::kDescribe: return reply(in.session, in.req, value{box.stubs()});
         default:
-            return bad_request(make_error(errc::kInvalidArgument, std::format("{} arrives in a later stage", in.code), std::string{wire::to_string(in.code)}));
+            return bad_request(make_error(errc::kInvalidArgument, std::format("{} is not supported by this host", in.code), std::string{wire::to_string(in.code)}));
         }
+    }
+
+    // One chunk of a blob (see wire::blob_chunk). The sink and role are checked on the first chunk,
+    // before anything is buffered; the whole blob goes to the sink when the last chunk arrives.
+    void blob(pump_session& sess, const inbound& in) {
+        auto chunk = Rhp::from_value<wire::blob_chunk>(in.body);
+        if (!chunk) {
+            reply_error(in.session, in.req, chunk.error());
+            return;
+        }
+        if (chunk->transfer == 0) {
+            reply_error(in.session, in.req, make_error(errc::kProtocol, "a blob needs a transfer id", "blob"));
+            return;
+        }
+        if (chunk->transfer == sess.failed_transfer) {
+            reply_error(in.session, in.req, make_error(errc::kCancelled, "an earlier chunk of this blob was refused", "blob"));
+            return;
+        }
+        const auto refuse = [&](const error& err) {
+            if (sess.blob && sess.blob->id == chunk->transfer) {
+                sess.blob.reset();
+            }
+            sess.failed_transfer = chunk->transfer;
+            if (wants<event::blob_received>()) {
+                publish(event::blob_received{now(), in.session, sess.identity, chunk->sink, chunk->name, chunk->total, {}, err});
+            }
+            reply_error(in.session, in.req, err);
+        };
+        if (!sess.blob || sess.blob->id != chunk->transfer) {
+            if (sess.blob) {
+                reply_error(in.session, in.req, make_error(errc::kInvalidArgument, "another blob is still arriving on this session", "blob"));
+                return;
+            }
+            if (chunk->offset != 0) {
+                return refuse(make_error(errc::kProtocol, "a blob must start at offset 0", "blob"));
+            }
+            const auto sink = blob_sinks_.find(chunk->sink);
+            if (sink == blob_sinks_.end()) {
+                return refuse(make_error(errc::kNotFound, std::format("no blob sink named '{}'", chunk->sink), "blob"));
+            }
+            if (!allows(sess.granted, sink->second.need)) {
+                return refuse(make_error(errc::kForbidden, std::format("blob sink '{}' needs role {}, {} has {}", chunk->sink, sink->second.need, sess.identity, sess.granted),
+                                         "blob"));
+            }
+            if (chunk->total > setup_.limits.max_blob) {
+                return refuse(make_error(errc::kLimitExceeded, std::format("a {}-byte blob is over the limit ({} bytes)", chunk->total, setup_.limits.max_blob), "blob"));
+            }
+            blob_transfer t;
+            t.id = chunk->transfer;
+            t.sink = chunk->sink;
+            t.name = chunk->name;
+            t.total = chunk->total;
+            t.data.reserve(static_cast<std::size_t>(std::min<std::uint64_t>(chunk->total, 1u << 20)));
+            sess.blob = std::move(t);
+        }
+        blob_transfer& t = *sess.blob;
+        if (chunk->offset != t.data.size() || chunk->sink != t.sink || chunk->total != t.total) {
+            return refuse(make_error(errc::kProtocol, "blob chunks out of order or inconsistent", "blob"));
+        }
+        if (chunk->data.size() > t.total - t.data.size()) {
+            return refuse(make_error(errc::kProtocol, "more blob bytes than announced", "blob"));
+        }
+        t.data.insert(t.data.end(), chunk->data.begin(), chunk->data.end());
+        if (t.data.size() < t.total) {
+            reply(in.session, in.req, value{});
+            return;
+        }
+        // Complete: the sink decides.
+        const auto sink = blob_sinks_.find(t.sink);
+        result<void> verdict = fail(errc::kNotFound, std::format("no blob sink named '{}'", t.sink), "blob");
+        if (sink != blob_sinks_.end()) {
+            try {
+                verdict = sink->second.fn(blob_view{t.sink, t.name, sess.identity, t.data});
+            } catch (const std::exception& ex) {
+                verdict = fail(errc::kRuntime, std::format("blob sink '{}' threw: {}", t.sink, ex.what()), "blob");
+            } catch (...) {
+                verdict = fail(errc::kRuntime, std::format("blob sink '{}' threw", t.sink), "blob");
+            }
+        }
+        if (wants<event::blob_received>()) {
+            publish(event::blob_received{now(), in.session, sess.identity, t.sink, t.name, t.total, security::to_hex(security::blake2b_256(t.data)),
+                                         verdict ? error{} : verdict.error()});
+        }
+        log(log_level::kInfo, std::format("blob '{}' ({} bytes) from {} for sink {}: {}", t.name, t.total, sess.identity, t.sink, verdict ? "taken" : verdict.error().message));
+        const std::uint64_t id = t.id;
+        sess.blob.reset();
+        if (!verdict) {
+            sess.failed_transfer = id;
+            reply_error(in.session, in.req, verdict.error());
+            return;
+        }
+        reply(in.session, in.req, value{});
     }
 
     // Thread-safe: both threads log.
@@ -1018,6 +1453,7 @@ private:
     session::options session_options_;
     std::vector<std::pair<std::string, installer>> installers_;
     std::mutex log_mutex_;
+    std::atomic<bool> enabled_{true};
 
     // Network thread. io_ is declared first so it is destroyed last.
     net::io_context io_;
@@ -1033,6 +1469,12 @@ private:
     std::vector<std::shared_ptr<cancel_relay>> orphans_; // identities whose last session ended
     net::io_context::timer enforce_timer_{io_};
     std::atomic<std::size_t> ready_sessions_{0};
+    // Reverse mode: the one outgoing session, and when to dial again.
+    bool reverse_ = false;
+    session_id outgoing_;
+    std::uint32_t attempts_ = 0;
+    std::mt19937_64 rng_{0x52'48'50'00u};
+    net::io_context::timer redial_timer_{io_};
 
     // Crossing threads.
     utils::spsc_ring<inbound> inbox_;   // network → pump
@@ -1041,8 +1483,13 @@ private:
     // Pump thread.
     std::map<session_id, pump_session> pump_sessions_;
     std::map<std::string, identity_runtime, std::less<>> identities_;
+    std::map<std::string, blob_sink, std::less<>> blob_sinks_;
     std::deque<outbound> outbox_backlog_;
     std::atomic<std::size_t> identity_count_{0};
+    // The audit record of the request request() is handling (reply_error fills in its outcome).
+    event::script_executed* audit_ = nullptr;
+    session_id audit_session_;
+    std::uint64_t audit_req_ = 0;
 };
 
 // ---- the C++ wall --------------------------------------------------------------------------------------
@@ -1065,6 +1512,18 @@ std::uint16_t port(const engine& e) noexcept {
 
 result<void> install(engine& e, std::string_view name, installer fn) {
     return e.install(name, fn);
+}
+
+result<void> add_blob_sink(engine& e, std::string_view name, blob_fn fn, role need) {
+    return e.add_blob_sink(name, std::move(fn), need);
+}
+
+void set_enabled(engine& e, bool on) noexcept {
+    e.set_enabled(on);
+}
+
+bool enabled(const engine& e) noexcept {
+    return e.is_enabled();
 }
 
 void pump(engine& e) {

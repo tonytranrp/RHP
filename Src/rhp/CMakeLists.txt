@@ -9,6 +9,8 @@ add_subdirectory(net)      # layer 3
 add_subdirectory(security) # layer 3
 add_subdirectory(exec)     # layer 3
 add_subdirectory(script)   # layer 3
+add_subdirectory(event)    # layer 3
+add_subdirectory(audit)    # layer 4
 add_subdirectory(session)  # layer 4
 add_subdirectory(config)   # layer 5
 add_subdirectory(host)     # layer 5
@@ -22,4 +24,4 @@ target_sources(rhp INTERFACE
     BASE_DIRS "${PROJECT_SOURCE_DIR}/Src"
     FILES rhp.hpp
 )
-target_link_libraries(rhp INTERFACE Rhp::utils Rhp::core Rhp::script Rhp::host Rhp::client)
+target_link_libraries(rhp INTERFACE Rhp::utils Rhp::core Rhp::script Rhp::audit Rhp::host Rhp::client)

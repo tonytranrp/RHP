@@ -10,7 +10,9 @@
 #include <rhp/net/endpoint.hpp>
 #include <rhp/net/tcp/tcp.hpp>
 #include <rhp/security/authenticator.hpp>
+#include <rhp/security/ed25519.hpp>
 #include <rhp/security/psk_keyring.hpp>
+#include <rhp/security/signer.hpp>
 #include <rhp/utils/type_list.hpp>
 #include <rhp/wire/codec.hpp>
 #include <rhp/wire/codec/msgpack.hpp>
@@ -26,6 +28,7 @@ enum class slot : unsigned char {
     kTransport,
     kCodec,
     kAuth,
+    kSigner,
     kExecutor,
     kIo,
     kLimits,
@@ -96,6 +99,7 @@ using get_or_t = typename get_or<S, Default, Settings...>::type;
 //       ::transport<Rhp::net::tcp>             // Rhp::net::transport       default tcp
 //       ::codec    <Rhp::wire::msgpack>        // Rhp::wire::codec          default msgpack
 //       ::auth     <Rhp::security::psk_keyring>// Rhp::security::authenticator  default psk_keyring
+//       ::signer   <Rhp::security::ed25519>    // Rhp::security::signer     default ed25519
 //       ::executor <Rhp::exec::pumped>         // Rhp::exec::executor       default pumped
 //       ::io       <Rhp::exec::owned_io_thread>// Rhp::exec::io_runner      default owned_io_thread
 //       ::limits   <Rhp::limits{}>             // value                     default Rhp::limits{} (no script limits)
@@ -104,8 +108,8 @@ using get_or_t = typename get_or<S, Default, Settings...>::type;
 //       ::logger   <Rhp::core::stderr_logger>; // Rhp::core::logger         default stderr_logger
 //
 // Rhp::config<> with no links is exactly that chain. In your own templates (a dependent context)
-// write `Cfg::template transport<X>`. TLS, signing and discovery slots arrive with the stages that
-// implement them.
+// write `Cfg::template transport<X>`. TLS and discovery slots arrive with the stages that implement
+// them. `signer<Rhp::security::unsigned_scripts>` is the explicit opt-out of script signing.
 template <class... Settings>
 struct config {
     template <net::transport T>
@@ -114,6 +118,8 @@ struct config {
     using codec = config_detail::rebind_t<config_detail::slot::kCodec, C, Settings...>;
     template <security::authenticator A>
     using auth = config_detail::rebind_t<config_detail::slot::kAuth, A, Settings...>;
+    template <security::signer S>
+    using signer = config_detail::rebind_t<config_detail::slot::kSigner, S, Settings...>;
     template <exec::executor X>
     using executor = config_detail::rebind_t<config_detail::slot::kExecutor, X, Settings...>;
     template <exec::io_runner I>
@@ -131,6 +137,9 @@ struct config {
     using codec_t = config_detail::get_or_t<config_detail::slot::kCodec, wire::msgpack, Settings...>;
     using auth_t = config_detail::get_or_t<config_detail::slot::kAuth, security::psk_keyring, Settings...>;
     using credential_t = typename auth_t::credential;
+    using signer_t = config_detail::get_or_t<config_detail::slot::kSigner, security::ed25519, Settings...>;
+    using signing_key_t = typename signer_t::key; // what a client signs with
+    using trust_t = typename signer_t::trust;     // what a host checks signatures against
     using executor_t = config_detail::get_or_t<config_detail::slot::kExecutor, exec::pumped, Settings...>;
     using io_t = config_detail::get_or_t<config_detail::slot::kIo, exec::owned_io_thread, Settings...>;
     using errors_t = config_detail::get_or_t<config_detail::slot::kErrors, ::Rhp::errors::expected, Settings...>;
