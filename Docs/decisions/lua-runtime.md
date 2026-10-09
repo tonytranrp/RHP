@@ -19,3 +19,5 @@
 - Lua 5.5.1 is fetched from `github.com/lua/lua` (tag `v5.5.1`, download only) and compiled as one C++ translation unit through upstream's `onelua.c` (`cmake/lua/lua_cxx.cpp`, target `Rhp::lua`), with `LUA_USE_APICHECK` in Debug.
 - Every role gets a text-only `load` that defaults to the caller's environment; a module's `_G` is its own `_ENV`. Non-admin roles get `os.time` / `os.clock` only and no `string.dump`, `dofile`, `loadfile`, `collectgarbage`, `require`, `io`, `package` or `debug`.
 - `puc_lua` is the only engine. `Rhp::script::stack` is the engine boundary; a formal `engine` concept for `config<>::engine<>` arrives with a second engine.
+
+**Stage 2 (as built):** `require` is the host loader for every role (admin included; `package` stays admin-only but never loads files through `require`). The `rhp` global gains `wait`, `next_frame`, `sleep`, `frame`, `timer`, `on`, `off` and `emit`. `coroutine.resume` / `coroutine.close` refuse the scheduler's request coroutines.

@@ -315,7 +315,7 @@ Patches **stack** per point, so multiple modules can patch the same point and be
 C++ can fire typed events that scripts subscribe to:
 
 ```cpp
-inline constinit Rhp::lua_event<"player.died", game::entity_id, std::string_view> player_died;
+inline constexpr Rhp::lua_event<"player.died", game::entity_id, std::string_view> player_died{};
 
 player_died.fire(id, "lava");          // RHP_ENABLE=OFF → no-op
 ```
@@ -324,7 +324,7 @@ player_died.fire(id, "lava");          // RHP_ENABLE=OFF → no-op
 rhp.on("player.died", function(id, cause) print(id, cause) end)   -- subscription is ledger-tracked
 ```
 
-Like patch points, `lua_event`s live in a **process-wide registry** (any host may deliver them to its scripts). Delivery is queued and runs on each host's `pump()` thread.
+Like patch points, `lua_event`s live in a **process-wide registry** (any host may deliver them to its scripts). Delivery is synchronous in sandboxes owned by the firing thread and queued to the next `pump()` of every other subscribed sandbox (arguments copied). Each handler runs as its own script request, so it may `rhp.wait`. A handle-type argument arrives as the handle userdata of whichever installed lib declares that type.
 
 ### 4.5 Opaque handles
 
@@ -350,7 +350,8 @@ No reflection-based automation; `convert<T>` is always written by hand (decided)
 Every `Rhp::lib<>` can emit **LuaLS annotations** so script authors get autocomplete and type checks:
 
 ```cpp
-Rhp::script::stubs::write<game_lib>(std::cout);   // compile-time walk of the lib type
+Rhp::script::stubs::write<game_lib>(std::cout, Rhp::role::kPatch);   // compile-time walk of the lib type
+std::string all = box.stubs();             // rhp API + every installed lib, for the sandbox's role
 ```
 
 ```lua
@@ -367,7 +368,7 @@ game = {}
 function game.spawn(kind, x, y, z) end
 ```
 
-`rhp-cli stubs > rhp_api.lua` fetches them from a running host (`op::describe`), filtered by the caller's role.
+Stubs are filtered by role: functions the role can't call are left out and variables it can't write are marked `read-only`. Parameters are named `arg1..argN` (C++ has no parameter names without reflection); a `Rhp::convert<T>` names its Lua type with `static constexpr std::string_view lua_type`. `rhp-cli stubs > rhp_api.lua` fetches them from a running host (`op::describe`).
 
 ---
 
@@ -482,7 +483,7 @@ flowchart LR
 
 Module names are dotted lowercase (`combat.low_grav`), same rule as patch ids. Chunk names are `@module_name`, so tracebacks read `@combat.low_grav:12`. Revisions are a per-module counter, with the content hash shown in `status`.
 
-`require("name")` resolves only to **loaded modules of the same identity** (whatever their chunk returned), via a host-controlled loader — never the file system. The host tracks the dependency graph; unloading a module that others require fails with `kHasDependents` unless `force` is passed (then dependents keep a table whose functions raise errors).
+`require("name")` resolves only to **loaded modules of the same identity** (whatever their chunk returned), via a host-controlled loader — never the file system, for every role. It returns a read-only proxy that always reads the module's **current** exports, so dependents follow a reload or rollback. A require cycle fails with an error naming the chain. The host tracks the dependency graph; unloading a module that others require fails with `kHasDependents` unless `force` is passed (then dependents stay loaded and touching the unloaded module raises `kUnloaded`).
 
 ---
 
@@ -818,7 +819,8 @@ RHP/
 │       │               tls/{openssl,mbedtls,auto_backend} · detail/
 │       ├── exec/       executor · pumped · threaded · inline_exec · io_runner · owned_io_thread · detail/
 │       ├── script/     stack · marshal · lib · patch_point · ledger · sandbox     (Stage 1)
-│       │               scheduler · revisions · hook_backend · stubs · audit       (Stage 2+)
+│       │               lua_event · stubs · scheduler, revisions, require in sandbox (Stage 2)
+│       │               hook_backend · audit                                       (later)
 │       │               puc_lua/(.cpp — lua.h never leaks) · detail/
 │       ├── session/    session · handshake · reliability · resume · heartbeat · backoff · detail/
 │       ├── host/       host · module_manager · dispatcher · blob_sinks · events · local_api
@@ -1047,7 +1049,7 @@ flowchart LR
 |---|---|
 | 0 ✅ | `cmake --preset windows-msvc` + `ctest` green with utils/core tests — done: 54 tests green on MSVC, clang-cl, MSVC-ASan, Linux Clang, Clang ASan+UBSan, Clang TSan |
 | 1 ✅ | `Examples/hello_console` runs a local Lua file calling exposed C++, patches a point, and reverts everything — done: 118 tests (56 script) green on MSVC, clang-cl, MSVC-ASan, Linux Clang, Clang ASan+UBSan, Clang TSan; the `RHP_ENABLE=OFF` build is green without Lua |
-| 2 | an infinite-loop script never blocks a frame; reload keeps state via `on_save`/`on_restore`; LuaLS stubs generated |
+| 2 ✅ | an infinite-loop script never blocks a frame; reload keeps state via `on_save`/`on_restore`; LuaLS stubs generated — done: `Examples/frame_loop` pumps 120 frames next to a `while true do end` (2 ms slices, worst frame ≈ 2 ms), reloads a module keeping its state and writes `rhp_api.lua`; 239 tests green on MSVC, clang-cl, MSVC-ASan, Linux Clang, Clang ASan+UBSan, Clang TSan; the `RHP_ENABLE=OFF` build (99 tests) is green without Lua |
 | 3 | exec over loopback and TCP with CRC, seq/ack, roles |
 | 4 | full lifecycle from `rhp-cli`, signed scripts only, audit log written |
 | 5 | TLS on all 5 OS presets; kill-the-socket test resumes exactly-once |
@@ -1206,3 +1208,24 @@ Choices made while building Stage 1 that the questionnaires didn't cover. Each i
 | T10 | Handlers outside a run | every patch / event handler call that game code triggers is its own small run: cancel, instruction and wall budgets apply per call; a stop faults the module and the C++ default runs |
 | T11 | Re-entrant lifecycle ops | `revert` / `unload` / `reload` / `rollback` / `revert_to` / `revert_all` called from inside a running script are queued and applied when the outermost run returns (or at the next `pump()` for handlers game code triggered); they report `deferred` |
 | T12 | Workflow | main session writes the core; one subagent (no nested agents) writes stubs and tests; branch `stage-2-scheduler`, PR |
+
+---
+
+## 23. Stage 2 implementation notes
+
+Choices made while building Stage 2 beyond the round-4 questionnaire (§22). Each is recorded in the matching `Docs/decisions/` file.
+
+| # | Topic | Decision |
+|---|---|---|
+| U1 | Requests | every `exec` / `load` / `call`, timer callback and event handler is a **request**: a coroutine with its own instruction / wall budget. An operation whose request suspends returns early (`exec` / `call`: empty list, `load`: module `kLoading`, `reload`: revision 0) and the final result goes to `sandbox_options::on_result`; `last_request()` names it |
+| U2 | Who may suspend | only a request's own thread, when yieldable. Patch handlers, `on_save` / `on_restore` / `on_unload`, coroutines a script created and callbacks of C functions (`table.sort`) can't; `rhp.wait` there raises `kInvalidArgument`. `coroutine.resume` / `close` refuse request coroutines |
+| U3 | Frames and time | `rhp.wait(n)` counts `pump()` calls (n < 1 → 1); `rhp.sleep` and `rhp.timer` use the injectable `sandbox_options::clock`; limits always use `steady_clock`. A pump resumes only requests ready when it started, round robin, and stops once its slice is spent |
+| U4 | Slices | `slice_us` applies per operation, per `pump()` and per synchronous event delivery from game code; the count hook yields only the request's own thread, so a loop inside a coroutine the script created can't be sliced (cancel and limits still stop it) |
+| U5 | `wall_ms` | per request (summed over resumes) or per handler call; errc `kTimeout` |
+| U6 | Revisions | each revision has its own `_ENV`; ledger entries carry module, revision and request (`effect_owner`), so a reload reverts exactly the old revision and a failed `exec` exactly its own request. Revision numbers are consumed by failed reloads too; `status` shows revision, CRC-32C source hash, revisions kept and `reloading` |
+| U7 | Reload swap | the old revision's effects, timers, subscriptions and suspended requests go at the swap — including game-state writes; state crosses only through `on_save` / `on_restore`. `load` of a loaded name is a reload; `rollback(mod, n)` reloads a kept source as a new revision |
+| U8 | Timers | `rhp.timer(ms, fn, repeating)` → id usable with `rhp.off`; a repeating timer fires at most once per pump and skips missed ticks |
+| U9 | Faults | outside a run a failing request faults its module at once; inside a run, and for handlers game code triggered, at the end of the outermost operation or the next `pump()`. A stop of the surrounding run (cancel, a limit) never faults a handler's module |
+| U10 | Events | `Rhp::lua_event<"name", Args...>` registers on first use of `fire`; arguments are `Rhp::convertible` or opaque handle types; `listeners()` counts subscribed sandboxes |
+| U11 | Errors | new `errc::kUnloaded`; `Rhp::kLastErrc` marks the last code |
+| U12 | Cancel delivery | a `cancel(request)` for a suspended request stays pending until that request would resume, which ends it instead (or the next operation / `pump()` does). `on_result` for timer and event requests carries no values; destroying a sandbox ends its suspended requests without `on_result` |

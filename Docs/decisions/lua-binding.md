@@ -20,3 +20,7 @@
 - Handles are trivially copyable, equality-comparable, non-arithmetic value types (strong ids), pushed as userdata with `__eq` / `__tostring`; handle names and types are unique across a lib tree.
 - `Rhp::undo<G>` is fed the binding's result (with `Rhp::result<>` peeled off) or, failing that, its arguments (string views copied).
 - Errors raised inside Lua are strings `[code] where: message`; C++ gets the original `Rhp::error` back.
+
+**Stage 2 (as built)**
+- `Rhp::lua_event<"name", Args...>`: arguments are `Rhp::convertible` or opaque handle types; a handle argument arrives as the handle userdata of whichever installed lib declares that C++ type (looked up by type tag), else through `Rhp::convert`, else `nil`.
+- `Rhp::script::stubs::generate<L>(role)` emits LuaLS annotations at compile time, filtered by role; `sandbox::stubs()` joins the `rhp` API with every installed lib.

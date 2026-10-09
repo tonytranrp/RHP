@@ -18,3 +18,5 @@
 **Consequences:** `spsc_ring` is the one hand-rolled lock-free structure and is covered by a TSan preset.
 
 **Stage 1 (as built):** patch layers are pushed, removed and invoked only on their owner thread. A call picks the highest layer owned by the calling thread under the point's mutex and invokes it unlocked; layers of other threads are skipped and counted in `off_thread_misses()`. While nothing is patched a call is one acquire load.
+
+**Stage 2 (as built):** a sandbox's thread is the one that created it or last called `pump()`. `Rhp::lua_event::fire` on that thread delivers synchronously; from any other thread it copies the arguments into the sandbox's inbox (mutex) for the next `pump()`. `cancel(request)` goes through the same mutex; `cancel()` stays a single atomic flag.

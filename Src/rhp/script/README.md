@@ -5,8 +5,9 @@ The script engine: PUC Lua 5.5 (built as C++), the `Rhp::lib<>` binding DSL, pat
 | Header | What |
 |---|---|
 | `lib.hpp` | `Rhp::lib<"name">::fn<>::var<>::ro<>::handle<>::sub<>` and the binding tags; names checked where written |
+| `lua_event.hpp` | `Rhp::lua_event<"dotted.name", Args...>`: C++ fires, scripts `rhp.on`; sync on the sandbox thread, queued otherwise |
 | `patch_point.hpp` | `Rhp::patch_point<"dotted.id", &default_fn>`: overridable call site, a direct call when `RHP_ENABLE=0` |
-| `sandbox.hpp` | `Rhp::script::sandbox`: one identity's `lua_State`, modules (`_ENV` each), exec / load / call / revert / unload / checkpoint |
+| `sandbox.hpp` | `Rhp::script::sandbox`: one identity's `lua_State`, modules (`_ENV` per revision), requests (coroutines), exec / load / reload / rollback / call / revert / unload / checkpoint, pump |
 | `ledger.hpp` | `effect`, `ledger` (owner-keyed undo log), `revert_report` |
 | `marshal.hpp` | `push` / `pull` between C++ and the Lua stack; `pushable`, `pullable`, `Rhp::convertible` |
 | `stack.hpp` | `Rhp::script::stack`: the only wall between templates and the Lua C API (all out of line) |
@@ -32,3 +33,15 @@ Lua: game.spawn("crate", 1)
 - Effects that can be reverted out of order (variable writes, patch layers) live in process-wide per-target stacks (`detail/var_layers.hpp`, `detail/patch_layers.hpp`); the ledger only owns and orders them.
 - A sandbox and its Lua state belong to one thread. Patch points may be hit from any thread; a layer owned by another thread is skipped (counted in `off_thread_misses()`).
 - `RHP_ENABLE=OFF`: `puc_lua/` is not compiled, Lua is not fetched, `sandbox_disabled.cpp` reports `kDisabled`, patch points are direct calls. The DSL and the ledger still build.
+
+## Requests and the frame
+
+```text
+exec / load / call ─▶ request (coroutine) ─▶ runs until done, error, rhp.wait/sleep, or slice end
+                                              │ suspended: the operation returns early
+pump() ─▶ queued events ─▶ due timers ─▶ ready requests (round robin, within slice_us)
+       ─▶ faults · cancels · deferred lifecycle operations · on_result callbacks
+```
+
+- A failing request faults its module; a scratch (exec) request reverts only its own effects.
+- Lifecycle operations from inside a run are deferred to the end of the outermost operation.

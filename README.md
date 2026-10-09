@@ -29,7 +29,16 @@ auto mod = box.load("low_grav", R"(
 box.revert(*mod);                                // gravity and damage are back
 ```
 
-See [`Examples/hello_console`](Examples/hello_console).
+Scripts can spread work over frames, and modules reload without losing state:
+
+```cpp
+Rhp::script::sandbox box{{.limits = {.slice_us = 2'000}}};   // opt-in: no script blocks a frame
+box.exec("while true do rhp.next_frame() end");             // returns at once, continues in pump()
+box.reload(*mod, new_source);                                // on_save() → on_restore(), old revision reverted
+while (running) { box.pump(); game::update(); }
+```
+
+See [`Examples/hello_console`](Examples/hello_console) and [`Examples/frame_loop`](Examples/frame_loop).
 
 ## Targets
 
@@ -65,8 +74,8 @@ target_link_libraries(my_app PRIVATE Rhp::rhp)
 |---|---|---|
 | 0 | layout, CMake, presets, `utils`, `core` | ✅ |
 | 1 | Lua 5.5 sandbox, `Rhp::lib` DSL, patch points, ledger, revert (local) | ✅ |
-| 2 | scheduler, `rhp.emit`, `lua_event`, reload + revisions, `require`, LuaLS stubs | next |
-| 3 | wire format, loopback + TCP, sessions, roles | |
+| 2 | scheduler, `rhp.emit`, `lua_event`, reload + revisions, `require`, LuaLS stubs | ✅ |
+| 3 | wire format, loopback + TCP, sessions, roles | next |
 | 4 | client, `rhp-cli`, signing, audit, blobs, reverse mode | |
 | 5 | TLS, reconnect/resume, fuzzing, mobile presets | |
 | 6 | WebSocket, UDP-reliable, HTTP gateway, mDNS, fleet | |
@@ -77,7 +86,7 @@ target_link_libraries(my_app PRIVATE Rhp::rhp)
 |---|---|
 | `Src/rhp/` | the library, one folder per module (`utils`, `core`, `script`, …), included as `<rhp/...>` |
 | `Tests/` | unit tests, compile-fail tests (later: integration, fuzz, bench) |
-| `Examples/` | `hello_console`, `custom_transport`, `headless_server` |
+| `Examples/` | `hello_console`, `frame_loop` (later: `custom_transport`, `headless_server`) |
 | `Tools/` | `rhp-cli` |
 | `Docs/` | [`ARCHITECTURE.md`](Docs/ARCHITECTURE.md) and [`decisions/`](Docs/decisions/) |
 | `cmake/` | build helpers and the single dependency pin file |

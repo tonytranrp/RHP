@@ -16,3 +16,9 @@
 - Once a stop fires, the count hook switches to every instruction on the running thread and the main thread. A script that keeps re-entering `pcall` can otherwise swallow a stop that only fires every 1000 instructions.
 - The memory limit covers the whole `lua_State` (allocator over `std::pmr`); growth is refused for the rest of the run once it's hit, and Lua's emergency GC reclaims afterwards.
 - `cancel()` while nothing runs is a no-op: each run clears the flag when it starts.
+
+**Stage 2 (as built)**
+- Every exec / load / call, timer callback and event handler is a request coroutine with its own budget (instructions and wall time summed over its resumes). Scripts suspend with `rhp.wait(n)` (pump calls), `rhp.next_frame()`, `rhp.sleep(ms)` (injectable clock) or a plain `coroutine.yield()`; an operation whose request suspends returns early and reports through `on_result`.
+- Time slicing stays opt-in (`slice_us`). Each operation, each `pump()` and each synchronous event delivery gets one slice; the count hook yields only the request's own thread when it is yieldable. `pump()` resumes ready requests round robin and stops when its slice is spent.
+- `cancel()` stops the running request(s); `cancel(request)` stops one request, running or suspended. Either faults per the fault policy (a scratch request reverts only its own effects). Timers are ledger effects: revert / unload removes them.
+- Patch handlers that game code triggers are small runs of their own: cancel, instructions and `wall_ms` (errc `kTimeout`) apply per call.
