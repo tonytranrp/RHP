@@ -27,3 +27,11 @@
 - Roles: the host checks each request's minimum role (`wire::required_role`) before running it; bindings check theirs inside Lua. `revert_all` over the network is the admin panic button for every identity.
 - Unsigned scripts run in Stage 3 (signing is Stage 4). Non-loopback TCP needs `insecure_lan` until TLS (Stage 5).
 - At most `limits.pending_handshakes` (64) unauthenticated connections; more are closed at once; `handshake_timeout_ms` (5 s) closes slow ones.
+
+**Stage 4 (as built)**
+- Script signing: `config<>::signer<S>` (concept `Rhp::security::signer`), default `Rhp::security::ed25519` — standard RFC 8032 Ed25519 from Monocypher's optional file, over `"rhp/script\0" ‖ source`, sent as `{signer, sig}`. The host checks `exec` / `load` / `reload` against its `trusted_signers` before running anything; observe sessions may send unsigned code, but a signature that is present must verify for every role. `Rhp::security::unsigned_scripts` is the typed opt-out.
+- Files: identity file (`name`, `psk`, `signing_key`, optional `signer`), keyring file (`name role base64-psk`), trusted-signers file (`name base64-public-key`); `rhp-cli keygen` writes the first and prints lines for the other two. Secrets are wiped.
+- Audit: `host.on<E>()` / `on_any()` and `Rhp::audit::file_sink` — every request that runs code or changes state (with its BLAKE2b-256 source hash, signer and outcome), sessions, failed handshakes, blobs and reverts, as JSON lines.
+- Blobs are admin-only unless a sink says otherwise (`host.on_blob(name, fn, role)`); the role is checked before a byte is buffered.
+- `host.set_enabled(false)` is the runtime kill switch: new connections closed, requests `kDisabled`.
+- `pin` (admin) keeps a module after its identity disconnects; `revert_all` still removes it.

@@ -25,10 +25,12 @@ Every request and reply is an `envelope {req, idem?, body}`: `req` ties replies,
 
 | Op | Request body | Result body |
 |---|---|---|
-| exec | `{source, chunk}` | array of values |
-| load | `{name, source}` | module id |
+| exec | `{source, chunk, signature}` | array of values |
+| load | `{name, source, signature}` | module id |
 | call | `{module, function, args}` | array of values |
-| reload / rollback | `{module, source}` / `{module, steps}` | revision (0 = deferred) |
+| reload / rollback | `{module, source, signature}` / `{module, steps}` | revision (0 = deferred) |
+| pin / unpin | `{module}` | nil |
+| blob | `{transfer, sink, name, total, offset, data}` (one chunk) | nil (the last chunk: the sink's verdict) |
 | revert / status | `{module}` | revert summary / module status |
 | unload | `{module, force}` | revert summary |
 | checkpoint / revert_to | `{tag}` | nil / revert summary |

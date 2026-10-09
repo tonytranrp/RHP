@@ -22,3 +22,5 @@
 - Not yet: resume tokens, reconnect/backoff (Stage 5), fragmentation (`kMore`, blobs, Stage 4), `CRC_OMITTED` (TLS, Stage 5).
 
 **Stage 3 review fixes:** frames before the handshake are capped at 16 KiB; the MessagePack decoder has a total value budget (`max_elements`, 2^20) and reserves at most 256 slots per container up front; control frames (ping, pong, ack, nack) carry a per-direction counter in `seq` so replays are dropped.
+
+**Stage 4 (as built):** `kProtocolRevision` 2. `exec` / `load` / `reload` requests carry `signature` (nil = unsigned); `pin` / `unpin` take `{module}`; `module_status` gains `pinned`. Blobs are chunked per message, not per frame: `kBlob` carries `{transfer, sink, name, total, offset, data}`, each chunk is a request answered nil, the last one's answer is the sink's verdict; `kMore` stays reserved. `wire::required_role(kBlob)` is observe — each sink checks its own role.
