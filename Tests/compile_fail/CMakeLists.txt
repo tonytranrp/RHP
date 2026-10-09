@@ -2,6 +2,8 @@ rhp_add_compile_fail(convert_unknown_type SOURCE convert_unknown_type.cpp LINKS 
 rhp_add_compile_fail(type_list_at_out_of_range SOURCE type_list_at_out_of_range.cpp LINKS Rhp::utils)
 rhp_add_compile_fail(size_literal_overflow SOURCE size_literal_overflow.cpp LINKS Rhp::utils)
 rhp_add_compile_fail(errors_mode_bad_policy SOURCE errors_mode_bad_policy.cpp LINKS Rhp::core)
+rhp_add_compile_fail(event_arg_reference SOURCE event_arg_reference.cpp LINKS Rhp::script)
+rhp_add_compile_fail(event_bad_name SOURCE event_bad_name.cpp LINKS Rhp::script)
 rhp_add_compile_fail(handle_arithmetic SOURCE handle_arithmetic.cpp LINKS Rhp::script)
 rhp_add_compile_fail(lib_bad_identifier SOURCE lib_bad_identifier.cpp LINKS Rhp::script)
 rhp_add_compile_fail(lib_duplicate_name SOURCE lib_duplicate_name.cpp LINKS Rhp::script)

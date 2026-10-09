@@ -14,7 +14,10 @@
 
 using Rhp::errc;
 using Rhp::module_id;
+using Rhp::request_id;
+using Rhp::revision_id;
 using Rhp::script::effect;
+using Rhp::script::effect_owner;
 using Rhp::script::ledger;
 using Rhp::script::revert_report;
 
@@ -354,4 +357,112 @@ TEST_CASE("var_layers through two ledgers reverts in any order", "[script][ledge
     REQUIRE(a.revert(kModA).undone == 2);
     REQUIRE(ledger_tests_fixtures::g_layered_text == "orig");
     REQUIRE(layers::depth() == 0);
+}
+
+// ---- revisions, requests and single entries ---------------------------------------------------------
+
+TEST_CASE("ledger entries carry the owner's revision and request", "[script][ledger]") {
+    std::vector<int> log;
+    ledger l;
+    const effect_owner owner{kModA, revision_id{2}, request_id{7}};
+    const std::uint64_t full = l.record(owner, "a.full", logged(log, 1));
+    const std::uint64_t bare = l.record(kModA, "a.bare", logged(log, 2));
+
+    const ledger::entry* e = l.find(full);
+    REQUIRE(e != nullptr);
+    CHECK(e->seq == full);
+    CHECK(e->owner == kModA);
+    CHECK(e->revision == revision_id{2});
+    CHECK(e->request == request_id{7});
+    CHECK(e->label == "a.full");
+
+    const ledger::entry* b = l.find(bare);
+    REQUIRE(b != nullptr);
+    CHECK_FALSE(b->revision.valid());
+    CHECK_FALSE(b->request.valid());
+
+    CHECK(l.find(0) == nullptr);
+    CHECK(l.find(bare + 1'000'000) == nullptr);
+    CHECK(effect_owner{kModA} == effect_owner{kModA, revision_id{}, request_id{}});
+    CHECK_FALSE(owner == effect_owner{kModA, revision_id{2}});
+}
+
+TEST_CASE("ledger revert_revision undoes one revision of one owner", "[script][ledger]") {
+    std::vector<int> log;
+    ledger l;
+    l.record(effect_owner{kModA, revision_id{1}}, "a.r1", logged(log, 1));
+    l.record(effect_owner{kModA, revision_id{2}}, "a.r2", logged(log, 2));
+    l.record(effect_owner{kModB, revision_id{2}}, "b.r2", logged(log, 3));
+    l.record(effect_owner{kModA, revision_id{2}}, "a.r2", logged(log, 4));
+    l.record(kModA, "a.untied", logged(log, 5));
+
+    const auto report = l.revert_revision(kModA, revision_id{2});
+    CHECK(report.undone == 2);
+    CHECK(log == std::vector<int>{4, 2});
+    CHECK(l.count(kModA) == 2);
+    CHECK(l.count(kModB) == 1);
+    CHECK(l.revert_revision(kModA, revision_id{2}).undone == 0);
+    CHECK(l.revert_revision(kModC, revision_id{1}).undone == 0);
+
+    CHECK(l.revert_revision(kModA, revision_id{1}).undone == 1);
+    CHECK(log == std::vector<int>{4, 2, 1});
+    CHECK(l.count(kModA) == 1); // revision 0 entries aren't any revision's
+}
+
+TEST_CASE("ledger revert_request undoes one request of one owner", "[script][ledger]") {
+    std::vector<int> log;
+    ledger l;
+    l.record(effect_owner{kModA, revision_id{}, request_id{1}}, "a.q1", logged(log, 1));
+    l.record(effect_owner{kModA, revision_id{}, request_id{2}}, "a.q2", logged(log, 2));
+    l.record(effect_owner{kModB, revision_id{}, request_id{1}}, "b.q1", logged(log, 3));
+    l.record(effect_owner{kModA, revision_id{}, request_id{1}}, "a.q1", logged(log, 4));
+
+    const auto report = l.revert_request(kModA, request_id{1});
+    CHECK(report.undone == 2);
+    CHECK(log == std::vector<int>{4, 1});
+    CHECK(l.size() == 2);
+    CHECK(l.revert_request(kModA, request_id{9}).undone == 0);
+}
+
+TEST_CASE("ledger revert_entry undoes exactly one effect", "[script][ledger]") {
+    std::vector<int> log;
+    int one_way_calls = 0;
+    ledger l;
+    const std::uint64_t s1 = l.record(kModA, "a1", logged(log, 1));
+    const std::uint64_t s2 = l.record(kModB, "b1", logged(log, 2));
+    const std::uint64_t s3 = l.record(kModA, "a.explode", std::make_unique<one_way_effect>(one_way_calls));
+
+    const auto report = l.revert_entry(s2);
+    CHECK(report.undone == 1);
+    CHECK(log == std::vector<int>{2});
+    CHECK(l.find(s2) == nullptr);
+    CHECK(l.find(s1) != nullptr);
+    CHECK(l.size() == 2);
+
+    const auto again = l.revert_entry(s2);
+    CHECK(again.undone == 0);
+    CHECK(again.irreversible == 0);
+    CHECK(again.clean());
+
+    const auto one_way = l.revert_entry(s3);
+    CHECK(one_way.undone == 0);
+    CHECK(one_way.irreversible == 1);
+    CHECK(one_way_calls == 0);
+    CHECK(l.find(s3) == nullptr);
+    CHECK(l.size() == 1);
+}
+
+TEST_CASE("revert_report merges deferred with OR", "[script][ledger]") {
+    revert_report total;
+    CHECK_FALSE(total.deferred);
+    revert_report now;
+    total += std::move(now);
+    CHECK_FALSE(total.deferred);
+    revert_report later;
+    later.deferred = true;
+    total += std::move(later);
+    CHECK(total.deferred);
+    revert_report after;
+    total += std::move(after);
+    CHECK(total.deferred); // stays set
 }

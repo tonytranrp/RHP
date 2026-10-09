@@ -20,4 +20,5 @@ ctest --preset windows-msvc
 - Prefer `STATIC_REQUIRE` for anything checkable at compile time.
 - Cover boundaries, not just the happy path: empty packs, minimal types satisfying a concept, out-of-range values.
 - Anything touching threads must stay clean under the `*-tsan` preset.
-- Globals, patch points and lib names are process-wide: give each test file its own fixture namespace, globals and patch point ids, and leave every point unpatched (a destroyed sandbox reverts everything).
+- Globals, patch points, events and lib names are process-wide: give each test file its own fixture namespace, globals and point / event ids, and leave every point unpatched (a destroyed sandbox reverts everything).
+- Script time: inject `sandbox_options::clock` for `rhp.sleep` / `rhp.timer`; use real time only where it is the subject (slicing, `wall_ms`, cross-thread cancel) and keep bounds generous for sanitizer builds.

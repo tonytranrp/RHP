@@ -1,7 +1,12 @@
 // Built only with RHP_ENABLE=OFF: the sandbox is an inert stub and patch points are direct calls.
+#include <string_view>
+
 #include <catch2/catch_test_macros.hpp>
 
+#include <rhp/core/error.hpp>
+#include <rhp/core/ids.hpp>
 #include <rhp/script/lib.hpp>
+#include <rhp/script/lua_event.hpp>
 #include <rhp/script/patch_point.hpp>
 #include <rhp/script/sandbox.hpp>
 
@@ -37,4 +42,45 @@ TEST_CASE("disabled sandbox reports kDisabled", "[script][disabled]") {
     REQUIRE(box.list().empty());
     REQUIRE(box.revert_all().undone == 0);
     REQUIRE(box.memory_used() == 0);
+}
+
+TEST_CASE("disabled reload, rollback and unload report kDisabled", "[script][disabled]") {
+    Rhp::script::sandbox box;
+    const Rhp::module_id mod{1};
+    REQUIRE(box.reload(mod, "return {}").error().code == Rhp::errc::kDisabled);
+    REQUIRE(box.rollback(mod).error().code == Rhp::errc::kDisabled);
+    REQUIRE(box.rollback(mod, 2).error().code == Rhp::errc::kDisabled);
+    REQUIRE(box.unload(mod).error().code == Rhp::errc::kDisabled);
+    REQUIRE(box.unload(mod, Rhp::script::force).error().code == Rhp::errc::kDisabled);
+    REQUIRE(box.revert(mod).error().code == Rhp::errc::kDisabled);
+    REQUIRE(box.call(mod, "f").error().code == Rhp::errc::kDisabled);
+    REQUIRE(box.checkpoint("tag").error().code == Rhp::errc::kDisabled);
+    REQUIRE(box.revert_to("tag").error().code == Rhp::errc::kDisabled);
+    REQUIRE_FALSE(box.revert_all().deferred);
+}
+
+TEST_CASE("disabled scheduler is inert", "[script][disabled]") {
+    Rhp::script::sandbox box;
+    box.pump();
+    box.cancel();
+    box.cancel(Rhp::request_id{1});
+    REQUIRE(box.frame() == 0);
+    REQUIRE(box.suspended() == 0);
+    REQUIRE_FALSE(box.last_request().valid());
+    REQUIRE(box.stubs().empty());
+    REQUIRE(box.effects().empty());
+}
+
+namespace disabled_tests_fixtures {
+
+inline constexpr Rhp::lua_event<"tests.disabled.ping", int, std::string_view> ping{};
+
+} // namespace disabled_tests_fixtures
+
+TEST_CASE("disabled lua_event fire is a no-op", "[script][disabled]") {
+    using namespace disabled_tests_fixtures;
+    STATIC_REQUIRE(decltype(ping)::arity == 2);
+    STATIC_REQUIRE(decltype(ping)::name == "tests.disabled.ping");
+    ping.fire(1, "nobody");
+    REQUIRE(decltype(ping)::listeners() == 0);
 }
