@@ -707,7 +707,8 @@ TEST_CASE("stage4: a connection that never authenticates doesn't fail a listenin
     REQUIRE(c.port());
     auto queued = c.async().exec<int>("return 11");
     {
-        // A stray connection: it reads the client's hello and hangs up.
+        // A stray connection: it sends something that isn't RHP and hangs up. (The listening
+        // client says nothing until the dialer has spoken: TLS or plaintext is the dialer's call.)
         Rhp::net::io_context io;
         std::unique_ptr<Rhp::net::link> stray;
         rhp_test::recorder seen;
@@ -716,7 +717,11 @@ TEST_CASE("stage4: a connection that never authenticates doesn't fail a listenin
             stray = std::move(*l);
             stray->start(seen);
         });
-        REQUIRE(rhp_test::poll_until({&io}, [&] { return seen.received.size() > 0; }));
+        REQUIRE(rhp_test::poll_until({&io}, [&] { return stray != nullptr; }));
+        Rhp::utils::byte_buffer junk;
+        junk.append(std::string_view{"GET / HTTP/1.1"});
+        stray->send(std::move(junk));
+        rhp_test::poll_for({&io}, 50ms);
         stray->close();
         rhp_test::poll_for({&io}, 50ms);
     }

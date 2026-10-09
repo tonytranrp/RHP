@@ -35,6 +35,12 @@ public:
         return *this;
     }
 
+    json_object& boolean(std::string_view key, bool v) {
+        name(key);
+        text_ += v ? "true" : "false";
+        return *this;
+    }
+
     // {"code":"bad_signature","message":"...","where":"..."}; kOk becomes "ok" alone.
     json_object& err(std::string_view key, const error& e) {
         name(key);
@@ -138,6 +144,15 @@ std::string to_json(const any& e) {
                                   .string("role", to_string(x.granted))
                                   .string("peer", x.peer)
                                   .string("platform", x.platform)
+                                  .boolean("tls", x.tls)
+                                  .done();
+                          },
+                          [](const session_resumed& x) {
+                              return json_object{x.name, x.time}
+                                  .number("session", x.session.value())
+                                  .string("identity", x.identity)
+                                  .string("peer", x.peer)
+                                  .boolean("tls", x.tls)
                                   .done();
                           },
                           [](const session_closed& x) {

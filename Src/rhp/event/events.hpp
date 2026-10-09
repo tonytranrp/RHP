@@ -27,6 +27,18 @@ struct session_opened {
     role granted = role::kObserve;
     std::string peer;
     std::string platform;
+    bool tls = false; // the connection is TLS
+};
+
+// A session continued on a new connection after its link was lost (resume): nothing was reverted
+// and no request ran twice.
+struct session_resumed {
+    static constexpr std::string_view name = "session_resumed";
+    time_point time;
+    session_id session;
+    std::string identity;
+    std::string peer; // the new connection's address
+    bool tls = false;
 };
 
 // An authenticated session ended (`reason`: the peer closed, the heartbeat lapsed, ...).
@@ -89,7 +101,7 @@ struct identity_reverted {
 };
 
 // Every host event, for handlers that take them all (the audit sinks).
-using any = std::variant<session_opened, session_closed, auth_failed, script_executed, blob_received, identity_reverted>;
+using any = std::variant<session_opened, session_closed, auth_failed, script_executed, blob_received, identity_reverted, session_resumed>;
 
 namespace detail {
 

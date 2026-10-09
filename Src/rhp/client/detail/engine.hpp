@@ -17,6 +17,7 @@
 #include <rhp/core/value.hpp>
 #include <rhp/net/endpoint.hpp>
 #include <rhp/security/authenticator.hpp>
+#include <rhp/security/tls/tls.hpp>
 #include <rhp/wire/codec.hpp>
 #include <rhp/wire/ops.hpp>
 
@@ -39,6 +40,10 @@ struct client_options {
     // many chunks may be in flight at once.
     std::size_t blob_chunk = 1u << 20;
     std::size_t blob_window = 4;
+    // TLS: how the host's certificate is checked (ca_pem, server_name; empty = not checked, the
+    // handshake is bound to the TLS channel instead) and, in reverse mode where the client listens,
+    // its own certificate (cert_pem + key_pem; empty = ephemeral self-signed).
+    security::tls::settings tls{};
 };
 
 } // namespace Rhp
@@ -48,6 +53,7 @@ namespace Rhp::client_detail {
 struct setup {
     net::endpoint ep;
     net::transport_ops transport;
+    security::tls::backend_ops tls;
     wire::codec_ops codec;
     std::function<std::unique_ptr<security::client_handshake>()> begin_handshake;
     Rhp::limits limits{};
@@ -97,6 +103,8 @@ struct session_info {
     std::string identity;
     role granted = role::kObserve;
     std::string host_platform;
+    bool tls = false;          // the current connection is TLS
+    std::uint64_t resumes = 0; // times the session continued on a new connection
 };
 [[nodiscard]] session_info info(const engine& e);
 

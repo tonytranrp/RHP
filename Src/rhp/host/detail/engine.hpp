@@ -18,6 +18,7 @@
 #include <rhp/net/endpoint.hpp>
 #include <rhp/script/sandbox.hpp>
 #include <rhp/security/authenticator.hpp>
+#include <rhp/security/tls/tls.hpp>
 #include <rhp/wire/codec.hpp>
 
 namespace Rhp {
@@ -29,6 +30,9 @@ struct host_options {
     std::size_t idempotency_bytes = 16u << 20;
     // Messages the network thread may queue for pump() before it holds them back itself.
     std::size_t inbox_capacity = 4096;
+    // TLS: the host's certificate (cert_pem + key_pem; empty = an ephemeral self-signed one) and,
+    // in reverse mode where the host dials, how it checks the client's (ca_pem, server_name).
+    security::tls::settings tls{};
 };
 
 // A whole blob as a sink sees it (host.on_blob). Views are valid during the sink call only.
@@ -50,6 +54,7 @@ namespace Rhp::host_detail {
 struct setup {
     net::endpoint ep;
     net::transport_ops transport;
+    security::tls::backend_ops tls;
     wire::codec_ops codec;
     std::function<std::unique_ptr<security::host_handshake>()> begin_handshake;
     // The signer policy's check of a script: who signed it, or kBadSignature.
@@ -87,6 +92,8 @@ result<void> add_blob_sink(engine& e, std::string_view name, blob_fn fn, role ne
 void set_enabled(engine& e, bool on) noexcept;
 [[nodiscard]] bool enabled(const engine& e) noexcept;
 void pump(engine& e);
+// Closes every session with a reason and waits briefly for that to go out (before the network stops).
+void goodbye(engine& e);
 // The network loop (the io_runner's body); returns once `stop` is signalled.
 void run_io(engine& e, std::stop_token stop);
 [[nodiscard]] std::size_t sessions(const engine& e) noexcept;

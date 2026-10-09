@@ -13,6 +13,8 @@
 #include <rhp/security/ed25519.hpp>
 #include <rhp/security/psk_keyring.hpp>
 #include <rhp/security/signer.hpp>
+#include <rhp/security/tls/auto_backend.hpp>
+#include <rhp/security/tls/tls.hpp>
 #include <rhp/utils/type_list.hpp>
 #include <rhp/wire/codec.hpp>
 #include <rhp/wire/codec/msgpack.hpp>
@@ -26,6 +28,7 @@ namespace config_detail {
 
 enum class slot : unsigned char {
     kTransport,
+    kTls,
     kCodec,
     kAuth,
     kSigner,
@@ -97,6 +100,7 @@ using get_or_t = typename get_or<S, Default, Settings...>::type;
 //
 //   using my_cfg = Rhp::config<>
 //       ::transport<Rhp::net::tcp>             // Rhp::net::transport       default tcp
+//       ::tls      <Rhp::security::tls::auto_backend> // ...::tls::backend  default auto_backend (OpenSSL, else Mbed TLS)
 //       ::codec    <Rhp::wire::msgpack>        // Rhp::wire::codec          default msgpack
 //       ::auth     <Rhp::security::psk_keyring>// Rhp::security::authenticator  default psk_keyring
 //       ::signer   <Rhp::security::ed25519>    // Rhp::security::signer     default ed25519
@@ -108,12 +112,15 @@ using get_or_t = typename get_or<S, Default, Settings...>::type;
 //       ::logger   <Rhp::core::stderr_logger>; // Rhp::core::logger         default stderr_logger
 //
 // Rhp::config<> with no links is exactly that chain. In your own templates (a dependent context)
-// write `Cfg::template transport<X>`. TLS and discovery slots arrive with the stages that implement
-// them. `signer<Rhp::security::unsigned_scripts>` is the explicit opt-out of script signing.
+// write `Cfg::template transport<X>`. The discovery slot arrives with the stage that implements it.
+// `signer<Rhp::security::unsigned_scripts>` is the explicit opt-out of script signing;
+// `tls<Rhp::security::tls::none>` builds without TLS (non-loopback endpoints then need insecure_lan).
 template <class... Settings>
 struct config {
     template <net::transport T>
     using transport = config_detail::rebind_t<config_detail::slot::kTransport, T, Settings...>;
+    template <security::tls::backend B>
+    using tls = config_detail::rebind_t<config_detail::slot::kTls, B, Settings...>;
     template <wire::codec C>
     using codec = config_detail::rebind_t<config_detail::slot::kCodec, C, Settings...>;
     template <security::authenticator A>
@@ -134,6 +141,7 @@ struct config {
     using logger = config_detail::rebind_t<config_detail::slot::kLogger, O, Settings...>;
 
     using transport_t = config_detail::get_or_t<config_detail::slot::kTransport, net::tcp, Settings...>;
+    using tls_t = config_detail::get_or_t<config_detail::slot::kTls, security::tls::auto_backend, Settings...>;
     using codec_t = config_detail::get_or_t<config_detail::slot::kCodec, wire::msgpack, Settings...>;
     using auth_t = config_detail::get_or_t<config_detail::slot::kAuth, security::psk_keyring, Settings...>;
     using credential_t = typename auth_t::credential;
