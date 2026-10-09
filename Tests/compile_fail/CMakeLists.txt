@@ -1,5 +1,6 @@
 rhp_add_compile_fail(config_bad_transport SOURCE config_bad_transport.cpp LINKS Rhp::config)
 rhp_add_compile_fail(config_bad_signer SOURCE config_bad_signer.cpp LINKS Rhp::config)
+rhp_add_compile_fail(config_bad_tls SOURCE config_bad_tls.cpp LINKS Rhp::config)
 rhp_add_compile_fail(convert_unknown_type SOURCE convert_unknown_type.cpp LINKS Rhp::core)
 rhp_add_compile_fail(type_list_at_out_of_range SOURCE type_list_at_out_of_range.cpp LINKS Rhp::utils)
 rhp_add_compile_fail(size_literal_overflow SOURCE size_literal_overflow.cpp LINKS Rhp::utils)

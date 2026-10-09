@@ -18,6 +18,8 @@
 #include <rhp/security/ed25519.hpp>
 #include <rhp/security/psk_keyring.hpp>
 #include <rhp/security/signer.hpp>
+#include <rhp/security/tls/auto_backend.hpp>
+#include <rhp/security/tls/tls.hpp>
 #include <rhp/wire/codec/msgpack.hpp>
 
 namespace config_tests_fixtures {
@@ -104,4 +106,17 @@ TEST_CASE("config: the signer slot defaults to Ed25519 and can be switched off b
     // The later link wins.
     using back = off::signer<Rhp::security::ed25519>;
     STATIC_REQUIRE(std::is_same_v<back::signer_t, Rhp::security::ed25519>);
+}
+
+TEST_CASE("config: the tls slot defaults to auto_backend and takes none", "[config]") {
+    using base = Rhp::config<>;
+    STATIC_REQUIRE(std::is_same_v<base::tls_t, Rhp::security::tls::auto_backend>);
+    using plain = base::tls<Rhp::security::tls::none>;
+    STATIC_REQUIRE(std::is_same_v<plain::tls_t, Rhp::security::tls::none>);
+    STATIC_REQUIRE(std::is_same_v<plain::transport_t, base::transport_t>);
+#if !RHP_ENABLE
+    // RHP_ENABLE=OFF builds no TLS backend: the default is none.
+    STATIC_REQUIRE(std::is_same_v<base::tls_t, Rhp::security::tls::none>);
+#endif
+    CHECK_FALSE(Rhp::security::tls::backend_ops_for<Rhp::security::tls::none>.available());
 }

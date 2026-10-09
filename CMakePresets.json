@@ -62,7 +62,7 @@
             "name": "linux-clang-tsan",
             "displayName": "Linux · Clang · TSan",
             "inherits": "linux-clang",
-            "cacheVariables": { "RHP_SANITIZE": "thread" }
+            "cacheVariables": { "RHP_SANITIZE": "thread", "RHP_TLS_OPENSSL": "OFF" }
         },
         {
             "name": "linux-clang-fuzz",
@@ -97,7 +97,7 @@
             "name": "ios-sim",
             "displayName": "iOS · Simulator",
             "inherits": "ios-base",
-            "cacheVariables": { "CMAKE_OSX_SYSROOT": "iphonesimulator" }
+            "cacheVariables": { "CMAKE_OSX_SYSROOT": "iphonesimulator", "CMAKE_CROSSCOMPILING_EMULATOR": "${sourceDir}/Tools/ios/simctl_run.sh" }
         },
         {
             "name": "ios-device",
@@ -161,6 +161,7 @@
         { "name": "linux-clang", "inherits": "test-base", "configurePreset": "linux-clang" },
         { "name": "linux-clang-asan", "inherits": "test-base", "configurePreset": "linux-clang-asan" },
         { "name": "linux-clang-tsan", "inherits": "test-base", "configurePreset": "linux-clang-tsan" },
-        { "name": "macos", "inherits": "test-base", "configurePreset": "macos" }
+        { "name": "macos", "inherits": "test-base", "configurePreset": "macos" },
+        { "name": "ios-sim", "inherits": "test-base", "configurePreset": "ios-sim" }
     ]
 }
