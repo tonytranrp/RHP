@@ -27,3 +27,7 @@ endif()
 if(RHP_BUILD_EXAMPLES)
     add_subdirectory(Examples)
 endif()
+
+if(RHP_BUILD_TOOLS AND RHP_ENABLE)
+    add_subdirectory(Tools)
+endif()
