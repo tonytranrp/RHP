@@ -19,8 +19,10 @@
 namespace Rhp {
 
 struct host_options {
-    // Responses kept per session for idempotent retries (by the client's idempotency key).
+    // Responses kept per session for idempotent retries (by the client's idempotency key): at most
+    // this many, and at most this many bytes (older ones are dropped first).
     std::size_t idempotency_cache = 256;
+    std::size_t idempotency_bytes = 16u << 20;
     // Messages the network thread may queue for pump() before it holds them back itself.
     std::size_t inbox_capacity = 4096;
 };

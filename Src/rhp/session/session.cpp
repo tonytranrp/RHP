@@ -402,6 +402,10 @@ void session::write_control(wire::op code, std::uint64_t ack_value) {
 }
 
 void session::acknowledge(std::uint64_t ack) {
+    // An ack beyond what we sent is a confused (or hostile) peer: never let it stall later acks.
+    if (ack >= next_seq_) {
+        ack = next_seq_ - 1;
+    }
     if (ack <= peer_acked_) {
         return;
     }

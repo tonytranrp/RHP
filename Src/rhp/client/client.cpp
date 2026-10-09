@@ -164,6 +164,10 @@ private:
     template <class Pred>
     bool wait(std::unique_lock<std::mutex>& lock, clock::time_point deadline, Pred done) {
         if (setup_.io_thread) {
+            if (deadline == clock::time_point::max()) {
+                cv_.wait(lock, done); // no wait_until(max): some libraries overflow converting it
+                return true;
+            }
             return cv_.wait_until(lock, deadline, done);
         }
         while (!done()) {

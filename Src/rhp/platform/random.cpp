@@ -7,8 +7,10 @@
 #include <rhp/platform/random.hpp>
 
 #if defined(RHP_PLATFORM_WINDOWS)
+// clang-format off
+#include <windows.h> // first: bcrypt.h needs its types
 #include <bcrypt.h>
-#include <windows.h>
+// clang-format on
 #elif defined(RHP_PLATFORM_LINUX)
 #include <cerrno>
 

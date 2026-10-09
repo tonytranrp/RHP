@@ -76,7 +76,7 @@ struct keys {
 template <class Cfg>
 class running_host {
 public:
-    running_host(Rhp::endpoint ep, const keys& k) : host_(std::move(ep), k.ring()) {
+    running_host(Rhp::endpoint ep, const keys& k, Rhp::host_options options = {}) : host_(std::move(ep), k.ring(), options) {
         if constexpr (std::is_same_v<typename Cfg::errors_t, Rhp::errors::throwing>) {
             host_.template install<test_lib>();
         } else {
@@ -533,40 +533,80 @@ TEST_CASE("host: unauthenticated connections are capped", "[integration][host]")
     CHECK(c.exec<int>("return 1") == 1);
 }
 
+namespace host_client_fixtures {
+
+// Speaks the session protocol directly (to send one request twice, as a retrying client would).
+struct raw_client final : Rhp::session::handler {
+    Rhp::net::io_context io;
+    std::unique_ptr<Rhp::session::session> s;
+    bool ready = false;
+    bool closed = false;
+    std::vector<Rhp::wire::envelope> replies;
+    std::vector<Rhp::wire::op> codes;
+
+    raw_client(const Rhp::endpoint& at, const Rhp::security::psk_identity& who) {
+        Rhp::session::options opts;
+        opts.codec = Rhp::wire::codec_ops_for<Rhp::wire::msgpack>;
+        Rhp::net::loopback::dial(io, at, [this, opts, who](Rhp::result<std::unique_ptr<Rhp::net::link>> l) {
+            REQUIRE(l);
+            s = std::make_unique<Rhp::session::session>(io, std::move(*l), who.begin(), *this, opts);
+            s->start();
+        });
+        REQUIRE(rhp_test::poll_until({&io}, [this] { return ready; }));
+    }
+
+    void on_ready(Rhp::session::session&) override { ready = true; }
+    void on_message(Rhp::session::session&, Rhp::wire::op code, value body) override {
+        codes.push_back(code);
+        replies.push_back(*Rhp::from_value<Rhp::wire::envelope>(body));
+    }
+    void on_closed(Rhp::session::session&, const Rhp::error&) override { closed = true; }
+
+    void exec(std::uint64_t req, std::uint64_t idem, std::string source) {
+        const value body = Rhp::to_value(Rhp::wire::exec_request{std::move(source), "exec"});
+        REQUIRE(s->send(Rhp::wire::op::kExec, Rhp::to_value(Rhp::wire::envelope{req, idem, body})));
+    }
+
+    bool wait_replies(std::size_t n) {
+        return rhp_test::poll_until({&io}, [this, n] { return replies.size() >= n; });
+    }
+};
+
+} // namespace host_client_fixtures
+
 TEST_CASE("host: a retried request (same idempotency key) runs once", "[integration][idempotency]") {
     keys k;
     const auto at = Rhp::endpoint::listen("itest.idem", 1);
     running_host<loopback_cfg> host{at, k};
+    raw_client c{host.dial_at(at), k.as_patch()};
+    const std::string counter = "counter = (counter or 0) + 1 return counter";
+    c.exec(1, 777, counter);
+    REQUIRE(c.wait_replies(1));
+    c.exec(2, 777, counter); // a retry
+    c.exec(3, 778, counter); // a new request
+    REQUIRE(c.wait_replies(3));
+    CHECK(c.replies[0].req == 1);
+    CHECK(c.replies[0].body == value{value::array{value{1}}});
+    CHECK(c.replies[1].req == 2);
+    CHECK(c.replies[1].body == value{value::array{value{1}}}); // answered from the cache
+    CHECK(c.replies[2].req == 3);
+    CHECK(c.replies[2].body == value{value::array{value{2}}}); // ran: the counter moved once
+}
 
-    // Speak the session protocol directly, to send one request twice.
-    Rhp::net::io_context io;
-    struct events final : Rhp::session::handler {
-        bool ready = false;
-        bool closed = false;
-        std::vector<Rhp::wire::envelope> replies;
-        void on_ready(Rhp::session::session&) override { ready = true; }
-        void on_message(Rhp::session::session&, Rhp::wire::op, value body) override { replies.push_back(*Rhp::from_value<Rhp::wire::envelope>(body)); }
-        void on_closed(Rhp::session::session&, const Rhp::error&) override { closed = true; }
-    } ev;
-    std::unique_ptr<Rhp::session::session> s;
-    Rhp::session::options opts;
-    opts.codec = Rhp::wire::codec_ops_for<Rhp::wire::msgpack>;
-    Rhp::net::loopback::dial(io, host.dial_at(at), [&](Rhp::result<std::unique_ptr<Rhp::net::link>> l) {
-        REQUIRE(l);
-        s = std::make_unique<Rhp::session::session>(io, std::move(*l), k.as_patch().begin(), ev, opts);
-        s->start();
-    });
-    REQUIRE(rhp_test::poll_until({&io}, [&] { return ev.ready; }));
-    const value body = Rhp::to_value(Rhp::wire::exec_request{"counter = (counter or 0) + 1 return counter", "exec"});
-    REQUIRE(s->send(Rhp::wire::op::kExec, Rhp::to_value(Rhp::wire::envelope{1, 777, body})));
-    REQUIRE(rhp_test::poll_until({&io}, [&] { return ev.replies.size() == 1; }));
-    REQUIRE(s->send(Rhp::wire::op::kExec, Rhp::to_value(Rhp::wire::envelope{2, 777, body}))); // a retry
-    REQUIRE(s->send(Rhp::wire::op::kExec, Rhp::to_value(Rhp::wire::envelope{3, 778, body}))); // a new request
-    REQUIRE(rhp_test::poll_until({&io}, [&] { return ev.replies.size() == 3; }));
-    CHECK(ev.replies[0].req == 1);
-    CHECK(ev.replies[0].body == value{value::array{value{1}}});
-    CHECK(ev.replies[1].req == 2);
-    CHECK(ev.replies[1].body == value{value::array{value{1}}}); // answered from the cache
-    CHECK(ev.replies[2].req == 3);
-    CHECK(ev.replies[2].body == value{value::array{value{2}}}); // ran: the counter moved once
+TEST_CASE("host: a reply too large to cache refuses its retry instead of running twice", "[integration][idempotency]") {
+    keys k;
+    const auto at = Rhp::endpoint::listen("itest.idem_big", 1);
+    running_host<loopback_cfg> host{at, k, Rhp::host_options{.idempotency_cache = 256, .idempotency_bytes = 1024}};
+    raw_client c{host.dial_at(at), k.as_patch()};
+    const std::string big = "runs = (runs or 0) + 1 return string.rep('x', 4000)";
+    c.exec(1, 900, big);
+    REQUIRE(c.wait_replies(1));
+    CHECK(c.codes[0] == Rhp::wire::op::kResult);
+    c.exec(2, 900, big);
+    REQUIRE(c.wait_replies(2));
+    CHECK(c.codes[1] == Rhp::wire::op::kError);
+    CHECK(Rhp::from_value<Rhp::error>(c.replies[1].body)->code == errc::kLimitExceeded);
+    c.exec(3, 901, "return runs");
+    REQUIRE(c.wait_replies(3));
+    CHECK(c.replies[2].body == value{value::array{value{1}}});
 }

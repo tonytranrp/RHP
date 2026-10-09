@@ -100,6 +100,29 @@ struct outbound {
     value body;
 };
 
+// Roughly what a value costs to keep (and to encode): enough to bound a cache.
+[[nodiscard]] std::size_t approx_size(const value& v) noexcept {
+    switch (v.type()) {
+    case value::kind::kString: return v.get_if<std::string>()->size() + 8;
+    case value::kind::kBytes: return v.get_if<value::bytes>()->size() + 8;
+    case value::kind::kArray: {
+        std::size_t n = 8;
+        for (const value& item : *v.get_if<value::array>()) {
+            n += approx_size(item);
+        }
+        return n;
+    }
+    case value::kind::kMap: {
+        std::size_t n = 8;
+        for (const auto& [k, item] : *v.get_if<value::map>()) {
+            n += approx_size(k) + approx_size(item);
+        }
+        return n;
+    }
+    default: return 16;
+    }
+}
+
 [[nodiscard]] bool final_reply(wire::op code, std::uint64_t req) noexcept {
     return req != 0 && (code == wire::op::kResult || code == wire::op::kError);
 }
@@ -242,6 +265,7 @@ private:
         std::vector<std::uint64_t> reqs; // requests waiting for this result (retries included)
         wire::op code = wire::op::kResult;
         value body;
+        std::size_t bytes = 0; // approx_size(body) once done
     };
 
     struct io_session {
@@ -250,7 +274,8 @@ private:
         std::string identity;
         std::map<std::uint64_t, std::uint64_t> req_idem; // in-flight req → idempotency key
         std::map<std::uint64_t, idem_entry> idem;
-        std::deque<std::uint64_t> idem_done; // completed keys, oldest first (evicted past the cache size)
+        std::deque<std::uint64_t> idem_done; // completed keys, oldest first (evicted past the cache budgets)
+        std::size_t idem_bytes = 0;          // approx_size of every completed body kept
     };
 
     struct io_identity {
@@ -426,9 +451,22 @@ private:
                         (void)send_reply(rec, entry.code, req, entry.body);
                     }
                     entry.reqs.clear();
+                    // Keep the answer for retries, within the cache's entry and byte budgets. A reply
+                    // too big to keep is remembered as such: a retry is refused, never run twice.
+                    entry.bytes = approx_size(entry.body);
+                    if (entry.bytes > setup_.options.idempotency_bytes) {
+                        entry.code = wire::op::kError;
+                        entry.body = Rhp::to_value(make_error(errc::kLimitExceeded, "the reply to this request was too large to keep for a retry", "host"));
+                        entry.bytes = approx_size(entry.body);
+                    }
+                    rec.idem_bytes += entry.bytes;
                     rec.idem_done.push_back(idem);
-                    while (rec.idem_done.size() > setup_.options.idempotency_cache) {
-                        rec.idem.erase(rec.idem_done.front());
+                    while (!rec.idem_done.empty() &&
+                           (rec.idem_done.size() > setup_.options.idempotency_cache || rec.idem_bytes > setup_.options.idempotency_bytes)) {
+                        if (const auto old = rec.idem.find(rec.idem_done.front()); old != rec.idem.end()) {
+                            rec.idem_bytes -= old->second.bytes;
+                            rec.idem.erase(old);
+                        }
                         rec.idem_done.pop_front();
                     }
                     continue;
