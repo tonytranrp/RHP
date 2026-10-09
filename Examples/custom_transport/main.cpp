@@ -59,7 +59,9 @@ struct transport {
 
 } // namespace metered
 
-using metered_cfg = Rhp::config<>::transport<metered::transport>::logger<Rhp::core::null_logger>;
+// This example is about transports, so it turns script signing off — explicitly, by type (the
+// default config requires Ed25519-signed scripts from patch and admin sessions).
+using metered_cfg = Rhp::config<>::transport<metered::transport>::signer<Rhp::security::unsigned_scripts>::logger<Rhp::core::null_logger>;
 
 int main() {
     auto secret = Rhp::security::key::generate();
