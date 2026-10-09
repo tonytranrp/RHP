@@ -1,0 +1,16 @@
+rhp_add_module(core
+    HEADERS
+        convert.hpp
+        error.hpp
+        errors_mode.hpp
+        ids.hpp
+        limits.hpp
+        log.hpp
+        result.hpp
+        value.hpp
+    SOURCES
+        log.cpp
+        value.cpp
+    DEPS
+        Rhp::utils
+)
