@@ -10,7 +10,14 @@
 #include <rhp/core/limits.hpp>
 #include <rhp/core/log.hpp>
 #include <rhp/core/result.hpp>
+#include <rhp/core/role.hpp>
 #include <rhp/core/value.hpp>
+#include <rhp/script/ledger.hpp>
+#include <rhp/script/lib.hpp>
+#include <rhp/script/marshal.hpp>
+#include <rhp/script/patch_point.hpp>
+#include <rhp/script/sandbox.hpp>
+#include <rhp/script/stack.hpp>
 #include <rhp/utils/byte_buffer.hpp>
 #include <rhp/utils/crc32c.hpp>
 #include <rhp/utils/fixed_string.hpp>
