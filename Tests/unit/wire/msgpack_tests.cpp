@@ -173,8 +173,8 @@ TEST_CASE("msgpack: claimed counts can't multiply memory", "[wire][msgpack]") {
     // the fix each level reserved its claim (hundreds of MB); now it is a plain truncation error.
     std::vector<std::byte> payload;
     constexpr std::size_t kFill = 64 * 1024;
-    for (int level = 0; level < 99; ++level) {
-        const std::uint32_t left = static_cast<std::uint32_t>(kFill + (98 - level) * 5);
+    for (std::size_t level = 0; level < 99; ++level) {
+        const auto left = static_cast<std::uint32_t>(kFill + (98 - level) * 5);
         payload.push_back(std::byte{0xdd});
         for (int shift = 24; shift >= 0; shift -= 8) {
             payload.push_back(static_cast<std::byte>(left >> shift));
