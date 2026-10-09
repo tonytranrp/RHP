@@ -63,6 +63,7 @@ public:
         host_detail::setup s;
         s.ep = std::move(ep);
         s.transport = net::transport_ops_for<typename Cfg::transport_t>;
+        s.tls = security::tls::backend_ops_for<typename Cfg::tls_t>;
         s.codec = wire::codec_ops_for<typename Cfg::codec_t>;
         s.begin_handshake = [auth = std::move(auth)] { return auth.begin(); };
         s.verify = [trust = std::move(trust)](std::string_view source, const value& signature) { return trust.verify(source, signature); };
@@ -92,6 +93,7 @@ public:
     // Stops the network, ends every session and reverts every identity (pinned modules included).
     ~host() {
 #if RHP_ENABLE
+        host_detail::goodbye(*engine_);
         runner_.stop();
         engine_.reset();
 #endif

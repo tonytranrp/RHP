@@ -9,6 +9,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <random>
 #include <span>
 #include <stop_token>
 #include <string>
@@ -26,6 +27,7 @@
 #include <rhp/net/link.hpp>
 #include <rhp/platform/os.hpp>
 #include <rhp/platform/random.hpp>
+#include <rhp/session/secure_link.hpp>
 #include <rhp/session/session.hpp>
 #include <rhp/wire/messages.hpp>
 #include <rhp/wire/ops.hpp>
@@ -64,11 +66,26 @@ public:
         options_.limits = setup_.limits;
         options_.codec = setup_.codec;
         options_.platform = std::string{platform::kOsName};
+        options_.resumable = setup_.limits.resume_ms != 0;
+        if (auto policy = session::channel_policy::make(setup_.ep, setup_.transport.network, setup_.tls, setup_.options.tls)) {
+            policy_ = std::move(*policy);
+        } else {
+            policy_error_ = std::move(policy).error();
+        }
+        if (auto seed = platform::random_array<8>()) {
+            std::uint64_t k = 0;
+            for (const std::byte b : *seed) {
+                k = (k << 8) | std::to_integer<std::uint64_t>(b);
+            }
+            rng_.seed(k);
+        }
     }
 
     ~engine() {
         // The network is stopped (or was never on another thread): plain teardown.
         timers_.clear();
+        redial_timer_.cancel();
+        others_.clear();
         session_.reset();
         listener_.reset();
     }
@@ -365,7 +382,7 @@ private:
             drop_timer(req);
             (void)complete(req, fail(errc::kCancelled, "cancelled before it was sent", "client"));
         }
-        if (session_ != nullptr && session_->ready()) {
+        if (session_ != nullptr && session_->usable()) {
             std::uint64_t req = 0;
             {
                 const std::scoped_lock lock{mutex_};
@@ -385,7 +402,8 @@ private:
                 return;
             }
         }
-        if (session_ != nullptr && session_->ready()) {
+        if (session_ != nullptr && ready_ && session_->usable()) {
+            // Ready, or detached and resuming: the session queues it and resends it when back.
             if (auto sent = session_->send(code, message); !sent) {
                 drop_timer(req);
                 complete(req, std::unexpected{std::move(sent).error()});
@@ -408,7 +426,18 @@ private:
     }
 
     void dial() {
-        setup_.transport.dial(io_, setup_.ep, [this](result<std::unique_ptr<net::link>> link) {
+        if (policy_error_) {
+            mark_closed(*policy_error_);
+            return;
+        }
+        setup_.transport.dial(io_, policy_.transport_endpoint(), [this](result<std::unique_ptr<net::link>> link) {
+            if (link) {
+                if (auto wrapped = policy_.wrap(std::move(*link)); wrapped) {
+                    link = std::move(*wrapped);
+                } else {
+                    link = std::unexpected{std::move(wrapped).error()};
+                }
+            }
             if (!link) {
                 mark_closed(std::move(link).error());
                 return;
@@ -424,9 +453,73 @@ private:
         });
     }
 
+    // ---- resume (dialing side) ---------------------------------------------------------------------
+
+    void on_detached(session::session& s, const error&) override {
+        if (reverse_ || &s != session_.get()) {
+            return; // a listening client waits for its host to dial back in
+        }
+        redial();
+    }
+
+    // Capped exponential backoff with full jitter (the first try comes quickly).
+    void redial() {
+        const std::uint32_t lo = setup_.limits.backoff_min_ms == 0 ? 1 : setup_.limits.backoff_min_ms;
+        const std::uint32_t hi = setup_.limits.backoff_max_ms < lo ? lo : setup_.limits.backoff_max_ms;
+        const std::uint64_t ceiling = attempts_ == 0 ? 50 : std::min<std::uint64_t>(hi, static_cast<std::uint64_t>(lo) << std::min<std::uint32_t>(attempts_, 20));
+        ++attempts_;
+        std::uniform_int_distribution<std::uint64_t> pick{1, ceiling};
+        redial_timer_.start(std::chrono::milliseconds{pick(rng_)}, [this] {
+            if (session_ == nullptr || session_->current() != session::state::kDetached) {
+                return;
+            }
+            setup_.transport.dial(io_, policy_.transport_endpoint(), [this](result<std::unique_ptr<net::link>> link) {
+                if (session_ == nullptr || session_->current() != session::state::kDetached) {
+                    return; // closed meanwhile: the link is dropped
+                }
+                if (link) {
+                    if (auto wrapped = policy_.wrap(std::move(*link)); wrapped) {
+                        link = std::move(*wrapped);
+                    } else {
+                        link = std::unexpected{std::move(wrapped).error()};
+                    }
+                }
+                if (!link) {
+                    redial();
+                    return;
+                }
+                session_->resume(std::move(*link));
+            });
+        });
+    }
+
+    void on_resumed(session::session& s) override {
+        attempts_ = 0;
+        const std::scoped_lock lock{mutex_};
+        ++info_.resumes;
+        info_.tls = s.encrypted();
+    }
+
+    // Reverse mode: a new connection asks to continue the session it lost.
+    session::session* resume_target(session::session& fresh, session_id id) override {
+        if (!reverse_ || session_ == nullptr || session_.get() == &fresh || session_->id() != id) {
+            return nullptr;
+        }
+        return session_.get();
+    }
+
     // Reverse mode: listen, and serve one host at a time.
     void listen() {
-        auto l = setup_.transport.listen(io_, setup_.ep, [this](std::unique_ptr<net::link> link) { accept(std::move(link)); });
+        if (policy_error_) {
+            {
+                const std::scoped_lock lock{mutex_};
+                listen_done_ = true;
+                listen_error_ = *policy_error_;
+            }
+            mark_closed(*policy_error_);
+            return;
+        }
+        auto l = setup_.transport.listen(io_, policy_.transport_endpoint(), [this](std::unique_ptr<net::link> link) { accept(std::move(link)); });
         {
             const std::scoped_lock lock{mutex_};
             listen_done_ = true;
@@ -444,25 +537,63 @@ private:
         cv_.notify_all();
     }
 
+    void park(std::unique_ptr<net::link> link) {
+        link->close();
+        parked_.push_back(std::move(link));
+        if (parked_.size() > 8) {
+            parked_.pop_front();
+        }
+    }
+
+    // Reverse mode. With no session the connection becomes it; with one, it may be that session's
+    // host coming back (a resume) or, once that session is detached, a new session of a restarted
+    // host: it waits as a candidate (a few at most) until its first frame tells.
     void accept(std::unique_ptr<net::link> link) {
-        bool refuse = session_ != nullptr;
+        bool refuse = false;
         {
             const std::scoped_lock lock{mutex_};
-            refuse = refuse || closed_ || closing_;
+            refuse = closed_ || closing_;
         }
-        if (refuse) {
-            link->close();
-            parked_.push_back(std::move(link));
-            if (parked_.size() > 8) {
-                parked_.pop_front();
-            }
+        if (refuse || (session_ != nullptr && others_.size() >= kMaxCandidates)) {
+            park(std::move(link));
             return;
         }
-        session_ = std::make_unique<session::session>(io_, std::move(link), setup_.begin_handshake(), static_cast<session::handler&>(*this), options_);
-        session_->start();
+        auto wrapped = policy_.wrap(std::move(link));
+        if (!wrapped) {
+            return; // refused (plaintext where TLS is required): the link is gone
+        }
+        auto s = std::make_unique<session::session>(io_, std::move(*wrapped), setup_.begin_handshake(), static_cast<session::handler&>(*this), options_);
+        session::session& started = *s;
+        if (session_ == nullptr) {
+            session_ = std::move(s);
+        } else {
+            others_.push_back(std::move(s));
+        }
+        started.start();
     }
 
     void on_ready(session::session& s) override {
+        if (&s != session_.get()) {
+            // Reverse mode: a candidate finished a full handshake. While the current session is
+            // alive the host already has one: refuse. Once it is detached, the host restarted (its
+            // old session can't come back): the new one takes over.
+            if (session_ != nullptr && session_->current() != session::state::kDetached) {
+                s.close(make_error(errc::kForbidden, "this client already serves a host", "client"));
+                return;
+            }
+            const auto it = std::ranges::find_if(others_, [&](const auto& o) { return o.get() == &s; });
+            if (it == others_.end()) {
+                return;
+            }
+            std::unique_ptr<session::session> fresh = std::move(*it);
+            others_.erase(it);
+            if (session_ != nullptr) {
+                fail_pending(make_error(errc::kTransport, "the host started a new session", "client"));
+                session_->close(make_error(errc::kCancelled, "replaced by the host's new session", "client"));
+                others_.push_back(std::move(session_));
+            }
+            session_ = std::move(fresh);
+        }
         {
             const std::scoped_lock lock{mutex_};
             ready_ = true;
@@ -471,6 +602,7 @@ private:
             info_.identity = s.identity();
             info_.granted = s.granted();
             info_.host_platform = s.peer_platform();
+            info_.tls = s.encrypted();
         }
         cv_.notify_all();
         auto queued = std::move(queued_);
@@ -514,7 +646,13 @@ private:
         }
     }
 
-    void on_closed(session::session&, const error& why) override {
+    void on_closed(session::session& s, const error& why) override {
+        if (&s != session_.get()) {
+            // A reverse-mode candidate (handed over to a resume, refused, or failed) or a replaced
+            // session. Destroying it inside on_closed is allowed.
+            std::erase_if(others_, [&](const auto& o) { return o.get() == &s; });
+            return;
+        }
         bool closing = false;
         bool was_ready = false;
         {
@@ -624,6 +762,13 @@ private:
     std::deque<std::unique_ptr<net::link>> parked_; // extra hosts turned away (reverse mode)
     std::vector<queued_request> queued_;            // sent once the session is ready
     std::map<std::uint64_t, std::unique_ptr<net::io_context::timer>> timers_;
+    static constexpr std::size_t kMaxCandidates = 4;
+    std::vector<std::unique_ptr<session::session>> others_; // reverse mode: candidates and replaced sessions
+    session::channel_policy policy_;
+    std::optional<error> policy_error_;
+    net::io_context::timer redial_timer_{io_};
+    std::uint32_t attempts_ = 0;
+    std::mt19937_64 rng_;
 
     mutable std::mutex mutex_;
     std::condition_variable cv_;

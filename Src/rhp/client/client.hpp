@@ -306,6 +306,7 @@ private:
         client_detail::setup s;
         s.ep = std::move(ep);
         s.transport = net::transport_ops_for<typename Cfg::transport_t>;
+        s.tls = security::tls::backend_ops_for<typename Cfg::tls_t>;
         s.codec = wire::codec_ops_for<typename Cfg::codec_t>;
         s.begin_handshake = [identity = std::move(identity)] { return identity.begin(); };
         s.limits = Cfg::limits_v;

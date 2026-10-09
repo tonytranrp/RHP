@@ -17,6 +17,7 @@
 #include <stop_token>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -37,6 +38,7 @@
 #include <rhp/script/ledger.hpp>
 #include <rhp/script/sandbox.hpp>
 #include <rhp/security/hash.hpp>
+#include <rhp/session/secure_link.hpp>
 #include <rhp/session/session.hpp>
 #include <rhp/utils/scope_guard.hpp>
 #include <rhp/utils/spsc_ring.hpp>
@@ -131,7 +133,8 @@ struct inbound {
         kOpened,
         kRequest,
         kClosed,
-        kAuthFailed
+        kAuthFailed,
+        kResumed
     };
 
     kind what = kind::kRequest;
@@ -143,9 +146,10 @@ struct inbound {
     std::uint64_t req = 0;
     std::uint64_t arrival = 0; // per-session order in which the network received requests
     value body;
-    std::string peer;     // kOpened, kClosed, kAuthFailed
+    std::string peer;     // kOpened, kClosed, kAuthFailed, kResumed
     std::string platform; // kOpened
     error reason;         // kClosed, kAuthFailed
+    bool tls = false;     // kOpened, kResumed
 };
 
 // Pump thread → network thread.
@@ -232,6 +236,7 @@ class engine final : private session::handler {
     static constexpr std::size_t kMaxInFlight = 4096;  // requests with an idempotency key, per session
     static constexpr std::size_t kMaxBacklog = 65'536; // requests held back while pump() is behind
     static constexpr std::chrono::milliseconds kEnforceInterval{20};
+    static constexpr std::chrono::milliseconds kGoodbyeWait{500};
 
 public:
     explicit engine(setup s)
@@ -241,6 +246,7 @@ public:
         session_options_.limits = setup_.limits;
         session_options_.codec = setup_.codec;
         session_options_.platform = std::string{platform::kOsName};
+        session_options_.resumable = setup_.limits.resume_ms != 0;
         if (auto seed = platform::random_array<8>()) {
             std::uint64_t k = 0;
             for (const std::byte b : *seed) {
@@ -248,15 +254,23 @@ public:
             }
             rng_.seed(k);
         }
+        auto policy = session::channel_policy::make(setup_.ep, setup_.transport.network, setup_.tls, setup_.options.tls);
+        if (!policy) {
+            listen_error_ = std::move(policy).error();
+            log(log_level::kError, std::format("host can't use {}: {}", setup_.ep, *listen_error_));
+            return;
+        }
+        policy_ = std::move(*policy);
+        const std::string tls_note = policy_.tls() ? std::format(", TLS: {}", policy_.backend()) : std::string{", no TLS"};
         if (setup_.ep.direction == net::endpoint::mode::kDial) {
             // Reverse mode: the host dials a listening client, and keeps dialing.
             reverse_ = true;
             enforce_cancels();
-            log(log_level::kInfo, std::format("host dialing {} over {} (reverse mode)", setup_.ep, setup_.transport.name));
+            log(log_level::kInfo, std::format("host dialing {} over {} (reverse mode{})", setup_.ep, setup_.transport.name, tls_note));
             dial_out();
             return;
         }
-        auto listener = setup_.transport.listen(io_, setup_.ep, [this](std::unique_ptr<net::link> link) { accept(std::move(link)); });
+        auto listener = setup_.transport.listen(io_, policy_.transport_endpoint(), [this](std::unique_ptr<net::link> link) { accept(std::move(link)); });
         if (!listener) {
             listen_error_ = std::move(listener).error();
             log(log_level::kError, std::format("host can't listen ({}): {}", setup_.ep, *listen_error_));
@@ -264,7 +278,7 @@ public:
         }
         listener_ = std::move(*listener);
         enforce_cancels();
-        log(log_level::kInfo, std::format("host listening on {} over {} (port {})", setup_.ep, setup_.transport.name, listener_->port()));
+        log(log_level::kInfo, std::format("host listening on {} over {} (port {}{})", setup_.ep, setup_.transport.name, listener_->port(), tls_note));
     }
 
     // The network is stopped (or never ran on another thread) when this runs.
@@ -327,6 +341,28 @@ public:
     }
 
     void run_io(std::stop_token stop) { io_.run(std::move(stop)); }
+
+    // Before the network stops: every session is closed with a reason ("the host is shutting
+    // down"), so its client fails its calls now instead of waiting to resume; waits briefly for
+    // those frames to go out. No new connections or dials after this.
+    void goodbye() {
+        io_.post([this] {
+            stopping_ = true;
+            redial_timer_.cancel();
+            listener_.reset();
+            for (auto& [id, rec] : sessions_) {
+                rec.s->close(make_error(errc::kTransport, "the host is shutting down", "host"));
+            }
+        });
+        const auto deadline = std::chrono::steady_clock::now() + kGoodbyeWait;
+        while (open_sessions_.load(std::memory_order_acquire) != 0 && std::chrono::steady_clock::now() < deadline) {
+            if (setup_.io_thread) {
+                std::this_thread::sleep_for(std::chrono::milliseconds{2});
+            } else {
+                io_.run_one_for(std::chrono::milliseconds{5});
+            }
+        }
+    }
 
     // ---- pump thread ---------------------------------------------------------------------------------
 
@@ -417,6 +453,10 @@ private:
     };
 
     void accept(std::unique_ptr<net::link> link) {
+        if (stopping_) {
+            park(std::move(link));
+            return;
+        }
         if (!is_enabled()) {
             log(log_level::kInfo, std::format("refusing {}: the host is disabled", link->peer()));
             refused(link->peer(), make_error(errc::kDisabled, "the host is disabled", "host"));
@@ -429,7 +469,14 @@ private:
             park(std::move(link));
             return;
         }
-        (void)start_session(std::move(link));
+        std::string peer = link->peer();
+        auto wrapped = policy_.wrap(std::move(link));
+        if (!wrapped) {
+            log(log_level::kWarn, std::format("refusing {}: {}", peer, wrapped.error()));
+            refused(std::move(peer), std::move(wrapped).error());
+            return;
+        }
+        (void)start_session(std::move(*wrapped));
     }
 
     // A connection that never got to authenticate (auth_failed, when anyone listens).
@@ -453,13 +500,16 @@ private:
         }
     }
 
-    session_id start_session(std::unique_ptr<net::link> link) {
+    session_id start_session(std::unique_ptr<net::link> link, bool dialed = false) {
         const session_id id = session_ids_.next();
         auto handshake = setup_.begin_handshake();
         io_session rec;
-        rec.s = std::make_unique<session::session>(io_, std::move(link), std::move(handshake), static_cast<session::handler&>(*this), session_options_, id);
+        session::options opts = session_options_;
+        opts.speaks_first = dialed;
+        rec.s = std::make_unique<session::session>(io_, std::move(link), std::move(handshake), static_cast<session::handler&>(*this), std::move(opts), id);
         session::session& s = *rec.s;
         sessions_.emplace(id, std::move(rec));
+        open_sessions_.store(sessions_.size(), std::memory_order_release);
         ++pending_handshakes_;
         s.start();
         return id;
@@ -467,8 +517,29 @@ private:
 
     // ---- network thread: reverse mode -------------------------------------------------------------------
 
-    void dial_out() {
-        setup_.transport.dial(io_, setup_.ep, [this](result<std::unique_ptr<net::link>> link) {
+    // Dials the client: a new session, or (resume_id set) a new link for that detached session.
+    void dial_out(session_id resume_id = {}) {
+        setup_.transport.dial(io_, policy_.transport_endpoint(), [this, resume_id](result<std::unique_ptr<net::link>> link) {
+            if (link) {
+                if (auto wrapped = policy_.wrap(std::move(*link)); wrapped) {
+                    link = std::move(*wrapped);
+                } else {
+                    link = std::unexpected{std::move(wrapped).error()};
+                }
+            }
+            if (resume_id.value() != 0) {
+                const auto it = sessions_.find(resume_id);
+                if (it == sessions_.end() || it->second.s->current() != session::state::kDetached) {
+                    return; // resumed or gone meanwhile; a link we got is dropped
+                }
+                if (!link) {
+                    log(log_level::kDebug, std::format("dialing {} to resume session {} failed: {}", setup_.ep, resume_id, link.error()));
+                    redial(resume_id);
+                    return;
+                }
+                it->second.s->resume(std::move(*link));
+                return;
+            }
             if (!link) {
                 log(log_level::kDebug, std::format("dialing {} failed: {}", setup_.ep, link.error()));
                 redial();
@@ -479,18 +550,55 @@ private:
                 redial();
                 return;
             }
-            outgoing_ = start_session(std::move(*link));
+            outgoing_ = start_session(std::move(*link), true);
         });
     }
 
     // Capped exponential backoff with full jitter: a random delay in [0, min(max, min · 2^n)].
-    void redial() {
+    void redial(session_id resume_id = {}) {
         const std::uint32_t lo = setup_.limits.backoff_min_ms == 0 ? 1 : setup_.limits.backoff_min_ms;
         const std::uint32_t hi = setup_.limits.backoff_max_ms < lo ? lo : setup_.limits.backoff_max_ms;
         const std::uint64_t ceiling = std::min<std::uint64_t>(hi, static_cast<std::uint64_t>(lo) << std::min<std::uint32_t>(attempts_, 20));
         ++attempts_;
         std::uniform_int_distribution<std::uint64_t> pick{1, ceiling};
-        redial_timer_.start(std::chrono::milliseconds{pick(rng_)}, [this] { dial_out(); });
+        redial_timer_.start(std::chrono::milliseconds{pick(rng_)}, [this, resume_id] { dial_out(resume_id); });
+    }
+
+    // ---- network thread: resume -------------------------------------------------------------------
+
+    void on_detached(session::session& s, const error& why) override {
+        log(log_level::kInfo, std::format("session {} ({}) lost its link ({}); it may resume within {} ms", s.id(), s.identity(), why, setup_.limits.resume_ms));
+        if (reverse_ && s.id() == outgoing_ && !stopping_) {
+            attempts_ = 0;
+            redial(s.id());
+        }
+    }
+
+    void on_resumed(session::session& s) override {
+        if (s.id() == outgoing_) {
+            attempts_ = 0;
+        }
+        log(log_level::kInfo, std::format("session {} ({}) resumed from {}{}", s.id(), s.identity(), s.peer(), s.encrypted() ? " over TLS" : ""));
+        if (setup_.events != nullptr && setup_.events->wants(event::kind_of<event::session_resumed>)) {
+            inbound in;
+            in.what = inbound::kind::kResumed;
+            in.session = s.id();
+            in.identity = s.identity();
+            in.peer = s.peer();
+            in.tls = s.encrypted();
+            (void)to_pump(std::move(in));
+        }
+    }
+
+    session::session* resume_target(session::session& fresh, session_id id) override {
+        if (!is_enabled() || reverse_) {
+            return nullptr;
+        }
+        const auto it = sessions_.find(id);
+        if (it == sessions_.end() || !it->second.ready || it->second.s.get() == &fresh) {
+            return nullptr;
+        }
+        return it->second.s.get();
     }
 
     void on_ready(session::session& s) override {
@@ -519,6 +627,7 @@ private:
         in.relay = ident.relay;
         in.peer = s.peer();
         in.platform = s.peer_platform();
+        in.tls = s.encrypted();
         to_pump(std::move(in));
     }
 
@@ -610,15 +719,20 @@ private:
             in.peer = s.peer();
             in.reason = why;
             to_pump(std::move(in));
+        } else if (why.code == errc::kOk) {
+            --pending_handshakes_; // it only carried a resume: its link went to that session
         } else {
             --pending_handshakes_;
             log(log_level::kInfo, std::format("connection from {} closed before authenticating: {}", s.peer(), why));
             refused(s.peer(), why);
         }
         sessions_.erase(it); // allowed inside on_closed
+        open_sessions_.store(sessions_.size(), std::memory_order_release);
         if (reverse_ && id == outgoing_) {
             outgoing_ = {};
-            redial();
+            if (!stopping_) {
+                redial();
+            }
         }
     }
 
@@ -762,6 +876,11 @@ private:
                     publish(event::auth_failed{now(), std::move(in.peer), std::move(in.reason)});
                 }
                 break;
+            case inbound::kind::kResumed:
+                if (wants<event::session_resumed>()) {
+                    publish(event::session_resumed{now(), in.session, in.identity, std::move(in.peer), in.tls});
+                }
+                break;
             }
         }
     }
@@ -801,7 +920,7 @@ private:
         }
         it->second.sessions.insert(in.session);
         if (wants<event::session_opened>()) {
-            publish(event::session_opened{now(), in.session, in.identity, in.granted, std::move(in.peer), std::move(in.platform)});
+            publish(event::session_opened{now(), in.session, in.identity, in.granted, std::move(in.peer), std::move(in.platform), in.tls});
         }
     }
 
@@ -1514,6 +1633,8 @@ private:
     std::unique_ptr<net::listener> listener_;
     std::optional<error> listen_error_;
     std::map<session_id, io_session> sessions_;
+    std::atomic<std::size_t> open_sessions_{0};
+    bool stopping_ = false; // goodbye(): no new connections or dials
     std::map<std::string, io_identity, std::less<>> io_identities_;
     id_generator<session_id> session_ids_;
     std::size_t pending_handshakes_ = 0;
@@ -1529,6 +1650,7 @@ private:
     std::uint32_t attempts_ = 0;
     std::mt19937_64 rng_{0x52'48'50'00u};
     net::io_context::timer redial_timer_{io_};
+    session::channel_policy policy_;
 
     // Crossing threads.
     utils::spsc_ring<inbound> inbox_;   // network → pump
@@ -1582,6 +1704,10 @@ bool enabled(const engine& e) noexcept {
 
 void pump(engine& e) {
     e.pump();
+}
+
+void goodbye(engine& e) {
+    e.goodbye();
 }
 
 void run_io(engine& e, std::stop_token stop) {
