@@ -24,6 +24,70 @@ rhp_add_test_suite(rhp_core_tests
         Rhp::core
 )
 
+rhp_add_test_suite(rhp_platform_tests
+    SOURCES
+        platform/platform_tests.cpp
+    LINKS
+        Rhp::platform
+)
+
+rhp_add_test_suite(rhp_wire_tests
+    SOURCES
+        wire/frame_tests.cpp
+        wire/messages_tests.cpp
+        wire/msgpack_tests.cpp
+    LINKS
+        Rhp::wire
+)
+
+rhp_add_test_suite(rhp_config_tests
+    SOURCES
+        config/config_tests.cpp
+    LINKS
+        Rhp::config
+)
+
+if(RHP_ENABLE)
+    rhp_add_test_suite(rhp_security_tests
+        SOURCES
+            security/key_tests.cpp
+            security/psk_tests.cpp
+        LINKS
+            Rhp::security
+    )
+
+    rhp_add_test_suite(rhp_net_tests
+        SOURCES
+            net/loopback_tests.cpp
+            net/tcp_tests.cpp
+        LINKS
+            Rhp::net
+    )
+
+    rhp_add_test_suite(rhp_session_tests
+        SOURCES
+            session/session_tests.cpp
+        LINKS
+            Rhp::session
+    )
+else()
+    # RHP_ENABLE=OFF: keys and the keyring still build (a disabled host takes one); host and client are inert.
+    rhp_add_test_suite(rhp_security_tests
+        SOURCES
+            security/key_tests.cpp
+        LINKS
+            Rhp::security
+    )
+
+    rhp_add_test_suite(rhp_host_tests
+        SOURCES
+            host/disabled_tests.cpp
+        LINKS
+            Rhp::host
+            Rhp::client
+    )
+endif()
+
 if(RHP_ENABLE)
     rhp_add_test_suite(rhp_script_tests
         SOURCES
