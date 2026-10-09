@@ -18,6 +18,7 @@
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
+#include <rhp_test/net_support.hpp>
 
 #include <rhp/audit/sinks.hpp>
 #include <rhp/client/client.hpp>
@@ -29,6 +30,8 @@
 #include <rhp/event/events.hpp>
 #include <rhp/exec/io_runner.hpp>
 #include <rhp/host/host.hpp>
+#include <rhp/net/io_context.hpp>
+#include <rhp/net/link.hpp>
 #include <rhp/net/loopback/loopback.hpp>
 #include <rhp/net/tcp/tcp.hpp>
 #include <rhp/script/lib.hpp>
@@ -38,6 +41,9 @@
 #include <rhp/security/keyring.hpp>
 #include <rhp/security/psk_keyring.hpp>
 #include <rhp/security/signer.hpp>
+#include <rhp/session/session.hpp>
+#include <rhp/wire/codec/msgpack.hpp>
+#include <rhp/wire/messages.hpp>
 
 using namespace std::chrono_literals;
 using Rhp::errc;
@@ -621,4 +627,179 @@ TEST_CASE("stage4: set_enabled(false) refuses requests and connections until re-
     CHECK_FALSE(late.connect());
     host->set_enabled(true);
     CHECK(c.exec<int>("return 2") == 2);
+}
+
+// ---- review regressions --------------------------------------------------------------------------------------
+
+namespace stage4_fixtures {
+
+// Speaks the session protocol directly, to send blob chunks in an order the client never would.
+struct raw_session final : Rhp::session::handler {
+    Rhp::net::io_context io;
+    std::unique_ptr<Rhp::session::session> s;
+    bool ready = false;
+    std::vector<std::pair<Rhp::wire::op, Rhp::wire::envelope>> replies;
+
+    raw_session(const Rhp::endpoint& at, const Rhp::security::psk_identity& who) {
+        Rhp::session::options opts;
+        opts.codec = Rhp::wire::codec_ops_for<Rhp::wire::msgpack>;
+        Rhp::net::loopback::dial(io, at, [this, opts, who](Rhp::result<std::unique_ptr<Rhp::net::link>> l) {
+            REQUIRE(l);
+            s = std::make_unique<Rhp::session::session>(io, std::move(*l), who.begin(), *this, opts);
+            s->start();
+        });
+        REQUIRE(rhp_test::poll_until({&io}, [this] { return ready; }));
+    }
+
+    void on_ready(Rhp::session::session&) override { ready = true; }
+    void on_message(Rhp::session::session&, Rhp::wire::op code, value body) override { replies.emplace_back(code, *Rhp::from_value<Rhp::wire::envelope>(body)); }
+    void on_closed(Rhp::session::session&, const Rhp::error&) override {}
+
+    // Sends one chunk as request `req` and waits for its answer.
+    std::pair<Rhp::wire::op, value> chunk(std::uint64_t req, std::uint64_t transfer, std::uint64_t total, std::uint64_t offset, std::size_t n) {
+        Rhp::wire::blob_chunk c{transfer, "configs", "x.bin", total, offset, value::bytes(n, std::byte{7})};
+        REQUIRE(s->send(Rhp::wire::op::kBlob, Rhp::to_value(Rhp::wire::envelope{req, 0, Rhp::to_value(c)})));
+        REQUIRE(rhp_test::poll_until({&io}, [&] {
+            for (const auto& [code, env] : replies) {
+                if (env.req == req) {
+                    return true;
+                }
+            }
+            return false;
+        }));
+        for (const auto& [code, env] : replies) {
+            if (env.req == req) {
+                return {code, env.body};
+            }
+        }
+        return {};
+    }
+};
+
+} // namespace stage4_fixtures
+
+TEST_CASE("stage4: a call that timed out or was cancelled before it was sent never runs", "[stage4][async][review]") {
+    keys k;
+    const auto at = Rhp::endpoint::listen("s4.ghost", 1);
+    Rhp::client_options brief;
+    brief.request_timeout = 200ms;
+    Rhp::client<fast_redial_cfg> c{at, k.as("patch"), k.dev(), brief};
+    REQUIRE(c.port());
+    // No host yet: both calls wait in the client's queue, then fail there.
+    CHECK(c.async().exec("s4.level = 5").get().error().code == errc::kTimeout);
+    auto second = c.async().exec("s4.level = s4.level + 100");
+    c.cancel(second.request());
+    const auto code = std::move(second).get().error().code;
+    CHECK((code == errc::kCancelled || code == errc::kTimeout));
+    // The host arrives: neither ran.
+    pumped_host<fast_redial_cfg> host{at.reversed(), k.ring(), k.trusted()};
+    host.start();
+    CHECK(eventually([&] {
+        auto level = c.exec<int>("return s4.level");
+        return level && *level == 0;
+    }));
+}
+
+TEST_CASE("stage4: a connection that never authenticates doesn't fail a listening client's queued calls", "[stage4][reverse][review]") {
+    keys k;
+    const auto at = Rhp::endpoint::listen("s4.stray", 1);
+    Rhp::client<fast_redial_cfg> c{at, k.as("patch"), k.dev()};
+    REQUIRE(c.port());
+    auto queued = c.async().exec<int>("return 11");
+    {
+        // A stray connection: it reads the client's hello and hangs up.
+        Rhp::net::io_context io;
+        std::unique_ptr<Rhp::net::link> stray;
+        rhp_test::recorder seen;
+        Rhp::net::loopback::dial(io, at.reversed(), [&](Rhp::result<std::unique_ptr<Rhp::net::link>> l) {
+            REQUIRE(l);
+            stray = std::move(*l);
+            stray->start(seen);
+        });
+        REQUIRE(rhp_test::poll_until({&io}, [&] { return seen.received.size() > 0; }));
+        stray->close();
+        rhp_test::poll_for({&io}, 50ms);
+    }
+    std::this_thread::sleep_for(50ms);
+    CHECK_FALSE(queued.ready());
+    pumped_host<fast_redial_cfg> host{at.reversed(), k.ring(), k.trusted()};
+    host.start();
+    CHECK(std::move(queued).get() == 11);
+}
+
+TEST_CASE("stage4: a new blob transfer replaces one the client gave up on", "[stage4][blob][review]") {
+    keys k;
+    const auto at = Rhp::endpoint::listen("s4.blob_replace", 1);
+    pumped_host<loop_cfg> host{at, k.ring(), k.trusted()};
+    std::atomic<std::size_t> delivered{0};
+    REQUIRE(host->on_blob("configs", [&](const Rhp::blob_view& b) -> Rhp::result<void> {
+        delivered = b.bytes.size();
+        return {};
+    }));
+    host.start();
+    raw_session raw{host.dial_at(at), k.as("admin")};
+    CHECK(raw.chunk(1, 100, 8, 0, 4).first == Rhp::wire::op::kResult); // transfer 100: half of it
+    CHECK(raw.chunk(2, 200, 4, 0, 4).first == Rhp::wire::op::kResult); // transfer 200 replaces it and completes
+    CHECK(delivered == 4);
+    const auto late = raw.chunk(3, 100, 8, 4, 4); // the abandoned transfer's next chunk
+    CHECK(late.first == Rhp::wire::op::kError);
+    CHECK(Rhp::from_value<Rhp::error>(late.second)->code == errc::kCancelled);
+    CHECK(raw.chunk(4, 300, 2, 0, 2).first == Rhp::wire::op::kResult); // and the session goes on
+}
+
+TEST_CASE("stage4: a call running in a pinned module outlives the session that started it", "[stage4][pin][review]") {
+    keys k;
+    const auto at = Rhp::endpoint::listen("s4.pin_call", 1);
+    pumped_host<loop_cfg> host{at, k.ring(), k.trusted()};
+    host.start();
+    {
+        Rhp::client<loop_cfg> admin{host.dial_at(at), k.as("admin"), k.dev()};
+        REQUIRE(admin.load("ticker", "s4.level = 3 return {run = function() while true do rhp.next_frame() end end}"));
+        REQUIRE(admin.pin("ticker"));
+        auto forever = admin.async().call("ticker", "run");
+        std::this_thread::sleep_for(50ms);
+        CHECK_FALSE(forever.ready());
+    } // disconnect: the pinned module and its running call stay
+    REQUIRE(eventually([&] { return host->sessions() == 0; }));
+    Rhp::client<loop_cfg> viewer{host.dial_at(at), k.as("observe")};
+    CHECK(viewer.exec<int>("return s4.level") == 3);
+    Rhp::client<loop_cfg> admin{host.dial_at(at), k.as("admin"), k.dev()};
+    auto status = admin.status("ticker");
+    REQUIRE(status);
+    CHECK(status->state == "active");
+    CHECK(status->pinned);
+    REQUIRE(admin.revert_all());
+    CHECK(viewer.exec<int>("return s4.level") == 0);
+}
+
+TEST_CASE("stage4: revert_to is refused while the identity has pinned modules", "[stage4][pin][review]") {
+    keys k;
+    const auto at = Rhp::endpoint::listen("s4.pin_revert_to", 1);
+    pumped_host<loop_cfg> host{at, k.ring(), k.trusted()};
+    host.start();
+    Rhp::client<loop_cfg> admin{host.dial_at(at), k.as("admin"), k.dev()};
+    REQUIRE(admin.checkpoint("before"));
+    REQUIRE(admin.load("patch.mod", "s4.level = 7 return {}"));
+    REQUIRE(admin.pin("patch.mod"));
+    CHECK(admin.revert_to("before").error().code == errc::kForbidden);
+    CHECK(admin.exec<int>("return s4.level") == 7);
+    REQUIRE(admin.unpin("patch.mod"));
+    CHECK(admin.revert_to("before"));
+    CHECK(admin.exec<int>("return s4.level") == 0);
+}
+
+TEST_CASE("stage4: refused connections are reported as auth_failed", "[stage4][audit][review]") {
+    keys k;
+    const auto at = Rhp::endpoint::listen("s4.refused", 1);
+    pumped_host<loop_cfg> host{at, k.ring(), k.trusted()};
+    recorder<Rhp::event::auth_failed> refused;
+    auto sub = host->on<Rhp::event::auth_failed>(refused.handler());
+    host.start();
+    host->set_enabled(false);
+    Rhp::client_options quick;
+    quick.connect_timeout = 2s;
+    Rhp::client<loop_cfg> c{host.dial_at(at), k.as("patch"), k.dev(), quick};
+    CHECK_FALSE(c.connect());
+    REQUIRE(eventually([&] { return refused.size() >= 1; }));
+    CHECK(refused.snapshot()[0].reason.code == errc::kDisabled);
 }

@@ -176,6 +176,9 @@ TEST_CASE("rhp-cli: values / words / literals / stubs / module names", "[cli][te
     CHECK(rhp_cli::module_name_for("C:\\x\\tune.v.lua") == "tune.v");
     CHECK(rhp_cli::parse_module("#4").id == Rhp::module_id{4});
     CHECK(rhp_cli::parse_module("tune").name == "tune");
+    CHECK(rhp_cli::parse_module("123456789012345678901234").name == "123456789012345678901234"); // too long for an id
+    CHECK(rhp_cli::split_words(R"(call m f "42" 42)", true) == std::vector<std::string>{"call", "m", "f", R"("42")", "42"});
+    CHECK(rhp_cli::parse_literal(R"("42")") == value{"42"});
 }
 
 // ---- the shell, in-process ----------------------------------------------------------------------------------
@@ -282,6 +285,19 @@ TEST_CASE("rhp-cli: the shell drives the whole module lifecycle", "[cli][shell]"
     CHECK(std::find(re.begin(), re.end(), "revert_all") != re.end());
     const auto lib = sh.complete("s4cli.");
     CHECK(lib == std::vector<std::string>{"s4cli.level"});
+
+    // Unfinished Lua: Ctrl+C drops it; at the end of input it is an error, never silently skipped.
+    CHECK(sh.feed("if true then"));
+    CHECK(sh.continuing());
+    sh.reset();
+    CHECK_FALSE(sh.continuing());
+    CHECK(sh.feed("return 'after reset'"));
+    CHECK(out.last() == "\"after reset\"");
+    CHECK(sh.feed("while false do"));
+    const int failed = sh.failures();
+    CHECK_FALSE(sh.finish());
+    CHECK(sh.failures() == failed + 1);
+    CHECK(sh.finish()); // nothing left
 
     CHECK_FALSE(sh.feed("quit"));
 }
