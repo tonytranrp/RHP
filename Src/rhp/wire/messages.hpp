@@ -71,14 +71,18 @@ struct module_ref {
     [[nodiscard]] bool operator==(const module_ref&) const = default;
 };
 
+// exec, load and reload carry code: `signature` is the config's signer over the source (nil =
+// unsigned, which the host accepts from observe sessions only).
 struct exec_request {
     std::string source;
     std::string chunk = "exec";
+    value signature;
 };
 
 struct load_request {
     std::string name;
     std::string source;
+    value signature;
 };
 
 struct call_request {
@@ -90,6 +94,7 @@ struct call_request {
 struct reload_request {
     module_ref module;
     std::string source;
+    value signature;
 };
 
 struct rollback_request {
@@ -102,7 +107,7 @@ struct unload_request {
     bool force = false;
 };
 
-// revert and status.
+// revert, status, pin and unpin.
 struct module_request {
     module_ref module;
 };
@@ -117,12 +122,24 @@ struct cancel_request {
     std::uint64_t target = 0;
 };
 
+// One piece of a blob for a host-registered sink. A transfer is a run of chunks with the same
+// `transfer` id, `offset`s back to back from 0, the same `sink` / `name` / `total`; each chunk is a
+// request of its own (answered nil), and the last one's reply is the sink's verdict.
+struct blob_chunk {
+    std::uint64_t transfer = 0;
+    std::string sink;
+    std::string name; // free-form (a file name); passed to the sink
+    std::uint64_t total = 0;
+    std::uint64_t offset = 0;
+    value::bytes data;
+};
+
 // Reply bodies (kResult):
 //   exec, call            array of returned values
 //   load                  module id
 //   reload, rollback      revision (0 = deferred)
 //   revert, unload, revert_to, revert_all   revert_summary
-//   checkpoint            nil
+//   checkpoint, pin, unpin, blob   nil
 //   list                  array of module_status
 //   status                module_status
 //   describe              string (LuaLS stubs)
@@ -151,6 +168,7 @@ struct module_status {
     bool reloading = false;
     std::vector<module_id> dependencies;
     std::optional<error> fault;
+    bool pinned = false; // kept when its identity's last session ends
 
     [[nodiscard]] bool operator==(const module_status&) const = default;
 };
@@ -184,6 +202,7 @@ RHP_WIRE_MESSAGE_CONVERT(Rhp::wire::unload_request);
 RHP_WIRE_MESSAGE_CONVERT(Rhp::wire::module_request);
 RHP_WIRE_MESSAGE_CONVERT(Rhp::wire::tag_request);
 RHP_WIRE_MESSAGE_CONVERT(Rhp::wire::cancel_request);
+RHP_WIRE_MESSAGE_CONVERT(Rhp::wire::blob_chunk);
 RHP_WIRE_MESSAGE_CONVERT(Rhp::wire::revert_summary);
 RHP_WIRE_MESSAGE_CONVERT(Rhp::wire::module_status);
 RHP_WIRE_MESSAGE_CONVERT(Rhp::wire::emit_message);

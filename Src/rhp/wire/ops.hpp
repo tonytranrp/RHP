@@ -11,7 +11,7 @@ namespace Rhp::wire {
 
 // The protocol revision both ends must agree on in hello. A plain integer, bumped on any change to
 // the frame layout, the handshake or a message schema.
-inline constexpr std::uint8_t kProtocolRevision = 1;
+inline constexpr std::uint8_t kProtocolRevision = 2; // 2: signatures, pin / unpin, blobs (Stage 4)
 
 // What a frame carries (the header's `op`, 16 bits on the wire).
 //
@@ -40,9 +40,9 @@ enum class op : std::uint16_t {
     kList,
     kStatus,
     kDescribe,
-    kPin,   // reserved (Stage 4)
-    kUnpin, // reserved (Stage 4)
-    kBlob,  // reserved (Stage 4)
+    kPin,   // keep a module when its identity's last session ends
+    kUnpin, // stop keeping it
+    kBlob,  // one chunk of a blob for a host-registered sink
 
     kOutput = 48, // print() line
     kEmit,        // rhp.emit(value)
@@ -130,10 +130,10 @@ enum class op : std::uint16_t {
     case op::kRevert:
     case op::kRevertTo:
     case op::kCheckpoint: return role::kPatch;
+    case op::kBlob: return role::kObserve; // each sink checks its own role (admin by default)
     case op::kRevertAll:
     case op::kPin:
-    case op::kUnpin:
-    case op::kBlob: return role::kAdmin;
+    case op::kUnpin: return role::kAdmin;
     default: return std::nullopt;
     }
 }
@@ -142,7 +142,7 @@ enum class op : std::uint16_t {
 enum class frame_flag : std::uint8_t {
     kMac = 1u << 0,          // a 32-byte MAC follows the CRC
     kAckRequested = 1u << 1, // reply with an ack right away
-    kMore = 1u << 2,         // a fragment; more follow (blobs, Stage 4)
+    kMore = 1u << 2,         // reserved: blobs are chunked per message (op kBlob), not per frame
     kCrcOmitted = 1u << 3,   // no CRC trailer (TLS links, Stage 5)
 };
 
