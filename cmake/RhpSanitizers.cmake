@@ -15,3 +15,13 @@ if(RHP_SANITIZE)
     endif()
     message(STATUS "RHP: sanitizers enabled: ${RHP_SANITIZE}")
 endif()
+
+# RHP_FUZZ: every target gets libFuzzer's coverage instrumentation; the fuzz executables themselves
+# add -fsanitize=fuzzer (Tests/fuzz). Clang only.
+if(RHP_FUZZ)
+    if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang" OR MSVC)
+        message(FATAL_ERROR "RHP: RHP_FUZZ needs Clang (libFuzzer)")
+    endif()
+    add_compile_options(-fsanitize=fuzzer-no-link)
+    message(STATUS "RHP: libFuzzer instrumentation on")
+endif()

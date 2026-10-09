@@ -674,3 +674,19 @@ TEST_CASE("sandbox memory accounting", "[script][sandbox]") {
         CHECK(resource.live_bytes() == 0);
     }
 }
+
+TEST_CASE("sandbox: returning deeply nested tables never overruns the Lua stack", "[script][sandbox][fuzz]") {
+    // Found by the sandbox_escape fuzzer: `return _G` walked nested tables past the C stack slots
+    // Lua guarantees a C function.
+    output_capture out;
+    sandbox box = make_box(out);
+    auto deep = box.exec("local t = {} local c = t for i = 1, 60 do c.x = {} c = c.x end return t");
+    REQUIRE(deep);
+    CHECK(deep->size() == 1);
+    // Too deep to convert: the result is described instead ("table: 0x..."), as for functions.
+    auto too_deep = box.exec("local t = {} local c = t for i = 1, 200 do c.x = {} c = c.x end return t");
+    REQUIRE(too_deep);
+    REQUIRE(too_deep->size() == 1);
+    CHECK(too_deep->front().is_string());
+    CHECK(box.exec("return _G"));
+}
