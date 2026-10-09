@@ -2,7 +2,9 @@
 rhp_add_test_suite(rhp_integration_tests
     SOURCES
         host_client_tests.cpp
+        stage4_tests.cpp
     LINKS
         Rhp::host
         Rhp::client
+        Rhp::audit
 )

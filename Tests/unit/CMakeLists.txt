@@ -47,11 +47,26 @@ rhp_add_test_suite(rhp_config_tests
         Rhp::config
 )
 
+rhp_add_test_suite(rhp_event_tests
+    SOURCES
+        event/event_tests.cpp
+    LINKS
+        Rhp::audit
+)
+
+rhp_add_test_suite(rhp_client_tests
+    SOURCES
+        client/pending_tests.cpp
+    LINKS
+        Rhp::client
+)
+
 if(RHP_ENABLE)
     rhp_add_test_suite(rhp_security_tests
         SOURCES
             security/key_tests.cpp
             security/psk_tests.cpp
+            security/signing_tests.cpp
         LINKS
             Rhp::security
     )
