@@ -24,4 +24,4 @@
 
 **Verified at Stage 3:** 324 tests (Asio 1.38.2 networking over loopback and TCP, Monocypher 4.0.3) pass on MSVC 19.51, clang-cl 22, MSVC ASan, Linux Clang 21, Clang ASan+UBSan and Clang TSan; the `RHP_ENABLE=OFF` MSVC build passes 137 tests without Lua, Asio or Monocypher.
 
-**Verified at Stage 5:** TLESTCOUNTS
+**Verified at Stage 5:** 398 tests (TLS through Mbed TLS 4.2 on Windows and OpenSSL 3.5 + Mbed TLS on Linux, resume, fuzz replays) pass on MSVC 19.51, clang-cl 22, MSVC ASan, Linux Clang 21, Clang ASan+UBSan and Clang TSan (TSan builds use Mbed TLS: the system libcrypto isn't instrumented); `RHP_ENABLE=OFF` passes 155. Android NDK 29 (Clang 21) builds `android-arm64` and `android-x64`, and every suite passed on an arm64 phone (SM-S948U1, Android 16 / API 36) via `Tools/android/run_tests.py`. macOS and iOS still unverified on hardware: `.github/workflows/ci.yml` covers them (and an Android emulator) once Actions can run on the repo.

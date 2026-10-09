@@ -42,4 +42,5 @@
 - TLS 1.3 on non-loopback endpoints (and wherever `Rhp::net::require_tls` asks), OpenSSL or Mbed TLS behind `config<>::tls<>`.
 - The PSK transcript ends with the TLS connection's tls-exporter value (RFC 9266): a relay that terminates TLS on both sides fails the handshake, so the host's certificate can be ephemeral and self-signed. `client_options::tls.ca_pem` (+ `server_name`) adds certificate checks; `host_options::tls.cert_pem` / `key_pem` set the host's certificate.
 - Plaintext reaches a host only from loopback peers, local transports or an endpoint that says `insecure_lan`; `require_tls` refuses it everywhere.
-- A resume request is sealed with the session's MAC key and a control counter: replaying one is refused, and nothing secret crosses the wire.
+- A resume request is sealed with the session's MAC key and a control counter (replaying one is refused, nothing secret crosses the wire), and both resume frames prove the new connection's channel binding: a relay terminating TLS on the redial can't take a session over.
+- Known limits: idle unauthenticated connections count against `pending_handshakes` and can delay a resume; a probe can tell a known session id from an unknown one.
