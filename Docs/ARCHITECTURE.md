@@ -539,6 +539,17 @@ int main() {
 }                            // ~host → revert_all()
 ```
 
+What runs today (Stage 3; signers, audit and blob sinks arrive in Stage 4):
+
+```cpp
+Rhp::host<> host{Rhp::endpoint::listen("127.0.0.1", 7777),
+                 Rhp::security::keyring{{"dev", *Rhp::security::key::from_env("RHP_KEY_DEV"), Rhp::role::kAdmin},
+                                        {"qa",  *Rhp::security::key::from_env("RHP_KEY_QA"),  Rhp::role::kPatch}}};
+host.install<game_lib>();
+if (auto port = host.port(); !port) { /* address in use, non-loopback without insecure_lan, ... */ }
+while (game::running()) { host.pump(); game::update(); }
+```
+
 ### 6.2 Client, fleet, CLI
 
 ```cpp
@@ -559,6 +570,8 @@ Rhp::fleet<Rhp::config<>> fleet{ identity };
 fleet.discover(Rhp::net::mdns::browse{ "_rhp._tcp" });
 auto results = fleet.exec<int>("return game.tick");                      // one result per host
 ```
+
+Stage 3 ships the blocking half: `connect`, `exec` / `exec<T>`, `load`, `call`, `reload`, `rollback`, `revert`, `unload` (with `force`), `checkpoint`, `revert_to`, `revert_all`, `list`, `status`, `describe` and `cancel()`, with `client_options::on_output` / `on_emit` for streamed output. `exec_async`, futures, `co_await`, `fleet` and `rhp-cli` are Stage 4.
 
 Error mode `Rhp::errors::throwing` makes the same calls return `T` and throw `Rhp::exception` (carrying the `Rhp::error`). Per call, `Rhp::unwrap(c.exec<int>(...))` does the same.
 
@@ -673,7 +686,7 @@ sequenceDiagram
 |---|---|
 | `magic`, `protocol_rev` | reject garbage; `protocol_rev` is a plain integer agreed in `hello` |
 | `flags` | `MAC`, `ACK_REQ`, `MORE` (fragment of a blob/large payload), `CRC_OMITTED` |
-| `op` | `hello, challenge, response, resume, exec, load, call, reload, rollback, unload, revert, revert_to, checkpoint, revert_all, cancel, list, status, describe, blob, output, emit, result, error, ping, pong, ack, nack` |
+| `op` | 16 bits: `hello, challenge, response, welcome, resume` (handshake) · `exec, load, call, reload, rollback, unload, revert, revert_to, checkpoint, revert_all, cancel, list, status, describe, pin, unpin, blob` (requests) · `output, emit, result, error` (replies) · `ping, pong, ack, nack` (control) — see X5 |
 | `seq` / `ack` | per-session monotonic + cumulative ack |
 | `length` | ≤ `max_frame` (4 MiB), checked **before** allocating; blobs larger than that are fragmented (`MORE`) |
 | `crc32c` | catches corruption TCP's checksum misses; dropped under TLS (AEAD covers it) |
@@ -811,23 +824,28 @@ RHP/
 │       ├── utils/      fixed_string · type_list · function_traits · scope_guard · spsc_ring
 │       │               byte_buffer · crc32c(.cpp) · units · overloaded · detail/
 │       ├── core/       error · result · errors_mode · value(.cpp) · convert · ids · log(.cpp) · limits
-│       ├── platform/   os · endian · time · detail/{win32,posix,apple,android}   ← only OS #ifdefs
-│       ├── wire/       frame(.cpp) · envelope · ops · codec/msgpack(.cpp) · detail/
-│       ├── net/        transport · endpoint · discovery
-│       │               tcp/ · local/ · loopback/ · websocket/ · udp_reliable/ · http_gateway/ · mdns/ · detail/
-│       ├── security/   authenticator · keyring · roles · signer · psk_keyring(.cpp) · ed25519(.cpp)
-│       │               tls/{openssl,mbedtls,auto_backend} · detail/
-│       ├── exec/       executor · pumped · threaded · inline_exec · io_runner · owned_io_thread · detail/
+│       ├── platform/   os · random(.cpp)                                    (Stage 3) ← only OS #ifdefs
+│       ├── wire/       ops · frame(.cpp) · codec · codec/msgpack(.cpp) · messages(.cpp)   (Stage 3)
+│       ├── net/        endpoint · io_context(.cpp) · link · loopback/ · tcp/          (Stage 3)
+│       │               local/ · websocket/ · udp_reliable/ · http_gateway/ · mdns/     (later)
+│       ├── security/   authenticator · key(.cpp) · keyring(.cpp) · psk_keyring(.cpp)  (Stage 3)
+│       │               signer · ed25519(.cpp) · tls/{openssl,mbedtls,auto_backend}     (later)
+│       ├── exec/       executor (pumped, steady_clock) · io_runner (owned_io_thread, zero_threads)
 │       ├── script/     stack · marshal · lib · patch_point · ledger · sandbox     (Stage 1)
 │       │               lua_event · stubs · scheduler, revisions, require in sandbox (Stage 2)
 │       │               hook_backend · audit                                       (later)
 │       │               puc_lua/(.cpp — lua.h never leaks) · detail/
-│       ├── session/    session · handshake · reliability · resume · heartbeat · backoff · detail/
-│       ├── host/       host · module_manager · dispatcher · blob_sinks · events · local_api
-│       └── client/     client · fleet · request · async_stream · task
+│       ├── session/    session(.cpp): handshake · seq/ack/nack · MAC · heartbeat   (Stage 3)
+│       │               resume · backoff                                              (Stage 5)
+│       ├── config/     config — the Rhp::config<> chain                              (Stage 3)
+│       ├── host/       host · detail/engine — host.cpp                               (Stage 3)
+│       │               blob_sinks · events · local_api                               (later)
+│       └── client/     client · detail/engine — client.cpp                           (Stage 3)
+│                       fleet · async_stream · task                                   (later)
 ├── Tests/
 │   ├── CMakeLists.txt
 │   ├── unit/          mirrors Src/rhp/* — files named `<thing>_tests.cpp`
+│   ├── support/       header-only test helpers (`rhp_test/…`)
 │   ├── integration/   loopback · tcp · tls · reconnect_resume · revert_matrix · roles · signing · fleet
 │   ├── compile_fail/  bad concepts, duplicate names — ctest WILL_FAIL
 │   ├── fuzz/          frame · envelope · msgpack · sandbox_escape
@@ -905,11 +923,9 @@ flowchart BT
     core["rhp_core"] --> utils
     platform["rhp_platform"] --> core
     wire["rhp_wire"] --> core
-    wire -. PRIVATE .-> msgpack[["msgpack-c"]]
     script["rhp_script"] --> core
     script -. PRIVATE .-> lua[["Lua 5.5 (as C++)"]]
-    net["rhp_net"] --> wire
-    net --> platform
+    net["rhp_net"] --> platform
     net -. PRIVATE .-> asio[["Asio"]]
     sec["rhp_security"] --> wire
     sec -. PRIVATE .-> mono[["Monocypher"]]
@@ -918,9 +934,11 @@ flowchart BT
     session["rhp_session"] --> net
     session --> sec
     session --> exec
-    host["rhp_host"] --> session
+    session --> wire
+    config["rhp_config"] --> session
+    host["rhp_host"] --> config
     host --> script
-    client["rhp_client"] --> session
+    client["rhp_client"] --> config
     rhp["Rhp::rhp"] --> host
     rhp --> client
 ```
@@ -1017,10 +1035,10 @@ All PRIVATE; none of their headers appear in `Src/rhp/**/*.hpp`.
 |---|---|---|
 | Script engine | PUC Lua 5.5.1 via CPM, built by us as C++ | MIT |
 | Binding | own concept binder (`Rhp::lib<>`) | — |
-| Async I/O | standalone Asio 1.38.x | BSL-1.0 |
-| Payload | msgpack-c ≥ 9.0.0, `MSGPACK_NO_BOOST` | BSL-1.0 |
+| Async I/O | standalone Asio 1.38.2 (Stage 3) | BSL-1.0 |
+| Payload | own MessagePack codec for `Rhp::value` (`Rhp::wire::msgpack`; msgpack-c dropped at Stage 3, W2) | — |
 | Integrity | CRC32C (own, HW-accelerated when available) | — |
-| Crypto | Monocypher ≥ 4.0.3 (BLAKE2b MAC, Ed25519) | CC0 / BSD-2 |
+| Crypto | Monocypher 4.0.3, compiled as C++ (BLAKE2b handshake + frame MAC from Stage 3; Ed25519 in Stage 4) | CC0 / BSD-2 |
 | TLS | OpenSSL 4.0.x (desktop) · mbedTLS 4.2 (mobile, custom Asio stream adapter) | Apache-2.0 |
 | WebSocket | own RFC 6455 framing on Asio | — |
 | HTTP gateway | own minimal HTTP/1.1 parser on Asio | — |
@@ -1050,7 +1068,7 @@ flowchart LR
 | 0 ✅ | `cmake --preset windows-msvc` + `ctest` green with utils/core tests — done: 54 tests green on MSVC, clang-cl, MSVC-ASan, Linux Clang, Clang ASan+UBSan, Clang TSan |
 | 1 ✅ | `Examples/hello_console` runs a local Lua file calling exposed C++, patches a point, and reverts everything — done: 118 tests (56 script) green on MSVC, clang-cl, MSVC-ASan, Linux Clang, Clang ASan+UBSan, Clang TSan; the `RHP_ENABLE=OFF` build is green without Lua |
 | 2 ✅ | an infinite-loop script never blocks a frame; reload keeps state via `on_save`/`on_restore`; LuaLS stubs generated — done: `Examples/frame_loop` pumps 120 frames next to a `while true do end` (2 ms slices, worst frame ≈ 2 ms), reloads a module keeping its state and writes `rhp_api.lua`; 239 tests green on MSVC, clang-cl, MSVC-ASan, Linux Clang, Clang ASan+UBSan, Clang TSan; the `RHP_ENABLE=OFF` build (99 tests) is green without Lua |
-| 3 | exec over loopback and TCP with CRC, seq/ack, roles |
+| 3 ✅ | exec over loopback and TCP with CRC, seq/ack, roles — done: `Examples/remote_exec` runs three keys (admin / patch / observe) against one host over loopback and TCP on 127.0.0.1, streams print back, cancels a `while true do end` from the network thread while the game thread is stuck in it, and reverts a client's effects when it disconnects; `Examples/custom_transport` plugs a user transport into `Rhp::config<>`; STAGE3_COUNTS |
 | 4 | full lifecycle from `rhp-cli`, signed scripts only, audit log written |
 | 5 | TLS on all 5 OS presets; kill-the-socket test resumes exactly-once |
 | 6 | fleet finds hosts via mDNS and broadcasts a script |
@@ -1229,3 +1247,47 @@ Choices made while building Stage 2 beyond the round-4 questionnaire (§22). Eac
 | U10 | Events | `Rhp::lua_event<"name", Args...>` registers on first use of `fire`; arguments are `Rhp::convertible` or opaque handle types; `listeners()` counts subscribed sandboxes |
 | U11 | Errors | new `errc::kUnloaded`; `Rhp::kLastErrc` marks the last code |
 | U12 | Cancel delivery | a `cancel(request)` for a suspended request stays pending until that request would resume, which ends it instead (or the next operation / `pump()` does). `on_result` for timer and event requests carries no values; destroying a sandbox ends its suspended requests without `on_result` |
+
+---
+
+## 24. Decision log (round 5, Stage 3)
+
+| # | Topic | Decision |
+|---|---|---|
+| W1 | Client scope | Stage 3 ships a **blocking** `Rhp::client<Cfg>` with every sandbox-backed op (`exec`, `load`, `call`, `reload`, `rollback`, `revert`, `unload`, `checkpoint`, `revert_to`, `revert_all`, `cancel`, `list`, `status`, `describe`) and `on_output` / `on_emit`; async calls, futures, `co_await`, `fleet` and `rhp-cli` are Stage 4 |
+| W2 | Codec | RHP's own MessagePack codec for `Rhp::value` (`Rhp::wire::msgpack`): no dependency, counts and depth checked before allocating, easy to fuzz. msgpack-c is dropped (its Boost-free mode is still experimental); another codec can still plug into `config<>::codec<>` |
+| W3 | Disconnect | without resume (Stage 5) a session ends when its link closes or its heartbeat dies (3 × 2 s); the identity's last session ending cancels its requests from the network thread, reverts and unloads everything and closes its `lua_State` |
+| W4 | I/O threading | `exec::owned_io_thread` (default: one `std::jthread` runs Asio) and `exec::zero_threads` (`pump()` and blocking client calls poll the network) |
+| W5 | Crypto | Monocypher 4.0.3 moves to Stage 3: the PSK mutual challenge-response derives per-direction keys, and every frame after the handshake carries a 32-byte keyed-BLAKE2b MAC over header + payload (seq inside, so replays fail) |
+| W6 | Non-loopback | loopback addresses always; anything else fails with `kForbidden` unless the endpoint says `Rhp::net::insecure_lan` (until TLS in Stage 5) |
+| W7 | Reliability | cumulative ack, an unacked resend window, CRC failure → nack → resend, a bounded idempotency-key response cache, ping/pong heartbeat; resume tokens and reconnect/backoff are Stage 5 |
+| W8 | Example | new `Examples/remote_exec` (loopback, then TCP; three keys and roles); `hello_console` stays the local demo |
+| W9 | Config | `Rhp::config<>` gets the Stage 3 slots only: transport, codec, auth, executor, io, limits, errors, clock, logger; TLS / signer / discovery slots come with their stages |
+| W10 | Signing | Stage 3 runs unsigned scripts from any authenticated role; roles still gate what they can do. Signatures become mandatory (except for observe) in Stage 4 |
+| W11 | Output routing | print / `rhp.emit` / results go to the session whose request caused them; output from timers, event handlers or requests whose session is gone goes to every live session of the identity (and the host logger at debug) |
+| W12 | Workflow | the main session writes and tests everything; one subagent (no nested agents) reviews the finished stage for bugs at the end; branch `stage-3-wire-session`, PR |
+
+---
+
+## 25. Stage 3 implementation notes
+
+Choices made while building Stage 3 beyond the round-5 questionnaire (§24). Each is recorded in the matching `Docs/decisions/` file.
+
+| # | Topic | Decision |
+|---|---|---|
+| X1 | Compile once | `Rhp::host<Cfg>` / `Rhp::client<Cfg>` are thin templates: the config is type-erased into a `setup` (`net::transport_ops`, `wire::codec_ops`, a handshake factory, limits, logger, clock) and the engines (`host.cpp`, `client.cpp`) compile once. The session layer never sees a policy type: only `net::link`, `wire::codec_ops`, `security::host_handshake` / `client_handshake` and `wire::frame_sealer` |
+| X2 | Modules | new folders: `platform` (OS name, secure random — the only OS `#ifdef`s), `wire`, `net`, `security`, `exec`, `session`, `config`, `host`, `client`. `net` depends on `platform` (not `wire`); `session` on `net`, `security`, `exec`, `wire`; `config` on all four policy layers |
+| X3 | Messages | every request and reply payload is an `envelope {req, idem, body}`; `wire/messages.hpp` defines each body with an `Rhp::convert` specialization. A request gets exactly one `kResult` or `kError`; `kOutput` / `kEmit` carry the request id (0 = none). Modules are named by id or name (`wire::module_ref`). Decoders ignore unknown keys |
+| X4 | Handshake | hello → challenge (host proof) → response (client proof, sent only after the host's proof checks out) → welcome, the first MAC'd frame. An unknown key name gets a normal challenge made with a random secret. Garbage before the handshake closes the connection at once; after it, three resync strikes |
+| X5 | Frames | the 28-byte header of §8.1 with a 16-bit op; ops 1–15 handshake, 16–47 requests, 48–63 replies (sequenced), 64+ control (unsequenced: ping, pong, ack, nack); a session-ending error is an unsequenced `kError` (sealed once keys exist). `kWelcome` joins the op list; `kResume`, `kPin`, `kUnpin`, `kBlob` are reserved |
+| X6 | Nack | a nack's `ack` field is the last good seq: the peer resends everything after it (one nack per gap). A whole heartbeat without ack progress also resends the window, covering a lost nack |
+| X7 | Identities | a sandbox per identity is created when its first session is welcomed (caller role = the key's role, every installed lib) and destroyed — `revert_all`, then closed — when its last session ends. Sessions of one identity share it (and its scratch module) |
+| X8 | Cancel path | the network thread reaches a sandbox only through a per-identity *cancel relay* (mutex; cleared before the sandbox dies): `cancel` stops the request running in `pump()` (`sandbox::cancel()`) or a suspended one (`sandbox::cancel(request)`); requests still queued for `pump()` and sent before the cancel are answered `kCancelled` without running |
+| X9 | Suspended requests | a request whose script suspends (`rhp.wait`, `rhp.sleep`, a time slice) is answered when `sandbox_options::on_result` reports it; the sandbox gained `pending(request)` and a request-aware `on_output` for this |
+| X10 | Idempotency | per session, keyed by the client's `idem` (63 random bits): a retry of a finished request is answered from the cache (256 entries), a retry of one in flight waits for the same result |
+| X11 | Limits | a reply larger than `max_frame` becomes a `kLimitExceeded` error for that request; an oversized request fails on the client. At most `pending_handshakes` (64) unauthenticated connections; more are closed at once |
+| X12 | TCP | `TCP_NODELAY` on every socket; `SO_REUSEADDR` only off Windows (there it would allow port stealing); port 0 = any free port, reported by `host.port()` |
+| X13 | Reverse mode | Stage 3 hosts listen and clients dial; the other directions fail with `kInvalidArgument` until Stage 4 |
+| X14 | Core additions | `Rhp::value_list`; `Rhp::convert` for `strong_id` (as an integer) and `Rhp::error` (a map; unknown code names decode as `kRuntime`) |
+| X15 | `RHP_ENABLE=OFF` | `wire`, `platform`, `config`, `exec` and keys / keyring still build and test; `net`, `session` and the PSK handshake compile to headers only; Asio and Monocypher are not fetched; `Rhp::host` / `Rhp::client` are inert (`kDisabled`) |
+| X16 | Monocypher | compiled as C++ through one wrapper translation unit (like Lua), so RHP still needs no C toolchain |

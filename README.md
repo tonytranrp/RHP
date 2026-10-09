@@ -9,12 +9,22 @@ using game_lib = Rhp::lib<"game">
     ::fn <"spawn",   &game::spawn, Rhp::undo<&game::despawn>>
     ::var<"gravity", &game::g_gravity>;
 
-Rhp::host<Rhp::config<>> host{ Rhp::endpoint::listen("127.0.0.1", 7777), keys, signers };
+Rhp::host<> host{Rhp::endpoint::listen("127.0.0.1", 7777),
+                 Rhp::security::keyring{{"dev", *Rhp::security::key::from_env("RHP_KEY_DEV"), Rhp::role::kAdmin}}};
 host.install<game_lib>();
-while (game::running()) { host.pump(); game::update(); }
+while (game::running()) { host.pump(); game::update(); }    // Lua runs only here; the network has its own thread
 ```
 
-> The snippet shows where the library is going (the network host arrives in Stage 3). Work lands in stages; today the script engine runs locally:
+```cpp
+Rhp::client<> dev{Rhp::endpoint::dial("127.0.0.1", 7777), Rhp::security::psk_identity{"dev", *key}};
+auto g   = dev.exec<double>("return game.gravity");          // Rhp::result<double>
+auto mod = dev.load("low_grav", "game.gravity = -1.6");
+dev.unload(*mod);                                              // or just disconnect: everything is reverted
+```
+
+Every connection authenticates with a pre-shared key (mutual BLAKE2b challenge-response); each key is an identity with its own Lua state and a role (`observe`, `patch`, `admin`). Frames carry CRC32C and a per-session MAC, are acked, nacked and resent, and a heartbeat ends dead sessions. Until TLS (Stage 5) TCP stays on loopback unless you opt in with `Rhp::net::insecure_lan`.
+
+The same script engine also runs locally, without a network:
 
 ```cpp
 float default_damage(float base, float mult) { return base * mult; }
@@ -38,7 +48,7 @@ box.reload(*mod, new_source);                                // on_save() → on
 while (running) { box.pump(); game::update(); }
 ```
 
-See [`Examples/hello_console`](Examples/hello_console) and [`Examples/frame_loop`](Examples/frame_loop).
+See [`Examples/hello_console`](Examples/hello_console), [`Examples/frame_loop`](Examples/frame_loop), [`Examples/remote_exec`](Examples/remote_exec) and [`Examples/custom_transport`](Examples/custom_transport).
 
 ## Targets
 
@@ -75,8 +85,8 @@ target_link_libraries(my_app PRIVATE Rhp::rhp)
 | 0 | layout, CMake, presets, `utils`, `core` | ✅ |
 | 1 | Lua 5.5 sandbox, `Rhp::lib` DSL, patch points, ledger, revert (local) | ✅ |
 | 2 | scheduler, `rhp.emit`, `lua_event`, reload + revisions, `require`, LuaLS stubs | ✅ |
-| 3 | wire format, loopback + TCP, sessions, roles | next |
-| 4 | client, `rhp-cli`, signing, audit, blobs, reverse mode | |
+| 3 | wire format, loopback + TCP, sessions, PSK roles, blocking client | ✅ |
+| 4 | async client, `rhp-cli`, signing, audit, blobs, reverse mode | next |
 | 5 | TLS, reconnect/resume, fuzzing, mobile presets | |
 | 6 | WebSocket, UDP-reliable, HTTP gateway, mDNS, fleet | |
 
@@ -84,9 +94,9 @@ target_link_libraries(my_app PRIVATE Rhp::rhp)
 
 | Folder | What lives there |
 |---|---|
-| `Src/rhp/` | the library, one folder per module (`utils`, `core`, `script`, …), included as `<rhp/...>` |
-| `Tests/` | unit tests, compile-fail tests (later: integration, fuzz, bench) |
-| `Examples/` | `hello_console`, `frame_loop` (later: `custom_transport`, `headless_server`) |
+| `Src/rhp/` | the library, one folder per module (`utils`, `core`, `platform`, `wire`, `net`, `security`, `exec`, `script`, `session`, `config`, `host`, `client`), included as `<rhp/...>` |
+| `Tests/` | unit, integration and compile-fail tests (later: fuzz, bench) |
+| `Examples/` | `hello_console`, `frame_loop`, `remote_exec`, `custom_transport` (later: `headless_server`) |
 | `Tools/` | `rhp-cli` |
 | `Docs/` | [`ARCHITECTURE.md`](Docs/ARCHITECTURE.md) and [`decisions/`](Docs/decisions/) |
 | `cmake/` | build helpers and the single dependency pin file |

@@ -11,3 +11,12 @@
 **Alternatives:** CBOR, FlatBuffers / Protobuf / Cap'n Proto (codegen, heavy), glaze (heavy compile, unlisted mobile support).
 
 **Consequences:** `protocol_rev` is a plain integer agreed in `hello`; there is no "v" naming anywhere.
+
+**Stage 3 (as built)**
+- **Codec changed:** MessagePack is RHP's own codec for `Rhp::value` (`Rhp::wire::msgpack`, `Src/rhp/wire/codec/`), not msgpack-c. Why: `Rhp::value` has eight kinds, so the codec is ~400 lines with no dependency; msgpack-c's Boost-free mode is still marked experimental; every count is checked against the bytes left and nesting against `decode_limits::max_depth` (100) before anything is allocated, which is what a fuzzer will hammer. `config<>::codec<>` still takes any codec.
+- The header is the 28 bytes above with a 16-bit op. Ops 1–15 are the handshake (`hello`, `challenge`, `response`, `welcome`, reserved `resume`), 16–47 requests, 48–63 replies — both sequenced — and 64+ control frames (`ping`, `pong`, `ack`, `nack`), which are unsequenced (seq 0). A session-ending error is an unsequenced `kError`.
+- Every request and reply payload is an `envelope {req, idem, body}` (`wire/messages.hpp`, one `Rhp::convert` per message). Decoders ignore unknown keys; a changed meaning bumps `kProtocolRevision` (1).
+- CRC32C covers header + payload on every frame. After the handshake every frame carries a keyed-BLAKE2b MAC over header + payload under its direction's key; the host's `welcome` is the first sealed frame.
+- Reliability: cumulative ack in every header; explicit `ack` frames when nothing else carries it; a nack's ack field is the last good seq and the peer resends everything after it; a heartbeat interval with no ack progress resends the window; duplicates are dropped by seq.
+- Idempotency: per session, keyed by the client's 63-bit `idem`; 256 finished responses kept; a retry in flight waits for the original's result.
+- Not yet: resume tokens, reconnect/backoff (Stage 5), fragmentation (`kMore`, blobs, Stage 4), `CRC_OMITTED` (TLS, Stage 5).

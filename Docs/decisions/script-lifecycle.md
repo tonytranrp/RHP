@@ -30,3 +30,8 @@
 - `rollback(mod, n)` reloads the source kept `n` revisions back, as a new revision; at most `limits.revisions` (default 8) are kept.
 - `require` returns a live read-only proxy; cycles fail; `unload` needs `force` while dependents exist, after which they get `kUnloaded`.
 - Lifecycle operations requested from inside a running script are queued until the outermost operation returns (they report `deferred`).
+
+**Stage 3 (as built)**
+- One sandbox per identity on a host, created when its first session is welcomed and destroyed when its last session ends (resume grace windows are Stage 5): its running and suspended requests are cancelled from the network thread, then `revert_all`, then the state is closed. Sessions of one identity share the sandbox and its scratch module.
+- Requests from the network are answered exactly once: right away, or — when the script suspends — from `sandbox_options::on_result`. `load` answers with the module id, `reload` / `rollback` with the revision, revert-type ops with a summary (`undone`, `irreversible`, `failures`, `deferred`).
+- `revert_all` over the network (admin) reverts every identity's modules.
