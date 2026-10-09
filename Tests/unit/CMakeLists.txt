@@ -23,3 +23,27 @@ rhp_add_test_suite(rhp_core_tests
     LINKS
         Rhp::core
 )
+
+if(RHP_ENABLE)
+    rhp_add_test_suite(rhp_script_tests
+        SOURCES
+            script/binding_tests.cpp
+            script/ledger_tests.cpp
+            script/lib_tests.cpp
+            script/limits_tests.cpp
+            script/patch_point_tests.cpp
+            script/sandbox_tests.cpp
+        LINKS
+            Rhp::script
+    )
+else()
+    # RHP_ENABLE=OFF: no Lua; checks the inert sandbox and direct-call patch points instead.
+    rhp_add_test_suite(rhp_script_tests
+        SOURCES
+            script/disabled_tests.cpp
+            script/ledger_tests.cpp
+            script/lib_tests.cpp
+        LINKS
+            Rhp::script
+    )
+endif()

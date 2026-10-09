@@ -1,0 +1,673 @@
+#include <cstddef>
+#include <memory_resource>
+#include <optional>
+#include <span>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+#include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
+
+#include <rhp/core/error.hpp>
+#include <rhp/core/ids.hpp>
+#include <rhp/core/result.hpp>
+#include <rhp/core/role.hpp>
+#include <rhp/core/value.hpp>
+#include <rhp/script/lib.hpp>
+#include <rhp/script/sandbox.hpp>
+
+using Rhp::errc;
+using Rhp::role;
+using Rhp::script::module_state;
+using Rhp::script::sandbox;
+using Rhp::script::sandbox_options;
+
+namespace sandbox_tests_fixtures {
+
+inline int g_counter = 0;
+
+using counter_lib = Rhp::lib<"counter">::var<"value", &g_counter>;
+
+} // namespace sandbox_tests_fixtures
+
+namespace {
+
+namespace fx = sandbox_tests_fixtures;
+
+struct output_capture {
+    std::vector<std::string> lines;
+};
+
+sandbox make_box(output_capture& out, role caller = role::kPatch) {
+    sandbox_options options;
+    options.caller_role = caller;
+    options.output = [&out](std::string_view line) { out.lines.emplace_back(line); };
+    return sandbox{std::move(options)};
+}
+
+// A sandbox with counter_lib installed and the counter reset.
+sandbox make_counter_box(output_capture& out, role caller = role::kPatch) {
+    fx::g_counter = 0;
+    sandbox box = make_box(out, caller);
+    REQUIRE(box.install<fx::counter_lib>());
+    return box;
+}
+
+bool contains(std::string_view haystack, std::string_view needle) {
+    return haystack.find(needle) != std::string_view::npos;
+}
+
+// The script returned nil into an optional.
+template <class T>
+bool is_nil_result(const Rhp::result<std::optional<T>>& r) {
+    return r.has_value() && !r->has_value();
+}
+
+std::string describe(const Rhp::error& err) {
+    return err.message + " | " + err.where + " | " + err.traceback;
+}
+
+class counting_resource final : public std::pmr::memory_resource {
+public:
+    [[nodiscard]] std::size_t allocations() const noexcept { return allocations_; }
+    [[nodiscard]] std::size_t live_bytes() const noexcept { return live_bytes_; }
+
+private:
+    void* do_allocate(std::size_t bytes, std::size_t alignment) override {
+        ++allocations_;
+        live_bytes_ += bytes;
+        return std::pmr::new_delete_resource()->allocate(bytes, alignment);
+    }
+
+    void do_deallocate(void* p, std::size_t bytes, std::size_t alignment) override {
+        live_bytes_ -= bytes;
+        std::pmr::new_delete_resource()->deallocate(p, bytes, alignment);
+    }
+
+    [[nodiscard]] bool do_is_equal(const std::pmr::memory_resource& other) const noexcept override { return this == &other; }
+
+    std::size_t allocations_ = 0;
+    std::size_t live_bytes_ = 0;
+};
+
+// Returns "" when the environment matches the restricted standard library, else what's wrong.
+constexpr std::string_view kRestrictedStdlibProbe = R"lua(
+local problems = {}
+local present = {
+    "assert", "error", "getmetatable", "ipairs", "next", "pairs", "pcall", "print", "rawequal",
+    "rawget", "rawlen", "rawset", "select", "setmetatable", "tonumber", "tostring", "type",
+    "xpcall", "_VERSION", "load", "string", "table", "math", "utf8", "coroutine", "os",
+}
+local absent = { "dofile", "loadfile", "collectgarbage", "require", "package", "io", "debug" }
+for _, name in ipairs(present) do
+    if _G[name] == nil then problems[#problems + 1] = "missing " .. name end
+end
+for _, name in ipairs(absent) do
+    if _G[name] ~= nil then problems[#problems + 1] = "present " .. name end
+end
+if string.dump ~= nil then problems[#problems + 1] = "present string.dump" end
+if type(string.format) ~= "function" then problems[#problems + 1] = "missing string.format" end
+if type(table.concat) ~= "function" then problems[#problems + 1] = "missing table.concat" end
+if type(math.floor) ~= "function" then problems[#problems + 1] = "missing math.floor" end
+if type(utf8.char) ~= "function" then problems[#problems + 1] = "missing utf8.char" end
+if type(coroutine.wrap) ~= "function" then problems[#problems + 1] = "missing coroutine.wrap" end
+if type(os.time) ~= "function" then problems[#problems + 1] = "missing os.time" end
+if type(os.clock) ~= "function" then problems[#problems + 1] = "missing os.clock" end
+for key in pairs(os) do
+    if key ~= "time" and key ~= "clock" then problems[#problems + 1] = "present os." .. key end
+end
+return table.concat(problems, ", ")
+)lua";
+
+constexpr std::string_view kFullStdlibProbe = R"lua(
+local problems = {}
+local present = { "dofile", "loadfile", "collectgarbage", "require", "package", "io", "debug" }
+for _, name in ipairs(present) do
+    if _G[name] == nil then problems[#problems + 1] = "missing " .. name end
+end
+if type(string.dump) ~= "function" then problems[#problems + 1] = "missing string.dump" end
+if type(os.execute) ~= "function" then problems[#problems + 1] = "missing os.execute" end
+if type(os.getenv) ~= "function" then problems[#problems + 1] = "missing os.getenv" end
+if type(io.open) ~= "function" then problems[#problems + 1] = "missing io.open" end
+return table.concat(problems, ", ")
+)lua";
+
+} // namespace
+
+TEST_CASE("observe and patch get the restricted standard library", "[script][sandbox]") {
+    const role caller = GENERATE(role::kObserve, role::kPatch);
+    CAPTURE(caller);
+    output_capture out;
+    sandbox box = make_box(out, caller);
+    REQUIRE(box.caller_role() == caller);
+
+    const auto scratch = box.exec<std::string>(kRestrictedStdlibProbe);
+    REQUIRE(scratch.has_value());
+    CHECK(*scratch == "");
+
+    // Same view from inside a module.
+    const auto mod = box.load("tests.stdlib", std::string{"function probe() "} + std::string{kRestrictedStdlibProbe} + " end");
+    REQUIRE(mod.has_value());
+    const auto values = box.call(*mod, "probe");
+    REQUIRE(values.has_value());
+    REQUIRE(values->size() == 1);
+    REQUIRE((*values)[0] == Rhp::value{""});
+}
+
+TEST_CASE("admin gets the full standard library", "[script][sandbox]") {
+    output_capture out;
+    sandbox box = make_box(out, role::kAdmin);
+    const auto problems = box.exec<std::string>(kFullStdlibProbe);
+    REQUIRE(problems.has_value());
+    CHECK(*problems == "");
+}
+
+TEST_CASE("load accepts text only, for every role", "[script][sandbox]") {
+    SECTION("binary chunks are refused even for admin and mode b") {
+        output_capture out;
+        sandbox box = make_box(out, role::kAdmin);
+        const auto refused = box.exec(R"lua(
+            local bytecode = string.dump(function() return 1 end)
+            local f1, msg1 = load(bytecode)
+            local f2, msg2 = load(bytecode, "chunk", "b")
+            local f3, msg3 = load(bytecode, "chunk", "bt")
+            return f1 == nil and f2 == nil and f3 == nil, type(msg1), type(msg2), type(msg3)
+        )lua");
+        REQUIRE(refused.has_value());
+        REQUIRE(refused->size() == 4);
+        CHECK((*refused)[0] == Rhp::value{true});
+        CHECK((*refused)[1] == Rhp::value{"string"});
+        CHECK((*refused)[2] == Rhp::value{"string"});
+        CHECK((*refused)[3] == Rhp::value{"string"});
+    }
+
+    SECTION("text chunks run in the calling module's environment") {
+        const role caller = GENERATE(role::kObserve, role::kPatch, role::kAdmin);
+        CAPTURE(caller);
+        output_capture out;
+        sandbox box = make_box(out, caller);
+        REQUIRE(box.exec<int>("return load('return 1')()") == 1);
+
+        REQUIRE(box.exec("y = 7"));
+        REQUIRE(box.exec<int>("return load('return y')()") == 7);
+
+        const auto mod = box.load("tests.loader", R"lua(
+            z = 3
+            load("w = z + 1")()
+            function get() return load("return w")() end
+        )lua");
+        REQUIRE(mod.has_value());
+        const auto values = box.call(*mod, "get");
+        REQUIRE(values.has_value());
+        REQUIRE(values->size() == 1);
+        CHECK((*values)[0] == Rhp::value{4});
+        // The scratch module never saw the module's globals.
+        CHECK(is_nil_result(box.exec<std::optional<int>>("return w")));
+    }
+}
+
+TEST_CASE("each module has its own environment", "[script][sandbox]") {
+    output_capture out;
+    sandbox box = make_box(out);
+
+    const auto a = box.load("tests.env.a", R"lua(
+        shared = "a"
+        function get() return shared end
+        function own_g() return _G == _ENV and _G.shared == "a" end
+    )lua");
+    const auto b = box.load("tests.env.b", "function get() return shared end");
+    REQUIRE(a.has_value());
+    REQUIRE(b.has_value());
+    REQUIRE(*a != *b);
+
+    const auto from_a = box.call(*a, "get");
+    REQUIRE(from_a.has_value());
+    REQUIRE(from_a->size() == 1);
+    CHECK((*from_a)[0] == Rhp::value{"a"});
+
+    const auto from_b = box.call(*b, "get");
+    REQUIRE(from_b.has_value());
+    CHECK((from_b->empty() || (*from_b)[0].is_nil()));
+
+    const auto own_g = box.call(*a, "own_g");
+    REQUIRE(own_g.has_value());
+    REQUIRE(own_g->size() == 1);
+    CHECK((*own_g)[0] == Rhp::value{true});
+
+    // Scratch globals persist across exec calls but stay out of modules.
+    REQUIRE(box.exec("x = 5"));
+    REQUIRE(box.exec<int>("return x") == 5);
+    CHECK(is_nil_result(box.exec<std::optional<std::string>>("return shared")));
+    const auto x_in_b = box.load("tests.env.c", "function get() return x end");
+    REQUIRE(x_in_b.has_value());
+    const auto x_value = box.call(*x_in_b, "get");
+    REQUIRE(x_value.has_value());
+    CHECK((x_value->empty() || (*x_value)[0].is_nil()));
+}
+
+TEST_CASE("print goes to the output callback", "[script][sandbox]") {
+    output_capture out;
+    sandbox box = make_box(out);
+    REQUIRE(box.exec("print('a', 1)"));
+    REQUIRE(box.exec("print('single')"));
+    REQUIRE(box.exec("print(nil, true, 2.5)"));
+    REQUIRE(box.exec("print()"));
+    REQUIRE(out.lines.size() == 4);
+    CHECK(out.lines[0] == "a\t1");
+    CHECK(out.lines[1] == "single");
+    CHECK(out.lines[2] == "nil\ttrue\t2.5");
+    CHECK(out.lines[3] == "");
+}
+
+TEST_CASE("exec returns values and reports errors", "[script][sandbox]") {
+    output_capture out;
+    sandbox box = make_counter_box(out);
+
+    SECTION("every returned value") {
+        const auto values = box.exec("return 1, 'a'");
+        REQUIRE(values.has_value());
+        REQUIRE(values->size() == 2);
+        CHECK((*values)[0] == Rhp::value{1});
+        CHECK((*values)[1] == Rhp::value{"a"});
+
+        const auto none = box.exec("local unused = 1");
+        REQUIRE(none.has_value());
+        CHECK(none->empty());
+
+        const auto table = box.exec("return { 1, 2, 3 }");
+        REQUIRE(table.has_value());
+        REQUIRE(table->size() == 1);
+        CHECK(box.exec<std::vector<int>>("return { 1, 2, 3 }") == std::vector<int>{1, 2, 3});
+        CHECK(box.exec<double>("return 0.5") == 0.5);
+        CHECK(box.exec<std::string>("return 'x' .. 1") == "x1");
+    }
+
+    SECTION("compile error") {
+        const auto bad = box.exec("return +");
+        REQUIRE_FALSE(bad.has_value());
+        CHECK(bad.error().code == errc::kCompile);
+    }
+
+    SECTION("runtime error has a traceback") {
+        const auto bad = box.exec("local function inner() error('boom') end\ninner()");
+        REQUIRE_FALSE(bad.has_value());
+        CHECK(bad.error().code == errc::kRuntime);
+        CHECK(contains(bad.error().message, "boom"));
+        CHECK_FALSE(bad.error().traceback.empty());
+    }
+
+    SECTION("a failing run reverts only its own effects") {
+        REQUIRE(box.exec("counter.value = 1"));
+        REQUIRE(fx::g_counter == 1);
+
+        const auto bad = box.exec("counter.value = 2\ncounter.value = 3\nerror('nope')");
+        REQUIRE_FALSE(bad.has_value());
+        CHECK(bad.error().code == errc::kRuntime);
+        CHECK(fx::g_counter == 1);
+
+        const auto scratch = box.status(box.scratch_module());
+        REQUIRE(scratch.has_value());
+        CHECK(scratch->scratch);
+        CHECK(scratch->effects == 1);
+        CHECK(scratch->state == module_state::kActive);
+
+        // The sandbox keeps working.
+        REQUIRE(box.exec("counter.value = counter.value + 10"));
+        CHECK(fx::g_counter == 11);
+    }
+}
+
+TEST_CASE("install exposes a lib once", "[script][sandbox]") {
+    output_capture out;
+    sandbox box = make_counter_box(out);
+    CHECK(box.exec<std::string>("return type(counter)") == "userdata");
+
+    const auto again = box.install<fx::counter_lib>();
+    REQUIRE_FALSE(again.has_value());
+    CHECK(again.error().code == errc::kAlreadyLoaded);
+
+    // A standard library global is taken too.
+    const auto clash = box.install<Rhp::lib<"string">>();
+    REQUIRE_FALSE(clash.has_value());
+    CHECK(clash.error().code == errc::kAlreadyLoaded);
+    CHECK(box.exec<std::string>("return string.rep('a', 2)") == "aa");
+}
+
+TEST_CASE("load validates names and runs the chunk", "[script][sandbox]") {
+    output_capture out;
+    sandbox box = make_counter_box(out);
+
+    SECTION("invalid names") {
+        for (const std::string_view name : {"Bad", "a..b", "", ".a", "a.", "a b", "a-b"}) {
+            CAPTURE(name);
+            const auto bad = box.load(name, "return {}");
+            REQUIRE_FALSE(bad.has_value());
+            CHECK(bad.error().code == errc::kInvalidArgument);
+        }
+        CHECK(box.list().size() == 1);
+    }
+
+    SECTION("duplicate names") {
+        REQUIRE(box.load("tests.dup", "return {}"));
+        const auto again = box.load("tests.dup", "return {}");
+        REQUIRE_FALSE(again.has_value());
+        CHECK(again.error().code == errc::kAlreadyLoaded);
+    }
+
+    SECTION("compile error registers nothing") {
+        const auto bad = box.load("tests.broken", "function (");
+        REQUIRE_FALSE(bad.has_value());
+        CHECK(bad.error().code == errc::kCompile);
+        const auto found = box.find("tests.broken");
+        REQUIRE_FALSE(found.has_value());
+        CHECK(found.error().code == errc::kNotFound);
+        // The name is still free.
+        CHECK(box.load("tests.broken", "return {}").has_value());
+    }
+
+    SECTION("runtime error faults the module and reverts its effects") {
+        const auto bad = box.load("low_grav", "counter.value = 5\nerror('boom')");
+        REQUIRE_FALSE(bad.has_value());
+        CHECK(bad.error().code == errc::kRuntime);
+        CHECK(contains(describe(bad.error()), "low_grav:2"));
+        CHECK(fx::g_counter == 0);
+
+        const auto found = box.find("low_grav");
+        REQUIRE(found.has_value());
+        const auto info = box.status(*found);
+        REQUIRE(info.has_value());
+        CHECK(info->name == "low_grav");
+        CHECK(info->state == module_state::kFaulted);
+        CHECK(info->effects == 0);
+        CHECK_FALSE(info->scratch);
+        REQUIRE(info->fault.has_value());
+        CHECK(info->fault->code == errc::kRuntime);
+
+        // A faulted module can't be called.
+        const auto call = box.call(*found, "anything");
+        REQUIRE_FALSE(call.has_value());
+        CHECK(call.error().code == errc::kInvalidArgument);
+    }
+
+    SECTION("on_load from the returned table") {
+        const auto mod = box.load("tests.onload.table", R"lua(
+            local M = {}
+            function M.on_load() print("loaded table") end
+            return M
+        )lua");
+        REQUIRE(mod.has_value());
+        REQUIRE(out.lines == std::vector<std::string>{"loaded table"});
+    }
+
+    SECTION("on_load as a global when nothing is returned") {
+        const auto mod = box.load("tests.onload.global", "function on_load() print('loaded global') end");
+        REQUIRE(mod.has_value());
+        REQUIRE(out.lines == std::vector<std::string>{"loaded global"});
+    }
+
+    SECTION("successful load is listed and active") {
+        const auto mod = box.load("tests.ok", "counter.value = 3");
+        REQUIRE(mod.has_value());
+        CHECK(fx::g_counter == 3);
+        REQUIRE(box.find("tests.ok") == *mod);
+        const auto info = box.status(*mod);
+        REQUIRE(info.has_value());
+        CHECK(info->id == *mod);
+        CHECK(info->state == module_state::kActive);
+        CHECK(info->effects == 1);
+        CHECK_FALSE(info->fault.has_value());
+        CHECK(box.list().size() == 2);
+    }
+}
+
+TEST_CASE("call runs exported functions", "[script][sandbox]") {
+    output_capture out;
+    sandbox box = make_counter_box(out);
+    const auto mod = box.load("tests.calls", R"lua(
+        local M = {}
+        function M.add(a, b) return a + b end
+        function M.pair() return 1, "two" end
+        function M.nothing() end
+        function M.fail() counter.value = 9 error("call failed") end
+        M.not_a_function = 3
+        return M
+    )lua");
+    REQUIRE(mod.has_value());
+
+    SECTION("arguments and results") {
+        const auto sum = box.call(*mod, "add", 2, 3);
+        REQUIRE(sum.has_value());
+        REQUIRE(sum->size() == 1);
+        CHECK((*sum)[0] == Rhp::value{5});
+
+        const Rhp::value args[] = {Rhp::value{1.5}, Rhp::value{2}};
+        const auto spanned = box.call(*mod, "add", std::span<const Rhp::value>{args});
+        REQUIRE(spanned.has_value());
+        CHECK((*spanned)[0] == Rhp::value{3.5});
+
+        const auto pair = box.call(*mod, "pair");
+        REQUIRE(pair.has_value());
+        REQUIRE(pair->size() == 2);
+        CHECK((*pair)[1] == Rhp::value{"two"});
+
+        const auto nothing = box.call(*mod, "nothing");
+        REQUIRE(nothing.has_value());
+        CHECK(nothing->empty());
+    }
+
+    SECTION("unknown function and module") {
+        const auto missing = box.call(*mod, "missing");
+        REQUIRE_FALSE(missing.has_value());
+        CHECK(missing.error().code == errc::kNotFound);
+
+        const auto ghost = box.call(Rhp::module_id{987654}, "add", 1, 2);
+        REQUIRE_FALSE(ghost.has_value());
+        CHECK(ghost.error().code == errc::kNotFound);
+    }
+
+    SECTION("inactive module") {
+        REQUIRE(box.revert(*mod));
+        const auto reverted = box.call(*mod, "add", 1, 2);
+        REQUIRE_FALSE(reverted.has_value());
+        CHECK(reverted.error().code == errc::kInvalidArgument);
+    }
+
+    SECTION("runtime error faults the module") {
+        const auto failed = box.call(*mod, "fail");
+        REQUIRE_FALSE(failed.has_value());
+        CHECK(failed.error().code == errc::kRuntime);
+        CHECK(contains(describe(failed.error()), "call failed"));
+        CHECK(fx::g_counter == 0);
+        const auto info = box.status(*mod);
+        REQUIRE(info.has_value());
+        CHECK(info->state == module_state::kFaulted);
+        CHECK(info->effects == 0);
+        REQUIRE(info->fault.has_value());
+    }
+}
+
+TEST_CASE("revert and unload", "[script][sandbox]") {
+    output_capture out;
+    sandbox box = make_counter_box(out);
+    fx::g_counter = 42;
+    const auto mod = box.load("tests.revert", R"lua(
+        counter.value = 1
+        counter.value = 2
+        function on_unload() print("bye") end
+    )lua");
+    REQUIRE(mod.has_value());
+    REQUIRE(fx::g_counter == 2);
+    REQUIRE(box.status(*mod)->effects == 2);
+
+    SECTION("revert") {
+        const auto report = box.revert(*mod);
+        REQUIRE(report.has_value());
+        CHECK(report->undone == 2);
+        CHECK(report->irreversible == 0);
+        CHECK(report->clean());
+        CHECK(fx::g_counter == 42);
+        const auto info = box.status(*mod);
+        REQUIRE(info.has_value());
+        CHECK(info->state == module_state::kReverted);
+        CHECK(info->effects == 0);
+        CHECK(box.find("tests.revert") == *mod);
+
+        // Reverting again undoes nothing.
+        const auto again = box.revert(*mod);
+        REQUIRE(again.has_value());
+        CHECK(again->undone == 0);
+    }
+
+    SECTION("unload") {
+        const auto report = box.unload(*mod);
+        REQUIRE(report.has_value());
+        CHECK(report->undone == 2);
+        CHECK(fx::g_counter == 42);
+        CHECK(out.lines == std::vector<std::string>{"bye"});
+        const auto found = box.find("tests.revert");
+        REQUIRE_FALSE(found.has_value());
+        CHECK(found.error().code == errc::kNotFound);
+        CHECK_FALSE(box.status(*mod).has_value());
+        // The name can be loaded again.
+        CHECK(box.load("tests.revert", "return {}").has_value());
+    }
+
+    SECTION("unknown ids") {
+        const auto revert = box.revert(Rhp::module_id{987654});
+        REQUIRE_FALSE(revert.has_value());
+        CHECK(revert.error().code == errc::kNotFound);
+        const auto unload = box.unload(Rhp::module_id{987654});
+        REQUIRE_FALSE(unload.has_value());
+        CHECK(unload.error().code == errc::kNotFound);
+        CHECK_FALSE(box.status(Rhp::module_id{987654}).has_value());
+    }
+}
+
+TEST_CASE("checkpoint and revert_to", "[script][sandbox]") {
+    output_capture out;
+    sandbox box = make_counter_box(out);
+
+    SECTION("undoes everything after the mark in any module") {
+        REQUIRE(box.exec("counter.value = 1"));
+        REQUIRE(box.checkpoint("before"));
+        REQUIRE(box.load("tests.cp", "counter.value = 2"));
+        REQUIRE(box.exec("counter.value = 3"));
+        REQUIRE(fx::g_counter == 3);
+
+        const auto report = box.revert_to("before");
+        REQUIRE(report.has_value());
+        CHECK(report->undone == 2);
+        CHECK(fx::g_counter == 1);
+    }
+
+    SECTION("unknown tag") {
+        const auto missing = box.revert_to("never");
+        REQUIRE_FALSE(missing.has_value());
+        CHECK(missing.error().code == errc::kNotFound);
+    }
+
+    SECTION("re-checkpointing moves the tag") {
+        REQUIRE(box.checkpoint("cp"));
+        REQUIRE(box.exec("counter.value = 5"));
+        REQUIRE(box.checkpoint("cp"));
+        REQUIRE(box.exec("counter.value = 6"));
+        REQUIRE(box.revert_to("cp"));
+        CHECK(fx::g_counter == 5);
+    }
+
+    SECTION("later checkpoints are dropped") {
+        REQUIRE(box.checkpoint("first"));
+        REQUIRE(box.exec("counter.value = 1"));
+        REQUIRE(box.checkpoint("second"));
+        REQUIRE(box.exec("counter.value = 2"));
+        REQUIRE(box.revert_to("first"));
+        CHECK(fx::g_counter == 0);
+        const auto second = box.revert_to("second");
+        REQUIRE_FALSE(second.has_value());
+        CHECK(second.error().code == errc::kNotFound);
+    }
+}
+
+TEST_CASE("revert_all unloads every module and reverts scratch", "[script][sandbox]") {
+    output_capture out;
+    sandbox box = make_counter_box(out);
+    fx::g_counter = 7;
+    REQUIRE(box.exec("counter.value = 1"));
+    REQUIRE(box.load("tests.all.a", "counter.value = 2"));
+    REQUIRE(box.load("tests.all.b", "counter.value = 3"));
+    REQUIRE(box.list().size() == 3);
+
+    const auto report = box.revert_all();
+    CHECK(report.undone == 3);
+    CHECK(report.clean());
+    CHECK(fx::g_counter == 7);
+
+    const auto modules = box.list();
+    REQUIRE(modules.size() == 1);
+    CHECK(modules[0].scratch);
+    CHECK(modules[0].id == box.scratch_module());
+    CHECK_FALSE(box.find("tests.all.a").has_value());
+
+    // Still usable.
+    REQUIRE(box.exec("counter.value = 8"));
+    CHECK(fx::g_counter == 8);
+}
+
+TEST_CASE("destroying a sandbox reverts everything", "[script][sandbox]") {
+    output_capture out;
+    {
+        sandbox box = make_counter_box(out);
+        fx::g_counter = 100;
+        REQUIRE(box.exec("counter.value = 1"));
+        REQUIRE(box.load("tests.dtor", "counter.value = 2"));
+        REQUIRE(fx::g_counter == 2);
+    }
+    CHECK(fx::g_counter == 100);
+}
+
+TEST_CASE("a moved sandbox keeps working", "[script][sandbox]") {
+    output_capture out;
+    sandbox first = make_counter_box(out);
+    REQUIRE(first.exec("x = 1\ncounter.value = 1"));
+
+    sandbox second{std::move(first)};
+    CHECK(second.exec<int>("return x") == 1);
+    REQUIRE(second.exec("print('moved')"));
+    CHECK(out.lines == std::vector<std::string>{"moved"});
+
+    sandbox third = make_box(out);
+    third = std::move(second);
+    CHECK(third.exec<int>("return x + counter.value") == 2);
+    CHECK(fx::g_counter == 1);
+
+    third.revert_all();
+    CHECK(fx::g_counter == 0);
+}
+
+TEST_CASE("sandbox memory accounting", "[script][sandbox]") {
+    SECTION("memory_used is non-zero") {
+        output_capture out;
+        sandbox box = make_box(out);
+        const std::size_t before = box.memory_used();
+        CHECK(before > 0);
+        REQUIRE(box.exec("big = string.rep('x', 100000)"));
+        CHECK(box.memory_used() > before);
+    }
+
+    SECTION("a custom memory resource sees the allocations") {
+        counting_resource resource;
+        {
+            sandbox_options options;
+            options.memory = &resource;
+            sandbox box{std::move(options)};
+            CHECK(resource.allocations() > 0);
+            const std::size_t before = resource.allocations();
+            REQUIRE(box.exec("t = {} for i = 1, 100 do t[i] = tostring(i) end"));
+            CHECK(resource.allocations() > before);
+            CHECK(resource.live_bytes() > 0);
+        }
+        CHECK(resource.live_bytes() == 0);
+    }
+}
