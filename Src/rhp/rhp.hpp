@@ -44,6 +44,11 @@
 #include <rhp/security/keyring.hpp>
 #include <rhp/security/psk_keyring.hpp>
 #include <rhp/security/signer.hpp>
+#include <rhp/security/tls/auto_backend.hpp>
+#include <rhp/security/tls/mbedtls.hpp>
+#include <rhp/security/tls/openssl.hpp>
+#include <rhp/security/tls/tls.hpp>
+#include <rhp/session/secure_link.hpp>
 #include <rhp/session/session.hpp>
 #include <rhp/utils/byte_buffer.hpp>
 #include <rhp/utils/crc32c.hpp>
