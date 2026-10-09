@@ -242,7 +242,7 @@ std::string format_values(const std::vector<Rhp::value>& values) {
     return out;
 }
 
-std::vector<std::string> split_words(std::string_view line) {
+std::vector<std::string> split_words(std::string_view line, bool keep_quotes) {
     std::vector<std::string> words;
     std::size_t i = 0;
     while (i < line.size()) {
@@ -255,6 +255,9 @@ std::vector<std::string> split_words(std::string_view line) {
         std::string word;
         if (line[i] == '"') {
             ++i;
+            if (keep_quotes) {
+                word += '"';
+            }
             while (i < line.size() && line[i] != '"') {
                 // Only \" is an escape: Windows paths keep their backslashes.
                 if (line[i] == '\\' && i + 1 < line.size() && line[i + 1] == '"') {
@@ -263,6 +266,9 @@ std::vector<std::string> split_words(std::string_view line) {
                 word += line[i++];
             }
             ++i; // closing quote
+            if (keep_quotes) {
+                word += '"';
+            }
         } else {
             while (i < line.size() && std::isspace(static_cast<unsigned char>(line[i])) == 0) {
                 word += line[i++];

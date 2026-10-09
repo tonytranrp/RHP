@@ -6,7 +6,7 @@ The REPL and scripting client for RHP hosts. Every script it sends is signed wit
 rhp-cli keygen dev
 ```
 
-Writes `dev.rhpid` (name, PSK, signing key — keep it private) and prints the two lines the host needs: one for its keyring file (`dev admin <psk>`) and one for its trusted-signers file (`dev <public key>`). `pubkey -i dev.rhpid --role patch` prints them again.
+Writes `dev.rhpid` (name, PSK, signing key; owner-only on POSIX — keep it private) and prints the two lines the host needs: one for its keyring file (`dev admin <psk>`) and one for its trusted-signers file (`dev <public key>`). `pubkey -i dev.rhpid --role patch` prints them again.
 
 ```bash
 rhp-cli connect 127.0.0.1:7777 -i dev.rhpid
@@ -38,7 +38,7 @@ rhp> watch scripts
 | `blob <sink> <file> [name]` | push a file to a host blob sink |
 | `watch <folder>` / `unwatch` | reload `<folder>/*.lua` whenever one is saved |
 
-Tab completes commands, lib names and functions (from the host's stubs) and loaded modules. Ctrl+C cancels the running script on the host. History lives in `~/.rhp/history`. When stdin is not a terminal, `connect` reads one command per line (scripted sessions).
+Tab completes commands, lib names and functions (from the host's stubs) and loaded modules. Ctrl+C cancels the running script on the host; at a `...>` prompt it drops the unfinished Lua. History lives in `~/.rhp/history`. When stdin is not a terminal, `connect` reads one command per line (scripted sessions); unfinished Lua at the end of the input is an error. `call` arguments in double quotes stay strings (`"42"`), bare ones are parsed (`42`).
 
 | Subcommand | What |
 |---|---|
