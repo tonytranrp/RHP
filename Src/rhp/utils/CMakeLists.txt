@@ -1,0 +1,14 @@
+rhp_add_module(utils
+    HEADERS
+        byte_buffer.hpp
+        crc32c.hpp
+        fixed_string.hpp
+        function_traits.hpp
+        overloaded.hpp
+        scope_guard.hpp
+        spsc_ring.hpp
+        type_list.hpp
+        units.hpp
+    SOURCES
+        crc32c.cpp
+)
