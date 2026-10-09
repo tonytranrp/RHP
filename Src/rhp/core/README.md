@@ -11,6 +11,7 @@ Types every other module speaks. Namespace `Rhp` (logger concept and loggers in 
 | `convert.hpp` | `Rhp::convert<T>` customization point, `to_value` / `from_value`, built-ins for scalars, strings, `vector`, `optional`, `map` |
 | `ids.hpp` | `strong_id<Tag>`: `module_id`, `request_id`, `session_id`, `identity_id`, `revision_id`; `id_generator` |
 | `log.hpp` | `log_level`, `Rhp::core::logger` concept, `null_logger`, `stderr_logger`, `Rhp::log(...)` |
+| `role.hpp` | `Rhp::role` (`kObserve` < `kPatch` < `kAdmin`), `Rhp::allows(have, need)` |
 | `limits.hpp` | `Rhp::limits` — structural, usable as `config<>::limits<Rhp::limits{...}>` |
 
 ## Rules

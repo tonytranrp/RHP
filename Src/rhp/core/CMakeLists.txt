@@ -7,6 +7,7 @@ rhp_add_module(core
         limits.hpp
         log.hpp
         result.hpp
+        role.hpp
         value.hpp
     SOURCES
         log.cpp

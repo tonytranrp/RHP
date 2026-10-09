@@ -2,7 +2,7 @@ include_guard(GLOBAL)
 
 # Every third-party pin lives in this file. Stages add their dependencies here, never inline.
 #   Stage 0: Catch2 (tests only)
-#   Stage 1: Lua 5.5          Stage 3: Asio, msgpack-c
+#   Stage 1: Lua 5.5.1        Stage 3: Asio, msgpack-c
 #   Stage 4: Monocypher, replxx, CLI11
 #   Stage 5: OpenSSL / mbedTLS
 
@@ -15,4 +15,15 @@ if(RHP_BUILD_TESTS)
         SYSTEM YES
     )
     list(APPEND CMAKE_MODULE_PATH "${Catch2_SOURCE_DIR}/extras")
+endif()
+
+# Lua is only needed for the live engine; RHP_ENABLE=OFF builds never fetch or link it.
+if(RHP_ENABLE)
+    CPMAddPackage(
+        NAME lua
+        GITHUB_REPOSITORY lua/lua
+        GIT_TAG v5.5.1
+        DOWNLOAD_ONLY YES
+    )
+    include(RhpLua)
 endif()
