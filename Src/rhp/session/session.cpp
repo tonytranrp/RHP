@@ -1,6 +1,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <format>
 #include <memory>
 #include <string>
@@ -26,6 +27,8 @@ namespace Rhp::session {
 namespace {
 
 constexpr int kMaxBadMagic = 3;
+// Before the handshake the peer is anonymous: its frames may only be this big.
+constexpr std::uint32_t kHandshakeMaxFrame = 16u * 1024u;
 
 [[nodiscard]] std::chrono::milliseconds ms(std::uint32_t n) noexcept {
     return std::chrono::milliseconds{n};
@@ -43,7 +46,7 @@ session::session(net::io_context& io, std::unique_ptr<net::link> link, std::uniq
       host_side_(true),
       id_(id),
       peer_(link_->peer()),
-      decoder_(opts_.limits.max_frame),
+      decoder_(kHandshakeMaxFrame < opts_.limits.max_frame ? kHandshakeMaxFrame : opts_.limits.max_frame),
       handshake_timer_(io),
       heartbeat_timer_(io) {}
 
@@ -55,7 +58,7 @@ session::session(net::io_context& io, std::unique_ptr<net::link> link, std::uniq
       opts_(std::move(opts)),
       host_side_(false),
       peer_(link_->peer()),
-      decoder_(opts_.limits.max_frame),
+      decoder_(kHandshakeMaxFrame < opts_.limits.max_frame ? kHandshakeMaxFrame : opts_.limits.max_frame),
       handshake_timer_(io),
       heartbeat_timer_(io) {}
 
@@ -92,6 +95,21 @@ void session::start() {
 // ---- receiving ----------------------------------------------------------------------------------------
 
 void session::on_bytes(utils::bytes_view data) {
+    // An exception (out of memory decoding what a peer sent, a handler that threw) ends this
+    // session, not the network thread every other session shares.
+    try {
+        receive(data);
+    } catch (const std::exception& e) {
+        try {
+            shutdown(make_error(errc::kLimitExceeded, std::format("receiving failed: {}", e.what()), peer_));
+        } catch (...) { // can't even build the error: the link still closes below
+            closed_ = true;
+            link_->close();
+        }
+    }
+}
+
+void session::receive(utils::bytes_view data) {
     if (closed_) {
         return;
     }
@@ -150,6 +168,14 @@ void session::handle(const wire::frame_view& frame) {
     }
     if (wire::has(frame.header.flags, wire::frame_flag::kAckRequested)) {
         ack_sent_ = 0; // forces an ack at the end of this read
+    }
+    if (!wire::is_sequenced(code)) {
+        // Control frames carry their own counter in `seq`: a replayed one (say, a captured nack
+        // that would make us resend the whole window) is dropped.
+        if (frame.header.seq <= control_in_) {
+            return;
+        }
+        control_in_ = frame.header.seq;
     }
     if (!wire::is_sequenced(code) || frame.header.seq == 0) {
         switch (code) {
@@ -319,6 +345,7 @@ void session::client_handshake_step(const wire::frame_view& frame) {
 
 void session::become_ready() {
     state_ = state::kReady;
+    decoder_.set_max_payload(opts_.limits.max_frame);
     handshake_timer_.cancel();
     handshake_ = std::unique_ptr<security::host_handshake>{}; // secrets of the handshake go now
     if (opts_.limits.heartbeat_ms != 0) {
@@ -357,7 +384,7 @@ result<void> session::write(wire::op code, std::uint64_t seq, utils::bytes_view 
         return ok;
     }
     ack_sent_ = header.ack;
-    if (seq != 0) {
+    if (seq != 0 && wire::is_sequenced(code)) {
         unacked_bytes_ += bytes.size();
         unacked_.push_back({seq, bytes});
         if (unacked_bytes_ > opts_.max_unacked_bytes) {
@@ -398,7 +425,8 @@ result<void> session::send(wire::op code, const value& body) {
 
 void session::write_control(wire::op code, std::uint64_t ack_value) {
     (void)ack_value; // the header's ack is always expected_ - 1
-    (void)write(code, 0, {}, state_ == state::kReady);
+    const bool sealed = state_ == state::kReady;
+    (void)write(code, sealed ? ++control_out_ : 0, {}, sealed);
 }
 
 void session::acknowledge(std::uint64_t ack) {

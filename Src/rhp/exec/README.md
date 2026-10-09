@@ -11,3 +11,4 @@ Threading and time policies. Namespace `Rhp::exec`. Header-only.
 
 - This layer knows nothing about sockets or Lua: an `io_runner` runs whatever body it is given (the host hands it the network loop).
 - `owned_io_thread` is what makes `cancel` a real escape hatch: the network keeps reading while `pump()` is stuck in a script. With `zero_threads` a stuck script also stops the network.
+- A `zero_threads` client runs its network only inside calls and `client::poll()`: poll at least once per heartbeat (2 s) while idle, or the host drops the session.

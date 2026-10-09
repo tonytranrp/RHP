@@ -12,7 +12,8 @@ namespace Rhp::wire {
 
 // Bounds a decoder enforces on untrusted input (the frame length already bounds the total size).
 struct decode_limits {
-    std::size_t max_depth = 100; // nested arrays / maps
+    std::size_t max_depth = 100;         // nested arrays / maps
+    std::size_t max_elements = 1u << 20; // values in total (array items, map keys and values)
 };
 
 // Payload codec policy for Rhp::config<>::codec<...>: Rhp::value <-> bytes.

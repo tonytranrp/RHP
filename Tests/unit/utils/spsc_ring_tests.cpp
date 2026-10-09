@@ -50,6 +50,25 @@ TEST_CASE("spsc_ring holds move-only types and destroys leftovers", "[utils][sps
     REQUIRE(**out == "frame");
 }
 
+TEST_CASE("spsc_ring: a push into a full ring leaves the value with the caller", "[utils][spsc_ring]") {
+    spsc_ring<std::unique_ptr<std::string>> ring{2};
+    REQUIRE(ring.try_push(std::make_unique<std::string>("a")));
+    REQUIRE(ring.try_push(std::make_unique<std::string>("b")));
+    auto kept = std::make_unique<std::string>("kept");
+    REQUIRE_FALSE(ring.try_push(std::move(kept)));
+    REQUIRE(kept != nullptr); // not moved from: the caller can retry later
+    REQUIRE(*kept == "kept");
+    REQUIRE_FALSE(ring.try_emplace(std::move(kept)));
+    REQUIRE(kept != nullptr);
+
+    spsc_ring<std::string> strings{2};
+    std::string text = "a long string that would be moved out of a by-value parameter";
+    REQUIRE(strings.try_push(text));
+    REQUIRE(strings.try_push(text)); // copies
+    REQUIRE_FALSE(strings.try_push(std::move(text)));
+    REQUIRE(text == "a long string that would be moved out of a by-value parameter");
+}
+
 TEST_CASE("spsc_ring transfers every item in order across threads", "[utils][spsc_ring]") {
     constexpr std::size_t kCount = 200'000;
     spsc_ring<std::size_t> ring{64};

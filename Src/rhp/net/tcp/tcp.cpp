@@ -107,7 +107,8 @@ struct link_state : std::enable_shared_from_this<link_state> {
         std::error_code ignored;
         socket.shutdown(atcp::socket::shutdown_both, ignored);
         socket.close(ignored);
-        writes.clear();
+        // `writes` is kept: an async_write in flight may still read its front buffer (the state
+        // lives until that completion runs, and frees it then).
         asio::post(socket.get_executor(), [self = shared_from_this(), why = std::move(why)] {
             if (link_handler* h = std::exchange(self->handler, nullptr)) {
                 h->on_closed(why);
@@ -127,11 +128,17 @@ public:
 
     ~tcp_link() override {
         state_->handler = nullptr;
-        if (!state_->closed) {
-            state_->closed = true;
-            std::error_code ignored;
-            state_->socket.close(ignored);
+        if (state_->closed) {
+            return;
         }
+        if (state_->closing && state_->writing) {
+            // close() asked for the queue to be written first (a session's last error frame):
+            // the pending write completes on the shared state, which closes the socket after it.
+            return;
+        }
+        state_->closed = true;
+        std::error_code ignored;
+        state_->socket.close(ignored);
     }
 
     tcp_link(const tcp_link&) = delete;

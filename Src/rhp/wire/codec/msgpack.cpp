@@ -158,6 +158,9 @@ public:
         if (depth > limits_.max_depth) {
             return fail(errc::kLimitExceeded, std::format("value nested deeper than {} levels", limits_.max_depth), where());
         }
+        if (++elements_ > limits_.max_elements) {
+            return fail(errc::kLimitExceeded, std::format("more than {} values", limits_.max_elements), where());
+        }
         auto tag = byte();
         if (!tag) {
             return std::unexpected{std::move(tag).error()};
@@ -304,7 +307,9 @@ private:
             return truncated();
         }
         value::array a;
-        a.reserve(n);
+        // Reserve only a little up front: counts are claims, and every nesting level would
+        // otherwise reserve against the same remaining bytes.
+        a.reserve(n < kReserveCap ? n : kReserveCap);
         for (std::size_t i = 0; i < n; ++i) {
             auto item = read(depth + 1);
             if (!item) {
@@ -320,7 +325,7 @@ private:
             return truncated();
         }
         value::map m;
-        m.reserve(n);
+        m.reserve(n < kReserveCap ? n : kReserveCap);
         for (std::size_t i = 0; i < n; ++i) {
             auto key = read(depth + 1);
             if (!key) {
@@ -337,9 +342,12 @@ private:
 
     [[nodiscard]] std::unexpected<error> truncated() const { return fail(errc::kProtocol, "truncated MessagePack data", where()); }
 
+    static constexpr std::size_t kReserveCap = 256;
+
     utils::bytes_view in_;
     const decode_limits& limits_;
     std::size_t at_ = 0;
+    std::size_t elements_ = 0;
 };
 
 } // namespace

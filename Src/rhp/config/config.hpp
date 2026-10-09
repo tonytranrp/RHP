@@ -98,7 +98,7 @@ using get_or_t = typename get_or<S, Default, Settings...>::type;
 //       ::auth     <Rhp::security::psk_keyring>// Rhp::security::authenticator  default psk_keyring
 //       ::executor <Rhp::exec::pumped>         // Rhp::exec::executor       default pumped
 //       ::io       <Rhp::exec::owned_io_thread>// Rhp::exec::io_runner      default owned_io_thread
-//       ::limits   <Rhp::limits{}>             // value                     default unlimited
+//       ::limits   <Rhp::limits{}>             // value                     default Rhp::limits{} (no script limits)
 //       ::errors   <Rhp::errors::expected>     // Rhp::errors::mode         default expected
 //       ::clock    <Rhp::exec::steady_clock>   // Rhp::exec::clock_source   default steady_clock
 //       ::logger   <Rhp::core::stderr_logger>; // Rhp::core::logger         default stderr_logger

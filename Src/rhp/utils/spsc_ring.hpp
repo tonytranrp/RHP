@@ -62,8 +62,15 @@ public:
         return true;
     }
 
-    [[nodiscard]] bool try_push(T value) noexcept(std::is_nothrow_move_constructible_v<T>) {
+    // Moves (or copies) `value` in only when there is room: a full ring leaves it untouched.
+    [[nodiscard]] bool try_push(T&& value) noexcept(std::is_nothrow_move_constructible_v<T>) {
         return try_emplace(std::move(value));
+    }
+
+    [[nodiscard]] bool try_push(const T& value) noexcept(std::is_nothrow_copy_constructible_v<T>)
+        requires std::copy_constructible<T>
+    {
+        return try_emplace(value);
     }
 
     [[nodiscard]] std::optional<T> try_pop() noexcept(std::is_nothrow_move_constructible_v<T>) {

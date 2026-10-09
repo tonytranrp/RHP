@@ -312,6 +312,16 @@ TEST_CASE("session: garbage and other protocol revisions are refused", "[session
         REQUIRE(poll_until({&io}, [&] { return raw_events.received.size() >= Rhp::wire::kHeaderSize; }));
         CHECK(header_of(raw_events.received).code == op::kError);
     }
+    SECTION("a frame too big for an anonymous peer") {
+        Rhp::wire::frame_header h;
+        h.code = op::kHello;
+        const std::string big(20'000, 'x');
+        Rhp::utils::byte_buffer b;
+        REQUIRE(Rhp::wire::encode_frame(h, Rhp::utils::as_bytes(big), b, nullptr, 1u << 20));
+        raw->send(std::move(b));
+        REQUIRE(poll_until({&io}, [&] { return host_events.closed; }));
+        CHECK(host_events.why.code == errc::kLimitExceeded);
+    }
     SECTION("not RHP at all") {
         raw->send(rhp_test::buffer_of("GET / HTTP/1.1\r\nHost: x\r\n\r\n"));
         REQUIRE(poll_until({&io}, [&] { return host_events.closed; }));

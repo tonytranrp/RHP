@@ -610,3 +610,94 @@ TEST_CASE("host: a reply too large to cache refuses its retry instead of running
     REQUIRE(c.wait_replies(3));
     CHECK(c.replies[2].body == value{value::array{value{1}}});
 }
+
+TEST_CASE("host: a full inbox or outbox loses nothing", "[integration][host]") {
+    keys k;
+    const auto at = Rhp::endpoint::listen("itest.rings", 1);
+    running_host<loopback_cfg> host{at, k, Rhp::host_options{.inbox_capacity = 2}};
+    inbox seen;
+    Rhp::client<loopback_cfg> c{host.dial_at(at), k.as_patch(), seen.options()};
+    // 300 prints and a result go through a 2-slot outbox in one pump().
+    auto r = c.exec("for i = 1, 300 do print('line ' .. i) end return 1, 2, 3");
+    REQUIRE(r);
+    CHECK(*r == Rhp::value_list{value{1}, value{2}, value{3}});
+    REQUIRE(eventually([&] { return seen.has_line("line 300"); }));
+    {
+        const std::scoped_lock lock{seen.mutex};
+        REQUIRE(seen.lines.size() == 300);
+        for (std::size_t i = 0; i < seen.lines.size(); ++i) {
+            CHECK(seen.lines[i].second == "line " + std::to_string(i + 1));
+        }
+    }
+    // Many requests at once through a 2-slot inbox.
+    std::vector<std::jthread> callers;
+    std::atomic<int> ok{0};
+    for (int i = 0; i < 8; ++i) {
+        callers.emplace_back([&c, &ok, i] {
+            if (c.exec<int>("return " + std::to_string(i)) == i) {
+                ++ok;
+            }
+        });
+    }
+    callers.clear();
+    CHECK(ok.load() == 8);
+}
+
+TEST_CASE("host: a request whose session closed before it ran never runs", "[integration][cancel]") {
+    keys k;
+    const auto at = Rhp::endpoint::listen("itest.dead_start", 1);
+    running_host<loopback_cfg> host{at, k};
+    {
+        raw_client c{host.dial_at(at), k.as_patch()};
+        c.exec(1, 0, "while true do end");
+        c.s->close(Rhp::make_error(errc::kCancelled, "gone"));
+        rhp_test::poll_for({&c.io}, 20ms); // let the close go out
+    }
+    // The pump thread is free: a new client is served.
+    Rhp::client<loopback_cfg> next{host.dial_at(at), k.as_admin()};
+    CHECK(next.exec<int>("return 5") == 5);
+    CHECK(eventually([&] { return host->identities() == 1; }));
+}
+
+TEST_CASE("host+client: cancel reaches a loop whenever it lands", "[integration][cancel]") {
+    keys k;
+    const auto at = Rhp::endpoint::listen("itest.cancel_storm", 1);
+    running_host<loopback_cfg> host{at, k};
+    Rhp::client<loopback_cfg> c{host.dial_at(at), k.as_patch()};
+    REQUIRE(c.connect());
+    for (int round = 0; round < 20; ++round) {
+        std::atomic<bool> done{false};
+        std::optional<Rhp::result<Rhp::value_list>> r;
+        std::jthread caller{[&] {
+            r = c.exec("while true do end");
+            done = true;
+        }};
+        // Cancel early and keep cancelling: some land before the request starts, some while it runs.
+        while (!done) {
+            c.cancel();
+            std::this_thread::sleep_for(std::chrono::microseconds{100 + 700 * (round % 3)});
+        }
+        caller.join();
+        REQUIRE(r.has_value());
+        REQUIRE_FALSE(*r);
+        CHECK(r->error().code == errc::kCancelled);
+    }
+    CHECK(c.exec<int>("return 1") == 1);
+}
+
+TEST_CASE("host+client: an idle zero_threads client stays connected while it polls", "[integration][threads]") {
+    using fast_cfg = loopback_cfg::io<Rhp::exec::zero_threads>::limits<Rhp::limits{.heartbeat_ms = 30, .heartbeat_misses = 3}>;
+    using fast_host_cfg = loopback_cfg::limits<Rhp::limits{.heartbeat_ms = 30, .heartbeat_misses = 3}>;
+    keys k;
+    const auto at = Rhp::endpoint::listen("itest.zero_idle", 1);
+    running_host<fast_host_cfg> host{at, k};
+    Rhp::client<fast_cfg> c{host.dial_at(at), k.as_patch()};
+    REQUIRE(c.exec("x = 42"));
+    const auto until = std::chrono::steady_clock::now() + 400ms; // > 10 heartbeats
+    while (std::chrono::steady_clock::now() < until) {
+        c.poll();
+        std::this_thread::sleep_for(5ms);
+    }
+    CHECK(c.exec<int>("return x") == 42);
+    CHECK(c.connected());
+}

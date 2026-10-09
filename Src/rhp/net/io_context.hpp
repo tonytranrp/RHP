@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <stop_token>
 
 namespace Rhp::net {
@@ -21,6 +22,20 @@ public:
 
     // Thread-safe: runs `fn` on the thread running the context (FIFO with other posts).
     void post(std::function<void()> fn);
+
+    // Posts from other threads that may outlive this context (cross-thread transports): post()
+    // returns false once the context has started to shut down, instead of touching it.
+    class poster {
+    public:
+        bool post(std::function<void()> fn);
+
+    private:
+        friend class io_context;
+        std::mutex mutex_;
+        io_context* io_ = nullptr;
+    };
+
+    [[nodiscard]] std::shared_ptr<poster> shared_poster() const noexcept { return poster_; }
 
     // Runs ready handlers without blocking; returns how many ran.
     std::size_t poll();
@@ -53,6 +68,7 @@ public:
 private:
     struct impl;
     std::unique_ptr<impl> impl_;
+    std::shared_ptr<poster> poster_;
 };
 
 } // namespace Rhp::net

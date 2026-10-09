@@ -1,9 +1,11 @@
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
 #include <format>
 #include <functional>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -37,38 +39,77 @@ namespace Rhp::host_detail {
 
 namespace {
 
+// What one session asked to stop. Cancels are recorded, not only forwarded to the sandbox, so one
+// that lands before its request starts, just before the sandbox's run scope opens, or just after
+// the request suspends still takes effect.
+struct session_cancels {
+    bool dead = false;            // the session ended: none of its requests may run
+    std::uint64_t upto = 0;       // cancel-all: every request that arrived at or before this one
+    std::set<std::uint64_t> reqs; // single cancels, by the client's request id
+};
+
 // Shared by the network thread and the pump thread for one identity: the only way the network
 // reaches a sandbox (cancel, which is thread-safe on the sandbox). `box` is cleared, under the
 // mutex, before the sandbox is destroyed.
 struct cancel_relay {
+    struct suspended_request {
+        request_id id;
+        std::uint64_t arrival = 0;
+    };
+
     std::mutex mutex;
     script::sandbox* box = nullptr;
-    session_id running_session; // the network request inside a sandbox call right now
+    // The network request inside a sandbox call right now.
+    session_id running_session;
     std::uint64_t running_req = 0;
-    std::map<std::pair<std::uint64_t, std::uint64_t>, request_id> suspended; // (session, req) → sandbox request
+    std::uint64_t running_arrival = 0;
+    std::map<std::pair<std::uint64_t, std::uint64_t>, suspended_request> suspended; // (session, req) → sandbox request
+    std::map<std::uint64_t, session_cancels> cancels;                               // by session
 
-    // Under the mutex. target 0 = everything of `session`.
-    void cancel(session_id session, std::uint64_t target) noexcept {
-        if (box == nullptr) {
-            return;
-        }
-        if (running_session == session && (target == 0 || running_req == target)) {
-            box->cancel();
-        }
-        for (const auto& [key, id] : suspended) {
-            if (key.first == session.value() && (target == 0 || key.second == target)) {
-                box->cancel(id);
-            }
-        }
+    // Everything below: under the mutex.
+    [[nodiscard]] bool covers(session_id session, std::uint64_t req, std::uint64_t arrival) const {
+        const auto it = cancels.find(session.value());
+        return it != cancels.end() && (it->second.dead || arrival <= it->second.upto || it->second.reqs.contains(req));
     }
 
-    void cancel_all() noexcept {
+    [[nodiscard]] bool dead(session_id session) const {
+        const auto it = cancels.find(session.value());
+        return it != cancels.end() && it->second.dead;
+    }
+
+    // Records a cancel from the network; target 0 = everything `session` sent up to `arrival`.
+    void cancel(session_id session, std::uint64_t target, std::uint64_t arrival) {
+        session_cancels& c = cancels[session.value()];
+        if (target == 0) {
+            c.upto = arrival > c.upto ? arrival : c.upto;
+        } else {
+            c.reqs.insert(target);
+        }
+        enforce(true);
+    }
+
+    // The session ended: whatever it still has running, suspended or queued is stopped.
+    void end(session_id session) {
+        cancels[session.value()].dead = true;
+        enforce(true);
+    }
+
+    // Stops the running request when a recorded cancel covers it, and (with `suspended_too`) every
+    // covered suspended request. The network thread repeats the first part on a timer: a cancel()
+    // that lands before the sandbox's outermost run scope opens is cleared by it.
+    void enforce(bool suspended_too) noexcept {
         if (box == nullptr) {
             return;
         }
-        box->cancel();
-        for (const auto& [key, id] : suspended) {
-            box->cancel(id);
+        if (running_session && covers(running_session, running_req, running_arrival)) {
+            box->cancel();
+        }
+        if (suspended_too) {
+            for (const auto& [key, req] : suspended) {
+                if (covers(session_id{key.first}, key.second, req.arrival)) {
+                    box->cancel(req.id);
+                }
+            }
         }
     }
 };
@@ -88,8 +129,8 @@ struct inbound {
     std::shared_ptr<cancel_relay> relay;
     wire::op code = wire::op::kExec;
     std::uint64_t req = 0;
+    std::uint64_t arrival = 0; // per-session order in which the network received requests
     value body;
-    bool cancelled = false; // a later cancel in the same batch covers it
 };
 
 // Pump thread → network thread.
@@ -151,6 +192,10 @@ struct outbound {
 } // namespace
 
 class engine final : private session::handler {
+    static constexpr std::size_t kMaxInFlight = 4096;  // requests with an idempotency key, per session
+    static constexpr std::size_t kMaxBacklog = 65'536; // requests held back while pump() is behind
+    static constexpr std::chrono::milliseconds kEnforceInterval{20};
+
 public:
     explicit engine(setup s)
         : setup_(std::move(s)),
@@ -170,11 +215,13 @@ public:
             return;
         }
         listener_ = std::move(*listener);
+        enforce_cancels();
         log(log_level::kInfo, std::format("host listening on {} over {} (port {})", setup_.ep, setup_.transport.name, listener_->port()));
     }
 
     // The network is stopped (or never ran on another thread) when this runs.
     ~engine() {
+        enforce_timer_.cancel();
         listener_.reset();
         sessions_.clear(); // aborts the links: no callbacks after this
         for (auto& [name, id] : identities_) {
@@ -276,6 +323,7 @@ private:
         std::map<std::uint64_t, idem_entry> idem;
         std::deque<std::uint64_t> idem_done; // completed keys, oldest first (evicted past the cache budgets)
         std::size_t idem_bytes = 0;          // approx_size of every completed body kept
+        std::uint64_t arrivals = 0;          // requests received so far
     };
 
     struct io_identity {
@@ -342,10 +390,18 @@ private:
             s.close(std::move(env).error());
             return;
         }
+        const std::uint64_t arrival = ++rec.arrivals;
         if (code == wire::op::kCancel) {
-            cancel_from_network(s, env->body);
+            // Applied here, through the relay: never queued for pump() (which may be stuck in the
+            // very script it stops) and never answered, so its idempotency key is ignored.
+            cancel_from_network(s, env->body, arrival);
+            return;
         }
         if (env->idem != 0 && env->req != 0) {
+            if (rec.req_idem.contains(env->req)) {
+                s.close(make_error(errc::kProtocol, std::format("request id {} is already in flight", env->req), "host"));
+                return;
+            }
             if (const auto found = rec.idem.find(env->idem); found != rec.idem.end()) {
                 idem_entry& entry = found->second;
                 if (entry.done) {
@@ -357,6 +413,10 @@ private:
                 }
                 return;
             }
+            if (rec.req_idem.size() >= kMaxInFlight) {
+                s.close(make_error(errc::kLimitExceeded, std::format("more than {} requests in flight", kMaxInFlight), "host"));
+                return;
+            }
             rec.idem[env->idem].reqs.push_back(env->req);
             rec.req_idem[env->req] = env->idem;
         }
@@ -365,8 +425,11 @@ private:
         in.session = s.id();
         in.code = code;
         in.req = env->req;
+        in.arrival = arrival;
         in.body = std::move(env->body);
-        to_pump(std::move(in));
+        if (!to_pump(std::move(in))) {
+            s.close(make_error(errc::kLimitExceeded, "the host is not keeping up with this session's requests", "host"));
+        }
     }
 
     void on_closed(session::session& s, const error& why) override {
@@ -380,13 +443,18 @@ private:
         if (was_ready) {
             log(log_level::kInfo, std::format("session {} ({}) ended: {}", id, identity, why));
             ready_sessions_.fetch_sub(1, std::memory_order_acq_rel);
-            if (auto ident = io_identities_.find(identity); ident != io_identities_.end() && --ident->second.sessions == 0) {
-                // The identity's last session: stop whatever it runs now; pump() reverts the rest.
+            if (auto ident = io_identities_.find(identity); ident != io_identities_.end()) {
+                // Nobody is left to answer: stop what this session runs, has suspended or queued.
                 {
                     const std::scoped_lock lock{ident->second.relay->mutex};
-                    ident->second.relay->cancel_all();
+                    ident->second.relay->end(id);
                 }
-                io_identities_.erase(ident);
+                if (--ident->second.sessions == 0) {
+                    // The identity's last session; pump() reverts the rest. Its relay stays on the
+                    // enforce timer until pump() has destroyed the sandbox.
+                    orphans_.push_back(ident->second.relay);
+                    io_identities_.erase(ident);
+                }
             }
             inbound in;
             in.what = inbound::kind::kClosed;
@@ -400,7 +468,7 @@ private:
         sessions_.erase(it); // allowed inside on_closed
     }
 
-    void cancel_from_network(session::session& s, const value& body) {
+    void cancel_from_network(session::session& s, const value& body, std::uint64_t arrival) {
         auto request = Rhp::from_value<wire::cancel_request>(body);
         if (!request) {
             return;
@@ -410,15 +478,35 @@ private:
             return;
         }
         const std::scoped_lock lock{ident->second.relay->mutex};
-        ident->second.relay->cancel(s.id(), request->target);
+        ident->second.relay->cancel(s.id(), request->target, arrival);
     }
 
-    void to_pump(inbound in) {
+    // Re-applies recorded cancels to whatever runs inside pump() right now (see enforce()).
+    void enforce_cancels() {
+        for (auto& [name, ident] : io_identities_) {
+            const std::scoped_lock lock{ident.relay->mutex};
+            ident.relay->enforce(false);
+        }
+        std::erase_if(orphans_, [](const std::shared_ptr<cancel_relay>& relay) {
+            const std::scoped_lock lock{relay->mutex};
+            relay->enforce(false);
+            return relay->box == nullptr;
+        });
+        enforce_timer_.start(kEnforceInterval, [this] { enforce_cancels(); });
+    }
+
+    // False when the backlog is full (the caller drops the session that is flooding it).
+    bool to_pump(inbound in) {
         if (inbox_backlog_.empty() && inbox_.try_push(std::move(in))) {
-            return;
+            return true;
+        }
+        if (inbox_backlog_.size() >= kMaxBacklog && in.what == inbound::kind::kRequest) {
+            return false;
         }
         inbox_backlog_.push_back(std::move(in));
+        inbox_backlog_waiting_.store(true, std::memory_order_release);
         flush_inbox_backlog();
+        return true;
     }
 
     void flush_inbox_backlog() {
@@ -427,6 +515,7 @@ private:
                 return;
             }
             inbox_backlog_.pop_front();
+            inbox_backlog_waiting_.store(!inbox_backlog_.empty(), std::memory_order_release);
         }
     }
 
@@ -488,37 +577,11 @@ private:
     // ---- pump thread: requests ---------------------------------------------------------------------------
 
     void process(std::vector<inbound>& batch) {
-        // A cancel stops requests of its session that were queued before it and haven't started:
-        // walk back from each cancel (requests sent after it are left alone).
-        std::set<std::pair<std::uint64_t, std::uint64_t>> targets;
-        std::set<std::uint64_t> whole_sessions;
-        for (auto it = batch.rbegin(); it != batch.rend(); ++it) {
-            if (it->what != inbound::kind::kRequest) {
-                continue;
-            }
-            if (it->code == wire::op::kCancel) {
-                if (auto c = Rhp::from_value<wire::cancel_request>(it->body)) {
-                    if (c->target == 0) {
-                        whole_sessions.insert(it->session.value());
-                    } else {
-                        targets.emplace(it->session.value(), c->target);
-                    }
-                }
-                continue;
-            }
-            it->cancelled = whole_sessions.contains(it->session.value()) || targets.contains({it->session.value(), it->req});
-        }
         for (inbound& in : batch) {
             switch (in.what) {
             case inbound::kind::kOpened: opened(in); break;
             case inbound::kind::kClosed: closed(in); break;
-            case inbound::kind::kRequest:
-                if (in.cancelled) {
-                    reply_error(in.session, in.req, make_error(errc::kCancelled, "cancelled before it started", std::string{wire::to_string(in.code)}));
-                    break;
-                }
-                request(in);
-                break;
+            case inbound::kind::kRequest: request(in); break;
             }
         }
     }
@@ -558,8 +621,10 @@ private:
         rt.sessions.erase(in.session);
         std::erase_if(rt.waiting, [&](const auto& entry) { return entry.second.session == in.session; });
         {
+            // Every request of this session that was queued before its close has been processed.
             const std::scoped_lock lock{rt.relay->mutex};
             std::erase_if(rt.relay->suspended, [&](const auto& entry) { return entry.first.first == in.session.value(); });
+            rt.relay->cancels.erase(in.session.value());
         }
         if (rt.sessions.empty()) {
             teardown(rt);
@@ -574,6 +639,7 @@ private:
             const std::scoped_lock lock{rt.relay->mutex};
             rt.relay->box = nullptr;
             rt.relay->suspended.clear();
+            rt.relay->cancels.clear();
         }
         const script::revert_report report = rt.box->revert_all();
         rt.box.reset();
@@ -598,14 +664,15 @@ private:
         return o;
     }
 
-    // print / emit: to the request that caused it, else to every session of the identity.
+    // print / emit: to the network request that caused it, else to every session of the identity.
     void route(const std::string& identity, request_id r, wire::op code, value body) {
         const auto it = identities_.find(identity);
         if (it == identities_.end()) {
             return;
         }
         identity_runtime& rt = it->second;
-        if (rt.current_session) {
+        // The operation's own request (an event handler started inside it is a request of its own).
+        if (rt.current_session && r && r == rt.box->last_request()) {
             to_network({rt.current_session, code, rt.current_req, std::move(body)});
             return;
         }
@@ -666,10 +733,10 @@ private:
             outbox_backlog_.pop_front();
             pushed = true;
         }
-        if (pushed || !outbox_backlog_.empty()) {
+        // Wake the network thread only when there is something for it: replies, or requests it is
+        // holding back because the inbox was full (pump() just made room).
+        if (pushed || !outbox_backlog_.empty() || inbox_backlog_waiting_.load(std::memory_order_acquire)) {
             io_.post([this] { drain_outbox(); });
-        } else {
-            io_.post([this] { flush_inbox_backlog(); });
         }
     }
 
@@ -680,16 +747,11 @@ private:
         return box.find(ref.name);
     }
 
-    // Runs one sandbox operation as network request (session, req); a request that suspends is
-    // answered from on_result later.
+    // Runs one sandbox operation as the network request `in`; a request that suspends is answered
+    // from on_result later. request() has already marked it running in the relay.
     template <class Op>
     void run_tracked(identity_runtime& rt, const inbound& in, module_id module, Op&& op) {
         const request_id before = rt.box->last_request();
-        {
-            const std::scoped_lock lock{rt.relay->mutex};
-            rt.relay->running_session = in.session;
-            rt.relay->running_req = in.req;
-        }
         rt.current_session = in.session;
         rt.current_req = in.req;
         auto outcome = op();
@@ -697,12 +759,12 @@ private:
         rt.current_req = 0;
         const request_id after = rt.box->last_request();
         const bool suspended = outcome && after != before && rt.box->pending(after);
-        {
+        if (suspended) {
             const std::scoped_lock lock{rt.relay->mutex};
-            rt.relay->running_session = {};
-            rt.relay->running_req = 0;
-            if (suspended) {
-                rt.relay->suspended[{in.session.value(), in.req}] = after;
+            rt.relay->suspended[{in.session.value(), in.req}] = cancel_relay::suspended_request{after, in.arrival};
+            // A cancel that came while it ran (and found nothing to stop yet) applies now.
+            if (rt.relay->covers(in.session, in.req, in.arrival)) {
+                rt.box->cancel(after);
             }
         }
         if (suspended) {
@@ -715,6 +777,29 @@ private:
         }
         reply(in.session, in.req, std::move(*outcome));
     }
+
+    // Marks a request running in the relay for as long as it lives (any op may run Lua: on_unload,
+    // on_save, a reload's top level).
+    struct running_scope {
+        cancel_relay& relay;
+
+        running_scope(cancel_relay& r, const inbound& in) : relay(r) {
+            const std::scoped_lock lock{relay.mutex};
+            relay.running_session = in.session;
+            relay.running_req = in.req;
+            relay.running_arrival = in.arrival;
+        }
+
+        running_scope(const running_scope&) = delete;
+        running_scope& operator=(const running_scope&) = delete;
+
+        ~running_scope() {
+            const std::scoped_lock lock{relay.mutex};
+            relay.running_session = {};
+            relay.running_req = 0;
+            relay.running_arrival = 0;
+        }
+    };
 
     void request(const inbound& in) {
         const auto ps = pump_sessions_.find(in.session);
@@ -738,6 +823,17 @@ private:
         }
         identity_runtime& rt = it->second;
         script::sandbox& box = *rt.box;
+        {
+            const std::scoped_lock lock{rt.relay->mutex};
+            if (rt.relay->dead(in.session)) {
+                return; // its session ended before it could run: nobody to answer
+            }
+            if (rt.relay->covers(in.session, in.req, in.arrival)) {
+                reply_error(in.session, in.req, make_error(errc::kCancelled, "cancelled before it started", std::string{wire::to_string(in.code)}));
+                return;
+            }
+        }
+        const running_scope running{*rt.relay, in};
 
         const auto bad_request = [&](const error& err) { reply_error(in.session, in.req, err); };
 
@@ -821,7 +917,7 @@ private:
             }
             target = *mod;
             run_tracked(rt, in, target, [&]() -> result<value> {
-                auto r = reload ? box.reload(target, reload->source) : box.rollback(target, static_cast<std::size_t>(rollback->steps));
+                auto r = reload ? box.reload(target, reload->source) : box.rollback(target, rollback->steps > std::numeric_limits<std::size_t>::max() ? std::numeric_limits<std::size_t>::max() : static_cast<std::size_t>(rollback->steps));
                 if (!r) {
                     return std::unexpected{std::move(r).error()};
                 }
@@ -902,7 +998,6 @@ private:
             return reply(in.session, in.req, value{std::move(modules)});
         }
         case wire::op::kDescribe: return reply(in.session, in.req, value{box.stubs()});
-        case wire::op::kCancel: return; // handled on the network thread and in process()
         default:
             return bad_request(make_error(errc::kInvalidArgument, std::format("{} arrives in a later stage", in.code), std::string{wire::to_string(in.code)}));
         }
@@ -934,6 +1029,9 @@ private:
     std::size_t pending_handshakes_ = 0;
     std::deque<std::unique_ptr<net::link>> closing_links_;
     std::deque<inbound> inbox_backlog_;
+    std::atomic<bool> inbox_backlog_waiting_{false};     // read by pump() to decide whether to wake us
+    std::vector<std::shared_ptr<cancel_relay>> orphans_; // identities whose last session ended
+    net::io_context::timer enforce_timer_{io_};
     std::atomic<std::size_t> ready_sessions_{0};
 
     // Crossing threads.

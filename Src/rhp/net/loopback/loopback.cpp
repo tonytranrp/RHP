@@ -21,13 +21,16 @@ namespace {
 // One end of an in-memory pipe. `io` and the queue are shared with the other end's thread (under
 // the pipe's mutex); `handler` is only called on this end's io thread.
 struct pipe_end {
-    io_context* io = nullptr; // null once this end's link is gone: nobody posts to it any more
+    std::shared_ptr<io_context::poster> io; // null once this end's link is gone: nobody posts to it any more
     link_handler* handler = nullptr;
     std::deque<utils::byte_buffer> inbox; // bytes the other end sent
     bool scheduled = false;               // a pump of this end is posted
     bool closed = false;                  // this end closed (or is gone)
     bool peer_closed = false;             // the other end closed (or is gone)
 };
+
+// Buffers delivered per turn before pump_end lets the context run other handlers.
+constexpr int kBatch = 64;
 
 struct pipe {
     std::mutex mutex;
@@ -43,18 +46,23 @@ void schedule(const std::shared_ptr<pipe>& p, int me) {
     if (e.scheduled || e.io == nullptr) {
         return;
     }
-    e.scheduled = true;
-    e.io->post([p, me] { pump_end(p, me); });
+    // A context that is shutting down refuses the post; this end is going away with it.
+    e.scheduled = e.io->post([p, me] { pump_end(p, me); });
 }
 
 // On end `me`'s io thread: hand queued bytes to the handler, then report a close.
 void pump_end(const std::shared_ptr<pipe>& p, int me) {
-    for (;;) {
+    for (int delivered = 0;; ++delivered) {
         std::unique_lock lock{p->mutex};
         pipe_end& e = p->ends[me];
         e.scheduled = false;
         link_handler* h = e.handler;
         if (h == nullptr) {
+            return;
+        }
+        if (delivered == kBatch && !e.inbox.empty()) {
+            // A busy peer must not starve this thread's timers and other handlers: yield.
+            schedule(p, me);
             return;
         }
         if (!e.closed && !e.inbox.empty()) {
@@ -87,7 +95,7 @@ public:
         }
         e.closed = true;
         e.handler = nullptr;
-        e.io = nullptr;
+        e.io.reset();
         e.inbox.clear();
     }
 
@@ -136,7 +144,7 @@ private:
 // A listening channel. `io` is cleared when the listener dies, so late dials see it closed.
 struct channel {
     std::mutex mutex;
-    io_context* io = nullptr;
+    std::shared_ptr<io_context::poster> io;
     accept_fn on_accept;
 };
 
@@ -167,7 +175,7 @@ public:
             }
         }
         const std::scoped_lock lock{channel_->mutex};
-        channel_->io = nullptr;
+        channel_->io.reset();
         channel_->on_accept = nullptr;
     }
 
@@ -186,7 +194,7 @@ private:
 result<std::unique_ptr<listener>> loopback::listen(io_context& io, const endpoint& ep, accept_fn on_accept) {
     std::string key = channel_name(ep);
     auto ch = std::make_shared<channel>();
-    ch->io = &io;
+    ch->io = io.shared_poster();
     ch->on_accept = std::move(on_accept);
     auto& r = channels();
     const std::scoped_lock lock{r.mutex};
@@ -214,7 +222,7 @@ void loopback::dial(io_context& io, const endpoint& ep, connect_fn on_connect) {
 
     auto p = std::make_shared<pipe>();
     p->name = key;
-    p->ends[0].io = &io;
+    p->ends[0].io = io.shared_poster();
     // Links travel through std::function (copyable) in shared holders.
     auto dialer = std::make_shared<std::unique_ptr<link>>(std::make_unique<loopback_link>(p, 0));
     auto acceptor = std::make_shared<std::unique_ptr<link>>(std::make_unique<loopback_link>(p, 1));

@@ -167,3 +167,31 @@ TEST_CASE("msgpack: nesting is bounded both ways", "[wire][msgpack]") {
     CHECK(encoded.error().code == errc::kLimitExceeded);
     CHECK(out.size() == 4); // left as it was
 }
+
+TEST_CASE("msgpack: claimed counts can't multiply memory", "[wire][msgpack]") {
+    // 99 nested array32 headers, each claiming every byte that is left, over 64 KiB of nils: before
+    // the fix each level reserved its claim (hundreds of MB); now it is a plain truncation error.
+    std::vector<std::byte> payload;
+    constexpr std::size_t kFill = 64 * 1024;
+    for (int level = 0; level < 99; ++level) {
+        const std::uint32_t left = static_cast<std::uint32_t>(kFill + (98 - level) * 5);
+        payload.push_back(std::byte{0xdd});
+        for (int shift = 24; shift >= 0; shift -= 8) {
+            payload.push_back(static_cast<std::byte>(left >> shift));
+        }
+    }
+    payload.insert(payload.end(), kFill, std::byte{0xc0});
+    auto r = msgpack::decode(payload);
+    REQUIRE_FALSE(r);
+    CHECK(r.error().code == errc::kProtocol);
+}
+
+TEST_CASE("msgpack: the element budget", "[wire][msgpack]") {
+    const value many{value::array(5'000, value{})};
+    Rhp::utils::byte_buffer out;
+    REQUIRE(msgpack::encode(many, out));
+    CHECK(msgpack::decode(out.view()));
+    auto limited = msgpack::decode(out.view(), Rhp::wire::decode_limits{.max_depth = 100, .max_elements = 1'000});
+    REQUIRE_FALSE(limited);
+    CHECK(limited.error().code == errc::kLimitExceeded);
+}

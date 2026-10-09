@@ -20,3 +20,5 @@
 - Reliability: cumulative ack in every header; explicit `ack` frames when nothing else carries it; a nack's ack field is the last good seq and the peer resends everything after it; a heartbeat interval with no ack progress resends the window; duplicates are dropped by seq.
 - Idempotency: per session, keyed by the client's 63-bit `idem`; 256 finished responses kept; a retry in flight waits for the original's result.
 - Not yet: resume tokens, reconnect/backoff (Stage 5), fragmentation (`kMore`, blobs, Stage 4), `CRC_OMITTED` (TLS, Stage 5).
+
+**Stage 3 review fixes:** frames before the handshake are capped at 16 KiB; the MessagePack decoder has a total value budget (`max_elements`, 2^20) and reserves at most 256 slots per container up front; control frames (ping, pong, ack, nack) carry a per-direction counter in `seq` so replays are dropped.

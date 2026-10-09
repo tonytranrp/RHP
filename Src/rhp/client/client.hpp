@@ -43,7 +43,8 @@ using wire::revert_summary;
 //
 // Calls may come from any thread (with the default io<owned_io_thread>); cancel() may be called
 // while another thread waits. With io<zero_threads> the calling thread runs the network itself,
-// so use the client from one thread. Destroying the client ends its session: if it was its
+// so use the client from one thread — and call poll() at least once per heartbeat (2 s by default)
+// while idle, or the host drops the session (and reverts what it did) after heartbeat_misses. Destroying the client ends its session: if it was its
 // identity's last one, the host reverts everything that identity did. Async calls, rhp-cli and
 // signed scripts arrive in Stage 4.
 //
@@ -172,6 +173,14 @@ public:
 
     // LuaLS annotations for everything this identity can use on the host.
     return_t<std::string> describe() { return finish(as<std::string>(raw(wire::op::kDescribe, value{}))); }
+
+    // io<zero_threads>: handles whatever the network has ready (pings, streamed output) without
+    // blocking. Call it from your loop between requests. No-op with an I/O thread.
+    void poll() {
+#if RHP_ENABLE
+        client_detail::poll(*engine_);
+#endif
+    }
 
     [[nodiscard]] bool connected() const { return info().connected; }
     // Who the host says we are, once connected.

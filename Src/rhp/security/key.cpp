@@ -169,6 +169,7 @@ result<key> key::from_env(std::string_view variable) {
         return fail(errc::kNotFound, std::format("environment variable {} is not set", name), "security.key");
     }
     std::string copy{text};
+    secure_wipe(text, length);
     std::free(text);
     auto k = from_base64(copy);
     secure_wipe(copy.data(), copy.size());

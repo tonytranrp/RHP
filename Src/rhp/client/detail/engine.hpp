@@ -66,6 +66,8 @@ void cancel(engine& e) noexcept;
 // Closes the session (the host reverts this identity if it was its last session) and waits briefly
 // for the close to go out.
 void close(engine& e) noexcept;
+// zero_threads: runs whatever the network has ready, without blocking. No-op with an I/O thread.
+void poll(engine& e);
 void run_io(engine& e, std::stop_token stop);
 
 struct session_info {

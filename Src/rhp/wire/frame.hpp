@@ -93,6 +93,9 @@ public:
     void feed(utils::bytes_view data);
     [[nodiscard]] decode_result next();
 
+    // Changes the payload limit for frames not yet decoded (a session raises it after the handshake).
+    void set_max_payload(std::uint32_t max_payload) noexcept { max_payload_ = max_payload; }
+
     [[nodiscard]] std::size_t buffered() const noexcept { return buffer_.size() - read_; }
 
 private:

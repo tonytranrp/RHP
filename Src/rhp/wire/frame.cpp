@@ -17,6 +17,8 @@ namespace Rhp::wire {
 
 namespace {
 
+constexpr std::size_t kKeepCapacity = 256u * 1024u;
+
 template <std::size_t Offset, std::unsigned_integral T>
 void put_field(std::span<std::byte, kHeaderSize> out, T value) noexcept {
     utils::store_le<T>(out.subspan<Offset, sizeof(T)>(), value);
@@ -91,6 +93,10 @@ void frame_decoder::compact() {
     if (read_ >= buffer_.size()) {
         buffer_.clear();
         read_ = 0;
+        // Don't keep a big frame's worth of memory around for every idle connection.
+        if (buffer_.capacity() > kKeepCapacity) {
+            buffer_.shrink_to_fit();
+        }
         return;
     }
     // Move the unread tail down once it is the smaller part, so a large buffer isn't shifted per frame.

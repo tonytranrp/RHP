@@ -27,3 +27,5 @@
 - The one other crossing is a per-identity cancel relay (a mutex and a sandbox pointer cleared before the sandbox dies): the network thread uses it to cancel the request running inside `pump()` — the escape hatch for a runaway loop — and suspended ones, and to stop an identity's scripts when its last session drops.
 - Client: callers block on a condition variable (or poll, with zero_threads); the network thread fills reply slots and calls `on_output` / `on_emit`.
 - Loggers are called from both threads under a mutex.
+
+**Stage 3 review fixes:** `utils::spsc_ring::try_push` now moves its argument only when there is room (by-value pushes destroyed the item a full ring refused). Cancels are recorded in the relay and re-applied from a 20 ms network-thread timer, so none is lost to timing. Cross-thread posts (the loopback transport) go through `net::io_context::poster`, which refuses once the context shuts down. The loopback pump hands over at most 64 buffers per turn. A `zero_threads` client must `poll()` between calls.

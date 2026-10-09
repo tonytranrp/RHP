@@ -63,7 +63,8 @@ protected:
 // Frames: CRC32C on every frame; after the handshake a keyed MAC (the authenticator's per-direction
 // keys) on every frame. Requests and replies are sequenced: cumulative acks, a resend window, a
 // nack (with the last good seq) when a corrupt frame arrives or a gap shows, duplicates dropped.
-// Control frames (ping, pong, ack, nack, session errors) are unsequenced. A ping goes out every
+// Control frames (ping, pong, ack, nack) are not acked or resent; they carry their own counter in
+// `seq`, so a replayed one is dropped. A session error is an unsequenced kError. A ping goes out every
 // heartbeat_ms; heartbeat_misses intervals without any frame from the peer end the session.
 //
 // Not thread-safe: every member is called on the io_context's thread.
@@ -115,6 +116,7 @@ private:
     // net::link_handler
     void on_bytes(utils::bytes_view data) override;
     void on_closed(const error& why) override;
+    void receive(utils::bytes_view data);
 
     void handle(const wire::frame_view& frame);
     void handle_handshake(const wire::frame_view& frame);
@@ -157,11 +159,13 @@ private:
     bool challenged_ = false; // host: hello answered; client: response sent
 
     wire::frame_decoder decoder_;
-    std::uint64_t next_seq_ = 1;   // next sequenced frame we send
-    std::uint64_t expected_ = 1;   // next sequenced frame we deliver
-    std::uint64_t ack_sent_ = 0;   // highest ack we have told the peer
-    std::uint64_t nacked_at_ = 0;  // expected_ when we last nacked (one nack per gap)
-    std::uint64_t peer_acked_ = 0; // highest ack the peer sent us
+    std::uint64_t next_seq_ = 1;    // next sequenced frame we send
+    std::uint64_t expected_ = 1;    // next sequenced frame we deliver
+    std::uint64_t ack_sent_ = 0;    // highest ack we have told the peer
+    std::uint64_t nacked_at_ = 0;   // expected_ when we last nacked (one nack per gap)
+    std::uint64_t peer_acked_ = 0;  // highest ack the peer sent us
+    std::uint64_t control_out_ = 0; // counter of the control frames we send (in their `seq`)
+    std::uint64_t control_in_ = 0;  // highest control counter received
     std::deque<unacked_frame> unacked_;
     std::size_t unacked_bytes_ = 0;
     int bad_magic_strikes_ = 0;

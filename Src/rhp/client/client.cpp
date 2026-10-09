@@ -154,6 +154,12 @@ public:
 
     void run_io(std::stop_token stop) { io_.run(std::move(stop)); }
 
+    void poll() {
+        if (!setup_.io_thread) {
+            io_.poll();
+        }
+    }
+
     [[nodiscard]] session_info info() const {
         const std::scoped_lock lock{mutex_};
         return info_;
@@ -203,6 +209,12 @@ private:
             if (!link) {
                 mark_closed(std::move(link).error());
                 return;
+            }
+            {
+                const std::scoped_lock lock{mutex_};
+                if (closed_) {
+                    return; // close() came first: drop the new link
+                }
             }
             session_ = std::make_unique<session::session>(io_, std::move(*link), setup_.begin_handshake(), static_cast<session::handler&>(*this), options_);
             session_->start();
@@ -328,6 +340,10 @@ void cancel(engine& e) noexcept {
 
 void close(engine& e) noexcept {
     e.close();
+}
+
+void poll(engine& e) {
+    e.poll();
 }
 
 void run_io(engine& e, std::stop_token stop) {

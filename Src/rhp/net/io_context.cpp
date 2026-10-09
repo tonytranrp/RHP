@@ -1,8 +1,10 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <stop_token>
 #include <system_error>
@@ -29,15 +31,30 @@ struct io_context::impl {
     }
 };
 
-io_context::io_context() : impl_(std::make_unique<impl>()) {}
+io_context::io_context() : impl_(std::make_unique<impl>()), poster_(std::make_shared<poster>()) {
+    poster_->io_ = this;
+}
 
 io_context::~io_context() {
+    {
+        const std::scoped_lock lock{poster_->mutex_};
+        poster_->io_ = nullptr;
+    }
     impl_->work.reset();
     impl_->ctx.stop();
 }
 
 void io_context::post(std::function<void()> fn) {
     asio::post(impl_->ctx, std::move(fn));
+}
+
+bool io_context::poster::post(std::function<void()> fn) {
+    const std::scoped_lock lock{mutex_};
+    if (io_ == nullptr) {
+        return false;
+    }
+    io_->post(std::move(fn));
+    return true;
 }
 
 std::size_t io_context::poll() {
@@ -54,7 +71,13 @@ void io_context::run(std::stop_token stop) {
     impl_->ready();
     const std::stop_callback on_stop{stop, [this] { impl_->ctx.stop(); }};
     while (!stop.stop_requested()) {
-        impl_->ctx.run();
+        try {
+            impl_->ctx.run();
+        } catch (const std::exception&) {
+            // A handler threw (sessions catch their own; this is the last line of defence): the
+            // handler is gone, the others keep running.
+            continue;
+        }
         // run() also returns after a stop() that wasn't ours (none today); go on unless asked to stop.
         if (!stop.stop_requested()) {
             impl_->ctx.restart();
