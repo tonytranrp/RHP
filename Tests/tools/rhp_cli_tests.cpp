@@ -309,7 +309,7 @@ TEST_CASE("rhp-cli: watch reloads a saved file", "[cli][shell]") {
     dir.write("live.lua", "s4cli.level = 2 return {}");
     fs::last_write_time(dir.path / "live.lua", fs::file_time_type::clock::now() + 2s); // a coarse clock still sees a change
     CHECK(eventually([&] { return out.has("loaded live #"); }));
-    CHECK(eventually([&] { return g_level == 2; }));
+    CHECK(eventually([&] { return c.exec<int>("return s4cli.level") == 2; })); // through the client: the pump thread owns it
     CHECK(sh.feed("unwatch"));
     CHECK(sh.feed("watch nowhere/at/all"));
     CHECK(out.last().find("is not a folder") != std::string::npos);

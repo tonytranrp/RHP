@@ -274,7 +274,6 @@ TEST_CASE("stage4: the host reports every script / session and revert", "[stage4
     Rhp::client<loop_cfg> intruder{host.dial_at(at), Rhp::security::psk_identity{"admin", k.patch}};
     CHECK(intruder.connect().error().code == errc::kAuth);
     REQUIRE(eventually([&] { return reverted.size() >= 2 && refused.size() == 1 && closed.size() == 3; }));
-    CHECK(g_level == 0);
 
     const auto s = scripts.snapshot();
     CHECK(s[0].op == "exec");
@@ -300,6 +299,7 @@ TEST_CASE("stage4: the host reports every script / session and revert", "[stage4
     s1.reset();
     Rhp::client<loop_cfg> again{host.dial_at(at), k.as("patch"), k.dev()};
     REQUIRE(again.exec("return 3"));
+    CHECK(again.exec<int>("return s4.level") == 0); // the patch identity's write was reverted
     std::this_thread::sleep_for(20ms);
     CHECK(scripts.size() == 3);
 
@@ -400,8 +400,10 @@ TEST_CASE("stage4: a pinned module outlives its identity's sessions", "[stage4][
     // The admin left: the pinned module and its effect stay, the rest is gone.
     REQUIRE(eventually([&] { return host->sessions() == 0; }));
     std::this_thread::sleep_for(20ms);
-    CHECK(g_level == 5);
     CHECK(host->identities() == 1);
+    // Game state is read through a client (the pump thread owns it).
+    Rhp::client<loop_cfg> viewer{host.dial_at(at), k.as("observe")};
+    CHECK(viewer.exec<int>("return s4.level") == 5);
     {
         Rhp::client<loop_cfg> admin{host.dial_at(at), k.as("admin"), k.dev()};
         auto modules = admin.list();
@@ -418,7 +420,7 @@ TEST_CASE("stage4: a pinned module outlives its identity's sessions", "[stage4][
         REQUIRE(admin.unpin("kept.mod"));
     }
     // Unpinned: the next disconnect reverts it like anything else.
-    REQUIRE(eventually([&] { return g_level == 0 && host->identities() == 0; }));
+    REQUIRE(eventually([&] { return viewer.exec<int>("return s4.level") == 0 && host->identities() == 1; })); // the viewer's own
 }
 
 TEST_CASE("stage4: revert_all unloads pinned modules and closes sessionless identities", "[stage4][pin]") {
@@ -432,12 +434,12 @@ TEST_CASE("stage4: revert_all unloads pinned modules and closes sessionless iden
         REQUIRE(admin.pin("kept.mod"));
     }
     REQUIRE(eventually([&] { return host->sessions() == 0; }));
-    CHECK(g_level == 8);
     Rhp::client<loop_cfg> other{host.dial_at(at), k.as("admin2"), k.dev()};
+    CHECK(other.exec<int>("return s4.level") == 8);
     auto all = other.revert_all();
     REQUIRE(all);
     CHECK(all->undone >= 1);
-    CHECK(g_level == 0);
+    CHECK(other.exec<int>("return s4.level") == 0);
     CHECK(eventually([&] { return host->identities() == 1; })); // admin2's own
 }
 
