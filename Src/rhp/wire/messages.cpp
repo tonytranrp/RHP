@@ -161,6 +161,18 @@ result<welcome> Rhp::convert<welcome>::from_value(const value& v) {
     return welcome{*session, std::move(*identity), *granted, *heartbeat, std::move(*platform)};
 }
 
+value Rhp::convert<resume>::to_value(const resume& m) {
+    return map_builder{}.set("session", m.session).done();
+}
+
+result<resume> Rhp::convert<resume>::from_value(const value& v) {
+    if (!v.is_map()) {
+        return not_a_map("resume", v);
+    }
+    RHP_WIRE_READ(session, field<Rhp::session_id>(v, "session", "resume"));
+    return resume{*session};
+}
+
 // ---- envelope and requests -----------------------------------------------------------------------
 
 value Rhp::convert<envelope>::to_value(const envelope& m) {

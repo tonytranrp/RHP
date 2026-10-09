@@ -134,6 +134,7 @@ public:
         }
     }
 
+    [[nodiscard]] bool loopback() const noexcept override { return true; }
     [[nodiscard]] std::string peer() const override { return std::format("loopback:{}", pipe_->name); }
 
 private:

@@ -34,6 +34,14 @@ using atcp = asio::ip::tcp;
     return *static_cast<asio::io_context*>(io.native_handle());
 }
 
+[[nodiscard]] bool is_loopback(const asio::ip::address& a) noexcept {
+    if (a.is_v4()) {
+        return a.to_v4().is_loopback();
+    }
+    const auto v6 = a.to_v6();
+    return v6.is_loopback() || (v6.is_v4_mapped() && asio::ip::make_address_v4(asio::ip::v4_mapped, v6).is_loopback());
+}
+
 [[nodiscard]] std::string describe(const atcp::endpoint& ep) {
     const auto addr = ep.address();
     return addr.is_v6() ? std::format("[{}]:{}", addr.to_string(), ep.port()) : std::format("{}:{}", addr.to_string(), ep.port());
@@ -124,6 +132,7 @@ public:
         state_->socket.set_option(atcp::no_delay{true}, ec);
         const auto remote = state_->socket.remote_endpoint(ec);
         state_->peer = ec ? std::string{"tcp:?"} : describe(remote);
+        loopback_ = !ec && is_loopback(remote.address());
     }
 
     ~tcp_link() override {
@@ -175,24 +184,18 @@ public:
     }
 
     [[nodiscard]] std::string peer() const override { return state_->peer; }
+    [[nodiscard]] bool loopback() const noexcept override { return loopback_; }
 
 private:
     std::shared_ptr<link_state> state_;
+    bool loopback_ = false;
 };
 
 // ---- addresses -------------------------------------------------------------------------------------
 
-[[nodiscard]] bool is_loopback(const asio::ip::address& a) noexcept {
-    if (a.is_v4()) {
-        return a.to_v4().is_loopback();
-    }
-    const auto v6 = a.to_v6();
-    return v6.is_loopback() || (v6.is_v4_mapped() && asio::ip::make_address_v4(asio::ip::v4_mapped, v6).is_loopback());
-}
-
 [[nodiscard]] std::unexpected<error> forbidden(const endpoint& ep) {
     return fail(errc::kForbidden,
-                std::format("{} is not a loopback address; without TLS (Stage 5) that needs Rhp::net::insecure_lan on the endpoint", ep.host),
+                std::format("{} is not a loopback address: plain TCP there needs Rhp::net::insecure_lan on the endpoint (hosts and clients add TLS themselves)", ep.host),
                 "net.tcp");
 }
 
@@ -290,7 +293,7 @@ result<std::unique_ptr<listener>> tcp::listen(io_context& io, const endpoint& ep
     // Bind the first address the rules allow.
     const atcp::endpoint* chosen = nullptr;
     for (const auto& a : *addresses) {
-        if (ep.insecure_lan || is_loopback(a.address())) {
+        if (ep.insecure_lan || ep.tls == tls_mode::kRequire || is_loopback(a.address())) {
             chosen = &a;
             break;
         }
@@ -333,7 +336,7 @@ void tcp::dial(io_context& io, const endpoint& ep, connect_fn on_connect) {
                                       }
                                       std::vector<atcp::endpoint> allowed;
                                       for (const auto& entry : found) {
-                                          if (state->target.insecure_lan || is_loopback(entry.endpoint().address())) {
+                                          if (state->target.insecure_lan || state->target.tls == tls_mode::kRequire || is_loopback(entry.endpoint().address())) {
                                               allowed.push_back(entry.endpoint());
                                           }
                                       }

@@ -29,6 +29,9 @@ struct psk_identity {
 //   client → response  {proof = MAC(psk, "rhp/client" ‖ T)}                  (after checking the host's proof)
 //   frame keys: MAC(psk, "rhp/c2h" ‖ T) and MAC(psk, "rhp/h2c" ‖ T), 32 bytes each
 //
+// Under TLS, T also ends with the connection's channel binding (tls-exporter): both ends of one
+// TLS connection share it, a relay with two TLS connections has two, so its proofs never match.
+//
 // Every frame after the handshake carries a 32-byte keyed-BLAKE2b MAC under its direction's key.
 class psk_keyring {
 public:

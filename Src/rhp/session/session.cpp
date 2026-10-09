@@ -29,6 +29,8 @@ namespace {
 constexpr int kMaxBadMagic = 3;
 // Before the handshake the peer is anonymous: its frames may only be this big.
 constexpr std::uint32_t kHandshakeMaxFrame = 16u * 1024u;
+// Replaced links kept around (they may still be inside a callback when replaced).
+constexpr std::size_t kMaxRetired = 4;
 
 [[nodiscard]] std::chrono::milliseconds ms(std::uint32_t n) noexcept {
     return std::chrono::milliseconds{n};
@@ -36,9 +38,26 @@ constexpr std::uint32_t kHandshakeMaxFrame = 16u * 1024u;
 
 } // namespace
 
+struct session::link_port final : net::link_handler {
+    session* owner = nullptr;
+
+    void on_bytes(utils::bytes_view data) override {
+        if (owner != nullptr) {
+            owner->on_bytes(data);
+        }
+    }
+
+    void on_closed(const error& why) override {
+        if (owner != nullptr) {
+            owner->on_link_closed(why);
+        }
+    }
+};
+
 session::session(net::io_context& io, std::unique_ptr<net::link> link, std::unique_ptr<security::host_handshake> handshake, handler& h, options opts,
                  session_id id)
     : io_(io),
+      port_(std::make_unique<link_port>()),
       link_(std::move(link)),
       handshake_(std::move(handshake)),
       handler_(h),
@@ -48,10 +67,14 @@ session::session(net::io_context& io, std::unique_ptr<net::link> link, std::uniq
       peer_(link_->peer()),
       decoder_(kHandshakeMaxFrame < opts_.limits.max_frame ? kHandshakeMaxFrame : opts_.limits.max_frame),
       handshake_timer_(io),
-      heartbeat_timer_(io) {}
+      heartbeat_timer_(io),
+      resume_timer_(io) {
+    port_->owner = this;
+}
 
 session::session(net::io_context& io, std::unique_ptr<net::link> link, std::unique_ptr<security::client_handshake> handshake, handler& h, options opts)
     : io_(io),
+      port_(std::make_unique<link_port>()),
       link_(std::move(link)),
       handshake_(std::move(handshake)),
       handler_(h),
@@ -60,23 +83,31 @@ session::session(net::io_context& io, std::unique_ptr<net::link> link, std::uniq
       peer_(link_->peer()),
       decoder_(kHandshakeMaxFrame < opts_.limits.max_frame ? kHandshakeMaxFrame : opts_.limits.max_frame),
       handshake_timer_(io),
-      heartbeat_timer_(io) {}
+      heartbeat_timer_(io),
+      resume_timer_(io) {
+    port_->owner = this;
+}
 
 session::~session() {
     *alive_ = false;
     handshake_timer_.cancel();
     heartbeat_timer_.cancel();
+    resume_timer_.cancel();
     link_.reset(); // aborts: no callbacks after this
+    retired_.clear();
 }
 
 void session::start() {
-    link_->start(*this);
+    link_->start(*port_);
     if (opts_.limits.handshake_timeout_ms != 0) {
         handshake_timer_.start(ms(opts_.limits.handshake_timeout_ms), [this] {
             if (state_ == state::kHandshaking) {
                 fail_with(make_error(errc::kTimeout, std::format("no handshake within {} ms", opts_.limits.handshake_timeout_ms), peer_));
             }
         });
+    }
+    if (host_side_ && opts_.speaks_first) {
+        (void)write(wire::op::kPing, 0, {}, false);
     }
     if (!host_side_) {
         auto& hs = std::get<std::unique_ptr<security::client_handshake>>(handshake_);
@@ -104,7 +135,9 @@ void session::on_bytes(utils::bytes_view data) {
             shutdown(make_error(errc::kLimitExceeded, std::format("receiving failed: {}", e.what()), peer_));
         } catch (...) { // can't even build the error: the link still closes below
             closed_ = true;
-            link_->close();
+            if (link_ != nullptr) {
+                link_->close();
+            }
         }
     }
 }
@@ -145,13 +178,46 @@ void session::receive(utils::bytes_view data) {
     }
 }
 
-void session::on_closed(const error& why) {
-    shutdown(why.code == errc::kOk ? make_error(errc::kTransport, "the link closed", peer_) : why);
+void session::on_link_closed(const error& why) {
+    if (closed_) {
+        return;
+    }
+    const error lost = why.code == errc::kOk ? make_error(errc::kTransport, "the link closed", peer_) : why;
+    if (state_ == state::kDetached) {
+        // The link a resume was tried on failed too: the dialing side tries again.
+        resuming_ = false;
+        retire_link();
+        io_.post([this, alive = std::weak_ptr<bool>{alive_}, lost] {
+            if (const auto still = alive.lock(); still != nullptr && *still && state_ == state::kDetached) {
+                handler_.on_detached(*this, lost);
+            }
+        });
+        return;
+    }
+    if (state_ == state::kReady && opts_.resumable && opts_.limits.resume_ms != 0) {
+        detach(lost);
+        return;
+    }
+    shutdown(lost);
 }
 
 void session::handle(const wire::frame_view& frame) {
     heard_since_tick_ = true;
+    const bool first = !heard_;
+    heard_ = true;
+    if (wire::has(frame.header.flags, wire::frame_flag::kCrcOmitted) && !encrypted()) {
+        fail_with(make_error(errc::kProtocol, "a frame without a CRC on an unencrypted link", peer_));
+        return;
+    }
+    if (state_ == state::kDetached) {
+        handle_resume_reply(frame);
+        return;
+    }
     if (state_ != state::kReady) {
+        if (first && frame.header.code == wire::op::kResume) {
+            request_resume(frame);
+            return;
+        }
         handle_handshake(frame);
         return;
     }
@@ -179,7 +245,7 @@ void session::handle(const wire::frame_view& frame) {
     }
     if (!wire::is_sequenced(code) || frame.header.seq == 0) {
         switch (code) {
-        case wire::op::kPing: write_control(wire::op::kPong, expected_ - 1); return;
+        case wire::op::kPing: write_control(wire::op::kPong); return;
         case wire::op::kPong:
         case wire::op::kAck: return;
         case wire::op::kNack: resend_after(frame.header.ack); return;
@@ -212,6 +278,9 @@ void session::handle(const wire::frame_view& frame) {
 }
 
 void session::handle_handshake(const wire::frame_view& frame) {
+    if (frame.header.code == wire::op::kPing && frame.header.seq == 0) {
+        return; // a dialing host's opening nudge (options::speaks_first)
+    }
     if (frame.header.code == wire::op::kError) {
         shutdown(peer_error(frame.payload, make_error(errc::kAuth, "the peer refused the handshake", peer_)));
         return;
@@ -242,6 +311,7 @@ void session::host_handshake_step(const wire::frame_view& frame) {
             return;
         }
         peer_platform_ = hello->platform;
+        hs.bind_channel(link_->channel_binding());
         auto auth = hs.challenge(hello->auth);
         if (!auth) {
             fail_with(std::move(auth).error());
@@ -299,6 +369,7 @@ void session::client_handshake_step(const wire::frame_view& frame) {
             return;
         }
         peer_platform_ = challenge->platform;
+        hs.bind_channel(link_->channel_binding());
         auto auth = hs.respond(challenge->auth);
         if (!auth) {
             fail_with(std::move(auth).error());
@@ -348,11 +419,176 @@ void session::become_ready() {
     decoder_.set_max_payload(opts_.limits.max_frame);
     handshake_timer_.cancel();
     handshake_ = std::unique_ptr<security::host_handshake>{}; // secrets of the handshake go now
-    if (opts_.limits.heartbeat_ms != 0) {
-        heartbeat_timer_.start(ms(opts_.limits.heartbeat_ms), [this] { heartbeat(); });
-    }
+    start_heartbeat();
     handler_.on_ready(*this);
 }
+
+// ---- resume -------------------------------------------------------------------------------------------
+
+bool session::sealed_control(const wire::frame_view& frame) const {
+    return incoming_ != nullptr && wire::has(frame.header.flags, wire::frame_flag::kMac) && incoming_->verify(frame.sealed, frame.mac.first<wire::kMacSize>()) &&
+           frame.header.seq > control_in_;
+}
+
+// A fresh connection (no handshake yet) whose first frame asks to continue another session.
+void session::request_resume(const wire::frame_view& frame) {
+    auto body = decode(frame.payload);
+    if (!body) {
+        fail_with(std::move(body).error());
+        return;
+    }
+    auto request = Rhp::from_value<wire::resume>(*body);
+    if (!request) {
+        fail_with(std::move(request).error());
+        return;
+    }
+    session* target = handler_.resume_target(*this, request->session);
+    if (target == nullptr || target == this) {
+        fail_with(make_error(errc::kNotFound, std::format("no session {} to resume", request->session), peer_));
+        return;
+    }
+    if (auto adopted = target->adopt(*this, frame); !adopted) {
+        fail_with(std::move(adopted).error());
+        return;
+    }
+    // The link is the other session's now; this one ends without a word.
+    handed_over_ = true;
+    closed_ = true;
+    state_ = state::kClosed;
+    handshake_timer_.cancel();
+    io_.post([this, alive = std::weak_ptr<bool>{alive_}, id = request->session] {
+        if (const auto still = alive.lock(); still != nullptr && *still) {
+            handler_.on_closed(*this, make_error(errc::kOk, std::format("resumed session {}", id), peer_));
+        }
+    });
+}
+
+// This session takes over `fresh`'s link, if `frame` (its first) is a valid resume request for it.
+result<void> session::adopt(session& fresh, const wire::frame_view& frame) {
+    if (closed_ || !opts_.resumable || (state_ != state::kReady && state_ != state::kDetached) || incoming_ == nullptr) {
+        return fail(errc::kNotFound, std::format("session {} can't be resumed", id_), fresh.peer_);
+    }
+    if (!sealed_control(frame)) {
+        return fail(errc::kAuth, "the resume request failed its MAC check", fresh.peer_);
+    }
+    control_in_ = frame.header.seq;
+    // Not inside any callback of this session's own links: they can go now.
+    retired_.clear();
+    if (link_ != nullptr) {
+        port_->owner = nullptr;
+        link_.reset();
+    }
+    attach(std::move(fresh.link_), std::move(fresh.port_));
+    state_ = state::kReady;
+    resuming_ = false;
+    resume_timer_.cancel();
+    acknowledge(frame.header.ack);
+    utils::byte_buffer payload;
+    if (auto encoded = opts_.codec.encode(Rhp::to_value(wire::resume{id_}), payload); !encoded) {
+        fail_with(std::move(encoded).error());
+        return {};
+    }
+    (void)write_frame(wire::op::kWelcome, ++control_out_, payload.view(), true);
+    resend_after(peer_acked_);
+    ++stats_.resumes;
+    start_heartbeat();
+    handler_.on_resumed(*this);
+    return {};
+}
+
+void session::resume(std::unique_ptr<net::link> link) {
+    if (closed_ || state_ != state::kDetached || link == nullptr) {
+        return; // dropping `link` aborts it
+    }
+    if (link_ != nullptr) {
+        retire_link();
+    }
+    attach(std::move(link), std::make_unique<link_port>());
+    link_->start(*port_);
+    resuming_ = true;
+    utils::byte_buffer payload;
+    if (auto encoded = opts_.codec.encode(Rhp::to_value(wire::resume{id_}), payload); !encoded) {
+        shutdown(std::move(encoded).error());
+        return;
+    }
+    (void)write_frame(wire::op::kResume, ++control_out_, payload.view(), true);
+}
+
+// Detached, dialing side: the answer to our kResume (anything else is a stray handshake frame).
+void session::handle_resume_reply(const wire::frame_view& frame) {
+    if (!resuming_) {
+        return;
+    }
+    if (frame.header.code == wire::op::kError) {
+        shutdown(peer_error(frame.payload, make_error(errc::kNotFound, "the peer refused to resume the session", peer_)));
+        return;
+    }
+    if (frame.header.code != wire::op::kWelcome) {
+        return; // e.g. the hello of a reverse-mode client's new connection
+    }
+    if (!sealed_control(frame)) {
+        fail_with(make_error(errc::kAuth, "the resume answer failed its MAC check", peer_));
+        return;
+    }
+    auto body = decode(frame.payload);
+    auto answer = body ? Rhp::from_value<wire::resume>(*body) : result<wire::resume>{std::unexpected{body.error()}};
+    if (!answer || answer->session != id_) {
+        fail_with(make_error(errc::kProtocol, "the resume answer names another session", peer_));
+        return;
+    }
+    control_in_ = frame.header.seq;
+    state_ = state::kReady;
+    resuming_ = false;
+    resume_timer_.cancel();
+    acknowledge(frame.header.ack);
+    resend_after(peer_acked_);
+    ++stats_.resumes;
+    start_heartbeat();
+    handler_.on_resumed(*this);
+}
+
+void session::detach(error why) {
+    state_ = state::kDetached;
+    resuming_ = false;
+    heartbeat_timer_.cancel();
+    retire_link();
+    resume_timer_.start(ms(opts_.limits.resume_ms), [this, why] {
+        if (state_ == state::kDetached && !closed_) {
+            shutdown(make_error(why.code, std::format("{} (not resumed within {} ms)", why.message, opts_.limits.resume_ms), peer_));
+        }
+    });
+    // Posted: the dialing side may dial (and call resume()) right away, outside this link's callback.
+    io_.post([this, alive = std::weak_ptr<bool>{alive_}, why = std::move(why)] {
+        if (const auto still = alive.lock(); still != nullptr && *still && state_ == state::kDetached) {
+            handler_.on_detached(*this, why);
+        }
+    });
+}
+
+void session::retire_link() {
+    if (link_ == nullptr) {
+        return;
+    }
+    port_->owner = nullptr; // its last callbacks go nowhere
+    link_->close();
+    if (retired_.size() >= kMaxRetired) {
+        retired_.erase(retired_.begin());
+    }
+    retired_.push_back(retired_link{std::move(port_), std::move(link_)});
+}
+
+void session::attach(std::unique_ptr<net::link> link, std::unique_ptr<link_port> port) {
+    link_ = std::move(link);
+    port_ = std::move(port);
+    port_->owner = this;
+    peer_ = link_->peer();
+    decoder_ = wire::frame_decoder{opts_.limits.max_frame};
+    heard_since_tick_ = true;
+    misses_ = 0;
+    nacked_at_ = 0;
+}
+
+// ---- decoding helpers ---------------------------------------------------------------------------------
 
 error session::peer_error(utils::bytes_view payload, error fallback) const {
     if (auto body = decode(payload)) {
@@ -373,27 +609,48 @@ result<value> session::decode(utils::bytes_view payload) const {
 
 // ---- sending ------------------------------------------------------------------------------------------
 
-result<void> session::write(wire::op code, std::uint64_t seq, utils::bytes_view payload, bool sealed) {
+result<void> session::write_frame(wire::op code, std::uint64_t seq, utils::bytes_view payload, bool sealed) {
+    if (link_ == nullptr) {
+        return {};
+    }
     wire::frame_header header;
     header.code = code;
     header.seq = seq;
     header.ack = expected_ - 1;
+    if (link_->encrypted()) {
+        header.flags = static_cast<std::uint8_t>(header.flags | static_cast<std::uint8_t>(wire::frame_flag::kCrcOmitted));
+    }
     utils::byte_buffer bytes;
     bytes.reserve(wire::kHeaderSize + payload.size() + wire::kCrcSize + (sealed ? wire::kMacSize : 0));
     if (auto ok = wire::encode_frame(header, payload, bytes, sealed ? outgoing_.get() : nullptr, opts_.limits.max_frame); !ok) {
         return ok;
     }
     ack_sent_ = header.ack;
+    link_->send(std::move(bytes));
+    return {};
+}
+
+result<void> session::write(wire::op code, std::uint64_t seq, utils::bytes_view payload, bool sealed) {
+    if (payload.size() > opts_.limits.max_frame) {
+        return fail(errc::kLimitExceeded, std::format("{} payload of {} bytes exceeds the {}-byte frame limit", code, payload.size(), opts_.limits.max_frame),
+                    "wire.frame");
+    }
     if (seq != 0 && wire::is_sequenced(code)) {
-        unacked_bytes_ += bytes.size();
-        unacked_.push_back({seq, bytes});
+        unacked_frame f;
+        f.seq = seq;
+        f.code = code;
+        f.payload.append(payload);
+        unacked_bytes_ += payload.size() + wire::kHeaderSize;
+        unacked_.push_back(std::move(f));
         if (unacked_bytes_ > opts_.max_unacked_bytes) {
             fail_with(make_error(errc::kLimitExceeded, std::format("the peer left {} bytes unacknowledged", unacked_bytes_), peer_));
             return Rhp::fail(errc::kTransport, "session closed", peer_);
         }
     }
-    link_->send(std::move(bytes));
-    return {};
+    if (state_ == state::kDetached) {
+        return {}; // goes out (from the resend window) once the session resumes
+    }
+    return write_frame(code, seq, payload, sealed);
 }
 
 result<void> session::write_value(wire::op code, const value& body, bool sealed) {
@@ -405,7 +662,7 @@ result<void> session::write_value(wire::op code, const value& body, bool sealed)
 }
 
 result<void> session::send(wire::op code, const value& body) {
-    if (state_ != state::kReady || closed_) {
+    if (!usable() || closed_) {
         return Rhp::fail(errc::kTransport, "the session is not ready", peer_);
     }
     if (!wire::is_sequenced(code)) {
@@ -423,8 +680,7 @@ result<void> session::send(wire::op code, const value& body) {
     return {};
 }
 
-void session::write_control(wire::op code, std::uint64_t ack_value) {
-    (void)ack_value; // the header's ack is always expected_ - 1
+void session::write_control(wire::op code) {
     const bool sealed = state_ == state::kReady;
     (void)write(code, sealed ? ++control_out_ : 0, {}, sealed);
 }
@@ -439,16 +695,20 @@ void session::acknowledge(std::uint64_t ack) {
     }
     peer_acked_ = ack;
     while (!unacked_.empty() && unacked_.front().seq <= ack) {
-        unacked_bytes_ -= unacked_.front().bytes.size();
+        unacked_bytes_ -= unacked_.front().payload.size() + wire::kHeaderSize;
         unacked_.pop_front();
     }
 }
 
 void session::resend_after(std::uint64_t ack) {
     acknowledge(ack);
+    if (state_ != state::kReady) {
+        return;
+    }
     for (const unacked_frame& f : unacked_) {
         if (f.seq > ack) {
-            link_->send(f.bytes);
+            // Encoded again: the ack, and whether the link wants a CRC, may have changed.
+            (void)write_frame(f.code, f.seq, f.payload.view(), true);
             ++stats_.resent;
         }
     }
@@ -456,7 +716,7 @@ void session::resend_after(std::uint64_t ack) {
 
 void session::send_ack_if_due() {
     if (state_ == state::kReady && !closed_ && expected_ - 1 != ack_sent_) {
-        write_control(wire::op::kAck, expected_ - 1);
+        write_control(wire::op::kAck);
     }
 }
 
@@ -466,7 +726,15 @@ void session::send_nack() {
     }
     nacked_at_ = expected_;
     ++stats_.nacks_sent;
-    write_control(wire::op::kNack, expected_ - 1);
+    write_control(wire::op::kNack);
+}
+
+void session::start_heartbeat() {
+    if (opts_.limits.heartbeat_ms != 0) {
+        heard_since_tick_ = true;
+        misses_ = 0;
+        heartbeat_timer_.start(ms(opts_.limits.heartbeat_ms), [this] { heartbeat(); });
+    }
 }
 
 void session::heartbeat() {
@@ -476,7 +744,12 @@ void session::heartbeat() {
     if (heard_since_tick_) {
         misses_ = 0;
     } else if (++misses_ >= opts_.limits.heartbeat_misses && opts_.limits.heartbeat_misses != 0) {
-        fail_with(make_error(errc::kTimeout, std::format("no frame from the peer for {} heartbeats", misses_), peer_));
+        error dead = make_error(errc::kTimeout, std::format("no frame from the peer for {} heartbeats", misses_), peer_);
+        if (opts_.resumable && opts_.limits.resume_ms != 0) {
+            detach(std::move(dead)); // a half-open link: drop it and wait for a new one
+        } else {
+            fail_with(std::move(dead));
+        }
         return;
     }
     heard_since_tick_ = false;
@@ -486,7 +759,7 @@ void session::heartbeat() {
     }
     acked_at_last_tick_ = peer_acked_;
     nacked_at_ = 0; // allow a fresh nack for a gap that is still open
-    write_control(wire::op::kPing, expected_ - 1);
+    write_control(wire::op::kPing);
     if (!closed_) {
         heartbeat_timer_.start(ms(opts_.limits.heartbeat_ms), [this] { heartbeat(); });
     }
@@ -522,9 +795,13 @@ void session::shutdown(error why) {
     }
     closed_ = true;
     state_ = state::kClosed;
+    resuming_ = false;
     handshake_timer_.cancel();
     heartbeat_timer_.cancel();
-    link_->close(); // writes what is queued (the error frame), then closes
+    resume_timer_.cancel();
+    if (link_ != nullptr) {
+        link_->close(); // writes what is queued (the error frame), then closes
+    }
     io_.post([this, alive = std::weak_ptr<bool>{alive_}, why = std::move(why)] {
         if (const auto still = alive.lock(); still != nullptr && *still) {
             handler_.on_closed(*this, why);

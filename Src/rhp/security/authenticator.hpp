@@ -1,7 +1,9 @@
 #pragma once
 
 #include <concepts>
+#include <cstddef>
 #include <memory>
+#include <span>
 #include <string>
 
 #include <rhp/core/result.hpp>
@@ -24,6 +26,11 @@ class host_handshake {
 public:
     virtual ~host_handshake() = default;
 
+    // The connection's channel binding (RFC 9266 tls-exporter under TLS, empty otherwise), given
+    // before challenge(). Mix it into the proofs: a relay that terminates TLS on both sides then
+    // can't pass the handshake. Authenticators that ignore it are open to such relays when the
+    // client doesn't check the host's certificate.
+    virtual void bind_channel(std::span<const std::byte> binding) { (void)binding; }
     // The challenge for the client's hello (the authenticator's part of it). Unknown keys still get
     // a well-formed challenge, so a client can't probe which key names exist.
     [[nodiscard]] virtual result<value> challenge(const value& hello) = 0;
@@ -43,6 +50,8 @@ public:
     virtual ~client_handshake() = default;
 
     [[nodiscard]] virtual result<value> hello() = 0;
+    // The connection's channel binding, given before respond() (see host_handshake::bind_channel).
+    virtual void bind_channel(std::span<const std::byte> binding) { (void)binding; }
     // kAuth if the challenge doesn't prove the host knows the key.
     [[nodiscard]] virtual result<value> respond(const value& challenge) = 0;
     // After respond(): the frame keys (identity and role come from the host's welcome).

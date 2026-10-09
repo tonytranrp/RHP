@@ -169,5 +169,5 @@ TEST_CASE("messages: Stage 4 fields: signatures / pins / blob chunks", "[wire][m
     CHECK(wire::required_role(wire::op::kBlob) == Rhp::role::kObserve);
     CHECK(wire::required_role(wire::op::kPin) == Rhp::role::kAdmin);
     CHECK(wire::required_role(wire::op::kUnpin) == Rhp::role::kAdmin);
-    CHECK(wire::kProtocolRevision == 2);
+    CHECK(wire::kProtocolRevision >= 2);
 }

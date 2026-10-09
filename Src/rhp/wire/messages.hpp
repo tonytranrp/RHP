@@ -47,6 +47,13 @@ struct welcome {
     std::string platform;
 };
 
+// The payload of kResume (dialing side, on a new connection) and of the kWelcome that answers it:
+// which session continues. Both frames are sealed with the session's keys and carry the control
+// counter in `seq`, so a replayed one is refused.
+struct resume {
+    session_id session;
+};
+
 // ---- sequenced frames ---------------------------------------------------------------------------
 
 // The payload of every request and reply: `req` names the client's request (0 = none, e.g. a print
@@ -191,6 +198,7 @@ RHP_WIRE_MESSAGE_CONVERT(Rhp::wire::hello);
 RHP_WIRE_MESSAGE_CONVERT(Rhp::wire::challenge);
 RHP_WIRE_MESSAGE_CONVERT(Rhp::wire::response);
 RHP_WIRE_MESSAGE_CONVERT(Rhp::wire::welcome);
+RHP_WIRE_MESSAGE_CONVERT(Rhp::wire::resume);
 RHP_WIRE_MESSAGE_CONVERT(Rhp::wire::envelope);
 RHP_WIRE_MESSAGE_CONVERT(Rhp::wire::module_ref);
 RHP_WIRE_MESSAGE_CONVERT(Rhp::wire::exec_request);
