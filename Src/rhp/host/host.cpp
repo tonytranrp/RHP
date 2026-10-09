@@ -719,7 +719,7 @@ private:
             in.peer = s.peer();
             in.reason = why;
             to_pump(std::move(in));
-        } else if (why.code == errc::kOk) {
+        } else if (s.handed_over()) {
             --pending_handshakes_; // it only carried a resume: its link went to that session
         } else {
             --pending_handshakes_;

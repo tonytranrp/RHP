@@ -70,6 +70,7 @@ struct shared_config {
     mbedtls_x509_crt ca{};
     std::string server_name;
     bool client = false;
+    bool ca_pem_empty = true; // no CA: certificates aren't checked, so a failure isn't theirs
 
     shared_config() {
         mbedtls_ssl_config_init(&conf);
@@ -171,6 +172,7 @@ struct shared_config {
     auto c = std::make_shared<shared_config>();
     c->client = client;
     c->server_name = s.server_name;
+    c->ca_pem_empty = s.ca_pem.empty();
     int ret = mbedtls_ssl_config_defaults(&c->conf, client ? MBEDTLS_SSL_IS_CLIENT : MBEDTLS_SSL_IS_SERVER, MBEDTLS_SSL_TRANSPORT_STREAM, MBEDTLS_SSL_PRESET_DEFAULT);
     if (ret != 0) {
         return failure(errc::kTransport, "can't set up TLS", ret);
@@ -307,7 +309,7 @@ private:
         if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) {
             return {};
         }
-        if (config_->client && mbedtls_ssl_get_verify_result(&ssl_) != 0) {
+        if (config_->client && !config_->ca_pem_empty && mbedtls_ssl_get_verify_result(&ssl_) != 0) {
             return failure(errc::kAuth, "the host's certificate didn't verify", ret);
         }
         return failure(errc::kTransport, "TLS handshake failed", ret);

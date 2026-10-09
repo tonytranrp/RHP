@@ -79,9 +79,9 @@ jobs:
         with:
           xcode-version: latest-stable
       - uses: lukka/get-cmake@latest
-      - name: macOS (OpenSSL from Homebrew and Mbed TLS)
+      - name: macOS (universal, so Mbed TLS: Homebrew's OpenSSL is arm64 only)
         run: |
-          cmake --preset macos -DOPENSSL_ROOT_DIR="$(brew --prefix openssl@3)"
+          cmake --preset macos -DRHP_TLS_OPENSSL=OFF
           cmake --build --preset macos
           ctest --preset macos -j 4 --timeout 600
       - name: Boot an iOS simulator

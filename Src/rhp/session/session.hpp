@@ -4,7 +4,9 @@
 #include <cstdint>
 #include <deque>
 #include <memory>
+#include <span>
 #include <string>
+#include <string_view>
 #include <variant>
 #include <vector>
 
@@ -139,6 +141,8 @@ public:
     [[nodiscard]] const std::string& peer_platform() const noexcept { return peer_platform_; }
     // The current link is encrypted (TLS).
     [[nodiscard]] bool encrypted() const noexcept { return link_ != nullptr && link_->encrypted(); }
+    // This connection only carried a resume: its link went to the session it named.
+    [[nodiscard]] bool handed_over() const noexcept { return handed_over_; }
 
     struct counters {
         std::uint64_t sent = 0;       // sequenced frames sent (first time)
@@ -178,6 +182,12 @@ private:
     void handle_resume_reply(const wire::frame_view& frame);
     [[nodiscard]] bool sealed_control(const wire::frame_view& frame) const;
     void detach(error why);
+    void send_resume();
+    // Detached: the link a resume was tried on is given up (it failed, timed out, or carried
+    // something wrong); the dialing side tries another. Never ends the session.
+    void lose_resume_link(error why);
+    [[nodiscard]] wire::mac_bytes resume_proof(const wire::frame_sealer& sealer, std::string_view label, std::span<const std::byte> binding) const;
+    [[nodiscard]] bool resume_proof_ok(std::string_view label, std::span<const std::byte> binding, const value::bytes& proof) const;
     void retire_link();
     void attach(std::unique_ptr<net::link> link, std::unique_ptr<link_port> port);
 
@@ -225,7 +235,8 @@ private:
     std::unique_ptr<wire::frame_sealer> incoming_;
     bool challenged_ = false;  // host: hello answered; client: response sent
     bool heard_ = false;       // a frame has arrived (a resume request must be the first)
-    bool resuming_ = false;    // detached, dialing side: kResume sent on the current link
+    bool resuming_ = false;   // detached, dialing side: a resume is under way on the current link
+    bool resume_pending_ = false; // ... but the link's TLS isn't up yet: kResume goes once it is
     bool handed_over_ = false; // this connection's link went to the session it resumed
 
     wire::frame_decoder decoder_;

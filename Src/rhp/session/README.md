@@ -18,8 +18,10 @@ nack        a corrupt frame (bad CRC) or a gap → nack(last good seq) → the p
 resend      unacked frames are resent on nack, when a whole heartbeat passes with no ack progress, and on resume
 heartbeat   ping every heartbeat_ms; heartbeat_misses quiet intervals → the link is dead
 resume      (options.resumable) a dead link detaches the session for limits.resume_ms; the dialing side
-            calls resume(new_link) → sealed kResume; the other side's new connection hands its link to
-            the session (resume_target) → sealed kWelcome; both resend what wasn't acked
+            calls resume(new_link) → sealed kResume with a proof over the new link's channel binding;
+            the other side's new connection hands its link to the session (resume_target) → sealed
+            kWelcome, bound the same way; both resend what wasn't acked. A failed attempt (no answer
+            within 2 s, garbage, a refusal) only loses that link: the dialing side tries another
 errors      a fatal problem goes to the peer as an unsequenced kError (sealed once keys exist), then close
 ```
 

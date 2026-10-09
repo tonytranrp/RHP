@@ -14,6 +14,7 @@ namespace Rhp::net {
 // closed or destroyed.
 class link_handler {
 public:
+    // May be empty: the link became ready (a TLS link finished its handshake, channel_binding() is set).
     virtual void on_bytes(utils::bytes_view data) = 0;
     // The peer closed, the link failed, or close() finished. Called at most once.
     virtual void on_closed(const error& why) = 0;
