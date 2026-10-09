@@ -504,7 +504,7 @@ flowchart LR
 
 A Wi-Fi blip shorter than the heartbeat window does **not** revert; a real disconnect does.
 
-- **`pin(mod)`** (`kAdmin`): the host takes ownership of a module, so it survives its client's disconnect. Pinned modules belong to a host-owned identity, are reverted only by `unpin` + `revert`/`unload` or `revert_all`, and are listed with `pinned: true`. This is how `rhp-cli run patch.lua --pin` applies a lasting patch.
+- **`pin(mod)`** (`kAdmin`): the host takes ownership of a module, so it survives its client's disconnect. Pinned modules belong to a host-owned identity, are reverted only by `unpin` + `revert`/`unload` or `revert_all`, and are listed with `pinned: true`. This is how `rhp-cli run patch.lua --pin` applies a lasting patch. *As built (Stage 4):* the identity's own sandbox stays alive while it has pinned modules; at its last disconnect the scratch module and every module the pinned ones don't `require` are reverted and unloaded (Y7).
 - **HTTP gateway:** no connection, so an identity's gateway state is reverted after **5 minutes idle**.
 - **Handshake flood guard:** clients are unlimited, but at most **64 unauthenticated** handshakes may be pending, each with a **5 s** timeout.
 
@@ -539,13 +539,15 @@ int main() {
 }                            // ~host → revert_all()
 ```
 
-What runs today (Stage 3; signers, audit and blob sinks arrive in Stage 4):
+What runs today (Stage 4; the key files are what `rhp-cli keygen` prints):
 
 ```cpp
 Rhp::host<> host{Rhp::endpoint::listen("127.0.0.1", 7777),
-                 Rhp::security::keyring{{"dev", *Rhp::security::key::from_env("RHP_KEY_DEV"), Rhp::role::kAdmin},
-                                        {"qa",  *Rhp::security::key::from_env("RHP_KEY_QA"),  Rhp::role::kPatch}}};
+                 *Rhp::security::keyring::from_file("keys.txt"),              // name role base64-psk
+                 *Rhp::security::trusted_signers::from_file("signers.pub")};  // name base64-public-key
 host.install<game_lib>();
+auto audit = host.on_any(Rhp::audit::file_sink{"rhp_audit.log"});
+host.on_blob("configs", [](const Rhp::blob_view& b) -> Rhp::result<void> { return game::load_config(b.bytes); });
 if (auto port = host.port(); !port) { /* address in use, non-loopback without insecure_lan, ... */ }
 while (game::running()) { host.pump(); game::update(); }
 ```
@@ -571,7 +573,7 @@ fleet.discover(Rhp::net::mdns::browse{ "_rhp._tcp" });
 auto results = fleet.exec<int>("return game.tick");                      // one result per host
 ```
 
-Stage 3 ships the blocking half: `connect`, `exec` / `exec<T>`, `load`, `call`, `reload`, `rollback`, `revert`, `unload` (with `force`), `checkpoint`, `revert_to`, `revert_all`, `list`, `status`, `describe` and `cancel()`, with `client_options::on_output` / `on_emit` for streamed output. `exec_async`, futures, `co_await`, `fleet` and `rhp-cli` are Stage 4.
+As built (Stage 4): every op blocks or, through `c.async()`, returns an `Rhp::pending<T>` to `then` (callback on the network thread), `get`, turn into a `std::future` or `co_await` from any C++20 coroutine; `exec_async` / `exec_future` are shortcuts; `cancel(request)` stops one call. The client takes its signing key next to its credential (`client(ep, id.credential(), *id.signer_key())`); `on_output` replaces the `c.on_output(...)` setter shown above (it is a `client_options` field). `fleet` is Stage 6.
 
 Error mode `Rhp::errors::throwing` makes the same calls return `T` and throw `Rhp::exception` (carrying the `Rhp::error`). Per call, `Rhp::unwrap(c.exec<int>(...))` does the same.
 
@@ -619,6 +621,8 @@ Rhp::client<cfg> c   { Rhp::endpoint::listen("0.0.0.0", 7777), identity };      
 ```
 
 iOS: suspended apps can't service listeners, so prefer reverse mode; add `NSLocalNetworkUsageDescription` (and `NSBonjourServices` for discovery) to Info.plist.
+
+As built (Stage 4): a host with a dial endpoint dials, and dials again with capped exponential backoff and full jitter (`limits.backoff_min_ms` … `backoff_max_ms`) whenever the dial fails or the session ends; each connection is a fresh session (resume is Stage 5). A client with a listen endpoint serves one host at a time (`port()` reports the bound port); when that host's session ends, calls in flight fail and the next call waits for a host to dial in. `rhp-cli … --listen` and `headless_server --reverse` are the tooling for it.
 
 ### 6.5 HTTP REST gateway
 
@@ -829,33 +833,37 @@ RHP/
 │       ├── net/        endpoint · io_context(.cpp) · link · loopback/ · tcp/          (Stage 3)
 │       │               local/ · websocket/ · udp_reliable/ · http_gateway/ · mdns/     (later)
 │       ├── security/   authenticator · key(.cpp) · keyring(.cpp) · psk_keyring(.cpp)  (Stage 3)
-│       │               signer · ed25519(.cpp) · tls/{openssl,mbedtls,auto_backend}     (later)
+│       │               signer · ed25519(.cpp) · signing_keys(.cpp) · identity_file(.cpp) · hash(.cpp)   (Stage 4)
+│       │               tls/{openssl,mbedtls,auto_backend}                              (later)
 │       ├── exec/       executor (pumped, steady_clock) · io_runner (owned_io_thread, zero_threads)
 │       ├── script/     stack · marshal · lib · patch_point · ledger · sandbox     (Stage 1)
 │       │               lua_event · stubs · scheduler, revisions, require in sandbox (Stage 2)
-│       │               hook_backend · audit                                       (later)
+│       │               hook_backend                                               (later)
+│       ├── event/      events(.cpp) · hub — typed host events, subscriptions, JSON  (Stage 4)
+│       ├── audit/      sinks(.cpp) — file_sink, ostream_sink                        (Stage 4)
 │       │               puc_lua/(.cpp — lua.h never leaks) · detail/
 │       ├── session/    session(.cpp): handshake · seq/ack/nack · MAC · heartbeat   (Stage 3)
 │       │               resume · backoff                                              (Stage 5)
 │       ├── config/     config — the Rhp::config<> chain                              (Stage 3)
-│       ├── host/       host · detail/engine — host.cpp                               (Stage 3)
-│       │               blob_sinks · events · local_api                               (later)
-│       └── client/     client · detail/engine — client.cpp                           (Stage 3)
-│                       fleet · async_stream · task                                   (later)
+│       ├── host/       host · detail/engine — host.cpp (+ blobs, events, pin, reverse: Stage 4)
+│       │               local_api                                                     (later)
+│       └── client/     client · pending · detail/engine — client.cpp                 (Stage 3–4)
+│                       fleet · async_stream                                          (later)
 ├── Tests/
 │   ├── CMakeLists.txt
 │   ├── unit/          mirrors Src/rhp/* — files named `<thing>_tests.cpp`
 │   ├── support/       header-only test helpers (`rhp_test/…`)
-│   ├── integration/   loopback · tcp · tls · reconnect_resume · revert_matrix · roles · signing · fleet
+│   ├── integration/   host_client (Stage 3) · stage4 (signing, audit, blobs, pin, reverse, async)
+│   ├── tools/         rhp-cli in-process + as a process against headless_server
 │   ├── compile_fail/  bad concepts, duplicate names — ctest WILL_FAIL
 │   ├── fuzz/          frame · envelope · msgpack · sandbox_escape
 │   └── bench/         patch_point_call · frame_roundtrip · exec_latency · slice_overhead
 ├── Examples/
 │   ├── hello_console/     exec · expose · patch points · load/revert/rollback, local + over TCP
 │   ├── custom_transport/  writing your own Rhp::net::transport
-│   └── headless_server/   threaded server host, roles, audit, fleet + mDNS
+│   └── headless_server/   standalone host: key files, audit log, blobs, reverse mode (Stage 4)
 ├── Tools/
-│   └── rhp-cli/           REPL (replxx, CLI11): connect · exec · load · revert · rollback · pin · stubs · watch · run · keygen · sign
+│   └── rhp-cli/           REPL (replxx, CLI11): connect · exec · load · revert · rollback · pin · stubs · watch · run · keygen · sign · blob
 ├── Scripts/               sample .lua used by examples/tests
 └── Docs/
     ├── ARCHITECTURE.md
@@ -938,9 +946,15 @@ flowchart BT
     config["rhp_config"] --> session
     host["rhp_host"] --> config
     host --> script
+    event["rhp_event"] --> core
+    audit["rhp_audit"] --> event
+    host --> event
     client["rhp_client"] --> config
     rhp["Rhp::rhp"] --> host
     rhp --> client
+    rhp --> audit
+    cli["rhp-cli (Tools)"] --> rhp
+    cli -. PRIVATE .-> rx[["replxx · CLI11"]]
 ```
 
 ### 12.2 Options
@@ -1038,7 +1052,8 @@ All PRIVATE; none of their headers appear in `Src/rhp/**/*.hpp`.
 | Async I/O | standalone Asio 1.38.2 (Stage 3) | BSL-1.0 |
 | Payload | own MessagePack codec for `Rhp::value` (`Rhp::wire::msgpack`; msgpack-c dropped at Stage 3, W2) | — |
 | Integrity | CRC32C (own, HW-accelerated when available) | — |
-| Crypto | Monocypher 4.0.3, compiled as C++ (BLAKE2b handshake + frame MAC from Stage 3; Ed25519 in Stage 4) | CC0 / BSD-2 |
+| Crypto | Monocypher 4.0.3, compiled as C++ (BLAKE2b handshake + frame MAC from Stage 3; its optional RFC 8032 Ed25519 for script signatures and BLAKE2b-256 audit hashes from Stage 4) | CC0 / BSD-2 |
+| CLI | CLI11 2.7.2 (header-only) · replxx `release-0.0.4` (line editing; upstream quiet since 2021, built by our own target) — `rhp-cli` only | BSD-3 · BSD-3 |
 | TLS | OpenSSL 4.0.x (desktop) · mbedTLS 4.2 (mobile, custom Asio stream adapter) | Apache-2.0 |
 | WebSocket | own RFC 6455 framing on Asio | — |
 | HTTP gateway | own minimal HTTP/1.1 parser on Asio | — |
@@ -1069,7 +1084,7 @@ flowchart LR
 | 1 ✅ | `Examples/hello_console` runs a local Lua file calling exposed C++, patches a point, and reverts everything — done: 118 tests (56 script) green on MSVC, clang-cl, MSVC-ASan, Linux Clang, Clang ASan+UBSan, Clang TSan; the `RHP_ENABLE=OFF` build is green without Lua |
 | 2 ✅ | an infinite-loop script never blocks a frame; reload keeps state via `on_save`/`on_restore`; LuaLS stubs generated — done: `Examples/frame_loop` pumps 120 frames next to a `while true do end` (2 ms slices, worst frame ≈ 2 ms), reloads a module keeping its state and writes `rhp_api.lua`; 239 tests green on MSVC, clang-cl, MSVC-ASan, Linux Clang, Clang ASan+UBSan, Clang TSan; the `RHP_ENABLE=OFF` build (99 tests) is green without Lua |
 | 3 ✅ | exec over loopback and TCP with CRC, seq/ack, roles — done: `Examples/remote_exec` runs three keys (admin / patch / observe) against one host over loopback and TCP on 127.0.0.1, streams print back, cancels a `while true do end` from the network thread while the game thread is stuck in it, and reverts a client's effects when it disconnects; `Examples/custom_transport` plugs a user transport into `Rhp::config<>`; 324 tests green on MSVC, clang-cl, MSVC-ASan, Linux Clang, Clang ASan+UBSan, Clang TSan; the `RHP_ENABLE=OFF` build (137 tests) is green without Lua, Asio or Monocypher |
-| 4 | full lifecycle from `rhp-cli`, signed scripts only, audit log written |
+| 4 ✅ | full lifecycle from `rhp-cli`, signed scripts only, audit log written — done: `rhp-cli` (replxx + CLI11) runs keygen → host key files → a signed REPL session (multi-line Lua, load / reload / rollback / call / pin / unload, stubs, blob, watch) against `Examples/headless_server` as a separate process, which writes a JSON-lines audit log; unsigned scripts from patch/admin are refused (`kBadSignature`); reverse mode (`rhp-cli --listen`, `headless_server --reverse`), async client calls (then / get / future / `co_await`), blobs and `pin` work over loopback and TCP; 363 tests green on MSVC, clang-cl, MSVC-ASan, Linux Clang, Clang ASan+UBSan, Clang TSan; the `RHP_ENABLE=OFF` build (152 tests) is green without Lua, Asio or Monocypher |
 | 5 | TLS on all 5 OS presets; kill-the-socket test resumes exactly-once |
 | 6 | fleet finds hosts via mDNS and broadcasts a script |
 
@@ -1294,3 +1309,41 @@ Choices made while building Stage 3 beyond the round-5 questionnaire (§24). Eac
 | X17 | Control frames | ping, pong, ack and nack carry their own per-direction counter in `seq` (sealed), so a replayed one is dropped |
 | X18 | `zero_threads` clients | the network only runs while a call waits or `client::poll()` runs; an idle client must poll at least once per heartbeat or the host ends its session (and reverts it) |
 | X19 | Review | an end-of-stage review (one subagent) found ten issues — a full SPSC ring wiping the item it refused, lost cancels (incl. a disconnect that left a `while true` running for good), MessagePack reserve amplification before authentication, idle `zero_threads` clients dropped, unbounded in-flight / backlog state, event output misrouted, replayable control frames, TCP write-buffer lifetime, loopback posts into a dying context — all fixed with regression tests |
+
+---
+
+## 26. Decision log (round 6, Stage 4)
+
+Taken without a questionnaire: the user asked for Stage 4 to be planned and built straight away, so at each choice the implementer took the option the earlier rounds pointed to (or the conventional default) and recorded it here.
+
+| # | Topic | Decision |
+|---|---|---|
+| Y1 | Workflow | the main session writes and tests everything; one subagent (no nested agents) reviews the finished stage for bugs at the end; branch `stage-4-tooling`, PR |
+| Y2 | Signing | standard Ed25519 (RFC 8032, Monocypher's optional implementation) over `"rhp/script\0" ‖ source`; a signature is `{signer, sig}`; `config<>::signer<S>` slot (concept `Rhp::security::signer`), default `ed25519`; `Rhp::security::unsigned_scripts` is the typed opt-out; hosts take `trusted_signers` next to their authenticator |
+| Y3 | What is signed | the source of `exec`, `load`, `reload` from patch and admin sessions; observe may run unsigned code (F7–F8) but a signature that is present must verify; `call` and `rollback` carry no new code |
+| Y4 | Audit | `host.on<E>()` / `on_any()` return scoped subscriptions; events `session_opened`, `session_closed`, `auth_failed`, `script_executed` (every request that runs code or changes state, refused ones included), `blob_received`, `identity_reverted`, delivered on the pump thread; `Rhp::audit::file_sink` / `ostream_sink` write JSON lines; hashes BLAKE2b-256 hex (F19) |
+| Y5 | Blobs | chunked per message (op `kBlob`, `client_options::blob_chunk` 1 MiB, `blob_window` 4 in flight), each chunk a request; sink and role (admin unless the sink says otherwise) checked on the first chunk before anything is buffered; whole blob to the sink on the pump thread, ≤ `limits.max_blob`; one transfer per session; frame-level `kMore` stays reserved |
+| Y6 | Reverse mode | a dialing host redials with capped exponential backoff + full jitter; a listening client serves one host at a time and survives its host; `client::port()`; resume stays Stage 5 |
+| Y7 | Pin | admin, own identity; the identity's sandbox outlives its sessions while it has pinned modules; at the last disconnect the rest (scratch + modules the pinned ones don't require) is reverted and unloaded; `revert` / `unload` of a pinned module → `kForbidden`; `revert_all` clears pins and closes sessionless identities |
+| Y8 | Async client | `Rhp::pending<T, Errors>` per call (then / get / future / `co_await`, consumed once); `client.async()` mirrors the blocking ops; `exec_async` / `exec_future`; `cancel(request)`; no task type is shipped (any C++20 coroutine can await); `fleet` is Stage 6 |
+| Y9 | rhp-cli | replxx + CLI11 (R15–R16); subcommands `keygen`, `pubkey`, `sign`, `connect`, `run` (`--pin`, `--name`), `exec`, `stubs`, `blob`, `watch`; REPL with multi-line Lua (block / bracket heuristic), tab completion from `describe` + `list`, history, colors, Ctrl+C = cancel; a non-terminal stdin is a script; `--listen` = reverse mode |
+| Y10 | Key files | identity file (N12) `name`, `psk`, `signing_key`, optional `signer`; host files: keyring `name role base64-psk`, trusted signers `name base64-public-key` — exactly what `keygen` / `pubkey` print |
+| Y11 | Kill switch | `host.set_enabled(false)` at runtime: new connections closed, requests answered `kDisabled` |
+| Y12 | Protocol | `kProtocolRevision` 2 (signatures, pin / unpin, blobs) |
+| Y13 | Example | `Examples/headless_server`: a standalone host (key files, audit log, blob folder, reverse mode) that the CLI tests drive as a separate process |
+
+---
+
+## 27. Stage 4 implementation notes
+
+| # | Topic | Decision |
+|---|---|---|
+| Z1 | Ed25519 split | `signing_keys.cpp` (key bytes, base64, the signers file — pure C++) + `ed25519.cpp` (Monocypher) or `ed25519_disabled.cpp` (`RHP_ENABLE=OFF`: signing / verifying report `kDisabled`), so OFF builds still take trusted signers and identity files |
+| Z2 | Modules | new `event` (layer 3, core only) and `audit` (layer 4); `host` depends on `event`; `Tools/rhp-cli` is `rhp_cli_core` (text helpers + `shell<Cfg>`) and the `rhp-cli` executable |
+| Z3 | Audit timing | `script_executed` is reported when the request is handled; a request that suspends reports `kOk` then (its final result only goes to the client); `reply_error` fills in the outcome of the request being audited |
+| Z4 | Async before ready | an async call made before the session is ready is queued and sent once it is (or failed when the session closes); `client_options::request_timeout` arms a per-call timer for async calls; a closed client answers at once on the calling thread |
+| Z5 | Pin and the relay | a released identity's cancel relay drops its sandbox (no session can cancel); a new session of that identity hands its fresh relay the sandbox |
+| Z6 | Blob refusal | after a refused chunk, later chunks of that transfer are refused quietly (`kCancelled`, no second event) so a pipelined window doesn't spam the log |
+| Z7 | rhp-cli parsing | in quoted words only `\"` is an escape, so Windows paths keep their backslashes; Lua completeness counts `function` / `do` / `if` / `repeat` against `end` / `until`, brackets, long strings and comments |
+| Z8 | rhp-cli tests | `Tests/tools`: the shell in-process over loopback (every command, watch, completion, Ctrl+C), then the real binaries as processes (`std::system`) against `headless_server` over TCP, including reverse mode |
+| Z9 | replxx | upstream's last commit is from 2021 (`release-0.0.4`); kept per R15 — it builds warning-free under our own target on MSVC 19.51, clang-cl 22 and Clang 21, and reads plain lines when stdin isn't a terminal |

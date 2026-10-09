@@ -18,4 +18,6 @@
 - Monocypher ≥ 4.0.3, replxx, CLI11 (Stage 4)
 - OpenSSL 4.0.x and mbedTLS 4.2 (Stage 5)
 
+**Stage 4 (as built):** CLI11 `v2.7.2` (header-only) and replxx `release-0.0.4` (our own static target from its sources; upstream has been quiet since 2021) are pinned for `rhp-cli` only, fetched when `RHP_BUILD_TOOLS=ON` and `RHP_ENABLE=ON`. Monocypher's optional Ed25519 is compiled through its own wrapper translation unit. `Tools/` is built after `Tests/`; `Tests/tools` runs the real `rhp-cli` and `headless_server` binaries.
+
 **Stage 3 (as built):** Asio `asio-1-38-2` and Monocypher `4.0.3` are pinned in `cmake/Dependencies.cmake` (live builds only). msgpack-c is not a dependency: RHP has its own MessagePack codec (see wire-format). Monocypher is compiled as C++ (`cmake/monocypher/monocypher_cxx.cpp`), so the project still enables only CXX. Tests gain `Tests/integration/` and header-only helpers in `Tests/support/rhp_test/`.

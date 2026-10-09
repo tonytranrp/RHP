@@ -11,8 +11,8 @@ One folder per module. Each module is its own CMake target (`Rhp::<module>`), de
    | 0 | `utils` |
    | 1 | `core` |
    | 2 | `wire`, `platform` |
-   | 3 | `net`, `security`, `exec`, `script` |
-   | 4 | `session` |
+   | 3 | `net`, `security`, `exec`, `script`, `event` |
+   | 4 | `session`, `audit` |
    | 5 | `host`, `client` |
 
 2. **Folder = namespace.** `rhp/script/` is `Rhp::script`; `rhp/script/detail/` is `Rhp::script::detail` and is never used outside its module.
@@ -33,5 +33,6 @@ One folder per module. Each module is its own CMake target (`Rhp::<module>`), de
 | `security` | 3 | Monocypher |
 | `exec` | 3 | — (header-only) |
 | `script` | 3 | Lua |
-| `session` | 4 | — |
+| `event` | 3 | — |
+| `session`, `audit` | 4 | — |
 | `config`, `host`, `client` | 5 | — |

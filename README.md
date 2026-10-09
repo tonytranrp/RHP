@@ -10,19 +10,28 @@ using game_lib = Rhp::lib<"game">
     ::var<"gravity", &game::g_gravity>;
 
 Rhp::host<> host{Rhp::endpoint::listen("127.0.0.1", 7777),
-                 Rhp::security::keyring{{"dev", *Rhp::security::key::from_env("RHP_KEY_DEV"), Rhp::role::kAdmin}}};
+                 *Rhp::security::keyring::from_file("keys.txt"),               // who may connect, with which role
+                 *Rhp::security::trusted_signers::from_file("signers.pub")};   // whose scripts may run
 host.install<game_lib>();
+auto audit = host.on_any(Rhp::audit::file_sink{"rhp_audit.log"});
 while (game::running()) { host.pump(); game::update(); }    // Lua runs only here; the network has its own thread
 ```
 
+```bash
+rhp-cli keygen dev                                   # dev.rhpid + the lines for keys.txt and signers.pub
+rhp-cli connect 127.0.0.1:7777 -i dev.rhpid          # REPL; every script is signed
+```
+
 ```cpp
-Rhp::client<> dev{Rhp::endpoint::dial("127.0.0.1", 7777), Rhp::security::psk_identity{"dev", *key}};
+auto id = *Rhp::security::identity_file::load("dev.rhpid");
+Rhp::client<> dev{Rhp::endpoint::dial("127.0.0.1", 7777), id.credential(), *id.signer_key()};
 auto g   = dev.exec<double>("return game.gravity");          // Rhp::result<double>
-auto mod = dev.load("low_grav", "game.gravity = -1.6");
+auto mod = dev.load("low_grav", "game.gravity = -1.6");      // signed automatically
+auto t   = co_await dev.async().exec<int>("return game.tick");
 dev.unload(*mod);                                              // or just disconnect: everything is reverted
 ```
 
-Every connection authenticates with a pre-shared key (mutual BLAKE2b challenge-response); each key is an identity with its own Lua state and a role (`observe`, `patch`, `admin`). Frames carry CRC32C and a per-session MAC, are acked, nacked and resent, and a heartbeat ends dead sessions. Until TLS (Stage 5) TCP stays on loopback unless you opt in with `Rhp::net::insecure_lan`.
+Every connection authenticates with a pre-shared key (mutual BLAKE2b challenge-response); each key is an identity with its own Lua state and a role (`observe`, `patch`, `admin`). Scripts from patch and admin must be Ed25519-signed by a developer key the host trusts. Frames carry CRC32C and a per-session MAC, are acked, nacked and resent, and a heartbeat ends dead sessions. Hosts can also dial out to a listening client (reverse mode, for phones and NAT), accept blobs into registered sinks, and keep admin-pinned modules after a disconnect. Until TLS (Stage 5) TCP stays on loopback unless you opt in with `Rhp::net::insecure_lan`.
 
 The same script engine also runs locally, without a network:
 
@@ -48,7 +57,7 @@ box.reload(*mod, new_source);                                // on_save() → on
 while (running) { box.pump(); game::update(); }
 ```
 
-See [`Examples/hello_console`](Examples/hello_console), [`Examples/frame_loop`](Examples/frame_loop), [`Examples/remote_exec`](Examples/remote_exec) and [`Examples/custom_transport`](Examples/custom_transport).
+See [`Examples/hello_console`](Examples/hello_console), [`Examples/frame_loop`](Examples/frame_loop), [`Examples/remote_exec`](Examples/remote_exec), [`Examples/custom_transport`](Examples/custom_transport), [`Examples/headless_server`](Examples/headless_server) and [`Tools/rhp-cli`](Tools/rhp-cli).
 
 ## Targets
 
@@ -86,18 +95,18 @@ target_link_libraries(my_app PRIVATE Rhp::rhp)
 | 1 | Lua 5.5 sandbox, `Rhp::lib` DSL, patch points, ledger, revert (local) | ✅ |
 | 2 | scheduler, `rhp.emit`, `lua_event`, reload + revisions, `require`, LuaLS stubs | ✅ |
 | 3 | wire format, loopback + TCP, sessions, PSK roles, blocking client | ✅ |
-| 4 | async client, `rhp-cli`, signing, audit, blobs, reverse mode | next |
-| 5 | TLS, reconnect/resume, fuzzing, mobile presets | |
+| 4 | async client, `rhp-cli`, signing, audit, blobs, reverse mode, pin | ✅ |
+| 5 | TLS, reconnect/resume, fuzzing, mobile presets | next |
 | 6 | WebSocket, UDP-reliable, HTTP gateway, mDNS, fleet | |
 
 ## Layout
 
 | Folder | What lives there |
 |---|---|
-| `Src/rhp/` | the library, one folder per module (`utils`, `core`, `platform`, `wire`, `net`, `security`, `exec`, `script`, `session`, `config`, `host`, `client`), included as `<rhp/...>` |
-| `Tests/` | unit, integration and compile-fail tests (later: fuzz, bench) |
-| `Examples/` | `hello_console`, `frame_loop`, `remote_exec`, `custom_transport` (later: `headless_server`) |
-| `Tools/` | `rhp-cli` |
+| `Src/rhp/` | the library, one folder per module (`utils`, `core`, `platform`, `wire`, `net`, `security`, `exec`, `script`, `event`, `audit`, `session`, `config`, `host`, `client`), included as `<rhp/...>` |
+| `Tests/` | unit, integration, tools and compile-fail tests (later: fuzz, bench) |
+| `Examples/` | `hello_console`, `frame_loop`, `remote_exec`, `custom_transport`, `headless_server` |
+| `Tools/` | `rhp-cli` (REPL, scripting, keys) |
 | `Docs/` | [`ARCHITECTURE.md`](Docs/ARCHITECTURE.md) and [`decisions/`](Docs/decisions/) |
 | `cmake/` | build helpers and the single dependency pin file |
 

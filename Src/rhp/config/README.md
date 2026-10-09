@@ -14,6 +14,7 @@ using my_cfg = Rhp::config<>
 | `transport<T>` | `Rhp::net::transport` | `Rhp::net::tcp` |
 | `codec<C>` | `Rhp::wire::codec` | `Rhp::wire::msgpack` |
 | `auth<A>` | `Rhp::security::authenticator` | `Rhp::security::psk_keyring` (clients use `A::credential`) |
+| `signer<S>` | `Rhp::security::signer` | `Rhp::security::ed25519` (hosts take `S::trust`, clients sign with `S::key`; `unsigned_scripts` opts out) |
 | `executor<X>` | `Rhp::exec::executor` | `Rhp::exec::pumped` |
 | `io<I>` | `Rhp::exec::io_runner` | `Rhp::exec::owned_io_thread` |
 | `limits<L>` | `Rhp::limits` value | `Rhp::limits{}` (unlimited, run to completion) |
@@ -25,4 +26,4 @@ using my_cfg = Rhp::config<>
 
 - Each slot is constrained where it is written: a bad transport fails on the `::transport<X>` line.
 - A later link overrides an earlier one for the same slot; the result is always a `Rhp::config<...>`.
-- Slots for TLS, signing and discovery are added by the stages that implement them (4–6), never as placeholders.
+- Slots for TLS and discovery are added by the stages that implement them (5–6), never as placeholders.
