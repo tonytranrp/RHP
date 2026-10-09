@@ -12,6 +12,7 @@ Who may connect and what each frame proves. Namespace `Rhp::security`.
 | `ed25519.hpp` | `ed25519` (the default signer): `ed25519_secret_key` / `ed25519_public_key`, `signing_key` (client), `trusted_signers` (host; parses `name base64-public-key` files) |
 | `identity_file.hpp` | a developer's `.rhpid` file: name, PSK, signing key; prints the host's keyring / signers lines |
 | `hash.hpp` | `blake2b_256`, `to_hex` (audit hashes) |
+| `tls/` | `Rhp::security::tls` — TLS 1.3 engines (OpenSSL, Mbed TLS) behind the `tls::backend` concept: see [tls/README.md](tls/README.md) |
 
 ## PSK handshake
 
@@ -21,6 +22,8 @@ host   → challenge {nonce = Nh, proof = MAC(psk, "rhp/host"   ‖ T)}     T = 
 client → response  {proof = MAC(psk, "rhp/client" ‖ T)}                  only after the host's proof checked out
 host   → welcome   (first MAC'd frame)
 frame keys         MAC(psk, "rhp/c2h" ‖ T), MAC(psk, "rhp/h2c" ‖ T)
+under TLS          T also ends with the connection's tls-exporter value (bind_channel): a relay that
+                   terminates TLS on both sides has two values, so no proof matches
 ```
 
 MAC = keyed BLAKE2b-256 (Monocypher). Proofs and MACs are compared in constant time (`crypto_verify32`).
@@ -31,5 +34,5 @@ MAC = keyed BLAKE2b-256 (Monocypher). Proofs and MACs are compared in constant t
 - Authentication is mutual: a client never sends its proof to a host that failed to prove the key first.
 - An unknown key name gets a normal-looking challenge (made with a random secret), so key names can't be probed.
 - Secrets are wiped (`crypto_wipe`) when keys, handshakes and sealers die.
-- Script signatures are Ed25519 (RFC 8032) over `"rhp/script\0" ‖ source`; the host checks them before anything runs, except unsigned code from observe sessions. TLS arrives in Stage 5.
+- Script signatures are Ed25519 (RFC 8032) over `"rhp/script\0" ‖ source`; the host checks them before anything runs, except unsigned code from observe sessions.
 - `RHP_ENABLE=OFF`: keys, keyring, signing keys, trusted signers and identity files still build (`signing_keys.cpp`); signing and verifying report `kDisabled` (`ed25519_disabled.cpp`); the handshake and hashing aren't built.

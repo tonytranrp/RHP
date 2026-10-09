@@ -12,6 +12,7 @@ using my_cfg = Rhp::config<>
 | Slot | Concept | Default |
 |---|---|---|
 | `transport<T>` | `Rhp::net::transport` | `Rhp::net::tcp` |
+| `tls<B>` | `Rhp::security::tls::backend` | `Rhp::security::tls::auto_backend` (OpenSSL where found, else Mbed TLS; `tls::none` = no TLS) |
 | `codec<C>` | `Rhp::wire::codec` | `Rhp::wire::msgpack` |
 | `auth<A>` | `Rhp::security::authenticator` | `Rhp::security::psk_keyring` (clients use `A::credential`) |
 | `signer<S>` | `Rhp::security::signer` | `Rhp::security::ed25519` (hosts take `S::trust`, clients sign with `S::key`; `unsigned_scripts` opts out) |
@@ -26,4 +27,4 @@ using my_cfg = Rhp::config<>
 
 - Each slot is constrained where it is written: a bad transport fails on the `::transport<X>` line.
 - A later link overrides an earlier one for the same slot; the result is always a `Rhp::config<...>`.
-- Slots for TLS and discovery are added by the stages that implement them (5–6), never as placeholders.
+- The discovery slot is added by the stage that implements it (6), never as a placeholder.

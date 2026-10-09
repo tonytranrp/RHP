@@ -197,7 +197,7 @@ classDiagram
 | Extension point | Kind | User does | Example |
 |---|---|---|---|
 | Transport | concept policy | satisfy `Rhp::net::transport` | Steam P2P, USB serial, in-house relay |
-| TLS backend | concept policy | satisfy `Rhp::security::tls_backend` | platform TLS |
+| TLS backend | concept policy | satisfy `Rhp::security::tls::backend` (a sans-IO `tls::engine` per connection) | platform TLS |
 | Codec | concept policy | satisfy `Rhp::wire::codec` | debug JSON codec |
 | Authenticator | concept policy | satisfy `Rhp::security::authenticator` | company SSO token |
 | Script signer | concept policy | satisfy `Rhp::security::signer` | HSM-backed signing |
@@ -226,7 +226,7 @@ using namespace Rhp::literals;                                // 32_MiB, 2_ms, .
 
 using my_cfg = Rhp::config<>
     ::transport<Rhp::net::tcp>
-    ::tls      <Rhp::security::tls::auto_backend>             // OpenSSL on desktop, mbedTLS on mobile
+    ::tls      <Rhp::security::tls::auto_backend>             // the system's OpenSSL where found, else Mbed TLS
     ::codec    <Rhp::wire::msgpack>
     ::auth     <Rhp::security::psk_keyring>                   // keys → identities → roles
     ::signer   <Rhp::security::ed25519>                       // scripts must be signed
@@ -239,7 +239,7 @@ using my_cfg = Rhp::config<>
     ::limits   <Rhp::limits{}>;                               // everything unlimited, scripts run to completion
 ```
 
-`Rhp::config<>` with no links equals exactly this. TLS activates automatically for non-loopback endpoints. There is **no default port** — every endpoint names one.
+`Rhp::config<>` with no links equals exactly this. TLS activates automatically for non-loopback endpoints (*as built, Stage 5:* the discovery slot is still to come; see AA2–AA5). There is **no default port** — every endpoint names one.
 
 How it works:
 
@@ -504,6 +504,8 @@ flowchart LR
 
 A Wi-Fi blip shorter than the heartbeat window does **not** revert; a real disconnect does.
 
+*As built (Stage 5):* a lost link (or a heartbeat that died: a half-open link) detaches the session for `limits.resume_ms` (6 s); the side that dialed redials and resumes it, both ends resend what wasn't acknowledged, and nothing is reverted or run twice (AA7). Only a session that doesn't come back in time — or one closed on purpose — ends and reverts.
+
 - **`pin(mod)`** (`kAdmin`): the host takes ownership of a module, so it survives its client's disconnect. Pinned modules belong to a host-owned identity, are reverted only by `unpin` + `revert`/`unload` or `revert_all`, and are listed with `pinned: true`. This is how `rhp-cli run patch.lua --pin` applies a lasting patch. *As built (Stage 4):* the identity's own sandbox stays alive while it has pinned modules; at its last disconnect the scratch module and every module the pinned ones don't `require` are reverted and unloaded (Y7).
 - **HTTP gateway:** no connection, so an identity's gateway state is reverted after **5 minutes idle**.
 - **Handshake flood guard:** clients are unlimited, but at most **64 unauthenticated** handshakes may be pending, each with a **5 s** timeout.
@@ -622,7 +624,7 @@ Rhp::client<cfg> c   { Rhp::endpoint::listen("0.0.0.0", 7777), identity };      
 
 iOS: suspended apps can't service listeners, so prefer reverse mode; add `NSLocalNetworkUsageDescription` (and `NSBonjourServices` for discovery) to Info.plist.
 
-As built (Stage 4): a host with a dial endpoint dials, and dials again with capped exponential backoff and full jitter (`limits.backoff_min_ms` … `backoff_max_ms`) whenever the dial fails or the session ends; each connection is a fresh session (resume is Stage 5). A client with a listen endpoint serves one host at a time (`port()` reports the bound port); when that host's session ends, calls in flight fail and the next call waits for a host to dial in. `rhp-cli … --listen` and `headless_server --reverse` are the tooling for it.
+As built (Stage 4): a host with a dial endpoint dials, and dials again with capped exponential backoff and full jitter (`limits.backoff_min_ms` … `backoff_max_ms`) whenever the dial fails or the session ends; each connection is a fresh session (Stage 5: a lost link is redialed and the same session resumed, AA7). A client with a listen endpoint serves one host at a time (`port()` reports the bound port); when that host's session ends, calls in flight fail and the next call waits for a host to dial in. `rhp-cli … --listen` and `headless_server --reverse` are the tooling for it.
 
 ### 6.5 HTTP REST gateway
 
@@ -693,7 +695,7 @@ sequenceDiagram
 | `op` | 16 bits: `hello, challenge, response, welcome, resume` (handshake) · `exec, load, call, reload, rollback, unload, revert, revert_to, checkpoint, revert_all, cancel, list, status, describe, pin, unpin, blob` (requests) · `output, emit, result, error` (replies) · `ping, pong, ack, nack` (control) — see X5 |
 | `seq` / `ack` | per-session monotonic + cumulative ack |
 | `length` | ≤ `max_frame` (4 MiB), checked **before** allocating; blobs larger than that are fragmented (`MORE`) |
-| `crc32c` | catches corruption TCP's checksum misses; dropped under TLS (AEAD covers it) |
+| `crc32c` | catches corruption TCP's checksum misses; dropped under TLS (AEAD covers it) — as built, flag `kCrcOmitted`, accepted only on encrypted links (AA6) |
 | MAC | loopback/IPC integrity + replay protection (`seq` inside the MAC) |
 
 The header is fixed binary; only the payload is MessagePack (maps 1:1 onto Lua values).
@@ -759,7 +761,7 @@ stateDiagram-v2
 | Authentication | `psk_keyring`: mutual challenge-response, keyed BLAKE2b (Monocypher); each key maps to an **identity** and a **role** |
 | Roles | `observe` (read, pure calls) · `patch` (mutations, load/revert) · `admin` (revert_all, blobs, `io`, admin-tagged bindings) |
 | Script signing | Ed25519 (Monocypher): host only runs code signed by a trusted developer key; `rhp-cli` signs automatically with the identity's private key |
-| Channel | TLS 1.3 on networks: OpenSSL (desktop) / mbedTLS (iOS, Android) behind `tls::auto_backend`; keyed-BLAKE2b frame MAC on loopback/IPC |
+| Channel | TLS 1.3 on networks: OpenSSL (desktop) / mbedTLS (iOS, Android) behind `tls::auto_backend`; keyed-BLAKE2b frame MAC on loopback/IPC. *As built (Stage 5):* the PSK handshake is bound to the TLS connection (RFC 9266 tls-exporter), so the host's certificate needs no PKI; `ca_pem` adds certificate checks (AA4) |
 | Sandbox | allowed libs: `string`, `table`, `math`, `utf8`, `coroutine`, `os.time`/`os.clock`; **full standard library for `kAdmin`** — `io`, `os` (incl. `execute`, `getenv`, `remove`, `rename`), `package.loadlib`, `debug` (decided: an admin key is fully trusted; `package.loadlib` can't load unsigned native code on iOS anyway); no `debug`, `package`, `dofile`, binary chunks (`load` forced to `"t"`), `string.dump` |
 | Limits | unlimited, run to completion by default; cancel always works; optional sticky totals / slicing per role |
 | Connections | unlimited concurrent clients per host (decided) — every one must authenticate |
@@ -834,7 +836,7 @@ RHP/
 │       │               local/ · websocket/ · udp_reliable/ · http_gateway/ · mdns/     (later)
 │       ├── security/   authenticator · key(.cpp) · keyring(.cpp) · psk_keyring(.cpp)  (Stage 3)
 │       │               signer · ed25519(.cpp) · signing_keys(.cpp) · identity_file(.cpp) · hash(.cpp)   (Stage 4)
-│       │               tls/{openssl,mbedtls,auto_backend}                              (later)
+│       │   tls/        tls · openssl(.cpp) · mbedtls(.cpp) · auto_backend — Rhp::security::tls  (Stage 5)
 │       ├── exec/       executor (pumped, steady_clock) · io_runner (owned_io_thread, zero_threads)
 │       ├── script/     stack · marshal · lib · patch_point · ledger · sandbox     (Stage 1)
 │       │               lua_event · stubs · scheduler, revisions, require in sandbox (Stage 2)
@@ -843,7 +845,7 @@ RHP/
 │       ├── audit/      sinks(.cpp) — file_sink, ostream_sink                        (Stage 4)
 │       │               puc_lua/(.cpp — lua.h never leaks) · detail/
 │       ├── session/    session(.cpp): handshake · seq/ack/nack · MAC · heartbeat   (Stage 3)
-│       │               resume · backoff                                              (Stage 5)
+│       │               resume · secure_link(.cpp): TLS over any link, channel_policy   (Stage 5)
 │       ├── config/     config — the Rhp::config<> chain                              (Stage 3)
 │       ├── host/       host · detail/engine — host.cpp (+ blobs, events, pin, reverse: Stage 4)
 │       │               local_api                                                     (later)
@@ -856,14 +858,16 @@ RHP/
 │   ├── integration/   host_client (Stage 3) · stage4 (signing, audit, blobs, pin, reverse, async)
 │   ├── tools/         rhp-cli in-process + as a process against headless_server
 │   ├── compile_fail/  bad concepts, duplicate names — ctest WILL_FAIL
-│   ├── fuzz/          frame · envelope · msgpack · sandbox_escape
+│   ├── fuzz/          frame · envelope · msgpack · sandbox_escape (Stage 5)
 │   └── bench/         patch_point_call · frame_roundtrip · exec_latency · slice_overhead
 ├── Examples/
 │   ├── hello_console/     exec · expose · patch points · load/revert/rollback, local + over TCP
 │   ├── custom_transport/  writing your own Rhp::net::transport
 │   └── headless_server/   standalone host: key files, audit log, blobs, reverse mode (Stage 4)
 ├── Tools/
-│   └── rhp-cli/           REPL (replxx, CLI11): connect · exec · load · revert · rollback · pin · stubs · watch · run · keygen · sign · blob
+│   ├── rhp-cli/           REPL (replxx, CLI11): connect · exec · load · revert · rollback · pin · stubs · watch · run · keygen · sign · blob
+│   ├── android/           run_tests.py — the test executables on a device / emulator over adb (Stage 5)
+│   └── ios/               simctl_run.sh — the ios-sim preset's test runner (Stage 5)
 ├── Scripts/               sample .lua used by examples/tests
 └── Docs/
     ├── ARCHITECTURE.md
@@ -937,7 +941,9 @@ flowchart BT
     net -. PRIVATE .-> asio[["Asio"]]
     sec["rhp_security"] --> wire
     sec -. PRIVATE .-> mono[["Monocypher"]]
-    sec -. PRIVATE, optional .-> tls[["OpenSSL / mbedTLS"]]
+    tlsmod["rhp_tls"] --> core
+    tlsmod -. PRIVATE, optional .-> tls[["OpenSSL (system) / Mbed TLS 4.2"]]
+    session --> tlsmod
     exec["rhp_exec"] --> core
     session["rhp_session"] --> net
     session --> sec
@@ -964,6 +970,9 @@ flowchart BT
 | `RHP_ENABLE` | `ON` | `OFF` → inert host, direct-call patch points |
 | `RHP_BUILD_TESTS` / `RHP_BUILD_EXAMPLES` / `RHP_BUILD_TOOLS` | `ON` when top-level | |
 | `RHP_WITH_TLS` | `ON` | OpenSSL desktop / mbedTLS mobile |
+| `RHP_TLS_OPENSSL` | `AUTO` | the system's OpenSSL ≥ 3.0: `AUTO` (if found, desktop only), `ON` (required), `OFF` |
+| `RHP_TLS_MBEDTLS` | `ON` | build the Mbed TLS backend (fetched) |
+| `RHP_FUZZ` | `OFF` | Tests/fuzz as libFuzzer executables (Clang) |
 | `RHP_WITH_WEBSOCKET` · `RHP_WITH_UDP` · `RHP_WITH_HTTP` · `RHP_WITH_MDNS` | `ON` | optional transports / discovery |
 | `RHP_SANITIZE` | empty | `address;undefined` or `thread` |
 | `RHP_WARNINGS_AS_ERRORS` | `ON` | `/W4 /WX` · `-Wall -Wextra -Wpedantic -Werror` |
@@ -976,11 +985,12 @@ flowchart BT
 | `windows-clang-cl` | clang-cl | ✅ |
 | `windows-msvc-asan` | MSVC AddressSanitizer | ✅ |
 | `linux-clang` / `linux-clang-asan` / `linux-clang-tsan` | Clang 17+, glibc 2.31+ | ✅ |
+| `linux-clang-fuzz` | Clang, `RHP_FUZZ=ON`, ASan+UBSan, RelWithDebInfo | libFuzzer runs (Tests/fuzz/README.md) |
 | `macos` | AppleClang, `arm64;x86_64`, macOS 13+ | ✅ |
-| `ios-sim` | Xcode + AppleClang, `CMAKE_SYSTEM_NAME=iOS`, iOS 16+, simulator | ✅ via `xcrun simctl spawn` as crosscompiling emulator |
+| `ios-sim` | Xcode + AppleClang, `CMAKE_SYSTEM_NAME=iOS`, iOS 16+, simulator | ✅ via `xcrun simctl spawn` as crosscompiling emulator (`Tools/ios/simctl_run.sh`, CI) |
 | `ios-device` | Xcode, arm64 | build only |
-| `android-x64` | NDK r30 Clang, API 26+ | ✅ on emulator via `adb` |
-| `android-arm64` | NDK r30 clang | build only |
+| `android-x64` | NDK r30 Clang, API 26+ (`ANDROID_NDK_HOME`) | ✅ on emulator via `adb` (`Tools/android/run_tests.py`, CI) |
+| `android-arm64` | NDK r30 clang | build only (with `-DRHP_BUILD_TESTS=ON` the same runner tests on a phone) |
 
 ```bash
 cmake --preset windows-msvc
@@ -1054,7 +1064,7 @@ All PRIVATE; none of their headers appear in `Src/rhp/**/*.hpp`.
 | Integrity | CRC32C (own, HW-accelerated when available) | — |
 | Crypto | Monocypher 4.0.3, compiled as C++ (BLAKE2b handshake + frame MAC from Stage 3; its optional RFC 8032 Ed25519 for script signatures and BLAKE2b-256 audit hashes from Stage 4) | CC0 / BSD-2 |
 | CLI | CLI11 2.7.2 (header-only) · replxx `release-0.0.4` (line editing; upstream quiet since 2021, built by our own target) — `rhp-cli` only | BSD-3 · BSD-3 |
-| TLS | OpenSSL 4.0.x (desktop) · mbedTLS 4.2 (mobile, custom Asio stream adapter) | Apache-2.0 |
+| TLS | OpenSSL 4.0.x (desktop) · mbedTLS 4.2 (mobile, custom Asio stream adapter) — as built: the system's OpenSSL ≥ 3.0 and Mbed TLS 4.2.0, both behind one sans-IO engine (no Asio SSL streams) | Apache-2.0 |
 | WebSocket | own RFC 6455 framing on Asio | — |
 | HTTP gateway | own minimal HTTP/1.1 parser on Asio | — |
 | mDNS / DNS-SD | platform APIs behind `Rhp::net::discovery`: `dns_sd` (Apple), Windows DNS-SD API, Avahi or own responder on Linux, NSD bridge on Android — exact per-OS choice researched at Stage 6 | — |
@@ -1085,7 +1095,7 @@ flowchart LR
 | 2 ✅ | an infinite-loop script never blocks a frame; reload keeps state via `on_save`/`on_restore`; LuaLS stubs generated — done: `Examples/frame_loop` pumps 120 frames next to a `while true do end` (2 ms slices, worst frame ≈ 2 ms), reloads a module keeping its state and writes `rhp_api.lua`; 239 tests green on MSVC, clang-cl, MSVC-ASan, Linux Clang, Clang ASan+UBSan, Clang TSan; the `RHP_ENABLE=OFF` build (99 tests) is green without Lua |
 | 3 ✅ | exec over loopback and TCP with CRC, seq/ack, roles — done: `Examples/remote_exec` runs three keys (admin / patch / observe) against one host over loopback and TCP on 127.0.0.1, streams print back, cancels a `while true do end` from the network thread while the game thread is stuck in it, and reverts a client's effects when it disconnects; `Examples/custom_transport` plugs a user transport into `Rhp::config<>`; 324 tests green on MSVC, clang-cl, MSVC-ASan, Linux Clang, Clang ASan+UBSan, Clang TSan; the `RHP_ENABLE=OFF` build (137 tests) is green without Lua, Asio or Monocypher |
 | 4 ✅ | full lifecycle from `rhp-cli`, signed scripts only, audit log written — done: `rhp-cli` (replxx + CLI11) runs keygen → host key files → a signed REPL session (multi-line Lua, load / reload / rollback / call / pin / unload, stubs, blob, watch) against `Examples/headless_server` as a separate process, which writes a JSON-lines audit log; unsigned scripts from patch/admin are refused (`kBadSignature`); reverse mode (`rhp-cli --listen`, `headless_server --reverse`), async client calls (then / get / future / `co_await`), blobs and `pin` work over loopback and TCP; 370 tests green on MSVC, clang-cl, MSVC-ASan, Linux Clang, Clang ASan+UBSan, Clang TSan; the `RHP_ENABLE=OFF` build (153 tests) is green without Lua, Asio or Monocypher |
-| 5 | TLS on all 5 OS presets; kill-the-socket test resumes exactly-once |
+| 5 ✅ | TLS on all 5 OS presets; kill-the-socket test resumes exactly-once — done: TLS 1.3 through OpenSSL (system) and Mbed TLS 4.2 behind `config<>::tls<>`, the PSK handshake bound to the TLS channel (a TLS-terminating relay fails it), resume after a lost link (200 calls through 20 socket cuts run exactly once, over TLS too, reverse mode too), libFuzzer targets for frame / envelope / msgpack / sandbox_escape (the sandbox fuzzer found and fixed a Lua stack overrun); TESTCOUNTS |
 | 6 | fleet finds hosts via mDNS and broadcasts a script |
 
 ---
@@ -1349,3 +1359,38 @@ Taken without a questionnaire: the user asked for Stage 4 to be planned and buil
 | Z9 | replxx | upstream's last commit is from 2021 (`release-0.0.4`); kept per R15 — it builds warning-free under our own target on MSVC 19.51, clang-cl 22 and Clang 21, and reads plain lines when stdin isn't a terminal |
 
 | Z10 | Review | an end-of-stage review (one subagent) found nine issues, six confirmed with repros: async calls that had already failed (timed out, cancelled, or failed with their session) still went out once a session became ready; a cancelled or disabled blob chunk left its transfer half-open, blocking every later blob on that session; the MSVC runtime resetting the SIGINT handler, so a second Ctrl+C killed `rhp-cli` (and the host reverted its work); a disconnect faulting a pinned module through a call its session had started; `revert_to` undoing pinned modules; identity files created world-readable on POSIX; unfinished multi-line Lua impossible to abandon at the prompt and silently dropped at end of input; a listening client failing its queued calls when a connection that never authenticated closed; observe sessions' unsigned code able to hold the pump thread under default (unlimited) limits — documented. All fixed with regression tests, plus nits: quoted `call` arguments stay strings, invalid UTF-8 in audit lines becomes U+FFFD, refused connections are reported as `auth_failed`, `headless_server` logs the reverts it does at shutdown and accepts only plain blob file names, a client closed before it started stays closed |
+
+## 28. Decision log (round 7, Stage 5)
+
+Taken without a questionnaire: the user asked for Stage 5 to be planned and built straight away, like Stage 4, so each choice took the option earlier rounds pointed to (or the conventional default) and is recorded here.
+
+| # | Topic | Decision |
+|---|---|---|
+| AA1 | Workflow | the main session writes and tests everything; one subagent reviews the finished stage at the end; branch `stage-5-hardening`, PR |
+| AA2 | TLS shape | a sans-IO `Rhp::security::tls::engine` (ciphertext in and out through buffers) behind the `tls::backend` concept (`server(settings)` / `client(settings)` → a `context` that makes one engine per connection); `config<>::tls<B>` slot, default `tls::auto_backend`; `tls::none` builds without TLS. A link decorator (`session::tls_client` / `tls_server`) puts TLS over any transport, user transports included — no Asio SSL streams, so both backends share one path |
+| AA3 | Backends | OpenSSL is the system's (≥ 3.0, found by CMake, desktop only) — never built from source, which needs Perl and NASM; Mbed TLS 4.2.0 comes from its release tarball through CPM (generated files included, no Python) and is built whenever `RHP_TLS_MBEDTLS` (mobile, the fallback without OpenSSL, interop tests). `auto_backend` = OpenSSL where found, else Mbed TLS. Round 1 said "OpenSSL 4.0.x": the OS's 3.x or 4.x is used instead |
+| AA4 | Trust | TLS 1.3 only, no session tickets. The host's certificate is `host_options::tls.cert_pem` + `key_pem`, or an ephemeral self-signed P-256 one made at start. Clients don't check it by default: the PSK proofs and frame keys include the RFC 9266 tls-exporter value, so a relay that terminates TLS on both sides can't authenticate (mTLS stays rejected). `client_options::tls.ca_pem` (+ `server_name`) turns on certificate verification. Authenticators get the binding through `bind_channel()`; one that ignores it is open to such relays unless the client checks certificates |
+| AA5 | When TLS | `endpoint::tls`: `kAuto` (default) or `kRequire` (`Rhp::net::require_tls`). Dialing: TLS when required, or over a network transport (`T::network`, TCP) to a non-loopback address without `insecure_lan`. Listening: the first byte decides (0x16 → TLS); plaintext only from loopback peers (`link::loopback()`), over local transports, or with `insecure_lan` — never with `require_tls`. Building without a backend makes such endpoints `kForbidden` |
+| AA6 | CRC under TLS | frames on an encrypted link carry no CRC (`kCrcOmitted`); a CRC-less frame on a plaintext link ends the session |
+| AA7 | Resume | `limits.resume_ms` (6000; 0 = off). A lost link — or a heartbeat that died, i.e. a half-open link — detaches the session instead of ending it; requests and replies keep queueing. The dialing side redials (capped backoff, full jitter) and sends `kResume {session}` sealed with the session's MAC key under the next control counter (replay-proof, nothing secret on the wire); the other side's new connection hands its link to that session, which answers with a sealed `kWelcome`; both resend what the other hasn't acknowledged. Exactly once comes from the existing seq/ack. Not back in time: the session ends with the link's error and its identity is reverted as before. Works in reverse mode (the host redials) |
+| AA8 | Goodbye | a host that shuts down closes its sessions with a reason ("the host is shutting down", `kTransport`) and waits up to 500 ms for that to go out, so clients fail at once instead of trying to resume |
+| AA9 | Fuzzing | targets frame (decoder over arbitrary chunking, re-encode round trip), envelope (every wire message type), msgpack (canonical round trip) and sandbox_escape (observe-role Lua with limits: host state untouched, hidden globals stay hidden); `RHP_FUZZ=ON` (Clang, preset `linux-clang-fuzz`) builds libFuzzer executables; every build runs replay drivers in ctest (seeds + 3000 deterministic mutations) |
+| AA10 | Mobile presets | Android presets take `ANDROID_NDK_HOME`; `Tools/android/run_tests.py` pushes the test executables to a device or emulator and runs them; `ios-sim` runs tests through `Tools/ios/simctl_run.sh` (`CMAKE_CROSSCOMPILING_EMULATOR`); a GitHub Actions workflow builds and tests Linux (Clang, ASan+UBSan, TSan), Windows (MSVC, clang-cl), macOS, the iOS simulator (+ an iOS device build) and Android (x86_64 on an emulator, arm64 build) |
+| AA11 | Protocol and events | `kProtocolRevision` 3 (resume, CRC-less frames); events gain `session_resumed`, and `session_opened.tls` |
+
+---
+
+## 29. Stage 5 implementation notes
+
+| # | Topic | Decision |
+|---|---|---|
+| AB1 | Mbed TLS threading | its PSA core isn't thread-safe in the default configuration, and Windows has no ready threading layer: every Mbed TLS call takes one process-wide recursive lock (a handful of links don't notice) |
+| AB2 | Moving a link | a session receives its link's callbacks through a small `link_port` that can be re-pointed, so a link moves from the new connection's session to the one it resumes; replaced links are kept (`retired_`) until they are surely outside their own callbacks |
+| AB3 | The resume connection | the session that only carried a resume ends with `errc::kOk` ("resumed session N"): hosts don't count it as a failed authentication |
+| AB4 | Resend | unacknowledged frames are kept as payloads and encoded again when resent (the ack and whether the link wants a CRC may have changed) |
+| AB5 | Who speaks first | the accepting side holds what its session sends until the peer's first byte (TLS or not); a host that dials (reverse mode) opens with an unsealed ping, which handshakes ignore |
+| AB6 | Reverse-mode client | while it has a session it keeps new connections as candidates (at most 4): a resume goes to the session; a full handshake replaces a session that is detached (the host restarted) and is refused otherwise |
+| AB7 | Expiry | a session not resumed in time ends with its link's error code (`kTransport`, or `kTimeout` for a dead heartbeat) and "(not resumed within N ms)" |
+| AB8 | Fuzz finding | sandbox_escape: converting a deeply nested Lua table to `Rhp::value` used more stack slots than Lua guarantees a C function (`lapi.c` assertion in Debug builds, an overrun in Release) — `lua_checkstack` per level |
+| AB9 | Build | Mbed TLS enables C, so the Windows and Linux presets name the C compiler too (`cl`, `clang-cl`, `clang`); `RHP_ENABLE=OFF` still fetches only Catch2 (the TLS module builds factories that report `kDisabled`) |
+| AB10 | Android on hardware | with `-DRHP_BUILD_TESTS=ON` the `android-arm64` build runs on a phone through `run_tests.py`: every suite — integration (TLS, resume) and the fuzz replays included — passed on an arm64 device with Android 16 (API 36) |

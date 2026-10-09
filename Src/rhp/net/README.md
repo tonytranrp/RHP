@@ -4,11 +4,11 @@ Transports: ordered, reliable byte streams between a host and a client. Namespac
 
 | Header | What |
 |---|---|
-| `endpoint.hpp` | `endpoint::listen` / `endpoint::dial` (host, port, `insecure_lan`); the `transport` concept; `transport_ops` (a transport as function pointers) |
+| `endpoint.hpp` | `endpoint::listen` / `endpoint::dial` (host, port, `insecure_lan`, `require_tls`), `tls_mode`, `is_loopback_host`; the `transport` concept (`network` marks transports the TLS address rules apply to); `transport_ops` |
 | `io_context.hpp` | the reactor (Asio behind a wall): `post`, `poll`, `run_one_for`, `run(stop_token)`, one-shot `timer` |
-| `link.hpp` | `link` (a connected stream: `start`, `send`, `close`, `peer`), `link_handler` (`on_bytes`, `on_closed`), `listener` (`port`) |
+| `link.hpp` | `link` (a connected stream: `start`, `send`, `close`, `peer`, and `loopback`, `encrypted`, `channel_binding` with defaults), `link_handler` (`on_bytes`, `on_closed`), `listener` (`port`) |
 | `loopback/loopback.hpp` | in-process transport: named channels, no sockets, ends may live on different threads |
-| `tcp/tcp.hpp` | TCP on Asio; loopback addresses only unless `Rhp::net::insecure_lan` (TLS is Stage 5) |
+| `tcp/tcp.hpp` | TCP on Asio (`network = true`); a non-loopback address only with `insecure_lan` or when TLS is layered on top (hosts and clients do that) |
 
 ## Writing a transport
 

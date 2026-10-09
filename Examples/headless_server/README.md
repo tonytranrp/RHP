@@ -25,6 +25,9 @@ rhp-cli connect 127.0.0.1:7777 -i dev.rhpid
 | `--blobs DIR` | blob sink `files` (admin): pushed files land in `DIR` (file name only) |
 | `--reverse H:N` | reverse mode: dial a listening `rhp-cli … --listen` instead of listening |
 | `--port-file FILE`, `--stop-file FILE`, `--seconds N` | for scripts and tests |
-| `--insecure-lan` | a non-loopback address without TLS |
+| `--insecure-lan` | plaintext to and from non-loopback addresses (no TLS) |
+| `--tls` | TLS on every connection, loopback included (non-loopback peers always get it) |
+| `--cert FILE --key FILE` | the host's certificate chain and key (PEM); default: an ephemeral self-signed certificate |
+| `--ca FILE` | reverse mode: check the listening `rhp-cli`'s certificate against this CA |
 
-`Tests/tools/rhp_cli_tests.cpp` drives it as a separate process: keygen → key files → `run --pin` → a scripted REPL → blob → stubs → an unsigned identity refused → the audit log checked, and reverse mode.
+`Tests/tools/rhp_cli_tests.cpp` drives it as a separate process: keygen → key files → `run --pin` → a scripted REPL → blob → stubs → an unsigned identity refused → the audit log checked, and reverse mode; and TLS (`--tls` on both ends, plaintext refused).

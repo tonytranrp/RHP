@@ -37,3 +37,5 @@
 - `revert_all` over the network (admin) reverts every identity's modules.
 
 **Stage 4 (as built):** `pin` / `unpin` (admin, own identity). While an identity has pinned modules its sandbox outlives its sessions: at its last disconnect the scratch module and every module the pinned ones don't `require` are reverted and unloaded, and an `identity_reverted` event reports how many were kept. A pinned module refuses `revert` / `unload` (`kForbidden`) until unpinned, and `revert_to` is refused while the identity has any pinned module; `reload` and `rollback` still work; a call running in a pinned module keeps running when the session that started it ends (an explicit cancel still stops it); `revert_all` unloads it and closes identities left without sessions.
+
+**Stage 5 (as built):** a session whose link drops stays alive for `limits.resume_ms` (6 s) while its dialing side reconnects; the identity's sandbox, its modules and its requests in flight are untouched, and nothing runs twice. Only a session that ends (closed, refused, or not resumed in time) counts toward the "last session ends → revert" rule.

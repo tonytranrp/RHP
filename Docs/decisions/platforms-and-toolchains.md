@@ -23,3 +23,5 @@
 **Consequences:** OS `#ifdef`s live only in `Src/rhp/platform`.
 
 **Verified at Stage 3:** 324 tests (Asio 1.38.2 networking over loopback and TCP, Monocypher 4.0.3) pass on MSVC 19.51, clang-cl 22, MSVC ASan, Linux Clang 21, Clang ASan+UBSan and Clang TSan; the `RHP_ENABLE=OFF` MSVC build passes 137 tests without Lua, Asio or Monocypher.
+
+**Verified at Stage 5:** TLESTCOUNTS
