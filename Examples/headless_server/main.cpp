@@ -18,7 +18,10 @@
 //   --port-file FILE         write the bound port there once listening (tests, scripts)
 //   --stop-file FILE         exit once FILE exists
 //   --seconds N              exit after N seconds
-//   --insecure-lan           allow a non-loopback address without TLS
+//   --insecure-lan           allow plaintext to and from non-loopback addresses (no TLS)
+//   --tls                    TLS on every connection, loopback included
+//   --cert FILE --key FILE   the host's TLS certificate chain and key (PEM); default: ephemeral self-signed
+//   --ca FILE                reverse mode: check the listening rhp-cli's certificate against this CA
 #include <atomic>
 #include <charconv>
 #include <chrono>
@@ -29,6 +32,7 @@
 #include <fstream>
 #include <initializer_list>
 #include <optional>
+#include <iterator>
 #include <print>
 #include <string>
 #include <string_view>
@@ -95,6 +99,10 @@ struct options {
     std::string stop_file;
     int seconds = 0;
     bool insecure_lan = false;
+    bool tls = false;
+    std::string cert;
+    std::string key;
+    std::string ca;
 };
 
 [[nodiscard]] std::optional<options> parse(int argc, char** argv) {
@@ -111,6 +119,10 @@ struct options {
         std::optional<std::string> v;
         if (arg == "--insecure-lan") {
             o.insecure_lan = true;
+            continue;
+        }
+        if (arg == "--tls") {
+            o.tls = true;
             continue;
         }
         if (!(v = value())) {
@@ -139,6 +151,12 @@ struct options {
             o.port_file = *v;
         } else if (arg == "--stop-file") {
             o.stop_file = *v;
+        } else if (arg == "--cert") {
+            o.cert = *v;
+        } else if (arg == "--key") {
+            o.key = *v;
+        } else if (arg == "--ca") {
+            o.ca = *v;
         } else if (arg == "--seconds") {
             if (std::from_chars(v->data(), v->data() + v->size(), o.seconds).ec != std::errc{} || o.seconds < 0) {
                 std::println(stderr, "bad --seconds {}", *v);
@@ -150,7 +168,7 @@ struct options {
         }
     }
     if (o.keys.empty() || (!o.port && o.reverse.empty())) {
-        std::println(stderr, "usage: headless_server --port N --keys FILE [--signers FILE] [--audit FILE] [--blobs DIR] [--reverse H:N]");
+        std::println(stderr, "usage: headless_server --port N --keys FILE [--signers FILE] [--audit FILE] [--blobs DIR] [--reverse H:N] [--tls] [--cert FILE --key FILE] [--ca FILE]");
         return std::nullopt;
     }
     return o;
@@ -181,17 +199,32 @@ struct options {
 
 // The endpoint to listen on, or (reverse mode) to dial.
 [[nodiscard]] std::optional<Rhp::endpoint> endpoint_of(const options& o) {
+    std::optional<Rhp::endpoint> ep;
     if (o.reverse.empty()) {
-        return o.insecure_lan ? Rhp::endpoint::listen(o.host, *o.port, Rhp::net::insecure_lan) : Rhp::endpoint::listen(o.host, *o.port);
+        ep = o.insecure_lan ? Rhp::endpoint::listen(o.host, *o.port, Rhp::net::insecure_lan) : Rhp::endpoint::listen(o.host, *o.port);
+    } else {
+        const auto colon = o.reverse.rfind(':');
+        std::uint16_t p = 0;
+        if (colon == std::string::npos || std::from_chars(o.reverse.data() + colon + 1, o.reverse.data() + o.reverse.size(), p).ec != std::errc{}) {
+            std::println(stderr, "--reverse wants host:port");
+            return std::nullopt;
+        }
+        const std::string host = o.reverse.substr(0, colon);
+        ep = o.insecure_lan ? Rhp::endpoint::dial(host, p, Rhp::net::insecure_lan) : Rhp::endpoint::dial(host, p);
     }
-    const auto colon = o.reverse.rfind(':');
-    std::uint16_t p = 0;
-    if (colon == std::string::npos || std::from_chars(o.reverse.data() + colon + 1, o.reverse.data() + o.reverse.size(), p).ec != std::errc{}) {
-        std::println(stderr, "--reverse wants host:port");
+    if (o.tls) {
+        ep->tls = Rhp::net::tls_mode::kRequire;
+    }
+    return ep;
+}
+
+[[nodiscard]] std::optional<std::string> read_text(const std::string& path) {
+    std::ifstream in{path, std::ios::binary};
+    if (!in) {
+        std::println(stderr, "can't read {}", path);
         return std::nullopt;
     }
-    const std::string host = o.reverse.substr(0, colon);
-    return o.insecure_lan ? Rhp::endpoint::dial(host, p, Rhp::net::insecure_lan) : Rhp::endpoint::dial(host, p);
+    return std::string{std::istreambuf_iterator<char>{in}, {}};
 }
 
 } // namespace
@@ -220,10 +253,21 @@ int main(int argc, char** argv) {
         return 2;
     }
 
+    Rhp::host_options host_opts;
+    for (const auto& [path, field] : {std::pair{&o->cert, &host_opts.tls.cert_pem}, std::pair{&o->key, &host_opts.tls.key_pem}, std::pair{&o->ca, &host_opts.tls.ca_pem}}) {
+        if (!path->empty()) {
+            auto text = read_text(*path);
+            if (!text) {
+                return 1;
+            }
+            *field = std::move(*text);
+        }
+    }
+
     using cfg = Rhp::config<>::logger<Rhp::core::stderr_logger>;
     // Declared before the host so it outlives it: the reverts the host does when it shuts down are logged too.
     Rhp::event::subscription audit;
-    Rhp::host<cfg> host{*ep, std::move(*keys), std::move(signers)};
+    Rhp::host<cfg> host{*ep, std::move(*keys), std::move(signers), host_opts};
     if (auto installed = host.install<game::game_lib>(); !installed) {
         std::println(stderr, "{}", installed.error());
         return 1;

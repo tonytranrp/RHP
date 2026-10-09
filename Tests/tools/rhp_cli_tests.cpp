@@ -461,4 +461,33 @@ TEST_CASE("rhp-cli: reverse mode: rhp-cli listens / the server dials in", "[cli]
     CHECK(dir.read("cli.txt").find("true\t\"reversed\"") != std::string::npos);
 }
 
+TEST_CASE("rhp-cli: TLS against a headless_server that requires it", "[cli][process][tls]") {
+    scratch_dir dir;
+    const auto id = dir.path / "dev.rhpid";
+    REQUIRE(run(std::format("{} keygen dev --out {} > {}", kCli, q(id), q(dir.path / "keygen.txt"))) == 0);
+    REQUIRE(run(std::format("{} pubkey -i {} --role patch > {}", kCli, q(id), q(dir.path / "lines.txt"))) == 0);
+    const std::string lines = dir.read("lines.txt");
+    const auto nl = lines.find('\n');
+    dir.write("keys.txt", lines.substr(0, nl + 1));
+    dir.write("signers.pub", lines.substr(nl + 1));
+
+    std::jthread server{[&] {
+        (void)run(std::format("{} --port 0 --tls --keys {} --signers {} --audit {} --port-file {} --stop-file {} --seconds 120 > {} 2>&1", kHost,
+                              q(dir.path / "keys.txt"), q(dir.path / "signers.pub"), q(dir.path / "audit.log"), q(dir.path / "port.txt"), q(dir.path / "stop"),
+                              q(dir.path / "server.log")));
+    }};
+    REQUIRE(eventually([&] { return fs::exists(dir.path / "port.txt") && !dir.read("port.txt").empty(); }));
+    const std::string at = "127.0.0.1:" + std::to_string(std::stoi(dir.read("port.txt")));
+
+    CHECK(run(std::format("{} exec \"return 6 * 7\" --tls -c {} -i {} > {} 2>&1", kCli, at, q(id), q(dir.path / "tls.txt"))) == 0);
+    CHECK(dir.read("tls.txt").find("42") != std::string::npos);
+    // Without --tls the CLI speaks plaintext on loopback, and this host refuses it.
+    CHECK(run(std::format("{} exec \"return 1\" --timeout 3000 -c {} -i {} > {} 2>&1", kCli, at, q(id), q(dir.path / "plain.txt"))) == 1);
+
+    dir.write("stop", "");
+    server.join();
+    CHECK(dir.read("server.log").find("TLS") != std::string::npos);
+    CHECK(dir.read("audit.log").find(R"("tls":true)") != std::string::npos);
+}
+
 #endif

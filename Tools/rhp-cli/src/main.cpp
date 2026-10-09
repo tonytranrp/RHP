@@ -14,6 +14,8 @@
 #include <cstdlib>
 #include <filesystem>
 #include <format>
+#include <iterator>
+#include <fstream>
 #include <iostream>
 #include <memory>
 #include <mutex>
@@ -134,6 +136,11 @@ struct connection_options {
     std::string identity;
     bool insecure_lan = false;
     bool listen = false;
+    bool tls = false;
+    std::string ca;
+    std::string server_name;
+    std::string cert;
+    std::string key;
     int timeout_ms = 0; // 0: 10 s when dialing, 10 min when listening
 };
 
@@ -144,7 +151,12 @@ void add_connection_options(CLI::App& cmd, connection_options& o, bool positiona
         cmd.add_option("-c,--connect", o.address, "host:port of the host (or where to listen with --listen)")->required();
     }
     cmd.add_option("-i,--identity", o.identity, "identity file (rhp-cli keygen)")->required()->envname("RHP_IDENTITY");
-    cmd.add_flag("--insecure-lan", o.insecure_lan, "allow a non-loopback address without TLS");
+    cmd.add_flag("--insecure-lan", o.insecure_lan, "plaintext to a non-loopback address (no TLS)");
+    cmd.add_flag("--tls", o.tls, "TLS even on loopback (non-loopback addresses always use it)");
+    cmd.add_option("--ca", o.ca, "check the host's certificate against this CA (PEM); default: not checked, the handshake is bound to the TLS channel");
+    cmd.add_option("--server-name", o.server_name, "the name the host's certificate must carry (with --ca)");
+    cmd.add_option("--cert", o.cert, "with --listen: this side's certificate chain (PEM); default: ephemeral self-signed");
+    cmd.add_option("--key", o.key, "with --listen: the certificate's private key (PEM)");
     cmd.add_flag("--listen", o.listen, "reverse mode: listen at the address and wait for the host to dial in");
     cmd.add_option("--timeout", o.timeout_ms, "ms to wait for the session (default 10000, 600000 with --listen)");
 }
@@ -167,8 +179,23 @@ struct connected {
         (*out)(rhp_cli::style::kError, ep.error().message);
         return std::nullopt;
     }
+    if (o.tls) {
+        ep->tls = Rhp::net::tls_mode::kRequire;
+    }
     Rhp::client_options options;
     options.connect_timeout = std::chrono::milliseconds{o.timeout_ms > 0 ? o.timeout_ms : (o.listen ? 600'000 : 10'000)};
+    for (const auto& [path, field] : {std::pair{&o.ca, &options.tls.ca_pem}, std::pair{&o.cert, &options.tls.cert_pem}, std::pair{&o.key, &options.tls.key_pem}}) {
+        if (path->empty()) {
+            continue;
+        }
+        std::ifstream in{*path, std::ios::binary};
+        if (!in) {
+            (*out)(rhp_cli::style::kError, std::format("can't read {}", *path));
+            return std::nullopt;
+        }
+        *field = std::string{std::istreambuf_iterator<char>{in}, {}};
+    }
+    options.tls.server_name = o.server_name;
     terminal* sink = out.get();
     options.on_output = [sink](std::uint64_t, std::string_view line) { (*sink)(rhp_cli::style::kOutput, line); };
     options.on_emit = [sink](std::uint64_t, Rhp::module_id, const Rhp::value& v) { (*sink)(rhp_cli::style::kOutput, "emit " + rhp_cli::format_value(v)); };
@@ -191,7 +218,7 @@ struct connected {
         return std::nullopt;
     }
     const auto who = c->info();
-    (*out)(rhp_cli::style::kInfo, std::format("connected as {} ({}) to a {} host", who.identity, who.granted, who.host_platform));
+    (*out)(rhp_cli::style::kInfo, std::format("connected as {} ({}) to a {} host{}", who.identity, who.granted, who.host_platform, who.tls ? " over TLS" : ""));
     return connected{std::move(c), std::move(out)};
 }
 
