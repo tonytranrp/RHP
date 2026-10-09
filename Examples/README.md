@@ -4,8 +4,10 @@ Each example is a small, complete program a user can copy. They are added as the
 
 | Example | Shows | Arrives |
 |---|---|---|
-| `hello_console/` | exec, exposing C++ with `Rhp::lib`, patch points, load / revert / rollback — locally, then over TCP | Stage 1 (local), Stage 3 (TCP) |
-| `custom_transport/` | writing your own `Rhp::net::transport` | Stage 3 |
+| `hello_console/` | exec, exposing C++ with `Rhp::lib`, patch points, load / revert / rollback — locally | Stage 1 |
+| `frame_loop/` | pumping scripts per frame: slicing, `rhp.wait`, reload keeping state, events, LuaLS stubs | Stage 2 |
+| `remote_exec/` | `Rhp::host` + `Rhp::client` over loopback and TCP: three keys and roles, streamed output, cancel of a runaway loop, disconnect = revert | Stage 3 |
+| `custom_transport/` | writing your own `Rhp::net::transport` (a byte-metering wrapper around loopback) | Stage 3 |
 | `headless_server/` | threaded host, roles, audit log, fleet + mDNS | Stage 6 |
 
 ## Rules

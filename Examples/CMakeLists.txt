@@ -1,2 +1,4 @@
 add_subdirectory(hello_console)
 add_subdirectory(frame_loop)
+add_subdirectory(remote_exec)
+add_subdirectory(custom_transport)
