@@ -2,6 +2,8 @@
 
 #include <cstdint>
 #include <format>
+#include <initializer_list>
+#include <optional>
 #include <string_view>
 
 namespace Rhp {
@@ -27,6 +29,16 @@ enum class role : std::uint8_t {
     case role::kAdmin: return "admin";
     }
     return "unknown";
+}
+
+// "observe" / "patch" / "admin" (what to_string writes); nullopt for anything else.
+[[nodiscard]] constexpr std::optional<role> parse_role(std::string_view text) noexcept {
+    for (const role r : {role::kObserve, role::kPatch, role::kAdmin}) {
+        if (to_string(r) == text) {
+            return r;
+        }
+    }
+    return std::nullopt;
 }
 
 } // namespace Rhp
