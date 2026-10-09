@@ -37,3 +37,9 @@
 - `pin` (admin) keeps a module after its identity disconnects; `revert_all` still removes it; `revert` / `unload` / `revert_to` can't touch it until unpinned.
 - `rhp-cli keygen` writes identity files owner-only (0600 on POSIX).
 - Unsigned observe code can't mutate anything, but under the default (unlimited) limits it can still hold the pump thread or grow memory until cancelled: a host that hands observe keys to people it doesn't trust should set `limits` (`instructions`, `wall_ms`, `memory`).
+
+**Stage 5 (as built)**
+- TLS 1.3 on non-loopback endpoints (and wherever `Rhp::net::require_tls` asks), OpenSSL or Mbed TLS behind `config<>::tls<>`.
+- The PSK transcript ends with the TLS connection's tls-exporter value (RFC 9266): a relay that terminates TLS on both sides fails the handshake, so the host's certificate can be ephemeral and self-signed. `client_options::tls.ca_pem` (+ `server_name`) adds certificate checks; `host_options::tls.cert_pem` / `key_pem` set the host's certificate.
+- Plaintext reaches a host only from loopback peers, local transports or an endpoint that says `insecure_lan`; `require_tls` refuses it everywhere.
+- A resume request is sealed with the session's MAC key and a control counter: replaying one is refused, and nothing secret crosses the wire.

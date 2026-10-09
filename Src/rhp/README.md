@@ -11,7 +11,7 @@ One folder per module. Each module is its own CMake target (`Rhp::<module>`), de
    | 0 | `utils` |
    | 1 | `core` |
    | 2 | `wire`, `platform` |
-   | 3 | `net`, `security`, `exec`, `script`, `event` |
+   | 3 | `net`, `security`, `tls` (`security/tls/`), `exec`, `script`, `event` |
    | 4 | `session`, `audit` |
    | 5 | `host`, `client` |
 
@@ -31,6 +31,7 @@ One folder per module. Each module is its own CMake target (`Rhp::<module>`), de
 | `wire` | 2 | — (own MessagePack codec) |
 | `net` | 3 | Asio |
 | `security` | 3 | Monocypher |
+| `tls` (`security/tls/`) | 3 | OpenSSL (system) and/or Mbed TLS 4.2 |
 | `exec` | 3 | — (header-only) |
 | `script` | 3 | Lua |
 | `event` | 3 | — |

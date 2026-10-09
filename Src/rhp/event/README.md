@@ -4,7 +4,7 @@ What a host reports. Namespace `Rhp::event`. Depends on `core` only; built with 
 
 | Header | What |
 |---|---|
-| `events.hpp` | the event types (`session_opened`, `session_closed`, `auth_failed`, `script_executed`, `blob_received`, `identity_reverted`), `any` (a variant of all of them), the `host_event` concept, `kind_of<E>`, `to_json` |
+| `events.hpp` | the event types (`session_opened` (with `tls`), `session_closed`, `auth_failed`, `script_executed`, `blob_received`, `identity_reverted`, `session_resumed`), `any` (a variant of all of them), the `host_event` concept, `kind_of<E>`, `to_json` |
 | `hub.hpp` | `hub` (a host's handlers, thread-safe), `subscription` (RAII, move-only), `subscribe<E>` / `subscribe_any` |
 
 ```cpp

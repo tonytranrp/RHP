@@ -31,7 +31,12 @@ auto t   = co_await dev.async().exec<int>("return game.tick");
 dev.unload(*mod);                                              // or just disconnect: everything is reverted
 ```
 
-Every connection authenticates with a pre-shared key (mutual BLAKE2b challenge-response); each key is an identity with its own Lua state and a role (`observe`, `patch`, `admin`). Scripts from patch and admin must be Ed25519-signed by a developer key the host trusts. Frames carry CRC32C and a per-session MAC, are acked, nacked and resent, and a heartbeat ends dead sessions. Hosts can also dial out to a listening client (reverse mode, for phones and NAT), accept blobs into registered sinks, and keep admin-pinned modules after a disconnect. Until TLS (Stage 5) TCP stays on loopback unless you opt in with `Rhp::net::insecure_lan`.
+Every connection authenticates with a pre-shared key (mutual BLAKE2b challenge-response); each key is an identity with its own Lua state and a role (`observe`, `patch`, `admin`). Scripts from patch and admin must be Ed25519-signed by a developer key the host trusts. Frames carry CRC32C and a per-session MAC, are acked, nacked and resent, and a heartbeat ends dead sessions. Hosts can also dial out to a listening client (reverse mode, for phones and NAT), accept blobs into registered sinks, and keep admin-pinned modules after a disconnect. Non-loopback connections use TLS 1.3 (the system's OpenSSL, or Mbed TLS on mobile), with the key handshake bound to the TLS channel; a dropped connection is redialed and the session resumed, with every call run exactly once (`limits.resume_ms`).
+
+```cpp
+Rhp::host<> lan{Rhp::endpoint::listen("0.0.0.0", 7777), keys, signers};      // TLS for every non-loopback peer
+Rhp::client<> dev{Rhp::endpoint::dial("10.0.0.5", 7777), id.credential(), *id.signer_key()};  // TLS
+```
 
 The same script engine also runs locally, without a network:
 

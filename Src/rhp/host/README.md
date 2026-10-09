@@ -24,7 +24,9 @@ while (running) { host.pump(); game::update(); }
 - **Roles and signatures:** each request's least role is checked (`wire::required_role`); `exec`, `load` and `reload` must carry a signature by a trusted signer (`config<>::signer`, Ed25519 by default) unless the session is observe. A signature that is present must verify.
 - **Events:** `script_executed` for every request that runs code or changes state (refused ones too), sessions, auth failures, blobs, reverts — on the pump thread.
 - **Blobs:** `on_blob(sink, fn, role)`; chunks are checked (sink, role, `limits.max_blob`) on the first one, buffered, and the whole blob goes to `fn` on the pump thread. The sink's result is the client's answer. One transfer per session; a new one replaces a transfer the client gave up on.
-- **Reverse mode:** with a dial endpoint the host dials a listening client and redials (capped exponential backoff, full jitter) whenever that fails or the session ends.
+- **Reverse mode:** with a dial endpoint the host dials a listening client and redials (capped exponential backoff, full jitter) whenever that fails or the session ends; a lost link is redialed to resume the same session.
+- **TLS:** non-loopback peers get TLS 1.3 (`config<>::tls<>`), `require_tls` everyone; `host_options::tls` holds the certificate (default: ephemeral self-signed). Events say `tls`.
+- **Resume:** a lost link keeps the session for `limits.resume_ms`; the client's new connection takes it over (`session_resumed`), nothing is reverted or run twice. Shutting down closes every session with a reason first.
 - **Kill switch:** `set_enabled(false)` closes new connections (reported as `auth_failed`) and answers every request `kDisabled`.
 
 ## Rules
