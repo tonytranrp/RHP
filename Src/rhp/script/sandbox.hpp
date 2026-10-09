@@ -59,11 +59,11 @@ struct module_info {
     std::size_t effects = 0; // live ledger entries
     std::size_t irreversible_effects = 0;
     std::optional<error> fault; // why it is kFaulted
-    revision_id revision;          // current revision (1 = first load); 0 for the scratch module
+    revision_id revision{};        // current revision (1 = first load); 0 for the scratch module
     std::uint32_t source_hash = 0; // CRC-32C of the current revision's source
     std::size_t revisions = 0;     // revisions kept for rollback, current included
     bool reloading = false;        // a new revision is loading next to the current one
-    std::vector<module_id> dependencies; // modules this one require()s
+    std::vector<module_id> dependencies{}; // modules this one require()s
 };
 
 // Tag for unload(mod, Rhp::script::force): unload even if other modules require this one.

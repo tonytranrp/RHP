@@ -65,10 +65,10 @@ struct run_budget {
 
 // One revision of a module: its _ENV, its exports and what it require()s.
 struct module_instance {
-    revision_id revision;
+    revision_id revision{};
     int env_ref = kNoRef;
     int exports_ref = kNoRef;
-    std::set<module_id> dependencies;
+    std::set<module_id> dependencies{};
 };
 
 struct revision_source {
@@ -223,6 +223,8 @@ private:
     void reset_hook() noexcept;
     [[nodiscard]] std::uint32_t check_interval() const noexcept;
     void check_cancels() noexcept;
+    // Consumes a pending cancel(request) for `id`; a request with one is ended instead of resumed.
+    [[nodiscard]] bool take_cancel(request_id id);
     [[nodiscard]] int new_environment();
     // Pushes the compiled chunk with its _ENV set; fails with kCompile.
     [[nodiscard]] result<void> compile(std::string_view source, const std::string& chunk_name, int env_ref);
@@ -282,6 +284,7 @@ private:
     id_generator<request_id> request_ids_;
     std::map<request_id, std::unique_ptr<request_record>> requests_;
     request_id last_request_;
+    request_id last_resumed_; // round robin in resume_ready()
     std::uint64_t frame_ = 0;
     std::map<std::uint64_t, timer_record> timers_;
     std::uint64_t timer_keys_ = 0;

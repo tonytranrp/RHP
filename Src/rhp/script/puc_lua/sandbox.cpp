@@ -660,8 +660,8 @@ void sandbox_impl::check_cancels() noexcept {
         return;
     }
     const std::scoped_lock lock{inbox_mutex_};
-    cancel_ids_pending_.store(false, std::memory_order_release);
-    // Running requests stop here; suspended ones are ended by the next drain().
+    // Running requests stop here; suspended ones are ended before they resume (take_cancel) or by
+    // the next drain(), so their ids stay pending.
     std::erase_if(cancel_ids_, [this](request_id id) {
         for (active_run& run : running_) {
             if (run.request != nullptr && run.request->id == id) {
@@ -673,6 +673,21 @@ void sandbox_impl::check_cancels() noexcept {
         }
         return false;
     });
+    cancel_ids_pending_.store(!cancel_ids_.empty(), std::memory_order_release);
+}
+
+bool sandbox_impl::take_cancel(request_id id) {
+    if (!cancel_ids_pending_.load(std::memory_order_acquire)) {
+        return false;
+    }
+    const std::scoped_lock lock{inbox_mutex_};
+    const auto it = std::ranges::find(cancel_ids_, id);
+    if (it == cancel_ids_.end()) {
+        return false;
+    }
+    cancel_ids_.erase(it);
+    cancel_ids_pending_.store(!cancel_ids_.empty(), std::memory_order_release);
+    return true;
 }
 
 void sandbox_impl::count_hook(lua_State* L, lua_Debug*) {
@@ -1030,7 +1045,8 @@ void sandbox_impl::push_required(lua_State* L, std::string_view name) {
         s.raise(make_error(errc::kInvalidArgument, std::format("module '{}' can't require itself", name), "require"));
     }
     if (target->live.exports_ref == kNoRef) {
-        s.raise(make_error(errc::kInvalidArgument, std::format("module '{}' is still loading", name), "require"));
+        const std::string why = target->state == module_state::kLoading ? "is still loading" : std::format("has no exports (it is {})", target->state);
+        s.raise(make_error(errc::kInvalidArgument, std::format("module '{}' {}", name, why), "require"));
     }
     if (module_record* self = record(current_.module); self != nullptr && !self->scratch) {
         if (module_instance* instance = instance_of(*self, current_.revision); instance != nullptr && !instance->dependencies.contains(target->id)) {
@@ -1145,6 +1161,9 @@ request_record& sandbox_impl::start_request(request_kind kind, const effect_owne
 }
 
 std::optional<result<value_list>> sandbox_impl::step(request_record& req, int nargs) {
+    if (take_cancel(req.id)) {
+        return complete(req.id, std::unexpected{make_error(errc::kCancelled, "script cancelled")}); // never resumed again
+    }
     req.sliced = false;
     req.wake_frame = 0;
     req.wake_time.reset();
@@ -1177,10 +1196,13 @@ std::optional<result<value_list>> sandbox_impl::step(request_record& req, int na
         }
         return complete(req.id, nresults);
     }
-    // The dead coroutine's stack is still intact: take the traceback before the error object.
-    luaL_traceback(state_, req.thread, nullptr, 0);
-    pending_traceback = lua_tostring(state_, -1);
-    lua_pop(state_, 1);
+    // The dead coroutine's stack is still intact: take the traceback before the error object
+    // (unless memory ran out: building it would need more).
+    if (status != LUA_ERRMEM && stop != sticky_stop::kMemory) {
+        luaL_traceback(state_, req.thread, nullptr, 0);
+        pending_traceback = lua_tostring(state_, -1);
+        lua_pop(state_, 1);
+    }
     lua_xmove(req.thread, state_, 1);
     error err = take_lua_error(state_, status);
     if (stop != sticky_stop::kNone) {
@@ -1498,11 +1520,15 @@ void sandbox_impl::resume_ready() {
             ready.push_back(id);
         }
     }
+    // Round robin from the request after the one resumed last, so with slicing on a busy request
+    // can't take every slice.
+    std::ranges::rotate(ready, std::ranges::upper_bound(ready, last_resumed_));
     for (const request_id id : ready) {
         if (slice_deadline_ && steady::now() >= *slice_deadline_) {
             return; // the rest stay ready for the next pump()
         }
         if (const auto it = requests_.find(id); it != requests_.end()) {
+            last_resumed_ = id;
             (void)step(*it->second, 0);
         }
     }
