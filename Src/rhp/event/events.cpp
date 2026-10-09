@@ -66,9 +66,24 @@ private:
         text_ += ':';
     }
 
+    // A JSON string. Valid UTF-8 passes through; each byte of an invalid sequence becomes U+FFFD,
+    // so client-supplied names can't break the line.
     void quoted(std::string_view v) {
         text_ += '"';
-        for (const char c : v) {
+        for (std::size_t i = 0; i < v.size();) {
+            const auto lead = static_cast<unsigned char>(v[i]);
+            if (lead >= 0x80) {
+                const std::size_t n = utf8_length(v.substr(i));
+                if (n == 0) {
+                    text_ += "\xEF\xBF\xBD"; // U+FFFD in UTF-8
+                    ++i;
+                } else {
+                    text_.append(v.substr(i, n));
+                    i += n;
+                }
+                continue;
+            }
+            const char c = v[i++];
             switch (c) {
             case '"': text_ += "\\\""; break;
             case '\\': text_ += "\\\\"; break;
@@ -84,6 +99,29 @@ private:
             }
         }
         text_ += '"';
+    }
+
+    // Bytes in the well-formed UTF-8 sequence starting `s` (no overlongs, surrogates or > U+10FFFF), or 0.
+    [[nodiscard]] static std::size_t utf8_length(std::string_view s) noexcept {
+        const auto b = [&](std::size_t k) { return static_cast<unsigned char>(s[k]); };
+        const auto cont = [&](std::size_t k) { return k < s.size() && (b(k) & 0xC0u) == 0x80u; };
+        const unsigned char c = b(0);
+        if (c >= 0xC2 && c <= 0xDF) {
+            return cont(1) ? 2 : 0;
+        }
+        if (c >= 0xE0 && c <= 0xEF) {
+            if (!cont(1) || !cont(2) || (c == 0xE0 && b(1) < 0xA0) || (c == 0xED && b(1) > 0x9F)) {
+                return 0;
+            }
+            return 3;
+        }
+        if (c >= 0xF0 && c <= 0xF4) {
+            if (!cont(1) || !cont(2) || !cont(3) || (c == 0xF0 && b(1) < 0x90) || (c == 0xF4 && b(1) > 0x8F)) {
+                return 0;
+            }
+            return 4;
+        }
+        return 0;
     }
 
     std::string text_;

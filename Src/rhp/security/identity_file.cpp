@@ -1,8 +1,10 @@
+#include <filesystem>
 #include <format>
 #include <fstream>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <utility>
 
 #include <rhp/core/error.hpp>
@@ -106,6 +108,19 @@ std::string identity_file::to_text() const {
 }
 
 result<void> identity_file::save(const std::string& path) const {
+    {
+        // Create it empty and owner-only (0600 on POSIX) before any secret goes in; an existing
+        // file loses wider permissions too.
+        const std::ofstream create{path, std::ios::binary | std::ios::trunc};
+        if (!create) {
+            return fail(errc::kInvalidArgument, std::format("can't write identity file {}", path), "security.identity_file");
+        }
+    }
+    std::error_code ec;
+    std::filesystem::permissions(path, std::filesystem::perms::owner_read | std::filesystem::perms::owner_write, std::filesystem::perm_options::replace, ec);
+    if (ec) {
+        return fail(errc::kInvalidArgument, std::format("can't make identity file {} private: {}", path, ec.message()), "security.identity_file");
+    }
     std::ofstream out{path, std::ios::binary | std::ios::trunc};
     if (!out) {
         return fail(errc::kInvalidArgument, std::format("can't write identity file {}", path), "security.identity_file");

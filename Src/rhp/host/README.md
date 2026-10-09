@@ -20,12 +20,12 @@ while (running) { host.pump(); game::update(); }
 ## What it does
 
 - **Sessions:** the network thread authenticates every connection (`config<>::auth`), at most `limits.pending_handshakes` at a time, and hands requests to `pump()` through SPSC rings.
-- **Identities:** one sandbox per key identity, created on its first session. When its last session ends everything it did is reverted and the sandbox closed — unless an admin pinned some of its modules (`pin`): those, and the modules they require, stay; the rest is reverted.
+- **Identities:** one sandbox per key identity, created on its first session. When its last session ends everything it did is reverted and the sandbox closed — unless an admin pinned some of its modules (`pin`): those, and the modules they require, stay (with the calls running in them); the rest is reverted. `revert` / `unload` / `revert_to` refuse to touch pinned modules.
 - **Roles and signatures:** each request's least role is checked (`wire::required_role`); `exec`, `load` and `reload` must carry a signature by a trusted signer (`config<>::signer`, Ed25519 by default) unless the session is observe. A signature that is present must verify.
 - **Events:** `script_executed` for every request that runs code or changes state (refused ones too), sessions, auth failures, blobs, reverts — on the pump thread.
-- **Blobs:** `on_blob(sink, fn, role)`; chunks are checked (sink, role, `limits.max_blob`) on the first one, buffered, and the whole blob goes to `fn` on the pump thread. The sink's result is the client's answer.
+- **Blobs:** `on_blob(sink, fn, role)`; chunks are checked (sink, role, `limits.max_blob`) on the first one, buffered, and the whole blob goes to `fn` on the pump thread. The sink's result is the client's answer. One transfer per session; a new one replaces a transfer the client gave up on.
 - **Reverse mode:** with a dial endpoint the host dials a listening client and redials (capped exponential backoff, full jitter) whenever that fails or the session ends.
-- **Kill switch:** `set_enabled(false)` closes new connections and answers every request `kDisabled`.
+- **Kill switch:** `set_enabled(false)` closes new connections (reported as `auth_failed`) and answers every request `kDisabled`.
 
 ## Rules
 

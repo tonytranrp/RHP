@@ -12,7 +12,7 @@ struct limits {
     std::uint32_t wall_ms = 0;      // wall clock per run
     std::uint32_t slice_us = 0;     // opt-in time slicing per pump(); 0 = run to completion
     std::uint32_t max_frame = 4u * 1024u * 1024u;
-    std::uint64_t max_blob = 256ull * 1024ull * 1024ull;
+    std::uint64_t max_blob = 256ull * 1024ull * 1024ull; // bytes per blob (host.on_blob); 0 = only empty blobs
     std::uint32_t revisions = 8;           // revisions kept per module
     std::uint32_t pending_handshakes = 64; // unauthenticated connections allowed at once
     std::uint32_t handshake_timeout_ms = 5'000;
