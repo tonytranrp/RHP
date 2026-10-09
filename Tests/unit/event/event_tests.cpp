@@ -133,3 +133,16 @@ TEST_CASE("audit sinks write JSON lines", "[audit]") {
     CHECK(nowhere.ok().error().code == errc::kInvalidArgument);
     nowhere(sample()); // dropped, no crash
 }
+
+TEST_CASE("to_json keeps valid UTF-8 and replaces invalid bytes", "[event][json]") {
+    event::script_executed e = sample();
+    e.module = "caf\xC3\xA9 \xE2\x82\xAC \xF0\x9F\x99\x82"; // é € 🙂
+    CHECK(event::to_json(e).find("\"module\":\"caf\xC3\xA9 \xE2\x82\xAC \xF0\x9F\x99\x82\"") != std::string::npos);
+    e.module = std::string{"a\xFF"
+                           "b\xC3"
+                           "c\xED\xA0\x80"
+                           "d\xC0\xAF"}; // stray byte, truncated, surrogate, overlong
+    const std::string line = event::to_json(e);
+    const std::string r = "\xEF\xBF\xBD"; // U+FFFD
+    CHECK(line.find("\"module\":\"a" + r + "b" + r + "c" + r + r + r + "d" + r + r + "\"") != std::string::npos);
+}

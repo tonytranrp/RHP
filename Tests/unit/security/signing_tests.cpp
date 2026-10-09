@@ -162,6 +162,11 @@ TEST_CASE("identity files round-trip and print the host's lines", "[security][fi
 
     const auto path = (std::filesystem::temp_directory_path() / "rhp_identity_test.rhpid").string();
     REQUIRE(id->save(path));
+#if !defined(_WIN32)
+    // Owner-only: other local users can't read the PSK or the signing key.
+    const auto perms = std::filesystem::status(path).permissions();
+    CHECK((perms & (std::filesystem::perms::group_all | std::filesystem::perms::others_all)) == std::filesystem::perms::none);
+#endif
     auto loaded = identity_file::load(path);
     REQUIRE(loaded);
     CHECK(loaded->name == "dev");
