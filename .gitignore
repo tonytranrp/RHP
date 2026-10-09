@@ -1,0 +1,16 @@
+# build trees (presets write to build/<preset>)
+/build/
+/out/
+
+# IDE state
+/.vs/
+/.vscode/
+/.idea/
+/.cache/
+CMakeUserPresets.json
+
+# local RHP identities and keys — never commit
+*.rhpid
+*.key
+rhp_signers.pub
+rhp_audit.log

@@ -1,0 +1,17 @@
+include_guard(GLOBAL)
+
+# Sanitizers are applied globally so every target (including dependencies) agrees on the runtime.
+if(RHP_SANITIZE)
+    if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+        if(NOT RHP_SANITIZE STREQUAL "address")
+            message(FATAL_ERROR "RHP: MSVC only supports RHP_SANITIZE=address (got '${RHP_SANITIZE}')")
+        endif()
+        add_compile_options(/fsanitize=address /Zi)
+        add_link_options(/INCREMENTAL:NO)
+    else()
+        list(JOIN RHP_SANITIZE "," _rhp_san)
+        add_compile_options(-fsanitize=${_rhp_san} -fno-omit-frame-pointer -fno-sanitize-recover=all)
+        add_link_options(-fsanitize=${_rhp_san})
+    endif()
+    message(STATUS "RHP: sanitizers enabled: ${RHP_SANITIZE}")
+endif()

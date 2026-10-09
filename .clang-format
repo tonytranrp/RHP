@@ -1,0 +1,49 @@
+---
+# RHP code style (Docs/ARCHITECTURE.md §11.1, Docs/decisions/naming-and-style.md)
+Language: Cpp
+BasedOnStyle: LLVM
+Standard: Latest
+
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ContinuationIndentWidth: 4
+AccessModifierOffset: -4
+IndentCaseLabels: false
+NamespaceIndentation: None
+FixNamespaceComments: true
+
+ColumnLimit: 0
+BreakBeforeBraces: Attach
+InsertNewlineAtEOF: true
+
+PointerAlignment: Left
+ReferenceAlignment: Left
+DerivePointerAlignment: false
+
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortBlocksOnASingleLine: Never
+AllowShortCaseLabelsOnASingleLine: true
+AllowShortLambdasOnASingleLine: All
+AllowShortEnumsOnASingleLine: false
+
+BreakTemplateDeclarations: Yes
+SpaceAfterTemplateKeyword: true
+RequiresClausePosition: OwnLine
+IndentRequiresClause: true
+
+SortIncludes: CaseSensitive
+IncludeBlocks: Regroup
+IncludeCategories:
+  # 1. standard library: <name> without a dot or slash
+  - Regex: '^<[a-z_0-9]+>$'
+    Priority: 1
+  # 3. rhp
+  - Regex: '^<rhp/'
+    Priority: 3
+  # 2. third-party
+  - Regex: '.*'
+    Priority: 2
+...
