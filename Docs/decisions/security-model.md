@@ -34,4 +34,6 @@
 - Audit: `host.on<E>()` / `on_any()` and `Rhp::audit::file_sink` — every request that runs code or changes state (with its BLAKE2b-256 source hash, signer and outcome), sessions, failed handshakes, blobs and reverts, as JSON lines.
 - Blobs are admin-only unless a sink says otherwise (`host.on_blob(name, fn, role)`); the role is checked before a byte is buffered.
 - `host.set_enabled(false)` is the runtime kill switch: new connections closed, requests `kDisabled`.
-- `pin` (admin) keeps a module after its identity disconnects; `revert_all` still removes it.
+- `pin` (admin) keeps a module after its identity disconnects; `revert_all` still removes it; `revert` / `unload` / `revert_to` can't touch it until unpinned.
+- `rhp-cli keygen` writes identity files owner-only (0600 on POSIX).
+- Unsigned observe code can't mutate anything, but under the default (unlimited) limits it can still hold the pump thread or grow memory until cancelled: a host that hands observe keys to people it doesn't trust should set `limits` (`instructions`, `wall_ms`, `memory`).
