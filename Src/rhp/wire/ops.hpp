@@ -11,11 +11,11 @@ namespace Rhp::wire {
 
 // The protocol revision both ends must agree on in hello. A plain integer, bumped on any change to
 // the frame layout, the handshake or a message schema.
-inline constexpr std::uint8_t kProtocolRevision = 2; // 2: signatures, pin / unpin, blobs (Stage 4)
+inline constexpr std::uint8_t kProtocolRevision = 3; // 2: signatures, pin / unpin, blobs (Stage 4); 3: resume, CRC-less TLS frames (Stage 5)
 
 // What a frame carries (the header's `op`, 16 bits on the wire).
 //
-//   handshake  1..15   unsequenced; hello / challenge / response unsealed, welcome sealed
+//   handshake  1..15   unsequenced; hello / challenge / response unsealed, welcome and resume sealed
 //   requests  16..47   client → host, sequenced
 //   replies   48..63   host → client, sequenced
 //   control   64..     unsequenced (seq 0), MAC'd once the handshake is done
@@ -23,8 +23,8 @@ enum class op : std::uint16_t {
     kHello = 1, // client: protocol revision, platform, authenticator hello
     kChallenge, // host: protocol revision, platform, authenticator challenge
     kResponse,  // client: authenticator response
-    kWelcome,   // host: session id, identity, role, heartbeat
-    kResume,    // reserved (Stage 5: resume token)
+    kWelcome,   // host: session id, identity, role, heartbeat; also the answer to a kResume
+    kResume,    // the dialing side, on a new connection: continue session N (sealed, control counter)
 
     kExec = 16,
     kLoad,
@@ -143,7 +143,7 @@ enum class frame_flag : std::uint8_t {
     kMac = 1u << 0,          // a 32-byte MAC follows the CRC
     kAckRequested = 1u << 1, // reply with an ack right away
     kMore = 1u << 2,         // reserved: blobs are chunked per message (op kBlob), not per frame
-    kCrcOmitted = 1u << 3,   // no CRC trailer (TLS links, Stage 5)
+    kCrcOmitted = 1u << 3,   // no CRC trailer: only on encrypted links (TLS checks integrity)
 };
 
 [[nodiscard]] constexpr std::uint8_t operator|(frame_flag a, frame_flag b) noexcept {

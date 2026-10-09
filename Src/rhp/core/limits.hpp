@@ -18,6 +18,7 @@ struct limits {
     std::uint32_t handshake_timeout_ms = 5'000;
     std::uint32_t heartbeat_ms = 2'000;
     std::uint32_t heartbeat_misses = 3;
+    std::uint32_t resume_ms = 6'000; // a lost link may come back (resume) within this; 0 = a lost link ends the session
     std::uint32_t backoff_min_ms = 250;
     std::uint32_t backoff_max_ms = 30'000;
     std::uint32_t gateway_idle_ms = 5u * 60u * 1000u;

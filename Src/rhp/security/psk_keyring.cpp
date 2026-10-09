@@ -56,13 +56,15 @@ using digest = std::array<std::byte, kMacSize>;
     return crypto_verify32(u8(a.data()), u8(b.data())) == 0;
 }
 
-// T = len(name) ‖ name ‖ Nc ‖ Nh: binds both nonces and the key name into every proof and key.
-[[nodiscard]] std::vector<std::byte> transcript(std::string_view name, const nonce& client, const nonce& host) {
+// T = len(name) ‖ name ‖ Nc ‖ Nh [‖ channel binding]: binds both nonces, the key name and (under
+// TLS) the TLS connection into every proof and key.
+[[nodiscard]] std::vector<std::byte> transcript(std::string_view name, const nonce& client, const nonce& host, std::span<const std::byte> binding) {
     utils::byte_buffer t;
     t.append_le(static_cast<std::uint32_t>(name.size()));
     t.append(name);
     t.append(client);
     t.append(host);
+    t.append(binding);
     return {t.view().begin(), t.view().end()};
 }
 
@@ -132,6 +134,8 @@ public:
         }
     }
 
+    void bind_channel(std::span<const std::byte> binding) override { binding_.assign(binding.begin(), binding.end()); }
+
     result<value> challenge(const value& hello) override {
         const value* name = hello.find("key");
         const auto client_nonce = read_nonce(hello, "nonce");
@@ -152,7 +156,7 @@ public:
             }
             fake_secret_.assign(fake->begin(), fake->end());
         }
-        transcript_ = transcript(name_, *client_nonce, *host_nonce);
+        transcript_ = transcript(name_, *client_nonce, *host_nonce, binding_);
         stage_ = stage::kChallenged;
         const digest proof = keyed_hash(secret(), "rhp/host", transcript_);
         value::map out;
@@ -196,6 +200,7 @@ private:
     std::vector<std::byte> fake_secret_;
     std::string name_;
     std::vector<std::byte> transcript_;
+    std::vector<std::byte> binding_;
     stage stage_ = stage::kHello;
 };
 
@@ -217,13 +222,15 @@ public:
         return value{std::move(out)};
     }
 
+    void bind_channel(std::span<const std::byte> binding) override { binding_.assign(binding.begin(), binding.end()); }
+
     result<value> respond(const value& challenge) override {
         const auto host_nonce = read_nonce(challenge, "nonce");
         const auto proof = read_nonce(challenge, "proof");
         if (!host_nonce || !proof) {
             return fail(errc::kProtocol, "malformed psk challenge", "psk handshake");
         }
-        transcript_ = transcript(name_, client_nonce_, *host_nonce);
+        transcript_ = transcript(name_, client_nonce_, *host_nonce, binding_);
         const digest expected = keyed_hash(secret_.bytes(), "rhp/host", transcript_);
         if (!same(expected, *proof)) {
             // The host doesn't know this key (or it is someone else): don't prove ours to it.
@@ -249,6 +256,7 @@ private:
     key secret_;
     nonce client_nonce_{};
     std::vector<std::byte> transcript_;
+    std::vector<std::byte> binding_;
 };
 
 } // namespace

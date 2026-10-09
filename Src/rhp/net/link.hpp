@@ -1,6 +1,8 @@
 #pragma once
 
+#include <cstddef>
 #include <memory>
+#include <span>
 #include <string>
 
 #include <rhp/core/error.hpp>
@@ -38,6 +40,15 @@ public:
     virtual void close() noexcept = 0;
     // "127.0.0.1:51234", "loopback:game"
     [[nodiscard]] virtual std::string peer() const = 0;
+    // True when the peer is on this machine (a loopback address, an in-process pipe): such a peer
+    // may speak plaintext to a host that otherwise wants TLS.
+    [[nodiscard]] virtual bool loopback() const noexcept { return false; }
+    // True when the stream is encrypted and integrity-protected (TLS): frames then skip their CRC.
+    [[nodiscard]] virtual bool encrypted() const noexcept { return false; }
+    // Bytes both ends of this connection, and only they, can compute (RFC 9266 tls-exporter under
+    // TLS); empty without. Valid once the first bytes arrived. Authenticators mix it into their
+    // proofs, so a relay that terminates the channel on both sides can't pass the handshake.
+    [[nodiscard]] virtual std::span<const std::byte> channel_binding() const noexcept { return {}; }
 
 protected:
     link() = default;
