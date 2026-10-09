@@ -1,0 +1,25 @@
+rhp_add_test_suite(rhp_utils_tests
+    SOURCES
+        utils/byte_buffer_tests.cpp
+        utils/crc32c_tests.cpp
+        utils/fixed_string_tests.cpp
+        utils/function_traits_tests.cpp
+        utils/scope_guard_tests.cpp
+        utils/spsc_ring_tests.cpp
+        utils/type_list_tests.cpp
+        utils/units_tests.cpp
+    LINKS
+        Rhp::utils
+)
+
+rhp_add_test_suite(rhp_core_tests
+    SOURCES
+        core/convert_tests.cpp
+        core/error_tests.cpp
+        core/errors_mode_tests.cpp
+        core/ids_tests.cpp
+        core/log_tests.cpp
+        core/value_tests.cpp
+    LINKS
+        Rhp::core
+)
