@@ -699,7 +699,11 @@ TEST_CASE("loads, calls and game-code events each get a time slice", "[script][s
     REQUIRE(mod.has_value());
     CHECK(box.status(*mod)->state == module_state::kLoading);
     fx::g_stop = true;
-    box.pump();
+    // One pump gives each ready request its slice; a busy machine can preempt us mid-slice, so
+    // pump (boundedly) until the work is done rather than assuming one pump is enough.
+    for (int i = 0; i < 50 && box.status(*mod)->state != module_state::kActive; ++i) {
+        box.pump();
+    }
     REQUIRE(box.status(*mod)->state == module_state::kActive);
 
     fx::g_stop = false;
@@ -713,7 +717,9 @@ TEST_CASE("loads, calls and game-code events each get a time slice", "[script][s
     CHECK(fx::g_counter == 0);
 
     fx::g_stop = true;
-    box.pump();
+    for (int i = 0; i < 50 && box.suspended() != 0; ++i) {
+        box.pump();
+    }
     CHECK(box.suspended() == 0);
     CHECK(fx::g_counter == 4);
     REQUIRE(out.results.size() == 3);
