@@ -109,10 +109,11 @@ Rhp::client_options printing(std::string_view who) {
 
 // One tour of everything over one transport.
 template <class Cfg>
-void tour(std::string_view title, const Rhp::endpoint& listen_at, const Rhp::security::keyring& keys, const Rhp::security::psk_identity& admin,
-          const Rhp::security::psk_identity& patcher, const Rhp::security::psk_identity& viewer) {
+void tour(std::string_view title, const Rhp::endpoint& listen_at, const Rhp::security::keyring& keys, const Rhp::security::trusted_signers& trusted,
+          const Rhp::security::signing_key& developer, const Rhp::security::psk_identity& admin, const Rhp::security::psk_identity& patcher,
+          const Rhp::security::psk_identity& viewer) {
     std::println("\n== {} ==", title);
-    Rhp::host<Cfg> host{listen_at, keys};
+    Rhp::host<Cfg> host{listen_at, keys, trusted};
     if (auto installed = host.template install<game::game_lib>(); !installed) {
         std::println("install failed: {}", installed.error());
         ++g_failures;
@@ -136,6 +137,7 @@ void tour(std::string_view title, const Rhp::endpoint& listen_at, const Rhp::sec
     }};
 
     {
+        // Observe runs unsigned code (it can't change anything); patch and admin sign every script.
         Rhp::client<Cfg> viewer_client{dial_at, viewer, printing("viewer")};
         auto g = viewer_client.template exec<double>("return game.gravity");
         expect("observe reads game.gravity", g);
@@ -143,7 +145,11 @@ void tour(std::string_view title, const Rhp::endpoint& listen_at, const Rhp::sec
         expect_error("observe may not load a module", viewer_client.load("tuning.moon", "return {}"), Rhp::errc::kForbidden);
 
         {
-            Rhp::client<Cfg> patch_client{dial_at, patcher, printing("patcher")};
+            Rhp::client<Cfg> unsigned_patcher{dial_at, patcher};
+            expect_error("an unsigned script from patch is refused", unsigned_patcher.exec("game.gravity = 0"), Rhp::errc::kBadSignature);
+        }
+        {
+            Rhp::client<Cfg> patch_client{dial_at, patcher, developer, printing("patcher")};
             auto mod = patch_client.load("tuning.moon", read_file(std::filesystem::path{RHP_REMOTE_SCRIPTS_DIR} / "moon.lua"));
             expect("patch loads tuning.moon (moon gravity)", mod);
             check("the game sees gravity -1.6", gravity_becomes(-1.6f));
@@ -171,7 +177,7 @@ void tour(std::string_view title, const Rhp::endpoint& listen_at, const Rhp::sec
         check("disconnect reverted gravity to -9.8", gravity_becomes(-9.8f));
         check("disconnect reverted the score", becomes(game::g_score_shadow, 0));
 
-        Rhp::client<Cfg> admin_client{dial_at, admin, printing("admin")};
+        Rhp::client<Cfg> admin_client{dial_at, admin, developer, printing("admin")};
         expect("admin prints", admin_client.exec("print('hello from ' .. 'admin') return 1"));
         auto modules = admin_client.list();
         expect("admin lists its modules", modules);
@@ -199,12 +205,20 @@ int main() {
     const Rhp::security::psk_identity admin{"dev", *admin_key};
     const Rhp::security::psk_identity patcher{"qa", *patch_key};
     const Rhp::security::psk_identity viewer{"viewer", *observe_key};
+    // The developer's script-signing key: the host trusts its public half.
+    auto signing = Rhp::security::ed25519_secret_key::generate();
+    if (!signing) {
+        std::println(stderr, "no OS randomness for the signing key");
+        return 1;
+    }
+    const Rhp::security::signing_key developer{"dev", *signing};
+    const Rhp::security::trusted_signers trusted{{"dev", signing->public_key()}};
 
     using loopback_cfg = Rhp::config<>::transport<Rhp::net::loopback>::logger<Rhp::core::null_logger>;
     using tcp_cfg = Rhp::config<>::logger<Rhp::core::null_logger>;
 
-    tour<loopback_cfg>("loopback (in-process)", Rhp::endpoint::listen("remote_exec", 1), keys, admin, patcher, viewer);
-    tour<tcp_cfg>("tcp 127.0.0.1 (any free port)", Rhp::endpoint::listen("127.0.0.1", 0), keys, admin, patcher, viewer);
+    tour<loopback_cfg>("loopback (in-process)", Rhp::endpoint::listen("remote_exec", 1), keys, trusted, developer, admin, patcher, viewer);
+    tour<tcp_cfg>("tcp 127.0.0.1 (any free port)", Rhp::endpoint::listen("127.0.0.1", 0), keys, trusted, developer, admin, patcher, viewer);
 
     // A wrong key never gets a session.
     {
