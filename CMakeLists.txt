@@ -23,3 +23,7 @@ if(RHP_BUILD_TESTS)
     enable_testing()
     add_subdirectory(Tests)
 endif()
+
+if(RHP_BUILD_EXAMPLES)
+    add_subdirectory(Examples)
+endif()
