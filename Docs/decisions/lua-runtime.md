@@ -14,3 +14,8 @@
 **Consequences**
 - Binary chunks are never loaded (`load` forced to `"t"`, `string.dump` removed).
 - `_ENV` isolation leaks through shared metatables, so separation between identities uses separate states.
+
+**Stage 1 (as built)**
+- Lua 5.5.1 is fetched from `github.com/lua/lua` (tag `v5.5.1`, download only) and compiled as one C++ translation unit through upstream's `onelua.c` (`cmake/lua/lua_cxx.cpp`, target `Rhp::lua`), with `LUA_USE_APICHECK` in Debug.
+- Every role gets a text-only `load` that defaults to the caller's environment; a module's `_G` is its own `_ENV`. Non-admin roles get `os.time` / `os.clock` only and no `string.dump`, `dofile`, `loadfile`, `collectgarbage`, `require`, `io`, `package` or `debug`.
+- `puc_lua` is the only engine. `Rhp::script::stack` is the engine boundary; a formal `engine` concept for `config<>::engine<>` arrives with a second engine.

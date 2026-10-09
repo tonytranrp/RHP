@@ -17,3 +17,9 @@
 **Consequences**
 - Irreversible bindings must be marked `Rhp::irreversible` and are reported in revert results.
 - Unmarked bindings are treated as pure.
+
+**Stage 1 (as built)** — `Rhp::script::sandbox` implements exec, load, call, revert, unload, checkpoint / revert_to and revert_all locally.
+- Variable writes and patch layers live in process-wide per-target stacks: undoing an older write hands its saved value to the next newer one, so modules (and sandboxes) can be reverted in any order and the target ends up as if the undone write never happened.
+- A failed `exec` reverts only the effects of that run; the scratch module keeps earlier effects.
+- A patch handler that errors falls back to the next layer (or the C++ default) and its module is faulted on the next `pump()`.
+- Deferred to Stage 2: transactional reload (loading a loaded name returns `kAlreadyLoaded`), revisions, `on_save` / `on_restore`, `require`, `Rhp::lua_event`.

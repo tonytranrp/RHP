@@ -18,4 +18,6 @@
 - Linux Clang 21 (WSL): all tests pass, including ASan+UBSan and TSan.
 - macOS, iOS and Android presets are defined but not yet run (no Apple / NDK host available).
 
+**Verified at Stage 1:** 118 tests (Lua 5.5.1 built as C++) pass on MSVC 19.51, clang-cl 22, MSVC ASan, Linux Clang 21, Clang ASan+UBSan and Clang TSan; an `RHP_ENABLE=OFF` MSVC build passes 82 tests without Lua.
+
 **Consequences:** OS `#ifdef`s live only in `Src/rhp/platform`.

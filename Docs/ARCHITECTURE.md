@@ -294,11 +294,13 @@ Compile-time guarantees: names are `Rhp::utils::fixed_string` NTTPs and **duplic
 ```cpp
 float default_damage(float base, int target);
 
-inline constinit Rhp::patch_point<"combat.damage", float(float, int)> damage{ &default_damage };
+inline constexpr Rhp::patch_point<"combat.damage", &default_damage> damage{};
 
 float d = damage(base, target);   // RHP_ENABLE=ON : one atomic load + predictable branch
                                   // RHP_ENABLE=OFF: compiles to a direct call to default_damage
 ```
+
+The default is a template argument (a function pointer or a captureless lambda) and the signature is deduced from it. That keeps all per-point state in the type: it is constant-initialized (safe to call during static initialization) and registers itself in the process-wide id table before `main`.
 
 ```lua
 rhp.patch("combat.damage", function(original, base, target)
@@ -332,11 +334,14 @@ Like patch points, `lua_event`s live in a **process-wide registry** (any host ma
 
 ```cpp
 template <> struct Rhp::convert<vec3> {
-    static void push(Rhp::script::stack& s, const vec3& v) { s.table("x", v.x, "y", v.y, "z", v.z); }
-    static Rhp::result<vec3> pull(Rhp::script::stack& s, int idx);
-    static Rhp::value to_wire(const vec3& v);
+    static Rhp::value to_value(const vec3& v);                              // wire + Lua (through Rhp::value)
+    static Rhp::result<vec3> from_value(const Rhp::value& v);
+    static void push(Rhp::script::stack& s, const vec3& v);                 // optional Lua fast path
+    static Rhp::result<vec3> pull(Rhp::script::stack& s, int index);        // optional Lua fast path
 };
 ```
+
+`to_value` / `from_value` alone are enough for bindings; `push` / `pull` only skip the `Rhp::value` round trip.
 
 No reflection-based automation; `convert<T>` is always written by hand (decided).
 
@@ -812,8 +817,8 @@ RHP/
 │       ├── security/   authenticator · keyring · roles · signer · psk_keyring(.cpp) · ed25519(.cpp)
 │       │               tls/{openssl,mbedtls,auto_backend} · detail/
 │       ├── exec/       executor · pumped · threaded · inline_exec · io_runner · owned_io_thread · detail/
-│       ├── script/     engine · stack · sandbox · scheduler · limits_hook · lib · patch_point
-│       │               ledger · module · revisions · hook_backend · stubs · audit
+│       ├── script/     stack · marshal · lib · patch_point · ledger · sandbox     (Stage 1)
+│       │               scheduler · revisions · hook_backend · stubs · audit       (Stage 2+)
 │       │               puc_lua/(.cpp — lua.h never leaks) · detail/
 │       ├── session/    session · handshake · reliability · resume · heartbeat · backoff · detail/
 │       ├── host/       host · module_manager · dispatcher · blob_sinks · events · local_api
@@ -1041,7 +1046,7 @@ flowchart LR
 | Stage | Done when |
 |---|---|
 | 0 ✅ | `cmake --preset windows-msvc` + `ctest` green with utils/core tests — done: 54 tests green on MSVC, clang-cl, MSVC-ASan, Linux Clang, Clang ASan+UBSan, Clang TSan |
-| 1 | `Examples/hello_console` runs a local Lua file calling exposed C++, patches a point, and reverts everything |
+| 1 ✅ | `Examples/hello_console` runs a local Lua file calling exposed C++, patches a point, and reverts everything — done: 118 tests (56 script) green on MSVC, clang-cl, MSVC-ASan, Linux Clang, Clang ASan+UBSan, Clang TSan; the `RHP_ENABLE=OFF` build is green without Lua |
 | 2 | an infinite-loop script never blocks a frame; reload keeps state via `on_save`/`on_restore`; LuaLS stubs generated |
 | 3 | exec over loopback and TCP with CRC, seq/ack, roles |
 | 4 | full lifecycle from `rhp-cli`, signed scripts only, audit log written |
@@ -1162,3 +1167,23 @@ Sources: lua.org/versions.html · github.com/ThePhD/sol2 · github.com/kunitoki/
 | R17 | `windows-msvc-asan` preset |
 | R18 | chunk names `@module_name` |
 | R19 | Stage 0 started |
+
+---
+
+## 21. Stage 1 implementation notes
+
+Choices made while building Stage 1 that the questionnaires didn't cover. Each is recorded in the matching `Docs/decisions/` file.
+
+| # | Topic | Decision |
+|---|---|---|
+| S1 | Local runtime | `Rhp::script::sandbox` is the per-identity runtime (one `lua_State`, one `_ENV` per module, one ledger). Stage 1 uses it directly; `Rhp::host` (Stage 3) owns one per identity. A local sandbox defaults to `role::kPatch` |
+| S2 | Patch point declaration | `Rhp::patch_point<"id", &default_fn>`: the default is a template argument (§4.3), so state is `constinit` and registration happens before `main` |
+| S3 | Out-of-order revert | variable writes and patch layers live in process-wide per-target stacks; undoing an older write hands its saved value to the next newer one, so any revert order restores exactly |
+| S4 | Lib globals | each lib is a locked **userdata** proxy (`__index` / `__newindex`, `__metatable = "locked"`), so `rawset` can't bypass journaling; unknown reads are `nil`, unknown or read-only writes raise `kInvalidArgument` |
+| S5 | Errors inside Lua | RHP raises strings formatted `[code] where: message`; when they reach C++ the original `Rhp::error` is recovered (`[code]` is parsed as a fallback) |
+| S6 | Environments | a module's `_G` is its own `_ENV`; `load` is text-only for **every** role (admin included) and defaults to the caller's environment; non-admin `os` holds only `time` and `clock` |
+| S7 | Stops | cancel and the instruction budget apply to runs (`exec`, `load`, `call`, and handlers they trigger). Once a stop fires the count hook switches to every instruction, so a script that keeps re-entering `pcall` still can't swallow it. Patch handlers hit from game code outside a run are not limited yet (Stage 2 scheduler) |
+| S8 | Memory | the Lua allocator goes through `std::pmr`; the memory limit covers the whole `lua_State` and is sticky for the rest of a run; Lua's emergency GC reclaims afterwards |
+| S9 | Engine concept | `puc_lua` is the only engine and `Rhp::script::stack` is the engine boundary; a formal `engine` concept for the `config<>::engine<>` slot arrives with a second engine |
+| S10 | Deferred to Stage 2 | `Rhp::lua_event`, transactional reload (loading a loaded name returns `kAlreadyLoaded`), `require`, revisions, `on_save` / `on_restore` |
+| S11 | `RHP_ENABLE=OFF` | Lua is not fetched or linked; the sandbox is an inert stub returning `kDisabled`; the DSL, the ledger and direct-call patch points still compile |

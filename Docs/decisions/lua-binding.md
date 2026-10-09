@@ -13,3 +13,10 @@
 **Consequences**
 - `Rhp::convert<T>` is the single customization point for marshaling (no reflection-based automation).
 - Stale handles raise a Lua error (`kStaleHandle`), never silently return nil.
+
+**Stage 1 (as built)**
+- Each lib is a locked userdata proxy (`__index` / `__newindex`, `__metatable = "locked"`): `rawset` can't bypass journaling, unknown reads are `nil`, writes to unknown, function or `ro` members raise `kInvalidArgument`.
+- Names and tag combinations are checked on the `::fn<>` / `::var<>` line; whether every type crosses the Lua boundary is checked by `sandbox::install<L>()` (the `installable` concept), because handles may be declared after the functions that use them.
+- Handles are trivially copyable, equality-comparable, non-arithmetic value types (strong ids), pushed as userdata with `__eq` / `__tostring`; handle names and types are unique across a lib tree.
+- `Rhp::undo<G>` is fed the binding's result (with `Rhp::result<>` peeled off) or, failing that, its arguments (string views copied).
+- Errors raised inside Lua are strings `[code] where: message`; C++ gets the original `Rhp::error` back.

@@ -16,3 +16,5 @@
 **Alternatives:** marshal patch-point calls to the pump thread (deadlock risk), RHP-owned script thread (bound functions would need to be thread-safe).
 
 **Consequences:** `spsc_ring` is the one hand-rolled lock-free structure and is covered by a TSan preset.
+
+**Stage 1 (as built):** patch layers are pushed, removed and invoked only on their owner thread. A call picks the highest layer owned by the calling thread under the point's mutex and invokes it unlocked; layers of other threads are skipped and counted in `off_thread_misses()`. While nothing is patched a call is one acquire load.

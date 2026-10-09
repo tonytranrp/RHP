@@ -14,7 +14,22 @@ host.install<game_lib>();
 while (game::running()) { host.pump(); game::update(); }
 ```
 
-> The snippet shows where the library is going. Work lands in stages (see below); today only the foundations are built.
+> The snippet shows where the library is going (the network host arrives in Stage 3). Work lands in stages; today the script engine runs locally:
+
+```cpp
+float default_damage(float base, float mult) { return base * mult; }
+inline constexpr Rhp::patch_point<"combat.damage", &default_damage> damage{};
+
+Rhp::script::sandbox box;                        // one identity: a Lua 5.5 state + undo ledger
+box.install<game_lib>();
+auto mod = box.load("low_grav", R"(
+    game.gravity = -1.6
+    rhp.patch("combat.damage", function(original, b, m) return original(b, m) * 2 end)
+)");
+box.revert(*mod);                                // gravity and damage are back
+```
+
+See [`Examples/hello_console`](Examples/hello_console).
 
 ## Targets
 
@@ -49,8 +64,8 @@ target_link_libraries(my_app PRIVATE Rhp::rhp)
 | Stage | Contents | State |
 |---|---|---|
 | 0 | layout, CMake, presets, `utils`, `core` | ✅ |
-| 1 | Lua 5.5 sandbox, `Rhp::lib` DSL, patch points, ledger, revert (local) | next |
-| 2 | scheduler, `print`/`rhp.emit`, revisions, `require`, LuaLS stubs | |
+| 1 | Lua 5.5 sandbox, `Rhp::lib` DSL, patch points, ledger, revert (local) | ✅ |
+| 2 | scheduler, `rhp.emit`, `lua_event`, reload + revisions, `require`, LuaLS stubs | next |
 | 3 | wire format, loopback + TCP, sessions, roles | |
 | 4 | client, `rhp-cli`, signing, audit, blobs, reverse mode | |
 | 5 | TLS, reconnect/resume, fuzzing, mobile presets | |
@@ -60,7 +75,7 @@ target_link_libraries(my_app PRIVATE Rhp::rhp)
 
 | Folder | What lives there |
 |---|---|
-| `Src/rhp/` | the library, one folder per module (`utils`, `core`, …), included as `<rhp/...>` |
+| `Src/rhp/` | the library, one folder per module (`utils`, `core`, `script`, …), included as `<rhp/...>` |
 | `Tests/` | unit tests, compile-fail tests (later: integration, fuzz, bench) |
 | `Examples/` | `hello_console`, `custom_transport`, `headless_server` |
 | `Tools/` | `rhp-cli` |
