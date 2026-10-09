@@ -1,19 +1,25 @@
-# Layer 3: authentication and frame integrity. Monocypher is PRIVATE and only the .cpp files include
-# monocypher.h. With RHP_ENABLE=OFF only keys and the keyring build (a disabled host still takes a
-# keyring); the handshake is not compiled and Monocypher is not fetched.
+# Layer 3: authentication, frame integrity and script signing. Monocypher is PRIVATE and only the
+# .cpp files include monocypher.h. With RHP_ENABLE=OFF only keys and the keyring build (a disabled
+# host still takes a keyring); the handshake, hashing and signatures are not compiled and
+# Monocypher is not fetched.
 set(rhp_security_sources key.cpp keyring.cpp)
 set(rhp_security_private_deps "")
 if(RHP_ENABLE)
-    list(APPEND rhp_security_sources psk_keyring.cpp)
+    list(APPEND rhp_security_sources psk_keyring.cpp hash.cpp ed25519.cpp identity_file.cpp)
     set(rhp_security_private_deps Rhp::monocypher)
 endif()
 
 rhp_add_module(security
     HEADERS
         authenticator.hpp
+        detail/text.hpp
+        ed25519.hpp
+        hash.hpp
+        identity_file.hpp
         key.hpp
         keyring.hpp
         psk_keyring.hpp
+        signer.hpp
     SOURCES
         ${rhp_security_sources}
     DEPS

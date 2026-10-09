@@ -29,6 +29,11 @@ public:
     keyring(std::initializer_list<keyring_entry> entries);
 
     result<void> add(keyring_entry entry);
+
+    // Text with one `name role base64-key` per line (role: observe, patch or admin; '#' starts a
+    // comment), e.g. what `rhp-cli keygen` prints for the host.
+    [[nodiscard]] static result<keyring> parse(std::string_view text);
+    [[nodiscard]] static result<keyring> from_file(const std::string& path);
     [[nodiscard]] const keyring_entry* find(std::string_view name) const noexcept;
     [[nodiscard]] std::size_t size() const noexcept { return entries_.size(); }
 
