@@ -2,9 +2,9 @@ include_guard(GLOBAL)
 
 # Every third-party pin lives in this file. Stages add their dependencies here, never inline.
 #   Stage 0: Catch2 (tests only)
-#   Stage 1: Lua 5.5.1        Stage 3: Asio, msgpack-c
-#   Stage 4: Monocypher, replxx, CLI11
-#   Stage 5: OpenSSL / mbedTLS
+#   Stage 1: Lua 5.5.1        Stage 3: Asio 1.38.2, Monocypher 4.0.3
+#   Stage 4: replxx, CLI11    Stage 5: OpenSSL / mbedTLS
+# MessagePack is RHP's own codec (Src/rhp/wire/codec), so msgpack-c is not a dependency.
 
 if(RHP_BUILD_TESTS)
     CPMAddPackage(
@@ -26,4 +26,22 @@ if(RHP_ENABLE)
         DOWNLOAD_ONLY YES
     )
     include(RhpLua)
+
+    # Networking (Rhp::net) and the PSK handshake + frame MAC (Rhp::security). Like Lua, only live
+    # builds fetch them: RHP_ENABLE=OFF has no network code at all.
+    CPMAddPackage(
+        NAME asio
+        GITHUB_REPOSITORY chriskohlhoff/asio
+        GIT_TAG asio-1-38-2
+        DOWNLOAD_ONLY YES
+    )
+    include(RhpAsio)
+
+    CPMAddPackage(
+        NAME monocypher
+        GITHUB_REPOSITORY LoupVaillant/Monocypher
+        GIT_TAG 4.0.3
+        DOWNLOAD_ONLY YES
+    )
+    include(RhpMonocypher)
 endif()
