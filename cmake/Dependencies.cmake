@@ -45,3 +45,20 @@ if(RHP_ENABLE)
     )
     include(RhpMonocypher)
 endif()
+
+# rhp-cli (Tools/): line editing and argument parsing. Desktop tools only, never linked into RHP.
+if(RHP_BUILD_TOOLS AND RHP_ENABLE)
+    CPMAddPackage(
+        NAME CLI11
+        GITHUB_REPOSITORY CLIUtils/CLI11
+        GIT_TAG v2.7.2
+        DOWNLOAD_ONLY YES
+    )
+    CPMAddPackage(
+        NAME replxx
+        GITHUB_REPOSITORY AmokHuginnsson/replxx
+        GIT_TAG release-0.0.4
+        DOWNLOAD_ONLY YES
+    )
+    include(RhpTools)
+endif()
