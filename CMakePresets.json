@@ -26,7 +26,7 @@
             "name": "windows-msvc",
             "displayName": "Windows · MSVC",
             "inherits": "windows-base",
-            "cacheVariables": { "CMAKE_CXX_COMPILER": "cl" }
+            "cacheVariables": { "CMAKE_C_COMPILER": "cl", "CMAKE_CXX_COMPILER": "cl" }
         },
         {
             "name": "windows-msvc-asan",
@@ -38,7 +38,7 @@
             "name": "windows-clang-cl",
             "displayName": "Windows · clang-cl",
             "inherits": "windows-base",
-            "cacheVariables": { "CMAKE_CXX_COMPILER": "clang-cl" }
+            "cacheVariables": { "CMAKE_C_COMPILER": "clang-cl", "CMAKE_CXX_COMPILER": "clang-cl" }
         },
         {
             "name": "linux-base",
@@ -50,7 +50,7 @@
             "name": "linux-clang",
             "displayName": "Linux · Clang",
             "inherits": "linux-base",
-            "cacheVariables": { "CMAKE_CXX_COMPILER": "clang++" }
+            "cacheVariables": { "CMAKE_C_COMPILER": "clang", "CMAKE_CXX_COMPILER": "clang++" }
         },
         {
             "name": "linux-clang-asan",
@@ -63,6 +63,12 @@
             "displayName": "Linux · Clang · TSan",
             "inherits": "linux-clang",
             "cacheVariables": { "RHP_SANITIZE": "thread" }
+        },
+        {
+            "name": "linux-clang-fuzz",
+            "displayName": "Linux · Clang · libFuzzer + ASan/UBSan",
+            "inherits": "linux-clang",
+            "cacheVariables": { "RHP_SANITIZE": "address;undefined", "RHP_FUZZ": "ON", "RHP_BUILD_EXAMPLES": "OFF", "RHP_BUILD_TOOLS": "OFF" }
         },
         {
             "name": "macos",
@@ -134,6 +140,7 @@
         { "name": "linux-clang", "configurePreset": "linux-clang", "configuration": "Debug" },
         { "name": "linux-clang-asan", "configurePreset": "linux-clang-asan", "configuration": "Debug" },
         { "name": "linux-clang-tsan", "configurePreset": "linux-clang-tsan", "configuration": "Debug" },
+        { "name": "linux-clang-fuzz", "configurePreset": "linux-clang-fuzz", "configuration": "RelWithDebInfo" },
         { "name": "macos", "configurePreset": "macos", "configuration": "Debug" },
         { "name": "ios-sim", "configurePreset": "ios-sim", "configuration": "Debug" },
         { "name": "ios-device", "configurePreset": "ios-device", "configuration": "Debug" },

@@ -67,8 +67,10 @@ if(RHP_ENABLE)
             security/key_tests.cpp
             security/psk_tests.cpp
             security/signing_tests.cpp
+            security/tls_tests.cpp
         LINKS
             Rhp::security
+            Rhp::tls
     )
 
     rhp_add_test_suite(rhp_net_tests
