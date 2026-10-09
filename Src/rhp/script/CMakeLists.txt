@@ -2,6 +2,7 @@
 # With RHP_ENABLE=OFF the sandbox compiles to an inert stub and Lua is neither fetched nor linked;
 # the lib DSL, ledger and patch points (direct calls) still build.
 set(rhp_script_sources
+    event_registry.cpp
     ledger.cpp
     patch_registry.cpp
 )
@@ -21,11 +22,14 @@ rhp_add_module(script
     HEADERS
         ledger.hpp
         lib.hpp
+        lua_event.hpp
         marshal.hpp
         patch_point.hpp
         sandbox.hpp
         stack.hpp
+        stubs.hpp
         detail/context.hpp
+        detail/event_registry.hpp
         detail/lib_builder.hpp
         detail/patch_layers.hpp
         detail/patch_registry.hpp

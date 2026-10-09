@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -6,21 +7,31 @@
 #include <cstring>
 #include <exception>
 #include <format>
+#include <functional>
 #include <memory>
 #include <memory_resource>
+#include <mutex>
 #include <new>
+#include <optional>
+#include <span>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
+#include <vector>
 
 #include <lauxlib.h>
 #include <lua.h>
 #include <lualib.h>
 
+#include <rhp/script/detail/event_registry.hpp>
 #include <rhp/script/detail/patch_layers.hpp>
 #include <rhp/script/detail/patch_registry.hpp>
 #include <rhp/script/puc_lua/sandbox_impl.hpp>
 #include <rhp/script/sandbox.hpp>
+#include <rhp/script/stubs.hpp>
+#include <rhp/utils/byte_buffer.hpp>
+#include <rhp/utils/crc32c.hpp>
 #include <rhp/utils/fixed_string.hpp>
 
 namespace Rhp::script {
@@ -31,6 +42,26 @@ namespace {
 
 constexpr std::size_t kAlignment = alignof(std::max_align_t);
 constexpr std::uint32_t kDefaultCheckInterval = 1'000;
+constexpr double kMaxMilliseconds = 1e12;                         // ~31 years: keeps duration conversions in range
+constexpr const char* kModuleProxyKey = "rhp.module";             // metatable of require() proxies
+constexpr const char* kModuleProxiesKey = "rhp.module_proxies";   // registry: module id → its proxy
+constexpr const char* kRequestThreadsKey = "rhp.request_threads"; // registry: weak set of request coroutines
+
+// Every load / reload request runs this: the module's top level, then on_load, then the exports.
+constexpr std::string_view kLoaderSource = R"lua(
+local type = type
+return function(chunk, env)
+    local exports = chunk()
+    if type(exports) ~= "table" then
+        exports = env
+    end
+    local on_load = exports.on_load
+    if type(on_load) == "function" then
+        on_load()
+    end
+    return exports
+end
+)lua";
 
 sandbox_impl& impl_of(lua_State* L) noexcept {
     return static_cast<sandbox_impl&>(**static_cast<context**>(lua_getextraspace(L)));
@@ -55,6 +86,24 @@ result<void> protect(lua_State* L, F&& fn) {
             return 0;
         },
         &h);
+}
+
+std::uint32_t source_hash(std::string_view source) noexcept {
+    return utils::crc32c(utils::bytes_view{reinterpret_cast<const std::byte*>(source.data()), source.size()});
+}
+
+steady::duration milliseconds(double ms) {
+    return std::chrono::duration_cast<steady::duration>(std::chrono::duration<double, std::milli>{std::min(ms, kMaxMilliseconds)});
+}
+
+// Milliseconds argument (>= 0) or a raised error naming `where`.
+double checked_ms(lua_State* L, int index, std::string_view where) {
+    const stack s{L};
+    const auto ms = s.to_number(index);
+    if (!ms || !(*ms >= 0.0)) {
+        s.raise(make_error(errc::kInvalidArgument, std::format("expected milliseconds >= 0, got {}", s.type_name(index)), std::string{where}));
+    }
+    return *ms;
 }
 
 // ---- Lua-side builtins ---------------------------------------------------------------------------
@@ -97,15 +146,28 @@ int lua_safe_load(lua_State* L) {
     if (argc >= 4) {
         lua_pushvalue(L, 4);
     } else {
-        auto& impl = impl_of(L);
-        const module_record* mod = impl.record(impl.current_module());
-        if (mod == nullptr) {
-            mod = impl.record(impl.scratch_module());
-        }
-        lua_rawgeti(L, LUA_REGISTRYINDEX, mod != nullptr ? mod->env_ref : LUA_NOREF);
+        lua_rawgeti(L, LUA_REGISTRYINDEX, impl_of(L).current_env());
     }
     lua_call(L, 4, LUA_MULTRET);
     return lua_gettop(L) - 4;
+}
+
+// coroutine.resume / coroutine.close, refusing request coroutines: only the scheduler resumes them.
+// Upvalue 1: the standard function.
+int lua_guarded_coroutine(lua_State* L) {
+    if (lua_type(L, 1) == LUA_TTHREAD) {
+        lua_getfield(L, LUA_REGISTRYINDEX, kRequestThreadsKey);
+        lua_pushvalue(L, 1);
+        const bool request = lua_rawget(L, -2) != LUA_TNIL;
+        lua_pop(L, 2);
+        if (request) {
+            stack{L}.raise(make_error(errc::kInvalidArgument, "this coroutine is a script request; only the scheduler resumes it"));
+        }
+    }
+    lua_pushvalue(L, lua_upvalueindex(1));
+    lua_insert(L, 1);
+    lua_call(L, lua_gettop(L) - 1, LUA_MULTRET);
+    return lua_gettop(L);
 }
 
 // rhp.patch(id, handler): overrides a C++ patch point until the calling module is reverted.
@@ -142,33 +204,210 @@ int lua_rhp_patch(lua_State* L) {
     return 0;
 }
 
+// rhp.wait([frames]): suspends the request for `frames` pump() calls (at least 1).
+int lua_rhp_wait(lua_State* L) {
+    const stack s{L};
+    std::int64_t frames = 1;
+    if (!s.is_none_or_nil(1)) {
+        const auto n = s.to_integer(1);
+        if (!n) {
+            s.raise(make_error(errc::kTypeMismatch, std::format("expected a frame count, got {}", s.type_name(1)), "rhp.wait"));
+        }
+        frames = std::max<std::int64_t>(*n, 1);
+    }
+    auto& impl = impl_of(L);
+    impl.suspendable(L, "rhp.wait").wake_frame = impl.frame() + static_cast<std::uint64_t>(frames);
+    return lua_yield(L, 0);
+}
+
+// rhp.next_frame(): suspends the request until the next pump().
+int lua_rhp_next_frame(lua_State* L) {
+    auto& impl = impl_of(L);
+    impl.suspendable(L, "rhp.next_frame").wake_frame = impl.frame() + 1;
+    return lua_yield(L, 0);
+}
+
+// rhp.sleep(ms): suspends the request until the script clock has advanced `ms` milliseconds.
+int lua_rhp_sleep(lua_State* L) {
+    const double ms = checked_ms(L, 1, "rhp.sleep");
+    auto& impl = impl_of(L);
+    impl.suspendable(L, "rhp.sleep").wake_time = impl.script_now() + milliseconds(ms);
+    return lua_yield(L, 0);
+}
+
+// rhp.frame(): pump() calls so far.
+int lua_rhp_frame(lua_State* L) {
+    lua_pushinteger(L, static_cast<lua_Integer>(impl_of(L).frame()));
+    return 1;
+}
+
+// rhp.emit(value): streams a value to the host (sandbox_options::on_emit).
+int lua_rhp_emit(lua_State* L) {
+    const stack s{L};
+    std::optional<error> failure;
+    {
+        auto v = s.to_value(1);
+        if (!v) {
+            failure = std::move(v).error();
+            failure->where = "rhp.emit";
+        } else {
+            try {
+                impl_of(L).emit(*v);
+            } catch (const std::exception& e) {
+                failure = make_error(errc::kRuntime, e.what(), "rhp.emit");
+            }
+        }
+    }
+    if (failure) {
+        s.raise(*failure);
+    }
+    return 0;
+}
+
+// rhp.timer(ms, fn [, repeating]) → id: calls fn as its own request after ms (every ms if repeating).
+int lua_rhp_timer(lua_State* L) {
+    const stack s{L};
+    const double ms = checked_ms(L, 1, "rhp.timer");
+    if (lua_type(L, 2) != LUA_TFUNCTION) {
+        s.raise(make_error(errc::kTypeMismatch, std::format("expected function, got {}", s.type_name(2)), "rhp.timer"));
+    }
+    const bool repeating = lua_toboolean(L, 3) != 0;
+    lua_pushinteger(L, static_cast<lua_Integer>(impl_of(L).add_timer(L, ms, 2, repeating)));
+    return 1;
+}
+
+// rhp.on(event, handler) → id: runs handler as its own request each time C++ fires the event.
+int lua_rhp_on(lua_State* L) {
+    const stack s{L};
+    const auto event = s.to_string(1);
+    if (!event) {
+        s.raise(make_error(errc::kTypeMismatch, std::format("expected an event name, got {}", s.type_name(1)), "rhp.on"));
+    }
+    if (lua_type(L, 2) != LUA_TFUNCTION) {
+        s.raise(make_error(errc::kTypeMismatch, std::format("expected function, got {}", s.type_name(2)), "rhp.on"));
+    }
+    lua_pushinteger(L, static_cast<lua_Integer>(impl_of(L).subscribe(L, *event, 2)));
+    return 1;
+}
+
+// rhp.off(id): removes a timer or subscription the calling module made.
+int lua_rhp_off(lua_State* L) {
+    const stack s{L};
+    const auto id = s.to_integer(1);
+    if (!id || *id <= 0) {
+        s.raise(make_error(errc::kTypeMismatch, std::format("expected a timer or subscription id, got {}", s.type_name(1)), "rhp.off"));
+    }
+    impl_of(L).remove_by_id(L, static_cast<std::uint64_t>(*id));
+    return 0;
+}
+
+// require(name): a read-only live proxy of a loaded module of this identity.
+int lua_require(lua_State* L) {
+    const stack s{L};
+    const auto name = s.to_string(1);
+    if (!name) {
+        s.raise(make_error(errc::kTypeMismatch, std::format("expected a module name, got {}", s.type_name(1)), "require"));
+    }
+    impl_of(L).push_required(L, *name);
+    return 1;
+}
+
+// ---- require() proxies ---------------------------------------------------------------------------
+
+// Userdata payload of a proxy; user value 1 is the module name (for messages after unload).
+struct module_proxy {
+    std::uint64_t id;
+};
+
+std::string proxy_name(lua_State* L, int index) {
+    lua_getiuservalue(L, index, 1);
+    std::size_t len = 0;
+    const char* s = lua_tolstring(L, -1, &len);
+    std::string name = s != nullptr ? std::string{s, len} : std::string{"?"};
+    lua_pop(L, 1);
+    return name;
+}
+
+int module_index(lua_State* L) {
+    const auto* proxy = static_cast<const module_proxy*>(luaL_checkudata(L, 1, kModuleProxyKey));
+    const module_record* mod = impl_of(L).record(module_id{proxy->id});
+    if (mod == nullptr || mod->live.exports_ref == kNoRef) {
+        stack{L}.raise(make_error(errc::kUnloaded, std::format("module '{}' was unloaded", proxy_name(L, 1))));
+    }
+    lua_rawgeti(L, LUA_REGISTRYINDEX, mod->live.exports_ref);
+    lua_pushvalue(L, 2);
+    lua_gettable(L, -2);
+    return 1;
+}
+
+int module_newindex(lua_State* L) {
+    (void)luaL_checkudata(L, 1, kModuleProxyKey);
+    stack{L}.raise(make_error(errc::kInvalidArgument, std::format("module '{}' is read-only to require()rs", proxy_name(L, 1))));
+}
+
+int module_tostring(lua_State* L) {
+    (void)luaL_checkudata(L, 1, kModuleProxyKey);
+    const std::string name = proxy_name(L, 1);
+    lua_pushfstring(L, "module: %s", name.c_str());
+    return 1;
+}
+
 } // namespace
 
-// ---- run scope -------------------------------------------------------------------------------------
+// ---- run scopes --------------------------------------------------------------------------------------
 
-// One top-level run (exec / load / call): resets the stop state on entry and makes `owner` the
-// current module. Nested runs (a binding re-entering the sandbox) share the outer run's state.
-struct sandbox_impl::run_scope {
+// One entry on the run stack: makes `owner` the running code and accounts its time to `budget`.
+// The outermost scope clears a cancel() that arrived while nothing ran, and resets the hook after a
+// stop switched it to every instruction.
+struct sandbox_impl::active_scope {
     sandbox_impl& self;
-    module_id previous;
+    effect_owner previous;
 
-    run_scope(sandbox_impl& s, module_id owner) : self(s), previous(s.current_) {
-        if (self.run_depth_++ == 0) {
-            self.cancel_requested_.store(false, std::memory_order_release);
-            self.sticky_ = sticky_stop::kNone;
-            self.instructions_ = 0;
+    active_scope(sandbox_impl& s, run_budget* budget, lua_State* thread, request_record* request, const effect_owner& owner)
+        : self(s), previous(s.current_) {
+        if (self.running_.empty()) {
+            self.cancel_running_.store(false, std::memory_order_release);
         }
+        self.running_.push_back(active_run{budget, thread, request, steady::now()});
         self.current_ = owner;
     }
 
-    run_scope(const run_scope&) = delete;
-    run_scope& operator=(const run_scope&) = delete;
+    active_scope(const active_scope&) = delete;
+    active_scope& operator=(const active_scope&) = delete;
 
-    ~run_scope() {
-        if (--self.run_depth_ == 0 && self.sticky_ != sticky_stop::kNone) {
-            self.reset_hook(); // the count hook went to every instruction while stopping
+    ~active_scope() {
+        const active_run& top = self.running_.back();
+        if (top.budget != nullptr) {
+            top.budget->active += steady::now() - top.started;
         }
+        self.running_.pop_back();
         self.current_ = previous;
+        if (self.running_.empty() && self.hook_dirty_) {
+            self.hook_dirty_ = false;
+            self.reset_hook();
+        }
+    }
+};
+
+// limits.slice_us of wall time for everything started from here (an operation, pump(), an event).
+struct sandbox_impl::slice_scope {
+    sandbox_impl& self;
+    bool owns;
+
+    explicit slice_scope(sandbox_impl& s)
+        : self(s), owns(s.options_.limits.slice_us != 0 && !s.slice_deadline_ && s.running_.empty()) {
+        if (owns) {
+            self.slice_deadline_ = steady::now() + std::chrono::microseconds{self.options_.limits.slice_us};
+        }
+    }
+
+    slice_scope(const slice_scope&) = delete;
+    slice_scope& operator=(const slice_scope&) = delete;
+
+    ~slice_scope() {
+        if (owns) {
+            self.slice_deadline_.reset();
+        }
     }
 };
 
@@ -176,7 +415,8 @@ struct sandbox_impl::run_scope {
 
 sandbox_impl::sandbox_impl(sandbox_options options)
     : options_(std::move(options)),
-      memory_(options_.memory != nullptr ? options_.memory : std::pmr::get_default_resource()) {
+      memory_(options_.memory != nullptr ? options_.memory : std::pmr::get_default_resource()),
+      thread_(std::this_thread::get_id()) {
     state_ = lua_newstate(&sandbox_impl::allocate, this, luaL_makeseed(nullptr));
     if (state_ == nullptr) {
         throw std::bad_alloc{};
@@ -187,14 +427,14 @@ sandbox_impl::sandbox_impl(sandbox_options options)
     reset_hook();
 
     scratch_ = ids_.next();
-    current_ = scratch_;
+    current_ = effect_owner{scratch_};
     auto opened = protect(state_, [this] {
         open_libraries();
         module_record scratch;
         scratch.id = scratch_;
         scratch.name = "scratch";
         scratch.scratch = true;
-        scratch.env_ref = new_environment();
+        scratch.live.env_ref = new_environment();
         modules_.emplace(scratch_, std::move(scratch));
     });
     if (!opened) {
@@ -209,10 +449,25 @@ sandbox_impl::~sandbox_impl() {
         return;
     }
     try {
-        (void)revert_all();
+        std::vector<module_id> ids;
+        for (const auto& [id, mod] : modules_) {
+            if (!mod.scratch) {
+                ids.push_back(id);
+            }
+        }
+        for (auto it = ids.rbegin(); it != ids.rend(); ++it) {
+            if (module_record* mod = record(*it)) {
+                (void)unload_module(*mod);
+            }
+        }
+        abandon_requests([](const request_record&) { return true; }, "the sandbox was destroyed");
     } catch (...) { // a destructor must not throw; effects are still undone below
     }
     (void)ledger_.revert_all();
+    for (const auto& [name, state] : attached_) {
+        state->detach(this);
+    }
+    attached_.clear();
     modules_.clear();
     lua_close(state_);
 }
@@ -224,7 +479,7 @@ void sandbox_impl::open_libraries() {
         luaL_openselectedlibs(L, ~0, 0);
     } else {
         luaL_openselectedlibs(L, LUA_GLIBK | LUA_COLIBK | LUA_MATHLIBK | LUA_OSLIBK | LUA_STRLIBK | LUA_TABLIBK | LUA_UTF8LIBK, 0);
-        for (const char* name : {"dofile", "loadfile", "collectgarbage", "require"}) {
+        for (const char* name : {"dofile", "loadfile", "collectgarbage"}) {
             lua_pushnil(L);
             lua_setglobal(L, name);
         }
@@ -251,9 +506,45 @@ void sandbox_impl::open_libraries() {
     lua_pushcfunction(L, &lua_print);
     lua_setglobal(L, "print");
 
-    lua_createtable(L, 0, 2);
-    lua_pushcfunction(L, &lua_rhp_patch);
-    lua_setfield(L, -2, "patch");
+    // require only finds loaded modules of this identity — never the file system, admin included.
+    lua_pushcfunction(L, &lua_require);
+    lua_setglobal(L, "require");
+
+    // Request coroutines belong to the scheduler.
+    lua_newtable(L);
+    lua_createtable(L, 0, 1);
+    lua_pushliteral(L, "k");
+    lua_setfield(L, -2, "__mode");
+    lua_setmetatable(L, -2);
+    lua_setfield(L, LUA_REGISTRYINDEX, kRequestThreadsKey);
+    lua_getglobal(L, "coroutine");
+    for (const char* name : {"resume", "close"}) {
+        lua_getfield(L, -1, name);
+        lua_pushcclosure(L, &lua_guarded_coroutine, 1);
+        lua_setfield(L, -2, name);
+    }
+    lua_pop(L, 1);
+
+    struct builtin {
+        const char* name;
+        lua_CFunction fn;
+    };
+    constexpr builtin builtins[] = {
+        {"patch", &lua_rhp_patch},
+        {"wait", &lua_rhp_wait},
+        {"next_frame", &lua_rhp_next_frame},
+        {"sleep", &lua_rhp_sleep},
+        {"frame", &lua_rhp_frame},
+        {"emit", &lua_rhp_emit},
+        {"timer", &lua_rhp_timer},
+        {"on", &lua_rhp_on},
+        {"off", &lua_rhp_off},
+    };
+    lua_createtable(L, 0, static_cast<int>(std::size(builtins)) + 1);
+    for (const auto& [name, fn] : builtins) {
+        lua_pushcfunction(L, fn);
+        lua_setfield(L, -2, name);
+    }
     stack{L}.push_string(to_string(options_.caller_role));
     lua_setfield(L, -2, "role");
     lua_setglobal(L, "rhp");
@@ -264,6 +555,29 @@ void sandbox_impl::open_libraries() {
     lua_pushliteral(L, "locked");
     lua_setfield(L, -2, "__metatable");
     lua_pop(L, 1);
+
+    // require() proxies, one per module (cached so require("x") == require("x")).
+    luaL_newmetatable(L, kModuleProxyKey);
+    lua_pushcfunction(L, &module_index);
+    lua_setfield(L, -2, "__index");
+    lua_pushcfunction(L, &module_newindex);
+    lua_setfield(L, -2, "__newindex");
+    lua_pushcfunction(L, &module_tostring);
+    lua_setfield(L, -2, "__tostring");
+    lua_pushliteral(L, "module");
+    lua_setfield(L, -2, "__name");
+    lua_pushliteral(L, "locked");
+    lua_setfield(L, -2, "__metatable");
+    lua_pop(L, 1);
+    lua_newtable(L);
+    lua_setfield(L, LUA_REGISTRYINDEX, kModuleProxiesKey);
+
+    // The module loader, compiled once against the base globals.
+    if (luaL_loadbufferx(L, kLoaderSource.data(), kLoaderSource.size(), "=rhp.loader", "t") != LUA_OK) {
+        lua_error(L);
+    }
+    lua_call(L, 0, 1);
+    loader_ref_ = luaL_ref(L, LUA_REGISTRYINDEX);
 }
 
 // A module's _ENV: its own globals, reading through to the shared base (stdlib + libs + rhp).
@@ -284,10 +598,12 @@ int sandbox_impl::new_environment() {
 
 // ---- allocator and hook ----------------------------------------------------------------------------
 
+std::uint32_t sandbox_impl::check_interval() const noexcept {
+    return options_.limits.cancel_check_instructions != 0 ? options_.limits.cancel_check_instructions : kDefaultCheckInterval;
+}
+
 void sandbox_impl::reset_hook() noexcept {
-    const std::uint32_t interval =
-        options_.limits.cancel_check_instructions != 0 ? options_.limits.cancel_check_instructions : kDefaultCheckInterval;
-    lua_sethook(state_, &sandbox_impl::count_hook, LUA_MASKCOUNT, static_cast<int>(interval));
+    lua_sethook(state_, &sandbox_impl::count_hook, LUA_MASKCOUNT, static_cast<int>(check_interval()));
 }
 
 void* sandbox_impl::allocate(void* ud, void* ptr, std::size_t old_size, std::size_t new_size) noexcept {
@@ -304,13 +620,16 @@ void* sandbox_impl::allocate(void* ud, void* ptr, std::size_t old_size, std::siz
     }
     if (new_size > old_size) {
         const std::uint64_t limit = self.options_.limits.memory;
-        const bool in_run = self.run_depth_ > 0;
-        if (in_run && self.sticky_ == sticky_stop::kMemory) {
+        run_budget* budget = nullptr; // innermost run with its own budget
+        for (auto it = self.running_.rbegin(); it != self.running_.rend() && budget == nullptr; ++it) {
+            budget = it->budget;
+        }
+        if (budget != nullptr && budget->sticky == sticky_stop::kMemory) {
             return nullptr;
         }
         if (limit != 0 && self.memory_used_ - old_size + new_size > limit) {
-            if (in_run) {
-                self.sticky_ = sticky_stop::kMemory;
+            if (budget != nullptr && budget->sticky == sticky_stop::kNone) {
+                budget->sticky = sticky_stop::kMemory;
             }
             return nullptr;
         }
@@ -329,53 +648,126 @@ void* sandbox_impl::allocate(void* ud, void* ptr, std::size_t old_size, std::siz
     return block;
 }
 
-void sandbox_impl::count_hook(lua_State* L, lua_Debug*) {
-    auto& self = impl_of(L);
-    if (self.run_depth_ == 0) {
-        return; // patch handlers called from game code outside a run aren't limited
-    }
-    if (self.sticky_ == sticky_stop::kNone) {
-        if (self.cancel_requested_.load(std::memory_order_acquire)) {
-            self.sticky_ = sticky_stop::kCancelled;
-        } else if (const std::uint64_t budget = self.options_.limits.instructions; budget != 0) {
-            const std::uint32_t interval = self.options_.limits.cancel_check_instructions != 0
-                                               ? self.options_.limits.cancel_check_instructions
-                                               : kDefaultCheckInterval;
-            self.instructions_ += interval;
-            if (self.instructions_ > budget) {
-                self.sticky_ = sticky_stop::kBudget;
+void sandbox_impl::check_cancels() noexcept {
+    if (cancel_running_.exchange(false, std::memory_order_acq_rel)) {
+        for (active_run& run : running_) {
+            if (run.budget != nullptr && run.budget->sticky == sticky_stop::kNone) {
+                run.budget->sticky = sticky_stop::kCancelled;
             }
         }
     }
-    if (self.sticky_ == sticky_stop::kNone) {
+    if (!cancel_ids_pending_.load(std::memory_order_acquire)) {
         return;
     }
-    // From now on fire on every instruction (this thread and the main one), so a script that keeps
-    // re-entering pcall can't swallow the stop between two widely spaced hook ticks.
-    lua_sethook(L, &sandbox_impl::count_hook, LUA_MASKCOUNT, 1);
-    lua_sethook(self.state_, &sandbox_impl::count_hook, LUA_MASKCOUNT, 1);
-    switch (self.sticky_) {
-    case sticky_stop::kNone: return;
-    case sticky_stop::kCancelled: stack{L}.raise(make_error(errc::kCancelled, "script cancelled"));
-    case sticky_stop::kBudget:
-        stack{L}.raise(make_error(errc::kBudgetExceeded, std::format("instruction limit of {} exceeded", self.options_.limits.instructions)));
-    case sticky_stop::kMemory:
-        stack{L}.raise(make_error(errc::kMemoryExceeded, std::format("memory limit of {} bytes exceeded", self.options_.limits.memory)));
+    const std::scoped_lock lock{inbox_mutex_};
+    cancel_ids_pending_.store(false, std::memory_order_release);
+    // Running requests stop here; suspended ones are ended by the next drain().
+    std::erase_if(cancel_ids_, [this](request_id id) {
+        for (active_run& run : running_) {
+            if (run.request != nullptr && run.request->id == id) {
+                if (run.budget->sticky == sticky_stop::kNone) {
+                    run.budget->sticky = sticky_stop::kCancelled;
+                }
+                return true;
+            }
+        }
+        return false;
+    });
+}
+
+void sandbox_impl::count_hook(lua_State* L, lua_Debug*) {
+    auto& self = impl_of(L);
+    if (self.running_.empty()) {
+        return; // a handler called from game code runs inside run_handler, so this is GC / setup code
     }
+    self.check_cancels();
+    const auto& limits = self.options_.limits;
+    const bool timed = limits.wall_ms != 0 || self.slice_deadline_.has_value();
+    const steady::time_point now = timed ? steady::now() : steady::time_point{};
+    sticky_stop stop = sticky_stop::kNone;
+    for (active_run& run : self.running_) {
+        if (run.budget == nullptr) {
+            continue;
+        }
+        run_budget& budget = *run.budget;
+        if (budget.sticky == sticky_stop::kNone) {
+            if (limits.instructions != 0 && (budget.instructions += self.check_interval()) > limits.instructions) {
+                budget.sticky = sticky_stop::kBudget;
+            } else if (limits.wall_ms != 0 && budget.active + (now - run.started) > std::chrono::milliseconds{limits.wall_ms}) {
+                budget.sticky = sticky_stop::kWall;
+            }
+        }
+        if (budget.sticky != sticky_stop::kNone) {
+            stop = budget.sticky; // the innermost stopped run decides the error
+        }
+    }
+    if (stop != sticky_stop::kNone) {
+        // From now on fire on every instruction (this thread and the main one), so a script that keeps
+        // re-entering pcall can't swallow the stop between two widely spaced hook ticks.
+        self.hook_dirty_ = true;
+        lua_sethook(L, &sandbox_impl::count_hook, LUA_MASKCOUNT, 1);
+        lua_sethook(self.state_, &sandbox_impl::count_hook, LUA_MASKCOUNT, 1);
+        stack{L}.raise(self.sticky_error(stop));
+    }
+    // End of the time slice: yield the request's own thread (never a coroutine it created, never
+    // across a C call); it continues at the next pump().
+    if (self.slice_deadline_ && now >= *self.slice_deadline_) {
+        const active_run& top = self.running_.back();
+        if (top.thread == L && top.request != nullptr && lua_isyieldable(L) != 0) {
+            top.request->sliced = true;
+            (void)lua_yield(L, 0);
+        }
+    }
+}
+
+error sandbox_impl::sticky_error(sticky_stop stop) const {
+    const auto& limits = options_.limits;
+    switch (stop) {
+    case sticky_stop::kCancelled: return make_error(errc::kCancelled, "script cancelled");
+    case sticky_stop::kBudget: return make_error(errc::kBudgetExceeded, std::format("instruction limit of {} exceeded", limits.instructions));
+    case sticky_stop::kMemory: return make_error(errc::kMemoryExceeded, std::format("memory limit of {} bytes exceeded", limits.memory));
+    case sticky_stop::kWall: return make_error(errc::kTimeout, std::format("wall time limit of {} ms exceeded", limits.wall_ms));
+    case sticky_stop::kNone: break;
+    }
+    return make_error(errc::kRuntime);
 }
 
 // ---- context -------------------------------------------------------------------------------------
 
-void sandbox_impl::record_effect(std::string label, std::unique_ptr<effect> e) {
-    const module_id owner = record(current_) != nullptr ? current_ : scratch_;
-    ledger_.record(owner, std::move(label), std::move(e));
+std::uint64_t sandbox_impl::record_effect(std::string label, std::unique_ptr<effect> e) {
+    effect_owner owner = current_;
+    if (record(owner.module) == nullptr) {
+        owner = effect_owner{scratch_};
+    }
+    return ledger_.record(owner, std::move(label), std::move(e));
 }
 
-module_id sandbox_impl::swap_current_module(module_id owner) noexcept {
-    return std::exchange(current_, owner);
+result<void> sandbox_impl::run_handler(const effect_owner& owner, c_function fn, void* data) {
+    // Inside a running script the handler is part of that run; from game code it is a run of its own.
+    run_budget local;
+    run_budget* budget = running_.empty() ? &local : nullptr;
+    result<void> ran;
+    {
+        const active_scope scope{*this, budget, nullptr, nullptr, owner};
+        ran = stack{state_}.run_protected(fn, data);
+    }
+    if (budget != nullptr && local.sticky != sticky_stop::kNone) {
+        error stop = sticky_error(local.sticky);
+        if (ran) {
+            return std::unexpected{std::move(stop)};
+        }
+        ran.error().code = stop.code;
+    }
+    return ran;
 }
 
-void sandbox_impl::report_fault(module_id owner, error err) noexcept {
+void sandbox_impl::report_fault(const effect_owner& owner, error err) noexcept {
+    // A stop of the run around the handler (cancel, a limit) is that run's failure, not the handler's.
+    for (const active_run& run : running_) {
+        if (run.budget != nullptr && run.budget->sticky != sticky_stop::kNone) {
+            return;
+        }
+    }
     try {
         pending_faults_.emplace_back(owner, std::move(err));
     } catch (...) { // out of memory: the fault is dropped, the patch keeps falling back
@@ -391,6 +783,12 @@ void sandbox_impl::output_line(std::string_view line) {
     }
 }
 
+void sandbox_impl::emit(const value& v) {
+    if (options_.on_emit) {
+        options_.on_emit(current_.request, current_.module, v);
+    }
+}
+
 module_record* sandbox_impl::record(module_id mod) noexcept {
     const auto it = modules_.find(mod);
     return it != modules_.end() ? &it->second : nullptr;
@@ -401,7 +799,289 @@ const module_record* sandbox_impl::record(module_id mod) const noexcept {
     return it != modules_.end() ? &it->second : nullptr;
 }
 
-// ---- running code ----------------------------------------------------------------------------------
+module_instance* sandbox_impl::instance_of(module_record& mod, revision_id revision) noexcept {
+    if (mod.pending && mod.pending->revision == revision) {
+        return &*mod.pending;
+    }
+    return mod.live.revision == revision ? &mod.live : nullptr;
+}
+
+int sandbox_impl::current_env() const noexcept {
+    const module_record* mod = record(current_.module);
+    if (mod == nullptr) {
+        mod = record(scratch_);
+    }
+    if (mod->pending && mod->pending->revision == current_.revision) {
+        return mod->pending->env_ref;
+    }
+    return mod->live.env_ref;
+}
+
+steady::time_point sandbox_impl::script_now() const {
+    return options_.clock ? options_.clock() : steady::now();
+}
+
+request_record& sandbox_impl::suspendable(lua_State* L, std::string_view what) {
+    if (!running_.empty()) {
+        const active_run& top = running_.back();
+        if (top.thread == L && top.request != nullptr && lua_isyieldable(L) != 0) {
+            return *top.request;
+        }
+    }
+    stack{L}.raise(make_error(errc::kInvalidArgument,
+                              "only a script's own thread can suspend (not a patch handler, on_save / on_restore / on_unload, "
+                              "a coroutine it created, or a callback of a C function such as table.sort)",
+                              std::string{what}));
+}
+
+// ---- timers and subscriptions ----------------------------------------------------------------------
+
+namespace {
+
+class timer_effect final : public effect {
+public:
+    timer_effect(sandbox_impl& box, std::uint64_t key) : box_(&box), key_(key) {}
+    timer_effect(const timer_effect&) = delete;
+    timer_effect& operator=(const timer_effect&) = delete;
+    ~timer_effect() override { box_->remove_timer(key_); }
+
+    void undo() override { box_->remove_timer(key_); }
+
+private:
+    sandbox_impl* box_;
+    std::uint64_t key_;
+};
+
+class subscription_effect final : public effect {
+public:
+    subscription_effect(sandbox_impl& box, std::string event, std::uint64_t key) : box_(&box), event_(std::move(event)), key_(key) {}
+    subscription_effect(const subscription_effect&) = delete;
+    subscription_effect& operator=(const subscription_effect&) = delete;
+    ~subscription_effect() override { box_->unsubscribe(event_, key_); }
+
+    void undo() override { box_->unsubscribe(event_, key_); }
+
+private:
+    sandbox_impl* box_;
+    std::string event_;
+    std::uint64_t key_;
+};
+
+} // namespace
+
+std::uint64_t sandbox_impl::add_timer(lua_State* L, double ms, int fn_index, bool repeating) {
+    lua_pushvalue(L, fn_index);
+    const int fn_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+    const std::uint64_t key = ++timer_keys_;
+    const steady::duration interval = milliseconds(ms);
+    timers_.emplace(key, timer_record{current_, fn_ref, script_now() + interval, interval, repeating, 0});
+    const std::uint64_t seq = record_effect(repeating ? "rhp.timer (repeating)" : "rhp.timer", std::make_unique<timer_effect>(*this, key));
+    if (const auto it = timers_.find(key); it != timers_.end()) {
+        it->second.seq = seq;
+    }
+    return seq;
+}
+
+void sandbox_impl::remove_timer(std::uint64_t key) noexcept {
+    const auto it = timers_.find(key);
+    if (it == timers_.end()) {
+        return;
+    }
+    luaL_unref(state_, LUA_REGISTRYINDEX, it->second.fn_ref);
+    timers_.erase(it);
+}
+
+std::uint64_t sandbox_impl::subscribe(lua_State* L, std::string_view event, int fn_index) {
+    std::optional<error> failure;
+    event_state* state = nullptr;
+    {
+        auto found = find_event(event);
+        if (found) {
+            state = (*found)->state;
+        } else {
+            failure = std::move(found).error();
+            failure->where = "rhp.on";
+        }
+    }
+    if (failure) {
+        stack{L}.raise(*failure);
+    }
+    lua_pushvalue(L, fn_index);
+    const int fn_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+    const std::uint64_t key = ++subscription_keys_;
+    auto& subs = subscriptions_[std::string{event}];
+    subs.push_back(subscription{key, current_, fn_ref, 0});
+    if (!attached_.contains(event)) {
+        attached_.emplace(std::string{event}, state);
+        state->attach(this);
+    }
+    const std::uint64_t seq =
+        record_effect(std::format("rhp.on {}", event), std::make_unique<subscription_effect>(*this, std::string{event}, key));
+    for (subscription& sub : subscriptions_[std::string{event}]) {
+        if (sub.key == key) {
+            sub.seq = seq;
+        }
+    }
+    return seq;
+}
+
+void sandbox_impl::unsubscribe(const std::string& event, std::uint64_t key) noexcept {
+    const auto it = subscriptions_.find(event);
+    if (it == subscriptions_.end()) {
+        return;
+    }
+    auto& subs = it->second;
+    const auto sub = std::ranges::find(subs, key, &subscription::key);
+    if (sub == subs.end()) {
+        return;
+    }
+    luaL_unref(state_, LUA_REGISTRYINDEX, sub->fn_ref);
+    subs.erase(sub);
+    if (!subs.empty()) {
+        return;
+    }
+    subscriptions_.erase(it);
+    if (const auto attached = attached_.find(event); attached != attached_.end()) {
+        attached->second->detach(this);
+        attached_.erase(attached);
+    }
+}
+
+void sandbox_impl::remove_by_id(lua_State* L, std::uint64_t seq) {
+    const ledger::entry* entry = ledger_.find(seq);
+    bool known = false;
+    if (entry != nullptr && entry->owner == current_.module) {
+        known = std::ranges::any_of(timers_, [seq](const auto& t) { return t.second.seq == seq; });
+        for (const auto& [event, subs] : subscriptions_) {
+            known = known || std::ranges::any_of(subs, [seq](const subscription& s) { return s.seq == seq; });
+        }
+    }
+    if (!known) {
+        stack{L}.raise(make_error(errc::kNotFound, std::format("no timer or subscription {} of this module", seq), "rhp.off"));
+    }
+    (void)ledger_.revert_entry(seq);
+}
+
+// ---- events ------------------------------------------------------------------------------------------
+
+void sandbox_impl::deliver(std::string_view event, event_pusher args) {
+    (void)protect(state_, [&] {
+        const slice_scope slice{*this};
+        const auto it = subscriptions_.find(event);
+        if (it == subscriptions_.end()) {
+            return;
+        }
+        const std::vector<subscription> snapshot = it->second; // handlers may (un)subscribe
+        for (const subscription& sub : snapshot) {
+            const auto now = subscriptions_.find(event);
+            if (now == subscriptions_.end() || std::ranges::find(now->second, sub.key, &subscription::key) == now->second.end()) {
+                continue;
+            }
+            const module_record* mod = record(sub.owner.module);
+            std::string label = std::format("{} (event {})", mod != nullptr ? mod->name : "?", event);
+            lua_rawgeti(state_, LUA_REGISTRYINDEX, sub.fn_ref);
+            stack s{state_};
+            const int nargs = args(s);
+            request_record& req = start_request(request_kind::kEvent, sub.owner, std::move(label), nargs, false);
+            (void)step(req, nargs);
+        }
+    });
+}
+
+void sandbox_impl::enqueue(std::string_view event, std::function<int(stack&)> args) noexcept {
+    try {
+        const std::scoped_lock lock{inbox_mutex_};
+        inbox_.emplace_back(std::string{event}, std::move(args));
+    } catch (...) { // out of memory: this sandbox misses the event
+    }
+}
+
+// ---- require -------------------------------------------------------------------------------------------
+
+bool sandbox_impl::depends_on(module_id from, module_id to, std::vector<module_id>& path) const {
+    path.push_back(from);
+    if (from == to) {
+        return true;
+    }
+    if (const module_record* mod = record(from)) {
+        const auto visit = [&](const std::set<module_id>& deps) {
+            return std::ranges::any_of(deps, [&](module_id dep) { return std::ranges::find(path, dep) == path.end() && depends_on(dep, to, path); });
+        };
+        if (visit(mod->live.dependencies) || (mod->pending && visit(mod->pending->dependencies))) {
+            return true;
+        }
+    }
+    path.pop_back();
+    return false;
+}
+
+void sandbox_impl::push_required(lua_State* L, std::string_view name) {
+    const stack s{L};
+    module_record* target = nullptr;
+    for (auto& [id, mod] : modules_) {
+        if (!mod.scratch && mod.name == name) {
+            target = &mod;
+        }
+    }
+    if (target == nullptr) {
+        s.raise(make_error(errc::kNotFound, std::format("module '{}' is not loaded (require only finds loaded modules of this identity)", name), "require"));
+    }
+    if (target->id == current_.module) {
+        s.raise(make_error(errc::kInvalidArgument, std::format("module '{}' can't require itself", name), "require"));
+    }
+    if (target->live.exports_ref == kNoRef) {
+        s.raise(make_error(errc::kInvalidArgument, std::format("module '{}' is still loading", name), "require"));
+    }
+    if (module_record* self = record(current_.module); self != nullptr && !self->scratch) {
+        if (module_instance* instance = instance_of(*self, current_.revision); instance != nullptr && !instance->dependencies.contains(target->id)) {
+            std::vector<module_id> path;
+            if (depends_on(target->id, self->id, path)) {
+                std::string chain = self->name;
+                for (const module_id id : path) {
+                    const module_record* step = record(id);
+                    chain += std::format(" -> {}", step != nullptr ? step->name : "?");
+                }
+                s.raise(make_error(errc::kInvalidArgument, std::format("require cycle: {}", chain), "require"));
+            }
+            instance->dependencies.insert(target->id);
+        }
+    }
+
+    const auto key = static_cast<lua_Integer>(target->id.value());
+    lua_getfield(L, LUA_REGISTRYINDEX, kModuleProxiesKey);
+    if (lua_rawgeti(L, -1, key) == LUA_TUSERDATA) {
+        lua_remove(L, -2);
+        return;
+    }
+    lua_pop(L, 1);
+    auto* proxy = static_cast<module_proxy*>(lua_newuserdatauv(L, sizeof(module_proxy), 1));
+    proxy->id = target->id.value();
+    s.push_string(target->name);
+    lua_setiuservalue(L, -2, 1);
+    luaL_setmetatable(L, kModuleProxyKey);
+    lua_pushvalue(L, -1);
+    lua_rawseti(L, -3, key);
+    lua_remove(L, -2);
+}
+
+void sandbox_impl::forget_proxy(module_id mod) noexcept {
+    lua_getfield(state_, LUA_REGISTRYINDEX, kModuleProxiesKey);
+    lua_pushnil(state_);
+    lua_rawseti(state_, -2, static_cast<lua_Integer>(mod.value()));
+    lua_pop(state_, 1);
+}
+
+std::vector<std::string> sandbox_impl::dependents_of(module_id mod) const {
+    std::vector<std::string> out;
+    for (const auto& [id, other] : modules_) {
+        if (id != mod && (other.live.dependencies.contains(mod) || (other.pending && other.pending->dependencies.contains(mod)))) {
+            out.push_back(other.name);
+        }
+    }
+    return out;
+}
+
+// ---- requests --------------------------------------------------------------------------------------
 
 result<void> sandbox_impl::compile(std::string_view source, const std::string& chunk_name, int env_ref) {
     lua_State* L = state_;
@@ -418,74 +1098,420 @@ result<void> sandbox_impl::compile(std::string_view source, const std::string& c
     return {};
 }
 
-result<void> sandbox_impl::run_call(module_id owner, int nargs, int nresults) {
-    const run_scope scope{*this, owner};
+template <class Pred>
+void sandbox_impl::abandon_requests(Pred pred, std::string_view why) {
+    std::vector<request_id> doomed;
+    for (const auto& [id, req] : requests_) {
+        if (!req->running && pred(*req)) {
+            doomed.push_back(id);
+        }
+    }
+    for (const request_id id : doomed) {
+        auto node = requests_.extract(id);
+        request_record& req = *node.mapped();
+        close_thread(req, true);
+        if (req.suspended_once) {
+            finished_.emplace_back(id, fail(errc::kCancelled, std::string{why}, req.label));
+        }
+    }
+}
+
+request_record& sandbox_impl::start_request(request_kind kind, const effect_owner& owner, std::string label, int nargs, bool from_operation) {
+    lua_State* L = state_;
+    auto req = std::make_unique<request_record>();
+    req->id = request_ids_.next();
+    req->kind = kind;
+    req->owner = owner;
+    req->owner.request = req->id;
+    req->label = std::move(label);
+
+    lua_State* co = lua_newthread(L);
+    lua_sethook(co, &sandbox_impl::count_hook, LUA_MASKCOUNT, static_cast<int>(check_interval()));
+    lua_getfield(L, LUA_REGISTRYINDEX, kRequestThreadsKey);
+    lua_pushvalue(L, -2);
+    lua_pushboolean(L, 1);
+    lua_rawset(L, -3);
+    lua_pop(L, 1);
+    req->thread = co;
+    req->thread_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+    lua_xmove(L, co, nargs + 1); // the function and its arguments
+
+    if (from_operation) {
+        last_request_ = req->id;
+    }
+    request_record& out = *req;
+    requests_.emplace(out.id, std::move(req));
+    return out;
+}
+
+std::optional<result<value_list>> sandbox_impl::step(request_record& req, int nargs) {
+    req.sliced = false;
+    req.wake_frame = 0;
+    req.wake_time.reset();
+    req.running = true;
+    lua_State* from = running_.empty() || running_.back().thread == nullptr ? state_ : running_.back().thread;
+    int status = LUA_OK;
+    int nresults = 0;
+    {
+        const active_scope scope{*this, &req.budget, req.thread, &req, req.owner};
+        status = lua_resume(req.thread, from, nargs, &nresults);
+    }
+    req.running = false;
+    const sticky_stop stop = req.budget.sticky;
+
+    if (status == LUA_YIELD) {
+        lua_pop(req.thread, nresults);
+        if (stop == sticky_stop::kNone) {
+            if (req.wake_frame == 0 && !req.wake_time) {
+                req.wake_frame = frame_ + 1; // a time slice ran out, or a plain coroutine.yield()
+            }
+            req.suspended_once = true;
+            return std::nullopt;
+        }
+        return complete(req.id, std::unexpected{sticky_error(stop)});
+    }
+    if (status == LUA_OK) {
+        // A stop wins even if the script swallowed it with pcall and returned normally.
+        if (stop != sticky_stop::kNone) {
+            return complete(req.id, std::unexpected{sticky_error(stop)});
+        }
+        return complete(req.id, nresults);
+    }
+    // The dead coroutine's stack is still intact: take the traceback before the error object.
+    luaL_traceback(state_, req.thread, nullptr, 0);
+    pending_traceback = lua_tostring(state_, -1);
+    lua_pop(state_, 1);
+    lua_xmove(req.thread, state_, 1);
+    error err = take_lua_error(state_, status);
+    if (stop != sticky_stop::kNone) {
+        err.code = sticky_error(stop).code;
+    }
+    return complete(req.id, std::unexpected{std::move(err)});
+}
+
+result<value_list> sandbox_impl::complete(request_id id, result<int> outcome) {
+    auto node = requests_.extract(id);
+    if (node.empty()) {
+        return fail(errc::kNotFound, std::format("no request {}", id));
+    }
+    request_record& req = *node.mapped();
+    module_record* mod = record(req.owner.module);
+
+    result<value_list> out = value_list{};
+    if (!outcome) {
+        out = std::unexpected{std::move(outcome).error()};
+    } else if (req.kind == request_kind::kExec || req.kind == request_kind::kCall) {
+        out = collect_results(req.thread, 1, *outcome);
+    } else if (req.kind == request_kind::kLoad) {
+        out = mod != nullptr ? complete_load(*mod, req.owner.revision, req.thread) : fail(errc::kNotFound, "the module was unloaded");
+    }
+
+    if (!out) {
+        if (out.error().where.empty() && !req.label.empty()) {
+            out.error().where = req.label;
+        }
+        if (req.kind == request_kind::kExec) {
+            (void)ledger_.revert_request(scratch_, req.id); // only this request's effects
+        } else if (req.kind == request_kind::kLoad && mod != nullptr && mod->pending && mod->pending->revision == req.owner.revision) {
+            abort_reload(*mod); // the old revision is untouched
+        } else {
+            fault_or_defer(req.owner, out.error());
+        }
+    }
+    close_thread(req, !out.has_value());
+    if (req.suspended_once) {
+        finished_.emplace_back(req.id, out);
+    }
+    return out;
+}
+
+result<value_list> sandbox_impl::complete_load(module_record& mod, revision_id revision, lua_State* thread) {
+    lua_State* L = state_;
+    lua_xmove(thread, L, 1); // the exports table the loader returned
+    if (mod.state == module_state::kLoading && mod.live.revision == revision) {
+        mod.live.exports_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+        mod.state = module_state::kActive;
+        return value_list{};
+    }
+    if (!mod.pending || mod.pending->revision != revision) {
+        lua_pop(L, 1);
+        return fail(errc::kCancelled, "the reload was superseded");
+    }
+    mod.pending->exports_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+
+    // Carry state over: new.on_restore(old.on_save()).
+    const effect_owner old_owner{mod.id, mod.live.revision};
+    const effect_owner new_owner{mod.id, revision};
+    const int base = lua_gettop(L);
+    lua_pushnil(L); // the saved state
+    if (mod.state == module_state::kActive && mod.live.exports_ref != kNoRef) {
+        lua_rawgeti(L, LUA_REGISTRYINDEX, mod.live.exports_ref);
+        lua_getfield(L, -1, "on_save");
+        lua_remove(L, -2);
+        if (lua_type(L, -1) == LUA_TFUNCTION) {
+            if (auto saved = call_sync(old_owner, 0, 1); !saved) {
+                lua_settop(L, base);
+                saved.error().where = std::format("{}.on_save", mod.name);
+                return std::unexpected{std::move(saved).error()};
+            }
+            lua_replace(L, base + 1);
+        } else {
+            lua_pop(L, 1);
+        }
+    }
+    lua_rawgeti(L, LUA_REGISTRYINDEX, mod.pending->exports_ref);
+    lua_getfield(L, -1, "on_restore");
+    lua_remove(L, -2);
+    if (lua_type(L, -1) == LUA_TFUNCTION) {
+        lua_pushvalue(L, base + 1);
+        if (auto restored = call_sync(new_owner, 1, 0); !restored) {
+            lua_settop(L, base);
+            restored.error().where = std::format("{}.on_restore", mod.name);
+            return std::unexpected{std::move(restored).error()};
+        }
+    } else {
+        lua_pop(L, 1);
+    }
+    lua_settop(L, base);
+
+    // Swap: the old revision goes, the new one is live.
+    const revision_id old_revision = mod.live.revision;
+    abandon_requests([&](const request_record& r) { return r.owner.module == mod.id && r.owner.revision == old_revision; },
+                     "its module revision was replaced by a reload");
+    (void)ledger_.revert_revision(mod.id, old_revision);
+    release(mod.live);
+    mod.live = std::move(*mod.pending);
+    mod.pending.reset();
+    if (mod.pending_source) {
+        mod.history.push_back(std::move(*mod.pending_source));
+        mod.pending_source.reset();
+    }
+    while (mod.history.size() > std::max<std::size_t>(options_.limits.revisions, 1)) {
+        mod.history.pop_front();
+    }
+    mod.state = module_state::kActive;
+    mod.fault.reset();
+    return value_list{};
+}
+
+void sandbox_impl::close_thread(request_record& req, bool failed) noexcept {
+    if (failed) {
+        // Runs the pending to-be-closed variables of a coroutine that didn't return normally.
+        (void)protect(state_, [&] {
+            run_budget local;
+            const active_scope scope{*this, running_.empty() ? &local : nullptr, nullptr, nullptr, req.owner};
+            (void)lua_closethread(req.thread, state_);
+        });
+    }
+    luaL_unref(state_, LUA_REGISTRYINDEX, req.thread_ref);
+    req.thread_ref = kNoRef;
+    req.thread = nullptr;
+}
+
+result<void> sandbox_impl::call_sync(const effect_owner& owner, int nargs, int nresults) {
+    run_budget local;
+    run_budget* budget = running_.empty() ? &local : nullptr;
     const int base = lua_gettop(state_) - nargs - 1;
-    auto called = stack{state_}.call(nargs, nresults);
-    // A sticky stop wins even if the script swallowed it with pcall and returned normally.
-    if (sticky_ != sticky_stop::kNone && scope.self.run_depth_ == 1) {
-        const errc code = sticky_ == sticky_stop::kCancelled ? errc::kCancelled
-                          : sticky_ == sticky_stop::kBudget  ? errc::kBudgetExceeded
-                                                             : errc::kMemoryExceeded;
+    result<void> called;
+    {
+        const active_scope scope{*this, budget, nullptr, nullptr, owner};
+        called = stack{state_}.call(nargs, nresults);
+    }
+    if (budget != nullptr && local.sticky != sticky_stop::kNone) {
+        error stop = sticky_error(local.sticky);
         if (called) {
             lua_settop(state_, base);
-            const std::string_view what = code == errc::kCancelled ? "script cancelled" : code == errc::kBudgetExceeded ? "instruction limit exceeded"
-                                                                                                                        : "memory limit exceeded";
-            return fail(code, std::string{what});
+            return std::unexpected{std::move(stop)};
         }
-        called.error().code = code;
+        called.error().code = stop.code;
     }
     return called;
 }
 
-value_list sandbox_impl::collect_results(int first) {
+value_list sandbox_impl::collect_results(lua_State* L, int first, int last) {
     value_list out;
-    const stack s{state_};
-    const int last = lua_gettop(state_);
     out.reserve(static_cast<std::size_t>(std::max(0, last - first + 1)));
+    const stack s{L};
     for (int i = first; i <= last; ++i) {
         auto v = s.to_value(i);
         if (v) {
             out.push_back(std::move(*v));
         } else {
-            out.emplace_back(std::format("{}: {}", luaL_typename(state_, i), lua_topointer(state_, i)));
+            out.emplace_back(std::format("{}: {}", luaL_typename(L, i), lua_topointer(L, i)));
         }
     }
     return out;
 }
 
-void sandbox_impl::fault(module_record& mod, error err) {
-    auto report = ledger_.revert(mod.id);
+// ---- faults --------------------------------------------------------------------------------------
+
+void sandbox_impl::fault_or_defer(const effect_owner& owner, error err) {
+    if (running_.empty()) {
+        fault(owner, std::move(err));
+    } else {
+        pending_faults_.emplace_back(owner, std::move(err));
+    }
+}
+
+void sandbox_impl::fault(const effect_owner& owner, error err) {
+    module_record* mod = record(owner.module);
+    if (mod == nullptr) {
+        return;
+    }
+    if (mod->scratch) {
+        // Scratch code faults only its own request's effects (earlier exec effects stay).
+        if (owner.request) {
+            abandon_requests([&](const request_record& r) { return r.id == owner.request; }, "the script faulted");
+            (void)ledger_.revert_request(scratch_, owner.request);
+        } else {
+            (void)ledger_.revert(scratch_);
+        }
+        return;
+    }
+    if (mod->pending && owner.revision == mod->pending->revision) {
+        abort_reload(*mod); // a fault of the incoming revision fails the reload; the live one stays
+        return;
+    }
+    if (owner.revision && owner.revision != mod->live.revision) {
+        return; // a revision that was already replaced
+    }
+    if (mod->state != module_state::kActive && mod->state != module_state::kLoading) {
+        return;
+    }
+    abandon_requests([&](const request_record& r) { return r.owner.module == mod->id; }, "its module faulted");
+    abort_reload(*mod);
+    auto report = ledger_.revert(mod->id);
     if (!report.clean()) {
         err.message += std::format(" (revert left {} effect(s) in place)", report.failures.size());
     }
-    if (mod.scratch) {
-        return;
-    }
-    mod.state = module_state::kFaulted;
-    mod.fault = std::move(err);
+    mod->state = module_state::kFaulted;
+    mod->fault = std::move(err);
 }
 
-void sandbox_impl::process_faults() {
-    auto pending = std::exchange(pending_faults_, {});
-    for (auto& [owner, err] : pending) {
-        if (module_record* mod = record(owner); mod != nullptr && mod->state == module_state::kActive) {
-            fault(*mod, std::move(err));
+void sandbox_impl::abort_reload(module_record& mod) noexcept {
+    if (!mod.pending) {
+        return;
+    }
+    const revision_id revision = mod.pending->revision;
+    try {
+        abandon_requests([&](const request_record& r) { return r.owner.module == mod.id && r.owner.revision == revision; },
+                         "the reload was abandoned");
+        (void)ledger_.revert_revision(mod.id, revision);
+    } catch (...) { // out of memory while reporting: the revision's effects are still owned by the ledger
+    }
+    release(*mod.pending);
+    mod.pending.reset();
+    mod.pending_source.reset();
+}
+
+void sandbox_impl::release(module_instance& instance) noexcept {
+    luaL_unref(state_, LUA_REGISTRYINDEX, instance.exports_ref);
+    luaL_unref(state_, LUA_REGISTRYINDEX, instance.env_ref);
+    instance.exports_ref = kNoRef;
+    instance.env_ref = kNoRef;
+}
+
+// ---- deferred work -----------------------------------------------------------------------------------
+
+bool sandbox_impl::defer_if_running(std::function<void()> op) {
+    if (running_.empty()) {
+        return false;
+    }
+    deferred_.push_back(std::move(op));
+    return true;
+}
+
+void sandbox_impl::drain() {
+    if (!running_.empty()) {
+        return;
+    }
+    std::vector<request_id> cancels;
+    {
+        const std::scoped_lock lock{inbox_mutex_};
+        cancels.swap(cancel_ids_);
+        cancel_ids_pending_.store(false, std::memory_order_release);
+    }
+    for (const request_id id : cancels) {
+        if (const auto it = requests_.find(id); it != requests_.end() && !it->second->running) {
+            (void)complete(id, std::unexpected{make_error(errc::kCancelled, "script cancelled")});
+        }
+    }
+    for (auto& [owner, err] : std::exchange(pending_faults_, {})) {
+        fault(owner, std::move(err));
+    }
+    for (auto& op : std::exchange(deferred_, {})) {
+        op();
+    }
+    // Last: the callback may re-enter the sandbox.
+    if (options_.on_result) {
+        for (auto& [id, r] : std::exchange(finished_, {})) {
+            options_.on_result(id, r);
+        }
+    } else {
+        finished_.clear();
+    }
+}
+
+// ---- the frame ---------------------------------------------------------------------------------------
+
+void sandbox_impl::fire_timers() {
+    const steady::time_point now = script_now();
+    std::vector<std::pair<steady::time_point, std::uint64_t>> due;
+    for (const auto& [key, timer] : timers_) {
+        if (timer.due <= now) {
+            due.emplace_back(timer.due, key);
+        }
+    }
+    std::ranges::sort(due);
+    for (const auto& [when, key] : due) {
+        const auto it = timers_.find(key);
+        if (it == timers_.end()) {
+            continue; // an earlier callback removed it
+        }
+        timer_record& timer = it->second;
+        const effect_owner owner = timer.owner;
+        std::uint64_t retire = 0;
+        if (timer.repeating) {
+            timer.due += timer.interval;
+            if (timer.due <= now) {
+                timer.due = now + timer.interval; // fell behind: no burst of catch-up calls
+            }
+        } else {
+            retire = timer.seq;
+        }
+        const module_record* mod = record(owner.module);
+        std::string label = std::format("{} (timer)", mod != nullptr ? mod->name : "?");
+        lua_rawgeti(state_, LUA_REGISTRYINDEX, timer.fn_ref);
+        request_record& req = start_request(request_kind::kTimer, owner, std::move(label), 0, false);
+        if (retire != 0) {
+            (void)ledger_.revert_entry(retire); // a one-shot timer is spent once its call starts
+        }
+        (void)step(req, 0);
+    }
+}
+
+void sandbox_impl::resume_ready() {
+    const steady::time_point now = script_now();
+    std::vector<request_id> ready;
+    for (const auto& [id, req] : requests_) {
+        if (!req->running && ((req->wake_frame != 0 && frame_ >= req->wake_frame) || (req->wake_time && now >= *req->wake_time))) {
+            ready.push_back(id);
+        }
+    }
+    for (const request_id id : ready) {
+        if (slice_deadline_ && steady::now() >= *slice_deadline_) {
+            return; // the rest stay ready for the next pump()
+        }
+        if (const auto it = requests_.find(id); it != requests_.end()) {
+            (void)step(*it->second, 0);
         }
     }
 }
 
-void sandbox_impl::release(module_record& mod) noexcept {
-    luaL_unref(state_, LUA_REGISTRYINDEX, mod.exports_ref);
-    luaL_unref(state_, LUA_REGISTRYINDEX, mod.env_ref);
-    mod.exports_ref = LUA_NOREF;
-    mod.env_ref = LUA_NOREF;
-}
-
 // ---- operations ----------------------------------------------------------------------------------
 
-result<void> sandbox_impl::install_lib(std::string_view name, c_function build) {
-    process_faults();
+result<void> sandbox_impl::install_lib(std::string_view name, c_function build, std::string (*describe)(role)) {
+    drain();
     result<void> out{};
     auto glue = protect(state_, [&] {
         lua_State* L = state_;
@@ -505,103 +1531,175 @@ result<void> sandbox_impl::install_lib(std::string_view name, c_function build) 
     if (!glue) {
         return std::unexpected{std::move(glue).error()};
     }
+    if (out) {
+        describers_.push_back(describe);
+    }
     return out;
 }
 
 result<value_list> sandbox_impl::exec(std::string_view source, std::string_view chunk_name) {
-    process_faults();
-    const std::uint64_t mark = ledger::mark();
+    drain();
     const std::string chunk = std::format("={}", chunk_name);
     result<value_list> out = value_list{};
     auto glue = protect(state_, [&] {
-        const int base = lua_gettop(state_);
-        if (auto compiled = compile(source, chunk, record(scratch_)->env_ref); !compiled) {
+        const slice_scope slice{*this};
+        if (auto compiled = compile(source, chunk, record(scratch_)->live.env_ref); !compiled) {
             out = std::unexpected{std::move(compiled).error()};
             return;
         }
-        if (auto ran = run_call(scratch_, 0, LUA_MULTRET); !ran) {
-            out = std::unexpected{std::move(ran).error()};
-            lua_settop(state_, base);
-            return;
+        request_record& req = start_request(request_kind::kExec, effect_owner{scratch_}, std::string{}, 0, true);
+        if (auto done = step(req, 0)) {
+            out = std::move(*done);
         }
-        out = collect_results(base + 1);
-        lua_settop(state_, base);
     });
     if (!glue) {
         out = std::unexpected{std::move(glue).error()};
     }
-    if (!out) {
-        (void)ledger_.revert_after(scratch_, mark); // only this run's effects
-    }
+    drain();
     return out;
 }
 
 result<module_id> sandbox_impl::load(std::string_view name, std::string_view source) {
-    process_faults();
+    drain();
     if (!utils::is_dotted_name(name)) {
         return fail(errc::kInvalidArgument, std::format("'{}' is not a module name (dotted lowercase, e.g. combat.low_grav)", name));
     }
-    if (find(name)) {
-        return fail(errc::kAlreadyLoaded, std::format("module '{}' is already loaded", name), std::string{name});
+    if (const auto existing = find(name)) {
+        auto reloaded = reload(*existing, source);
+        if (!reloaded) {
+            return std::unexpected{std::move(reloaded).error()};
+        }
+        return *existing;
     }
     const module_id id = ids_.next();
-    module_record& mod = modules_.emplace(id, module_record{}).first->second;
-    mod.id = id;
-    mod.name = std::string{name};
+    {
+        module_record mod;
+        mod.id = id;
+        mod.name = std::string{name};
+        mod.state = module_state::kLoading;
+        mod.revisions_made = 1;
+        mod.live.revision = revision_id{1};
+        mod.history.push_back(revision_source{revision_id{1}, std::string{source}, source_hash(source)});
+        modules_.emplace(id, std::move(mod));
+    }
 
     const std::string chunk = std::format("@{}", name);
     bool compiled_ok = false;
     std::optional<error> failure;
     auto glue = protect(state_, [&] {
         lua_State* L = state_;
-        const int base = lua_gettop(L);
-        mod.env_ref = new_environment();
-        if (auto compiled = compile(source, chunk, mod.env_ref); !compiled) {
+        const slice_scope slice{*this};
+        module_record& mod = *record(id);
+        mod.live.env_ref = new_environment();
+        if (auto compiled = compile(source, chunk, mod.live.env_ref); !compiled) {
             failure = std::move(compiled).error();
             return;
         }
         compiled_ok = true;
-        if (auto ran = run_call(id, 0, 1); !ran) {
-            failure = std::move(ran).error();
-            lua_settop(L, base);
-            return;
+        lua_rawgeti(L, LUA_REGISTRYINDEX, loader_ref_);
+        lua_insert(L, -2);
+        lua_rawgeti(L, LUA_REGISTRYINDEX, mod.live.env_ref);
+        request_record& req = start_request(request_kind::kLoad, effect_owner{id, mod.live.revision}, mod.name, 2, true);
+        if (auto done = step(req, 2); done && !*done) {
+            failure = std::move(*done).error();
         }
-        if (lua_type(L, -1) != LUA_TTABLE) {
-            lua_pop(L, 1);
-            lua_rawgeti(L, LUA_REGISTRYINDEX, mod.env_ref);
-        }
-        mod.exports_ref = luaL_ref(L, LUA_REGISTRYINDEX);
-
-        lua_rawgeti(L, LUA_REGISTRYINDEX, mod.exports_ref);
-        lua_getfield(L, -1, "on_load");
-        lua_remove(L, -2);
-        if (lua_type(L, -1) == LUA_TFUNCTION) {
-            if (auto loaded = run_call(id, 0, 0); !loaded) {
-                failure = std::move(loaded).error();
-            }
-        }
-        lua_settop(L, base);
     });
     if (!glue && !failure) {
         failure = std::move(glue).error();
+        if (compiled_ok) {
+            fault_or_defer(effect_owner{id, revision_id{1}}, *failure);
+        }
     }
-    if (!failure) {
-        return id;
-    }
-    if (!compiled_ok) {
-        release(mod);
+    if (failure && !compiled_ok) {
+        if (module_record* mod = record(id)) {
+            release(mod->live);
+        }
         modules_.erase(id);
+    }
+    drain();
+    if (failure) {
+        if (failure->where.empty()) {
+            failure->where = std::string{name};
+        }
         return std::unexpected{std::move(*failure)};
     }
-    if (failure->where.empty()) {
-        failure->where = std::string{name};
+    return id;
+}
+
+result<revision_id> sandbox_impl::reload(module_id id, std::string_view source) {
+    const module_record* found = record(id);
+    if (found == nullptr || found->scratch) {
+        return fail(errc::kNotFound, std::format("no module with id {}", id));
     }
-    fault(mod, *failure);
-    return std::unexpected{std::move(*failure)};
+    if (defer_if_running([this, id, src = std::string{source}] { (void)reload(id, src); })) {
+        return revision_id{};
+    }
+    drain();
+    module_record* mod = record(id);
+    if (mod == nullptr) {
+        return fail(errc::kNotFound, std::format("no module with id {}", id));
+    }
+    if (mod->state == module_state::kLoading) {
+        return fail(errc::kInvalidArgument, std::format("module '{}' is still loading", mod->name), mod->name);
+    }
+    if (mod->pending) {
+        return fail(errc::kInvalidArgument, std::format("a reload of module '{}' is already loading", mod->name), mod->name);
+    }
+    const revision_id revision{++mod->revisions_made};
+    const std::string chunk = std::format("@{}", mod->name);
+    result<revision_id> out = revision;
+    auto glue = protect(state_, [&] {
+        lua_State* L = state_;
+        const slice_scope slice{*this};
+        mod->pending = module_instance{revision};
+        mod->pending_source = revision_source{revision, std::string{source}, source_hash(source)};
+        mod->pending->env_ref = new_environment();
+        if (auto compiled = compile(source, chunk, mod->pending->env_ref); !compiled) {
+            out = std::unexpected{std::move(compiled).error()};
+            return;
+        }
+        lua_rawgeti(L, LUA_REGISTRYINDEX, loader_ref_);
+        lua_insert(L, -2);
+        lua_rawgeti(L, LUA_REGISTRYINDEX, mod->pending->env_ref);
+        request_record& req = start_request(request_kind::kLoad, effect_owner{id, revision}, mod->name, 2, true);
+        if (auto done = step(req, 2)) {
+            if (!*done) {
+                out = std::unexpected{std::move(*done).error()};
+            }
+        } else {
+            out = revision_id{}; // still loading: the swap happens in a later pump()
+        }
+    });
+    if (!glue) {
+        out = std::unexpected{std::move(glue).error()};
+    }
+    if (!out) {
+        if (module_record* still = record(id); still != nullptr && still->pending && still->pending->revision == revision) {
+            abort_reload(*still);
+        }
+        if (out.error().where.empty()) {
+            out.error().where = std::string{record(id) != nullptr ? record(id)->name : std::string{}};
+        }
+    }
+    drain();
+    return out;
+}
+
+result<revision_id> sandbox_impl::rollback(module_id id, std::size_t steps) {
+    const module_record* mod = record(id);
+    if (mod == nullptr || mod->scratch) {
+        return fail(errc::kNotFound, std::format("no module with id {}", id));
+    }
+    if (steps == 0 || steps >= mod->history.size()) {
+        return fail(errc::kOutOfRange, std::format("module '{}' keeps {} revision(s); can't go back {}", mod->name, mod->history.size(), steps),
+                    mod->name);
+    }
+    const std::string source = mod->history[mod->history.size() - 1 - steps].source;
+    return reload(id, source);
 }
 
 result<value_list> sandbox_impl::call(module_id id, std::string_view function, std::span<const value> args) {
-    process_faults();
+    drain();
     module_record* mod = record(id);
     if (mod == nullptr || mod->scratch) {
         return fail(errc::kNotFound, std::format("no module with id {}", id));
@@ -610,11 +1708,11 @@ result<value_list> sandbox_impl::call(module_id id, std::string_view function, s
         return fail(errc::kInvalidArgument, std::format("module '{}' is {}", mod->name, mod->state), mod->name);
     }
     result<value_list> out = value_list{};
-    bool faulted = false;
     auto glue = protect(state_, [&] {
         lua_State* L = state_;
+        const slice_scope slice{*this};
         const int base = lua_gettop(L);
-        lua_rawgeti(L, LUA_REGISTRYINDEX, mod->exports_ref);
+        lua_rawgeti(L, LUA_REGISTRYINDEX, mod->live.exports_ref);
         stack{L}.push_string(function);
         lua_gettable(L, -2);
         lua_remove(L, -2);
@@ -627,66 +1725,115 @@ result<value_list> sandbox_impl::call(module_id id, std::string_view function, s
         for (const auto& arg : args) {
             stack{L}.push_value(arg);
         }
-        if (auto ran = run_call(id, static_cast<int>(args.size()), LUA_MULTRET); !ran) {
-            out = std::unexpected{std::move(ran).error()};
-            faulted = true;
-            lua_settop(L, base);
-            return;
+        request_record& req = start_request(request_kind::kCall, effect_owner{id, mod->live.revision}, std::format("{}.{}", mod->name, function),
+                                            static_cast<int>(args.size()), true);
+        if (auto done = step(req, static_cast<int>(args.size()))) {
+            out = std::move(*done);
         }
-        out = collect_results(base + 1);
-        lua_settop(L, base);
     });
     if (!glue) {
-        return std::unexpected{std::move(glue).error()};
+        out = std::unexpected{std::move(glue).error()};
     }
-    if (faulted) {
-        if (out.error().where.empty()) {
-            out.error().where = std::format("{}.{}", mod->name, function);
-        }
-        fault(*mod, out.error());
-    }
+    drain();
     return out;
 }
 
-result<revert_report> sandbox_impl::revert(module_id id) {
-    process_faults();
-    module_record* mod = record(id);
-    if (mod == nullptr) {
-        return fail(errc::kNotFound, std::format("no module with id {}", id));
-    }
-    auto report = ledger_.revert(id);
-    if (!mod->scratch && mod->state == module_state::kActive) {
-        mod->state = module_state::kReverted;
+revert_report sandbox_impl::revert_module(module_record& mod) {
+    abandon_requests([&](const request_record& r) { return r.owner.module == mod.id; }, "its module was reverted");
+    abort_reload(mod);
+    auto report = ledger_.revert(mod.id);
+    if (!mod.scratch && (mod.state == module_state::kActive || mod.state == module_state::kLoading)) {
+        mod.state = module_state::kReverted;
     }
     return report;
 }
 
-result<revert_report> sandbox_impl::unload(module_id id) {
-    process_faults();
+result<revert_report> sandbox_impl::revert(module_id id) {
+    if (record(id) == nullptr) {
+        return fail(errc::kNotFound, std::format("no module with id {}", id));
+    }
+    if (defer_if_running([this, id] {
+            if (module_record* mod = record(id)) {
+                (void)revert_module(*mod);
+            }
+        })) {
+        revert_report report;
+        report.deferred = true;
+        return report;
+    }
+    drain();
     module_record* mod = record(id);
     if (mod == nullptr) {
         return fail(errc::kNotFound, std::format("no module with id {}", id));
     }
-    if (mod->scratch) {
-        return fail(errc::kInvalidArgument, "the scratch module can't be unloaded; revert it instead", mod->name);
-    }
-    if (mod->state == module_state::kActive) {
+    auto report = revert_module(*mod);
+    drain();
+    return report;
+}
+
+revert_report sandbox_impl::unload_module(module_record& mod) {
+    if (mod.state == module_state::kActive && mod.live.exports_ref != kNoRef) {
         // on_unload errors are ignored: the module is going away regardless.
         (void)protect(state_, [&] {
             lua_State* L = state_;
             const int base = lua_gettop(L);
-            lua_rawgeti(L, LUA_REGISTRYINDEX, mod->exports_ref);
+            lua_rawgeti(L, LUA_REGISTRYINDEX, mod.live.exports_ref);
             lua_getfield(L, -1, "on_unload");
             lua_remove(L, -2);
             if (lua_type(L, -1) == LUA_TFUNCTION) {
-                (void)run_call(id, 0, 0);
+                (void)call_sync(effect_owner{mod.id, mod.live.revision}, 0, 0);
             }
             lua_settop(L, base);
         });
     }
-    auto report = ledger_.revert(id);
-    release(*mod);
+    auto report = revert_module(mod);
+    const module_id id = mod.id;
+    release(mod.live);
+    forget_proxy(id);
+    for (auto& [other_id, other] : modules_) {
+        other.live.dependencies.erase(id);
+        if (other.pending) {
+            other.pending->dependencies.erase(id);
+        }
+    }
     modules_.erase(id);
+    return report;
+}
+
+result<revert_report> sandbox_impl::unload(module_id id, bool forced) {
+    const module_record* found = record(id);
+    if (found == nullptr) {
+        return fail(errc::kNotFound, std::format("no module with id {}", id));
+    }
+    if (found->scratch) {
+        return fail(errc::kInvalidArgument, "the scratch module can't be unloaded; revert it instead", found->name);
+    }
+    if (!forced) {
+        if (const auto dependents = dependents_of(id); !dependents.empty()) {
+            std::string names;
+            for (const auto& name : dependents) {
+                names += names.empty() ? name : ", " + name;
+            }
+            return fail(errc::kHasDependents, std::format("module '{}' is required by {} (unload them first, or force)", found->name, names),
+                        found->name);
+        }
+    }
+    if (defer_if_running([this, id] {
+            if (module_record* mod = record(id)) {
+                (void)unload_module(*mod);
+            }
+        })) {
+        revert_report report;
+        report.deferred = true;
+        return report;
+    }
+    drain();
+    module_record* mod = record(id);
+    if (mod == nullptr) {
+        return fail(errc::kNotFound, std::format("no module with id {}", id));
+    }
+    auto report = unload_module(*mod);
+    drain();
     return report;
 }
 
@@ -696,32 +1843,52 @@ result<void> sandbox_impl::checkpoint(std::string_view tag) {
 }
 
 result<revert_report> sandbox_impl::revert_to(std::string_view tag) {
-    process_faults();
     const auto it = checkpoints_.find(tag);
     if (it == checkpoints_.end()) {
         return fail(errc::kNotFound, std::format("no checkpoint '{}'", tag));
     }
     const std::uint64_t mark = it->second;
-    auto report = ledger_.revert_after(mark);
-    std::erase_if(checkpoints_, [mark](const auto& entry) { return entry.second > mark; });
+    const auto apply = [this, mark] {
+        auto report = ledger_.revert_after(mark);
+        std::erase_if(checkpoints_, [mark](const auto& entry) { return entry.second > mark; });
+        return report;
+    };
+    if (defer_if_running([apply] { (void)apply(); })) {
+        revert_report report;
+        report.deferred = true;
+        return report;
+    }
+    drain();
+    auto report = apply();
+    drain();
     return report;
 }
 
 revert_report sandbox_impl::revert_all() {
-    process_faults();
-    revert_report report;
-    std::vector<module_id> ids;
-    for (const auto& [id, mod] : modules_) {
-        if (!mod.scratch) {
-            ids.push_back(id);
+    const auto apply = [this] {
+        revert_report report;
+        std::vector<module_id> ids;
+        for (const auto& [id, mod] : modules_) {
+            if (!mod.scratch) {
+                ids.push_back(id);
+            }
         }
-    }
-    for (auto it = ids.rbegin(); it != ids.rend(); ++it) {
-        if (auto unloaded = unload(*it)) {
-            report += std::move(*unloaded);
+        for (auto it = ids.rbegin(); it != ids.rend(); ++it) {
+            if (module_record* mod = record(*it)) {
+                report += unload_module(*mod);
+            }
         }
+        report += revert_module(*record(scratch_));
+        return report;
+    };
+    if (defer_if_running([apply] { (void)apply(); })) {
+        revert_report report;
+        report.deferred = true;
+        return report;
     }
-    report += ledger_.revert(scratch_);
+    drain();
+    auto report = apply();
+    drain();
     return report;
 }
 
@@ -739,7 +1906,13 @@ std::optional<module_info> sandbox_impl::status(module_id id) const {
     if (mod == nullptr) {
         return std::nullopt;
     }
-    return module_info{mod->id, mod->name, mod->state, mod->scratch, ledger_.count(id), ledger_.irreversible_count(id), mod->fault};
+    module_info info{mod->id, mod->name, mod->state, mod->scratch, ledger_.count(id), ledger_.irreversible_count(id), mod->fault};
+    info.revision = mod->live.revision;
+    info.source_hash = mod->history.empty() ? 0 : mod->history.back().hash;
+    info.revisions = mod->history.size();
+    info.reloading = mod->pending.has_value();
+    info.dependencies.assign(mod->live.dependencies.begin(), mod->live.dependencies.end());
+    return info;
 }
 
 std::vector<module_info> sandbox_impl::list() const {
@@ -751,8 +1924,52 @@ std::vector<module_info> sandbox_impl::list() const {
     return out;
 }
 
+void sandbox_impl::cancel() noexcept {
+    cancel_running_.store(true, std::memory_order_release);
+}
+
+void sandbox_impl::cancel(request_id request) noexcept {
+    try {
+        const std::scoped_lock lock{inbox_mutex_};
+        cancel_ids_.push_back(request);
+        cancel_ids_pending_.store(true, std::memory_order_release);
+    } catch (...) { // out of memory: the request keeps running
+    }
+}
+
 void sandbox_impl::pump() {
-    process_faults();
+    thread_.store(std::this_thread::get_id(), std::memory_order_release);
+    drain();
+    ++frame_;
+    decltype(inbox_) inbox;
+    {
+        const std::scoped_lock lock{inbox_mutex_};
+        inbox.swap(inbox_);
+    }
+    (void)protect(state_, [&] {
+        const slice_scope slice{*this};
+        for (auto& [event, args] : inbox) {
+            deliver(event, event_pusher{&args, [](stack& s, const void* data) {
+                                            return (*static_cast<const std::function<int(stack&)>*>(data))(s);
+                                        }});
+        }
+        fire_timers();
+        resume_ready();
+    });
+    drain();
+}
+
+std::size_t sandbox_impl::suspended() const noexcept {
+    return static_cast<std::size_t>(std::ranges::count_if(requests_, [](const auto& entry) { return !entry.second->running; }));
+}
+
+std::string sandbox_impl::stubs() const {
+    std::string out = script::stubs::rhp_api(options_.caller_role);
+    for (const auto describe : describers_) {
+        out += '\n';
+        out += describe(options_.caller_role);
+    }
+    return out;
 }
 
 } // namespace detail
@@ -765,8 +1982,8 @@ sandbox::~sandbox() = default;
 sandbox::sandbox(sandbox&&) noexcept = default;
 sandbox& sandbox::operator=(sandbox&&) noexcept = default;
 
-result<void> sandbox::install_lib(std::string_view name, c_function build) {
-    return impl_->install_lib(name, build);
+result<void> sandbox::install_lib(std::string_view name, c_function build, stub_fn describe) {
+    return impl_->install_lib(name, build, describe);
 }
 
 result<value_list> sandbox::exec(std::string_view source, std::string_view chunk_name) {
@@ -775,6 +1992,14 @@ result<value_list> sandbox::exec(std::string_view source, std::string_view chunk
 
 result<module_id> sandbox::load(std::string_view name, std::string_view source) {
     return impl_->load(name, source);
+}
+
+result<revision_id> sandbox::reload(module_id mod, std::string_view source) {
+    return impl_->reload(mod, source);
+}
+
+result<revision_id> sandbox::rollback(module_id mod, std::size_t steps) {
+    return impl_->rollback(mod, steps);
 }
 
 result<value_list> sandbox::call(module_id mod, std::string_view function, std::span<const value> args) {
@@ -786,7 +2011,11 @@ result<revert_report> sandbox::revert(module_id mod) {
 }
 
 result<revert_report> sandbox::unload(module_id mod) {
-    return impl_->unload(mod);
+    return impl_->unload(mod, false);
+}
+
+result<revert_report> sandbox::unload(module_id mod, force_t) {
+    return impl_->unload(mod, true);
 }
 
 result<void> sandbox::checkpoint(std::string_view tag) {
@@ -821,8 +2050,24 @@ void sandbox::cancel() noexcept {
     impl_->cancel();
 }
 
+void sandbox::cancel(request_id request) noexcept {
+    impl_->cancel(request);
+}
+
 void sandbox::pump() {
     impl_->pump();
+}
+
+request_id sandbox::last_request() const noexcept {
+    return impl_->last_request();
+}
+
+std::size_t sandbox::suspended() const noexcept {
+    return impl_->suspended();
+}
+
+std::uint64_t sandbox::frame() const noexcept {
+    return impl_->frame();
 }
 
 role sandbox::caller_role() const noexcept {
@@ -835,6 +2080,10 @@ std::size_t sandbox::memory_used() const noexcept {
 
 const ledger& sandbox::effects() const noexcept {
     return impl_->effects();
+}
+
+std::string sandbox::stubs() const {
+    return impl_->stubs();
 }
 
 } // namespace Rhp::script

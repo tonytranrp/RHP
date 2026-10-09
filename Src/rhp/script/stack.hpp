@@ -101,6 +101,9 @@ public:
     [[nodiscard]] void* push_userdata(std::size_t size, std::string_view key) const;
     // The userdata's memory if the value at `index` carries the metatable registered under `key`.
     [[nodiscard]] void* to_userdata(int index, std::string_view key) const noexcept;
+    // Pushes a copy of `size` bytes as a userdata of the handle type defined with `type_tag`.
+    // Returns false and pushes nothing when no lib in this state defined that type.
+    [[nodiscard]] bool push_handle(const void* type_tag, const void* data, std::size_t size) const;
 
     // ---- registry references -----------------------------------------------------------------
     [[nodiscard]] int ref() const; // pops the top value, returns a reference to it

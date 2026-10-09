@@ -33,7 +33,11 @@ enum class errc : std::uint16_t {
     kInvalidArgument,
     kTypeMismatch,
     kOutOfRange,
+    kUnloaded,
 };
+
+// The highest errc value (for iterating every code).
+inline constexpr errc kLastErrc = errc::kUnloaded;
 
 [[nodiscard]] constexpr std::string_view to_string(errc code) noexcept {
     switch (code) {
@@ -62,6 +66,7 @@ enum class errc : std::uint16_t {
     case errc::kInvalidArgument: return "invalid_argument";
     case errc::kTypeMismatch: return "type_mismatch";
     case errc::kOutOfRange: return "out_of_range";
+    case errc::kUnloaded: return "unloaded";
     }
     return "unknown";
 }

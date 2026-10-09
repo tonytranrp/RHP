@@ -39,9 +39,21 @@ struct revert_report {
     std::size_t undone = 0;       // effects reversed
     std::size_t irreversible = 0; // effects that could not be reversed (Rhp::irreversible bindings)
     std::vector<error> failures;  // undo() calls that threw
+    // Requested from inside a running script: queued, applied when the outermost run returns.
+    bool deferred = false;
 
     [[nodiscard]] bool clean() const noexcept { return failures.empty(); }
     revert_report& operator+=(revert_report&& other);
+};
+
+// Who caused an effect: a module, and the revision and request of it that were running.
+// Revision and request are 0 when an effect isn't tied to one (they narrow reverts, never widen).
+struct effect_owner {
+    module_id module;
+    revision_id revision{};
+    request_id request{};
+
+    [[nodiscard]] bool operator==(const effect_owner&) const = default;
 };
 
 // Owner-keyed undo log (the GMod hook-id / Neovim augroup / Roblox Maid pattern): every effect is
@@ -52,6 +64,8 @@ public:
     struct entry {
         std::uint64_t seq = 0;
         module_id owner;
+        revision_id revision; // 0 = not tied to a revision
+        request_id request;   // 0 = not tied to a request
         std::string label; // "game.gravity", "patch combat.damage", "game.spawn"
         std::unique_ptr<effect> fx;
     };
@@ -65,15 +79,23 @@ public:
 
     // Appends an effect; returns its sequence number.
     std::uint64_t record(module_id owner, std::string label, std::unique_ptr<effect> fx);
+    std::uint64_t record(const effect_owner& owner, std::string label, std::unique_ptr<effect> fx);
 
     // Undoes every effect of `owner`, newest first.
     revert_report revert(module_id owner);
+    // Undoes the effects one revision of `owner` made (reload swaps revisions this way).
+    revert_report revert_revision(module_id owner, revision_id revision);
+    // Undoes the effects one request of `owner` made (a failed exec keeps the scratch module's others).
+    revert_report revert_request(module_id owner, request_id request);
+    // Undoes the single effect with this sequence number (rhp.off). Empty report if there is none.
+    revert_report revert_entry(std::uint64_t seq);
     // Undoes every effect of `owner` with seq > mark, newest first.
     revert_report revert_after(module_id owner, std::uint64_t mark);
     // Undoes every effect (all owners) with seq > mark, newest first.
     revert_report revert_after(std::uint64_t mark);
     revert_report revert_all();
 
+    [[nodiscard]] const entry* find(std::uint64_t seq) const noexcept;
     [[nodiscard]] std::size_t count(module_id owner) const noexcept;
     [[nodiscard]] std::size_t irreversible_count(module_id owner) const noexcept;
     [[nodiscard]] std::size_t size() const noexcept { return entries_.size(); }

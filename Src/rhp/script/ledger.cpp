@@ -31,6 +31,7 @@ revert_report& revert_report::operator+=(revert_report&& other) {
     undone += other.undone;
     irreversible += other.irreversible;
     failures.insert(failures.end(), std::make_move_iterator(other.failures.begin()), std::make_move_iterator(other.failures.end()));
+    deferred = deferred || other.deferred;
     return *this;
 }
 
@@ -39,8 +40,12 @@ ledger::~ledger() {
 }
 
 std::uint64_t ledger::record(module_id owner, std::string label, std::unique_ptr<effect> fx) {
+    return record(effect_owner{owner}, std::move(label), std::move(fx));
+}
+
+std::uint64_t ledger::record(const effect_owner& owner, std::string label, std::unique_ptr<effect> fx) {
     const std::uint64_t seq = next_effect_sequence();
-    entries_.push_back(entry{seq, owner, std::move(label), std::move(fx)});
+    entries_.push_back(entry{seq, owner.module, owner.revision, owner.request, std::move(label), std::move(fx)});
     return seq;
 }
 
@@ -88,6 +93,18 @@ revert_report ledger::revert(module_id owner) {
     return revert_if([owner](const entry& e) { return e.owner == owner; });
 }
 
+revert_report ledger::revert_revision(module_id owner, revision_id revision) {
+    return revert_if([owner, revision](const entry& e) { return e.owner == owner && e.revision == revision; });
+}
+
+revert_report ledger::revert_request(module_id owner, request_id request) {
+    return revert_if([owner, request](const entry& e) { return e.owner == owner && e.request == request; });
+}
+
+revert_report ledger::revert_entry(std::uint64_t seq) {
+    return revert_if([seq](const entry& e) { return e.seq == seq; });
+}
+
 revert_report ledger::revert_after(module_id owner, std::uint64_t mark) {
     return revert_if([owner, mark](const entry& e) { return e.owner == owner && e.seq > mark; });
 }
@@ -98,6 +115,11 @@ revert_report ledger::revert_after(std::uint64_t mark) {
 
 revert_report ledger::revert_all() {
     return revert_if([](const entry&) { return true; });
+}
+
+const ledger::entry* ledger::find(std::uint64_t seq) const noexcept {
+    const auto it = std::ranges::lower_bound(entries_, seq, {}, &entry::seq);
+    return it != entries_.end() && it->seq == seq ? &*it : nullptr;
 }
 
 std::size_t ledger::count(module_id owner) const noexcept {

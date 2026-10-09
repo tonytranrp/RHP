@@ -11,7 +11,7 @@ TEST_CASE("errc has a name for every value", "[core][error]") {
     REQUIRE(Rhp::to_string(errc::kOk) == "ok");
     REQUIRE(Rhp::to_string(errc::kForbidden) == "forbidden");
     REQUIRE(Rhp::to_string(errc::kOutOfRange) == "out_of_range");
-    for (std::uint16_t i = 0; i <= static_cast<std::uint16_t>(errc::kOutOfRange); ++i) {
+    for (std::uint16_t i = 0; i <= static_cast<std::uint16_t>(Rhp::kLastErrc); ++i) {
         REQUIRE(Rhp::to_string(static_cast<errc>(i)) != "unknown");
     }
 }

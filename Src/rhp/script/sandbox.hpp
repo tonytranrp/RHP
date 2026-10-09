@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <format>
@@ -23,6 +24,7 @@
 #include <rhp/script/ledger.hpp>
 #include <rhp/script/lib.hpp>
 #include <rhp/script/stack.hpp>
+#include <rhp/script/stubs.hpp>
 
 #if !defined(RHP_ENABLE)
 #define RHP_ENABLE 1
@@ -34,12 +36,14 @@ using value_list = std::vector<value>;
 
 enum class module_state : std::uint8_t {
     kActive,   // loaded, effects live
-    kReverted, // loaded, every effect undone; inert until unloaded (reload arrives in Stage 2)
-    kFaulted   // a runtime error auto-reverted it; kept for inspection until unloaded
+    kReverted, // loaded, every effect undone; inert until reloaded or unloaded
+    kFaulted,  // a runtime error auto-reverted it; kept for inspection until reloaded or unloaded
+    kLoading   // its first top level (or on_load) is suspended in rhp.wait / a time slice
 };
 
 [[nodiscard]] constexpr std::string_view to_string(module_state s) noexcept {
     switch (s) {
+    case module_state::kLoading: return "loading";
     case module_state::kActive: return "active";
     case module_state::kReverted: return "reverted";
     case module_state::kFaulted: return "faulted";
@@ -55,7 +59,21 @@ struct module_info {
     std::size_t effects = 0; // live ledger entries
     std::size_t irreversible_effects = 0;
     std::optional<error> fault; // why it is kFaulted
+    revision_id revision;          // current revision (1 = first load); 0 for the scratch module
+    std::uint32_t source_hash = 0; // CRC-32C of the current revision's source
+    std::size_t revisions = 0;     // revisions kept for rollback, current included
+    bool reloading = false;        // a new revision is loading next to the current one
+    std::vector<module_id> dependencies; // modules this one require()s
 };
+
+// Tag for unload(mod, Rhp::script::force): unload even if other modules require this one.
+struct force_t {
+    explicit constexpr force_t() = default;
+};
+inline constexpr force_t force{};
+
+// Script time for rhp.sleep and rhp.timer (limits always use std::chrono::steady_clock).
+using clock_fn = std::function<std::chrono::steady_clock::time_point()>;
 
 struct sandbox_options {
     // Role of the identity this sandbox runs for. Local C++ callers default to kPatch.
@@ -65,6 +83,12 @@ struct sandbox_options {
     std::pmr::memory_resource* memory = nullptr;
     // Receives each print() line (without the newline); empty = standard output.
     std::function<void(std::string_view)> output{};
+    // Receives each rhp.emit(value) as it happens, with the request and module that emitted it.
+    std::function<void(request_id, module_id, const value&)> on_emit{};
+    // Receives the result of every request that suspended before finishing (see exec()).
+    std::function<void(request_id, const result<value_list>&)> on_result{};
+    // Script time; empty = std::chrono::steady_clock::now.
+    clock_fn clock{};
     // Shown in errors and module listings.
     std::string identity = "local";
 };
@@ -76,8 +100,14 @@ class sandbox_impl;
 // One identity's script runtime: one lua_State, one _ENV per module, one undo ledger.
 //
 // Single-threaded: use it from one thread (the pump thread). The only exceptions are cancel(),
-// which any thread may call, and patch points, which any thread may hit (they run the C++
-// default off the owning thread).
+// which any thread may call, patch points, which any thread may hit (they run the C++ default off
+// the owning thread), and Rhp::lua_event::fire, which queues for the next pump() off that thread.
+//
+// Every exec / load / call starts a request: a coroutine that runs to completion unless the
+// script suspends itself (rhp.wait, rhp.next_frame, rhp.sleep) or limits.slice_us is set and its
+// time slice runs out. A suspended request continues in pump(); the operation that started it
+// returns early (exec / call with an empty list, load with the module kLoading) and the final
+// result goes to sandbox_options::on_result.
 //
 //   Rhp::script::sandbox box;
 //   box.install<game_lib>();
@@ -100,7 +130,7 @@ public:
     template <installable L>
     result<void> install() {
 #if RHP_ENABLE
-        return install_lib(L::name, &detail::install_lib_tree<L>);
+        return install_lib(L::name, &detail::install_lib_tree<L>, &::Rhp::script::stubs::generate<L>);
 #else
         return fail(errc::kDisabled, "RHP is compiled out (RHP_ENABLE=0)", std::string{L::name});
 #endif
@@ -122,9 +152,17 @@ public:
 
     // Compiles (text only) and runs a module chunk with its own _ENV, then calls M.on_load().
     // The chunk's returned table is the module's export table (its _ENV if it returns nothing).
-    // Names are dotted lowercase. Fails with kAlreadyLoaded if the name is loaded (reload: Stage 2).
+    // Names are dotted lowercase. Loading a name that is already loaded reloads it (see reload).
     // A runtime error auto-reverts the module and leaves it kFaulted.
     result<module_id> load(std::string_view name, std::string_view source);
+
+    // Transactional reload. The new revision runs next to the live one (its own _ENV), then
+    // new.on_restore(old.on_save()) carries state over and the old revision is reverted. If any step
+    // fails, the new revision's effects are reverted and the old one is untouched. Works on active,
+    // reverted and faulted modules. Returns the new revision (0 if still loading, or deferred).
+    result<revision_id> reload(module_id mod, std::string_view source);
+    // Reloads the source of the revision `steps` before the current one (1 = the previous one).
+    result<revision_id> rollback(module_id mod, std::size_t steps = 1);
 
     // Calls an exported function of an active module. A runtime error faults the module.
     result<value_list> call(module_id mod, std::string_view function, std::span<const value> args = {});
@@ -137,8 +175,14 @@ public:
 
     // Undoes every effect of the module, newest first; the module stays loaded but kReverted.
     result<revert_report> revert(module_id mod);
-    // M.on_unload() (errors ignored), revert, forget the module.
+    // M.on_unload() (errors ignored), revert, forget the module. Fails with kHasDependents while
+    // other modules require it; with `force` they stay loaded and touching it raises kUnloaded.
     result<revert_report> unload(module_id mod);
+    result<revert_report> unload(module_id mod, force_t);
+
+    // Called from inside a running script (a C++ binding re-entering the sandbox), revert, unload,
+    // reload, rollback, revert_to and revert_all are queued and applied when the outermost run
+    // returns; they report `deferred` (reload / rollback return revision 0).
 
     // Global marks over this sandbox's ledger. revert_to undoes every effect recorded after the
     // mark (any module) and drops later checkpoints.
@@ -156,17 +200,33 @@ public:
     // Stops the script running right now (sticky until it returns). Callable from any thread;
     // a no-op while nothing runs.
     void cancel() noexcept;
+    // Stops one request, running or suspended (its whole coroutine). Callable from any thread.
+    // Like any runtime error, it faults the owning module (a scratch request reverts its own effects).
+    void cancel(request_id request) noexcept;
 
-    // Housekeeping between frames: reverts modules whose patch handlers failed since the last call.
-    // Stage 2 adds the coroutine scheduler here.
+    // One frame: delivers queued events, fires due timers, resumes suspended requests whose wait
+    // is over (within limits.slice_us when set), and applies faults and deferred operations.
     void pump();
+
+    // The request the latest exec / load / call / reload started.
+    [[nodiscard]] request_id last_request() const noexcept;
+    // Requests suspended right now.
+    [[nodiscard]] std::size_t suspended() const noexcept;
+    // pump() calls so far (rhp.frame()).
+    [[nodiscard]] std::uint64_t frame() const noexcept;
 
     [[nodiscard]] role caller_role() const noexcept;
     [[nodiscard]] std::size_t memory_used() const noexcept;
     [[nodiscard]] const ledger& effects() const noexcept;
 
+    // LuaLS annotations for everything this identity can use: the rhp API and every installed lib,
+    // filtered by caller_role().
+    [[nodiscard]] std::string stubs() const;
+
 private:
-    result<void> install_lib(std::string_view name, c_function build);
+    using stub_fn = std::string (*)(role);
+
+    result<void> install_lib(std::string_view name, c_function build, stub_fn describe);
 
     std::unique_ptr<detail::sandbox_impl> impl_;
 };

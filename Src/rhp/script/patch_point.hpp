@@ -110,7 +110,7 @@ private:
         auto& ctx = s.context();
         s.push_copy(fn_index);
         const int fn_ref = s.ref();
-        auto layer = std::make_unique<script::detail::lua_patch_layer<signature>>(ctx, ctx.current_module(), fn_ref, state_, id);
+        auto layer = std::make_unique<script::detail::lua_patch_layer<signature>>(ctx, ctx.current_owner(), fn_ref, state_, id);
         return std::make_unique<script::detail::patch_effect<signature>>(state_, std::move(layer));
     }
 

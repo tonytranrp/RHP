@@ -1187,3 +1187,22 @@ Choices made while building Stage 1 that the questionnaires didn't cover. Each i
 | S9 | Engine concept | `puc_lua` is the only engine and `Rhp::script::stack` is the engine boundary; a formal `engine` concept for the `config<>::engine<>` slot arrives with a second engine |
 | S10 | Deferred to Stage 2 | `Rhp::lua_event`, transactional reload (loading a loaded name returns `kAlreadyLoaded`), `require`, revisions, `on_save` / `on_restore` |
 | S11 | `RHP_ENABLE=OFF` | Lua is not fetched or linked; the sandbox is an inert stub returning `kDisabled`; the DSL, the ledger and direct-call patch points still compile |
+
+---
+
+## 22. Decision log (round 4, Stage 2)
+
+| # | Topic | Decision |
+|---|---|---|
+| T1 | Time slicing | opt-in only: `limits.slice_us = 0` stays the default; the Stage 2 "never blocks a frame" check runs with slicing on |
+| T2 | Cancel vs waits | `cancel` kills the whole request: its coroutine, running or suspended. Timers are ledger effects: revert / unload removes them, cancel doesn't |
+| T3 | Reload | overlap, then swap: the new revision runs while the old one is live, `on_restore(on_save())` carries state, then the old revision is reverted. A failure reverts only the new revision; the old one is untouched |
+| T4 | Revisions | the last N sources (+ hash, counter) are kept; `rollback(mod, n)` is a reload of a stored source, so state carries through `on_save` / `on_restore` |
+| T5 | `require` cycles | a cycle fails with a clear error; `require` returns a read-only live proxy that always reads the module's current exports |
+| T6 | Force unload | without `force`: `kHasDependents`. With `force`: dependents stay loaded and touching the unloaded module raises `kUnloaded` |
+| T7 | `rhp.emit` | `sandbox_options::on_emit` callback, called immediately on the pump thread, in order with `print`; emitted values are not part of the return list |
+| T8 | Stubs | filtered by role: entries the role can't call are left out, variables are marked read-only for `observe`; the `rhp` API and module hooks are included |
+| T9 | `lua_event` delivery | synchronous when fired on the sandbox's thread, queued to the next `pump()` otherwise; each handler is ledger-tracked |
+| T10 | Handlers outside a run | every patch / event handler call that game code triggers is its own small run: cancel, instruction and wall budgets apply per call; a stop faults the module and the C++ default runs |
+| T11 | Re-entrant lifecycle ops | `revert` / `unload` / `reload` / `rollback` / `revert_to` / `revert_all` called from inside a running script are queued and applied when the outermost run returns (or at the next `pump()` for handlers game code triggered); they report `deferred` |
+| T12 | Workflow | main session writes the core; one subagent (no nested agents) writes stubs and tests; branch `stage-2-scheduler`, PR |

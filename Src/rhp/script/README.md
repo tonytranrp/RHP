@@ -10,6 +10,7 @@ The script engine: PUC Lua 5.5 (built as C++), the `Rhp::lib<>` binding DSL, pat
 | `ledger.hpp` | `effect`, `ledger` (owner-keyed undo log), `revert_report` |
 | `marshal.hpp` | `push` / `pull` between C++ and the Lua stack; `pushable`, `pullable`, `Rhp::convertible` |
 | `stack.hpp` | `Rhp::script::stack`: the only wall between templates and the Lua C API (all out of line) |
+| `stubs.hpp` | `stubs::generate<L>(role)` / `write<L>` / `rhp_api(role)`: LuaLS annotations from a lib type, filtered by role; no Lua needed |
 | `detail/` | trampolines and lib builder, patch layers, variable layers, patch point registry, sandbox context |
 | `puc_lua/` | the `.cpp` files that include `lua.h`, plus the private `sandbox_impl.hpp` |
 

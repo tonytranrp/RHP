@@ -219,18 +219,14 @@ class lua_patch_layer<R(Args...)> final : public patch_layer<R(Args...)> {
 public:
     using state_type = point_state<R(Args...)>;
 
-    lua_patch_layer(context& ctx, module_id owner, int fn_ref, state_type& state, std::string_view id)
+    lua_patch_layer(context& ctx, const effect_owner& owner, int fn_ref, state_type& state, std::string_view id)
         : patch_layer<R(Args...)>(std::this_thread::get_id()), ctx_(ctx), owner_(owner), fn_ref_(fn_ref), state_(state), id_(id) {}
 
     ~lua_patch_layer() override { stack{ctx_.main_state()}.unref(fn_ref_); }
 
     R invoke(Args... args) override {
-        const stack s{ctx_.main_state()};
         frame f{this, std::tuple<std::remove_reference_t<Args>&...>{args...}, {}};
-        const module_id previous = ctx_.swap_current_module(owner_);
-        const utils::scope_guard restore{[&]() noexcept { (void)ctx_.swap_current_module(previous); }};
-
-        auto ran = s.run_protected(&run, &f);
+        auto ran = ctx_.run_handler(owner_, &run, &f);
         if (ran && f.done) {
             if constexpr (std::is_void_v<R>) {
                 return;
@@ -331,7 +327,7 @@ private:
     }
 
     context& ctx_;
-    module_id owner_;
+    effect_owner owner_;
     int fn_ref_;
     state_type& state_;
     std::string_view id_;

@@ -2,8 +2,10 @@
 // errc::kDisabled; patch points compile to direct calls (see patch_point.hpp).
 
 #include <cstddef>
+#include <cstdint>
 #include <optional>
 #include <span>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -36,7 +38,7 @@ sandbox::~sandbox() = default;
 sandbox::sandbox(sandbox&&) noexcept = default;
 sandbox& sandbox::operator=(sandbox&&) noexcept = default;
 
-result<void> sandbox::install_lib(std::string_view, c_function) {
+result<void> sandbox::install_lib(std::string_view, c_function, stub_fn) {
     return disabled();
 }
 
@@ -45,6 +47,14 @@ result<value_list> sandbox::exec(std::string_view, std::string_view) {
 }
 
 result<module_id> sandbox::load(std::string_view, std::string_view) {
+    return disabled();
+}
+
+result<revision_id> sandbox::reload(module_id, std::string_view) {
+    return disabled();
+}
+
+result<revision_id> sandbox::rollback(module_id, std::size_t) {
     return disabled();
 }
 
@@ -57,6 +67,10 @@ result<revert_report> sandbox::revert(module_id) {
 }
 
 result<revert_report> sandbox::unload(module_id) {
+    return disabled();
+}
+
+result<revert_report> sandbox::unload(module_id, force_t) {
     return disabled();
 }
 
@@ -90,7 +104,21 @@ module_id sandbox::scratch_module() const noexcept {
 
 void sandbox::cancel() noexcept {}
 
+void sandbox::cancel(request_id) noexcept {}
+
 void sandbox::pump() {}
+
+request_id sandbox::last_request() const noexcept {
+    return {};
+}
+
+std::size_t sandbox::suspended() const noexcept {
+    return 0;
+}
+
+std::uint64_t sandbox::frame() const noexcept {
+    return 0;
+}
 
 role sandbox::caller_role() const noexcept {
     return impl_->options_.caller_role;
@@ -102,6 +130,10 @@ std::size_t sandbox::memory_used() const noexcept {
 
 const ledger& sandbox::effects() const noexcept {
     return impl_->effects_;
+}
+
+std::string sandbox::stubs() const {
+    return {};
 }
 
 } // namespace Rhp::script

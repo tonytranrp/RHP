@@ -20,6 +20,7 @@ namespace {
 
 constexpr int kMaxValueDepth = 64;
 constexpr const char* kTypeTagField = "__rhp_type";
+constexpr const char* kHandleTagsKey = "rhp.handle_tags"; // registry: type tag → metatable key
 
 detail::sandbox_impl& impl_of(lua_State* L) noexcept {
     return static_cast<detail::sandbox_impl&>(**static_cast<detail::context**>(lua_getextraspace(L)));
@@ -39,7 +40,7 @@ std::optional<errc> parse_code(std::string_view text) {
             return std::nullopt;
         }
         const std::string_view name = text.substr(open + 1, close - open - 1);
-        for (auto code = static_cast<std::uint16_t>(errc::kOk); code <= static_cast<std::uint16_t>(errc::kOutOfRange); ++code) {
+        for (auto code = static_cast<std::uint16_t>(errc::kOk); code <= static_cast<std::uint16_t>(kLastErrc); ++code) {
             if (to_string(static_cast<errc>(code)) == name) {
                 return static_cast<errc>(code);
             }
@@ -329,7 +330,37 @@ result<void> stack::define_userdata_type(std::string_view key, std::string_view 
     lua_pushliteral(state_, "locked");
     lua_setfield(state_, -2, "__metatable");
     lua_pop(state_, 1);
+
+    if (lua_getfield(state_, LUA_REGISTRYINDEX, kHandleTagsKey) != LUA_TTABLE) {
+        lua_pop(state_, 1);
+        lua_newtable(state_);
+        lua_pushvalue(state_, -1);
+        lua_setfield(state_, LUA_REGISTRYINDEX, kHandleTagsKey);
+    }
+    lua_pushlightuserdata(state_, const_cast<void*>(type_tag));
+    push_string(key);
+    lua_rawset(state_, -3);
+    lua_pop(state_, 1);
     return {};
+}
+
+bool stack::push_handle(const void* type_tag, const void* data, std::size_t size) const {
+    if (lua_getfield(state_, LUA_REGISTRYINDEX, kHandleTagsKey) != LUA_TTABLE) {
+        lua_pop(state_, 1);
+        return false;
+    }
+    lua_pushlightuserdata(state_, const_cast<void*>(type_tag));
+    if (lua_rawget(state_, -2) != LUA_TSTRING) {
+        lua_pop(state_, 2);
+        return false;
+    }
+    void* memory = lua_newuserdatauv(state_, size, 0);
+    std::memcpy(memory, data, size); // handle types are trivially copyable
+    lua_insert(state_, -3);          // userdata, tags, key
+    luaL_getmetatable(state_, lua_tostring(state_, -1));
+    lua_setmetatable(state_, -4);
+    lua_pop(state_, 2);
+    return true;
 }
 
 void* stack::push_userdata(std::size_t size, std::string_view key) const {

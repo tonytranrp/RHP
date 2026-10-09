@@ -33,6 +33,8 @@ if(RHP_ENABLE)
             script/limits_tests.cpp
             script/patch_point_tests.cpp
             script/sandbox_tests.cpp
+            script/scheduler_tests.cpp
+            script/stubs_tests.cpp
         LINKS
             Rhp::script
     )
@@ -43,6 +45,7 @@ else()
             script/disabled_tests.cpp
             script/ledger_tests.cpp
             script/lib_tests.cpp
+            script/stubs_tests.cpp
         LINKS
             Rhp::script
     )

@@ -98,9 +98,9 @@ local problems = {}
 local present = {
     "assert", "error", "getmetatable", "ipairs", "next", "pairs", "pcall", "print", "rawequal",
     "rawget", "rawlen", "rawset", "select", "setmetatable", "tonumber", "tostring", "type",
-    "xpcall", "_VERSION", "load", "string", "table", "math", "utf8", "coroutine", "os",
+    "xpcall", "_VERSION", "load", "string", "table", "math", "utf8", "coroutine", "os", "require",
 }
-local absent = { "dofile", "loadfile", "collectgarbage", "require", "package", "io", "debug" }
+local absent = { "dofile", "loadfile", "collectgarbage", "package", "io", "debug" }
 for _, name in ipairs(present) do
     if _G[name] == nil then problems[#problems + 1] = "missing " .. name end
 end
@@ -349,11 +349,14 @@ TEST_CASE("load validates names and runs the chunk", "[script][sandbox]") {
         CHECK(box.list().size() == 1);
     }
 
-    SECTION("duplicate names") {
-        REQUIRE(box.load("tests.dup", "return {}"));
+    SECTION("loading a loaded name reloads it") {
+        const auto first = box.load("tests.dup", "return {}");
+        REQUIRE(first.has_value());
         const auto again = box.load("tests.dup", "return {}");
-        REQUIRE_FALSE(again.has_value());
-        CHECK(again.error().code == errc::kAlreadyLoaded);
+        REQUIRE(again.has_value());
+        CHECK(*again == *first);
+        CHECK(box.status(*first)->revision == Rhp::revision_id{2});
+        CHECK(box.list().size() == 2);
     }
 
     SECTION("compile error registers nothing") {
