@@ -86,10 +86,12 @@ if(RHP_ENABLE)
             Rhp::session
     )
 else()
-    # RHP_ENABLE=OFF: keys and the keyring still build (a disabled host takes one); host and client are inert.
+    # RHP_ENABLE=OFF: keys, the keyring and signer files still build (a disabled host takes them);
+    # signing reports kDisabled; host and client are inert.
     rhp_add_test_suite(rhp_security_tests
         SOURCES
             security/key_tests.cpp
+            security/signing_disabled_tests.cpp
         LINKS
             Rhp::security
     )

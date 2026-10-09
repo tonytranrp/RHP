@@ -74,7 +74,7 @@ TEST_CASE("messages: requests round trip", "[wire][messages]") {
     CHECK(call.function == "f");
     CHECK(call.args.size() == 2);
 
-    const auto exec = roundtrip(wire::exec_request{"return 1", "repl"});
+    const auto exec = roundtrip(wire::exec_request{"return 1", "repl", value{}});
     CHECK(exec.source == "return 1");
     CHECK(exec.chunk == "repl");
 
@@ -144,7 +144,7 @@ TEST_CASE("messages: Stage 4 fields: signatures / pins / blob chunks", "[wire][m
     const value sig{value::map{{value{"signer"}, value{"dev"}}, {value{"sig"}, value{value::bytes(64, std::byte{7})}}}};
     const auto exec = roundtrip(wire::exec_request{"return 1", "exec", sig});
     CHECK(exec.signature == sig);
-    CHECK(roundtrip(wire::exec_request{"return 1"}).signature.is_nil());
+    CHECK(roundtrip(wire::exec_request{"return 1", "exec", value{}}).signature.is_nil());
     CHECK(roundtrip(wire::load_request{"m", "return {}", sig}).signature == sig);
     CHECK(roundtrip(wire::reload_request{wire::module_ref{"m"}, "return {}", sig}).signature == sig);
 

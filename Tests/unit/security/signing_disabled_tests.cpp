@@ -1,0 +1,30 @@
+// RHP_ENABLE=OFF: keys and signer files still load; nothing can be signed or checked.
+#include <string>
+
+#include <catch2/catch_test_macros.hpp>
+
+#include <rhp/core/error.hpp>
+#include <rhp/core/value.hpp>
+#include <rhp/security/ed25519.hpp>
+#include <rhp/security/identity_file.hpp>
+
+using Rhp::errc;
+using namespace Rhp::security;
+
+TEST_CASE("disabled signing: keys load, signing and checking report kDisabled", "[security][disabled]") {
+    auto secret = ed25519_secret_key::generate();
+    REQUIRE(secret);
+    auto again = ed25519_secret_key::from_base64(secret->to_base64());
+    REQUIRE(again);
+    const signing_key key{"dev", *again};
+    CHECK(key.sign("return 1").error().code == errc::kDisabled);
+
+    auto trust = trusted_signers::parse("dev AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n");
+    REQUIRE(trust);
+    CHECK(trust->size() == 1);
+    CHECK(trust->verify("return 1", Rhp::value{}).error().code == errc::kDisabled);
+
+    auto id = identity_file::generate("dev");
+    REQUIRE(id);
+    CHECK(identity_file::parse(id->to_text())->name == "dev");
+}
