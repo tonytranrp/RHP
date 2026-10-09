@@ -110,10 +110,16 @@ public:
             return fail(errc::kInvalidArgument, "only a client that listens (reverse mode) has a port", "client.port");
         }
         std::unique_lock lock{mutex_};
+        if (closed_) {
+            return fail(failure_.value_or(make_error(errc::kTransport, "the client is closed", "client")));
+        }
         start(lock);
         wait(lock, clock::time_point::max(), [this] { return listen_done_; });
         if (listen_error_) {
             return fail(*listen_error_);
+        }
+        if (closed_) {
+            return fail(failure_.value_or(make_error(errc::kTransport, "the client is closed", "client")));
         }
         return listen_port_;
     }
@@ -250,10 +256,17 @@ public:
         try {
             {
                 const std::scoped_lock lock{mutex_};
-                if (!started_ || closed_) {
+                if (closed_) {
                     return;
                 }
                 closing_ = true;
+                if (!started_) {
+                    // Nothing was dialed or listened on: just closed for good.
+                    closed_ = true;
+                    listen_done_ = true;
+                    failure_ = make_error(errc::kCancelled, "the client closed", "client");
+                    return;
+                }
             }
             io_.post([this] {
                 listener_.reset();
@@ -337,7 +350,21 @@ private:
 
     // ---- network thread ------------------------------------------------------------------------------
 
+    // Cancels `target` (0 = everything): requests still queued for the session never went out, so
+    // they are dropped here (and answered kCancelled); the host is told about the rest.
     void send_cancel(std::uint64_t target) {
+        std::vector<std::uint64_t> dropped;
+        std::erase_if(queued_, [&](const queued_request& q) {
+            if (target == 0 || q.req == target) {
+                dropped.push_back(q.req);
+                return true;
+            }
+            return false;
+        });
+        for (const std::uint64_t req : dropped) {
+            drop_timer(req);
+            (void)complete(req, fail(errc::kCancelled, "cancelled before it was sent", "client"));
+        }
         if (session_ != nullptr && session_->ready()) {
             std::uint64_t req = 0;
             {
@@ -350,6 +377,14 @@ private:
 
     // Sends now, or holds the request until the session is ready (async calls made before it was).
     void send_or_queue(wire::op code, const value& message, std::uint64_t req) {
+        {
+            // Answered already (timed out, cancelled, or failed with its session): it must not run.
+            const std::scoped_lock lock{mutex_};
+            const auto it = pending_.find(req);
+            if (it == pending_.end() || it->second.done.has_value()) {
+                return;
+            }
+        }
         if (session_ != nullptr && session_->ready()) {
             if (auto sent = session_->send(code, message); !sent) {
                 drop_timer(req);
@@ -481,18 +516,24 @@ private:
 
     void on_closed(session::session&, const error& why) override {
         bool closing = false;
+        bool was_ready = false;
         {
             const std::scoped_lock lock{mutex_};
             closing = closing_;
+            was_ready = ready_;
         }
         if (reverse_ && !closing) {
-            // The host may dial again: fail what was in flight, keep listening.
+            // The host may dial again: keep listening. Calls in flight fail only if this session
+            // was ready — a connection that never authenticated (a stray client, a port scan) had
+            // none, and the calls queued for the next host stay queued.
             {
                 const std::scoped_lock lock{mutex_};
                 ready_ = false;
                 info_.connected = false;
             }
-            fail_pending(why.code == errc::kOk ? make_error(errc::kTransport, "the session ended", "client") : why);
+            if (was_ready) {
+                fail_pending(why.code == errc::kOk ? make_error(errc::kTransport, "the session ended", "client") : why);
+            }
         } else {
             mark_closed(why);
         }

@@ -33,7 +33,7 @@ struct identity_file {
     [[nodiscard]] static result<identity_file> generate(std::string name);
 
     [[nodiscard]] std::string to_text() const;
-    // Writes to_text() to `path` (replacing it).
+    // Writes to_text() to `path` (replacing it), readable and writable by its owner only.
     result<void> save(const std::string& path) const;
 
     // What Rhp::client takes.

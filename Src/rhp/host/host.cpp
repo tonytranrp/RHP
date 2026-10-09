@@ -63,6 +63,7 @@ struct cancel_relay {
     struct suspended_request {
         request_id id;
         std::uint64_t arrival = 0;
+        bool pinned = false; // runs in a pinned module: its session ending doesn't stop it
     };
 
     std::mutex mutex;
@@ -71,13 +72,15 @@ struct cancel_relay {
     session_id running_session;
     std::uint64_t running_req = 0;
     std::uint64_t running_arrival = 0;
+    bool running_pinned = false;
     std::map<std::pair<std::uint64_t, std::uint64_t>, suspended_request> suspended; // (session, req) → sandbox request
     std::map<std::uint64_t, session_cancels> cancels;                               // by session
 
-    // Everything below: under the mutex.
-    [[nodiscard]] bool covers(session_id session, std::uint64_t req, std::uint64_t arrival) const {
+    // Everything below: under the mutex. A request of a pinned module isn't stopped by its session
+    // ending (the module is meant to outlive it), only by an explicit cancel.
+    [[nodiscard]] bool covers(session_id session, std::uint64_t req, std::uint64_t arrival, bool pinned = false) const {
         const auto it = cancels.find(session.value());
-        return it != cancels.end() && (it->second.dead || arrival <= it->second.upto || it->second.reqs.contains(req));
+        return it != cancels.end() && ((it->second.dead && !pinned) || arrival <= it->second.upto || it->second.reqs.contains(req));
     }
 
     [[nodiscard]] bool dead(session_id session) const {
@@ -109,12 +112,12 @@ struct cancel_relay {
         if (box == nullptr) {
             return;
         }
-        if (running_session && covers(running_session, running_req, running_arrival)) {
+        if (running_session && covers(running_session, running_req, running_arrival, running_pinned)) {
             box->cancel();
         }
         if (suspended_too) {
             for (const auto& [key, req] : suspended) {
-                if (covers(session_id{key.first}, key.second, req.arrival)) {
+                if (covers(session_id{key.first}, key.second, req.arrival, req.pinned)) {
                     box->cancel(req.id);
                 }
             }
@@ -416,15 +419,29 @@ private:
     void accept(std::unique_ptr<net::link> link) {
         if (!is_enabled()) {
             log(log_level::kInfo, std::format("refusing {}: the host is disabled", link->peer()));
+            refused(link->peer(), make_error(errc::kDisabled, "the host is disabled", "host"));
             park(std::move(link));
             return;
         }
         if (pending_handshakes_ >= setup_.limits.pending_handshakes) {
             log(log_level::kWarn, std::format("refusing {}: {} handshakes already pending", link->peer(), pending_handshakes_));
+            refused(link->peer(), make_error(errc::kLimitExceeded, std::format("{} handshakes already pending", pending_handshakes_), "host"));
             park(std::move(link));
             return;
         }
         (void)start_session(std::move(link));
+    }
+
+    // A connection that never got to authenticate (auth_failed, when anyone listens).
+    void refused(std::string peer, error why) {
+        if (setup_.events == nullptr || !setup_.events->wants(event::kind_of<event::auth_failed>)) {
+            return;
+        }
+        inbound in;
+        in.what = inbound::kind::kAuthFailed;
+        in.peer = std::move(peer);
+        in.reason = std::move(why);
+        (void)to_pump(std::move(in));
     }
 
     // Closes a link we won't serve; it dies once the next connection arrives or the host does.
@@ -596,13 +613,7 @@ private:
         } else {
             --pending_handshakes_;
             log(log_level::kInfo, std::format("connection from {} closed before authenticating: {}", s.peer(), why));
-            if (setup_.events != nullptr && setup_.events->wants(event::kind_of<event::auth_failed>)) {
-                inbound in;
-                in.what = inbound::kind::kAuthFailed;
-                in.peer = s.peer();
-                in.reason = why;
-                to_pump(std::move(in));
-            }
+            refused(s.peer(), why);
         }
         sessions_.erase(it); // allowed inside on_closed
         if (reverse_ && id == outgoing_) {
@@ -1009,6 +1020,11 @@ private:
     template <class Op>
     void run_tracked(identity_runtime& rt, const inbound& in, module_id module, Op&& op) {
         const request_id before = rt.box->last_request();
+        const bool pinned = module && rt.pinned.contains(module);
+        {
+            const std::scoped_lock lock{rt.relay->mutex};
+            rt.relay->running_pinned = pinned;
+        }
         rt.current_session = in.session;
         rt.current_req = in.req;
         auto outcome = op();
@@ -1018,9 +1034,9 @@ private:
         const bool suspended = outcome && after != before && rt.box->pending(after);
         if (suspended) {
             const std::scoped_lock lock{rt.relay->mutex};
-            rt.relay->suspended[{in.session.value(), in.req}] = cancel_relay::suspended_request{after, in.arrival};
+            rt.relay->suspended[{in.session.value(), in.req}] = cancel_relay::suspended_request{after, in.arrival, pinned};
             // A cancel that came while it ran (and found nothing to stop yet) applies now.
-            if (rt.relay->covers(in.session, in.req, in.arrival)) {
+            if (rt.relay->covers(in.session, in.req, in.arrival, pinned)) {
                 rt.box->cancel(after);
             }
         }
@@ -1055,6 +1071,7 @@ private:
             relay.running_session = {};
             relay.running_req = 0;
             relay.running_arrival = 0;
+            relay.running_pinned = false;
         }
     };
 
@@ -1087,6 +1104,7 @@ private:
         }};
 
         if (!is_enabled()) {
+            abandon_blob(sess, in);
             reply_error(in.session, in.req, make_error(errc::kDisabled, "the host is disabled", std::string{wire::to_string(in.code)}));
             return;
         }
@@ -1116,6 +1134,7 @@ private:
                 return; // its session ended before it could run: nobody to answer
             }
             if (rt.relay->covers(in.session, in.req, in.arrival)) {
+                abandon_blob(sess, in);
                 reply_error(in.session, in.req, make_error(errc::kCancelled, "cancelled before it started", std::string{wire::to_string(in.code)}));
                 return;
             }
@@ -1154,10 +1173,12 @@ private:
             if (auto who = check_signature(sess, m->name, m->source, m->signature); !who) {
                 return bad_request(who.error());
             }
-            // The module id is only known once load() returns: track it through `loaded`.
+            // The module id is only known once load() returns: track it through `loaded` (a load of a
+            // loaded name is a reload of that module).
             module_id loaded;
+            const auto existing = box.find(m->name);
             const request_id before = box.last_request();
-            run_tracked(rt, in, {}, [&]() -> result<value> {
+            run_tracked(rt, in, existing ? *existing : module_id{}, [&]() -> result<value> {
                 auto r = box.load(m->name, m->source);
                 if (!r) {
                     return std::unexpected{std::move(r).error()};
@@ -1272,10 +1293,22 @@ private:
                 if (info->scratch) {
                     return bad_request(make_error(errc::kInvalidArgument, "the scratch module can't be pinned (load a module)", std::string{wire::to_string(in.code)}));
                 }
-                if (in.code == wire::op::kPin) {
+                const bool pin = in.code == wire::op::kPin;
+                if (pin) {
                     rt.pinned.insert(*mod);
                 } else {
                     rt.pinned.erase(*mod);
+                }
+                {
+                    // Its requests suspended right now outlive their sessions from now on (or stop doing so).
+                    const std::scoped_lock lock{rt.relay->mutex};
+                    for (const auto& [r, p] : rt.waiting) {
+                        if (p.module == *mod) {
+                            if (const auto s = rt.relay->suspended.find({p.session.value(), p.req}); s != rt.relay->suspended.end()) {
+                                s->second.pinned = pin;
+                            }
+                        }
+                    }
                 }
                 log(log_level::kInfo, std::format("{} {} module {} ({})", sess.identity, in.code == wire::op::kPin ? "pinned" : "unpinned", info->name, *mod));
                 return reply(in.session, in.req, value{});
@@ -1305,6 +1338,11 @@ private:
                     return bad_request(r.error());
                 }
                 return reply(in.session, in.req, value{});
+            }
+            if (!rt.pinned.empty()) {
+                // revert_to undoes every effect after the mark, whatever module made it: it would
+                // hollow out pinned modules, which only unpin + revert / unload or revert_all may undo.
+                return bad_request(make_error(errc::kForbidden, "this identity has pinned modules: unpin them before revert_to", "revert_to"));
             }
             auto r = box.revert_to(m->tag);
             if (!r) {
@@ -1346,6 +1384,19 @@ private:
         }
     }
 
+    // A blob chunk answered before it reached blob() (cancelled, host disabled): its transfer can't
+    // complete any more, so it is dropped and its later chunks refused.
+    void abandon_blob(pump_session& sess, const inbound& in) {
+        if (in.code != wire::op::kBlob || !sess.blob) {
+            return;
+        }
+        const auto chunk = Rhp::from_value<wire::blob_chunk>(in.body);
+        if (chunk && chunk->transfer == sess.blob->id) {
+            sess.failed_transfer = sess.blob->id;
+            sess.blob.reset();
+        }
+    }
+
     // One chunk of a blob (see wire::blob_chunk). The sink and role are checked on the first chunk,
     // before anything is buffered; the whole blob goes to the sink when the last chunk arrives.
     void blob(pump_session& sess, const inbound& in) {
@@ -1373,10 +1424,6 @@ private:
             reply_error(in.session, in.req, err);
         };
         if (!sess.blob || sess.blob->id != chunk->transfer) {
-            if (sess.blob) {
-                reply_error(in.session, in.req, make_error(errc::kInvalidArgument, "another blob is still arriving on this session", "blob"));
-                return;
-            }
             if (chunk->offset != 0) {
                 return refuse(make_error(errc::kProtocol, "a blob must start at offset 0", "blob"));
             }
@@ -1390,6 +1437,13 @@ private:
             }
             if (chunk->total > setup_.limits.max_blob) {
                 return refuse(make_error(errc::kLimitExceeded, std::format("a {}-byte blob is over the limit ({} bytes)", chunk->total, setup_.limits.max_blob), "blob"));
+            }
+            if (sess.blob) {
+                // A new transfer replaces one the client gave up on (a chunk timed out or was
+                // cancelled): its later chunks are refused.
+                log(log_level::kInfo, std::format("blob '{}' from {} abandoned at {} of {} bytes", sess.blob->name, sess.identity, sess.blob->data.size(), sess.blob->total));
+                sess.failed_transfer = sess.blob->id;
+                sess.blob.reset();
             }
             blob_transfer t;
             t.id = chunk->transfer;
