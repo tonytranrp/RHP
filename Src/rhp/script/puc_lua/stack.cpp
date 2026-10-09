@@ -55,6 +55,11 @@ result<value> read_table(lua_State* L, int index, int depth) {
     if (depth > kMaxValueDepth) {
         return fail(errc::kOutOfRange, "table nesting is too deep (or cyclic) to convert");
     }
+    // Each level holds a key and a value on the stack (found by fuzzing: a deep table outgrew the
+    // C function's guaranteed LUA_MINSTACK slots).
+    if (lua_checkstack(L, 4) == 0) {
+        return fail(errc::kOutOfRange, "no Lua stack left to convert the table");
+    }
     index = lua_absindex(L, index);
     // An array is a table whose keys are exactly 1..n.
     const lua_Unsigned length = lua_rawlen(L, index);
