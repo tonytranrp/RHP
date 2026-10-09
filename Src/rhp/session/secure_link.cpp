@@ -39,7 +39,7 @@ public:
           mode_(mode::kSniff),
           plaintext_ok_(plaintext_ok) {}
 
-    ~secure_link() override = default; // inner_ goes first: no callbacks after this
+    ~secure_link() override = default; // destroying inner_ aborts it: no callbacks after this
 
     secure_link(const secure_link&) = delete;
     secure_link& operator=(const secure_link&) = delete;
@@ -120,9 +120,14 @@ private:
             inner_->send(std::move(reply));
         }
         if (!ok) {
+            // What arrived with the close_notify or alert still counts (a goodbye, a refusal).
+            if (!plain.empty() && !closed_) {
+                handler_->on_bytes(plain.view());
+            }
             fail(std::move(ok).error());
             return;
         }
+        bool became_ready = false;
         if (!was_ready && engine_->established()) {
             auto b = engine_->binding();
             if (!b) {
@@ -130,13 +135,14 @@ private:
                 return;
             }
             binding_ = *b;
+            became_ready = true;
             if (!held_.empty()) {
                 utils::byte_buffer held = std::exchange(held_, {});
                 encrypt(held.view());
             }
         }
-        if (!plain.empty() && !closed_) {
-            handler_->on_bytes(plain.view());
+        if ((!plain.empty() || became_ready) && !closed_) {
+            handler_->on_bytes(plain.view()); // empty: "ready" (the binding is known now)
         }
     }
 
@@ -231,7 +237,14 @@ result<channel_policy> channel_policy::make(const net::endpoint& ep, bool networ
         if (!p.dial_tls_) {
             return p;
         }
-        auto ctx = backend.client(settings);
+        security::tls::settings client = settings;
+        // With a CA, check the name too: by default the one dialed (unless it is an IP address).
+        const bool ip = ep.host.find_first_not_of("0123456789.:[]abcdefABCDEF") == std::string::npos &&
+                        ep.host.find_first_of("0123456789") != std::string::npos;
+        if (!client.ca_pem.empty() && client.server_name.empty() && !ip) {
+            client.server_name = ep.host;
+        }
+        auto ctx = backend.client(client);
         if (!ctx) {
             return std::unexpected{std::move(ctx).error()};
         }

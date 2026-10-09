@@ -1,10 +1,13 @@
+#include <algorithm>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
 #include <format>
 #include <memory>
+#include <span>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <variant>
 
@@ -31,6 +34,10 @@ constexpr int kMaxBadMagic = 3;
 constexpr std::uint32_t kHandshakeMaxFrame = 16u * 1024u;
 // Replaced links kept around (they may still be inside a callback when replaced).
 constexpr std::size_t kMaxRetired = 4;
+// One resume attempt (a new link and its kResume) gets at most this long before the next is tried.
+constexpr std::uint32_t kResumeAttemptMs = 2'000;
+constexpr std::string_view kResumeLabel = "rhp/resume";
+constexpr std::string_view kResumedLabel = "rhp/resumed";
 
 [[nodiscard]] std::chrono::milliseconds ms(std::uint32_t n) noexcept {
     return std::chrono::milliseconds{n};
@@ -146,6 +153,11 @@ void session::receive(utils::bytes_view data) {
     if (closed_) {
         return;
     }
+    if (resume_pending_ && link_ != nullptr && !link_->channel_binding().empty()) {
+        // The resume link's TLS just came up (an empty on_bytes says so): now the proof can name it.
+        resume_pending_ = false;
+        send_resume();
+    }
     decoder_.feed(data);
     while (!closed_) {
         const wire::decode_result r = decoder_.next();
@@ -184,14 +196,7 @@ void session::on_link_closed(const error& why) {
     }
     const error lost = why.code == errc::kOk ? make_error(errc::kTransport, "the link closed", peer_) : why;
     if (state_ == state::kDetached) {
-        // The link a resume was tried on failed too: the dialing side tries again.
-        resuming_ = false;
-        retire_link();
-        io_.post([this, alive = std::weak_ptr<bool>{alive_}, lost] {
-            if (const auto still = alive.lock(); still != nullptr && *still && state_ == state::kDetached) {
-                handler_.on_detached(*this, lost);
-            }
-        });
+        lose_resume_link(lost); // the link a resume was tried on failed too: try again
         return;
     }
     if (state_ == state::kReady && opts_.resumable && opts_.limits.resume_ms != 0) {
@@ -471,6 +476,11 @@ result<void> session::adopt(session& fresh, const wire::frame_view& frame) {
     if (!sealed_control(frame)) {
         return fail(errc::kAuth, "the resume request failed its MAC check", fresh.peer_);
     }
+    auto body = decode(frame.payload);
+    auto request = body ? Rhp::from_value<wire::resume>(*body) : result<wire::resume>{std::unexpected{body.error()}};
+    if (!request || !resume_proof_ok(kResumeLabel, fresh.link_->channel_binding(), request->proof)) {
+        return fail(errc::kAuth, "the resume request isn't bound to this connection (a relay in between?)", fresh.peer_);
+    }
     control_in_ = frame.header.seq;
     // Not inside any callback of this session's own links: they can go now.
     retired_.clear();
@@ -481,10 +491,13 @@ result<void> session::adopt(session& fresh, const wire::frame_view& frame) {
     attach(std::move(fresh.link_), std::move(fresh.port_));
     state_ = state::kReady;
     resuming_ = false;
+    resume_pending_ = false;
     resume_timer_.cancel();
+    handshake_timer_.cancel();
     acknowledge(frame.header.ack);
+    const wire::mac_bytes proof = resume_proof(*outgoing_, kResumedLabel, link_->channel_binding());
     utils::byte_buffer payload;
-    if (auto encoded = opts_.codec.encode(Rhp::to_value(wire::resume{id_}), payload); !encoded) {
+    if (auto encoded = opts_.codec.encode(Rhp::to_value(wire::resume{id_, value::bytes(proof.begin(), proof.end())}), payload); !encoded) {
         fail_with(std::move(encoded).error());
         return {};
     }
@@ -504,14 +517,21 @@ void session::resume(std::unique_ptr<net::link> link) {
         retire_link();
     }
     attach(std::move(link), std::make_unique<link_port>());
-    link_->start(*port_);
     resuming_ = true;
-    utils::byte_buffer payload;
-    if (auto encoded = opts_.codec.encode(Rhp::to_value(wire::resume{id_}), payload); !encoded) {
-        shutdown(std::move(encoded).error());
-        return;
+    // One attempt gets a bounded time; a dial that connects but never answers doesn't eat the window.
+    const std::uint32_t attempt = opts_.limits.handshake_timeout_ms == 0 ? kResumeAttemptMs : std::min(opts_.limits.handshake_timeout_ms, kResumeAttemptMs);
+    handshake_timer_.start(ms(attempt), [this] {
+        if (state_ == state::kDetached && resuming_) {
+            lose_resume_link(make_error(errc::kTimeout, "the resume attempt got no answer", peer_));
+        }
+    });
+    // Under TLS the proof names the new connection, whose binding exists once its handshake is done
+    // (the link then reports an empty on_bytes); the request goes out then.
+    resume_pending_ = link_->encrypted() && link_->channel_binding().empty();
+    link_->start(*port_);
+    if (!resume_pending_ && resuming_) {
+        send_resume();
     }
-    (void)write_frame(wire::op::kResume, ++control_out_, payload.view(), true);
 }
 
 // Detached, dialing side: the answer to our kResume (anything else is a stray handshake frame).
@@ -520,31 +540,80 @@ void session::handle_resume_reply(const wire::frame_view& frame) {
         return;
     }
     if (frame.header.code == wire::op::kError) {
-        shutdown(peer_error(frame.payload, make_error(errc::kNotFound, "the peer refused to resume the session", peer_)));
+        // Unsealed, so anyone on the path could have sent it: give up this link, not the session
+        // (a host that really dropped it lets the window run out).
+        lose_resume_link(peer_error(frame.payload, make_error(errc::kNotFound, "the peer refused to resume the session", peer_)));
         return;
     }
     if (frame.header.code != wire::op::kWelcome) {
         return; // e.g. the hello of a reverse-mode client's new connection
     }
     if (!sealed_control(frame)) {
-        fail_with(make_error(errc::kAuth, "the resume answer failed its MAC check", peer_));
+        lose_resume_link(make_error(errc::kAuth, "the resume answer failed its MAC check", peer_));
         return;
     }
     auto body = decode(frame.payload);
     auto answer = body ? Rhp::from_value<wire::resume>(*body) : result<wire::resume>{std::unexpected{body.error()}};
     if (!answer || answer->session != id_) {
-        fail_with(make_error(errc::kProtocol, "the resume answer names another session", peer_));
+        lose_resume_link(make_error(errc::kProtocol, "the resume answer names another session", peer_));
+        return;
+    }
+    if (!resume_proof_ok(kResumedLabel, link_->channel_binding(), answer->proof)) {
+        lose_resume_link(make_error(errc::kAuth, "the resume answer isn't bound to this connection (a relay in between?)", peer_));
         return;
     }
     control_in_ = frame.header.seq;
     state_ = state::kReady;
     resuming_ = false;
     resume_timer_.cancel();
+    handshake_timer_.cancel();
     acknowledge(frame.header.ack);
     resend_after(peer_acked_);
     ++stats_.resumes;
     start_heartbeat();
     handler_.on_resumed(*this);
+}
+
+wire::mac_bytes session::resume_proof(const wire::frame_sealer& sealer, std::string_view label, std::span<const std::byte> binding) const {
+    utils::byte_buffer what;
+    what.append(label);
+    what.append(binding);
+    return sealer.seal(what.view());
+}
+
+bool session::resume_proof_ok(std::string_view label, std::span<const std::byte> binding, const value::bytes& proof) const {
+    if (incoming_ == nullptr || proof.size() != wire::kMacSize) {
+        return false;
+    }
+    utils::byte_buffer what;
+    what.append(label);
+    what.append(binding);
+    return incoming_->verify(what.view(), std::span<const std::byte, wire::kMacSize>{proof.data(), wire::kMacSize});
+}
+
+void session::send_resume() {
+    const wire::mac_bytes proof = resume_proof(*outgoing_, kResumeLabel, link_->channel_binding());
+    utils::byte_buffer payload;
+    if (auto encoded = opts_.codec.encode(Rhp::to_value(wire::resume{id_, value::bytes(proof.begin(), proof.end())}), payload); !encoded) {
+        shutdown(std::move(encoded).error());
+        return;
+    }
+    (void)write_frame(wire::op::kResume, ++control_out_, payload.view(), true);
+}
+
+void session::lose_resume_link(error why) {
+    if (closed_ || state_ != state::kDetached) {
+        return;
+    }
+    resuming_ = false;
+    resume_pending_ = false;
+    handshake_timer_.cancel();
+    retire_link();
+    io_.post([this, alive = std::weak_ptr<bool>{alive_}, why = std::move(why)] {
+        if (const auto still = alive.lock(); still != nullptr && *still && state_ == state::kDetached && !resuming_) {
+            handler_.on_detached(*this, why);
+        }
+    });
 }
 
 void session::detach(error why) {
@@ -771,6 +840,10 @@ void session::fail_with(error why) {
     if (closed_) {
         return;
     }
+    if (state_ == state::kDetached) {
+        lose_resume_link(std::move(why)); // garbage on a resume link: try another link
+        return;
+    }
     if (why.where.empty()) {
         why.where = peer_;
     }
@@ -786,6 +859,10 @@ void session::close(error why) {
     if (why.code == errc::kOk) {
         why = make_error(errc::kCancelled, "closed", peer_);
     }
+    if (state_ == state::kDetached) {
+        shutdown(std::move(why)); // nobody to tell
+        return;
+    }
     fail_with(std::move(why));
 }
 
@@ -796,6 +873,7 @@ void session::shutdown(error why) {
     closed_ = true;
     state_ = state::kClosed;
     resuming_ = false;
+    resume_pending_ = false;
     handshake_timer_.cancel();
     heartbeat_timer_.cancel();
     resume_timer_.cancel();

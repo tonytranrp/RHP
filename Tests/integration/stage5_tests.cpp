@@ -39,6 +39,9 @@
 #include <rhp/security/tls/auto_backend.hpp>
 #include <rhp/security/tls/tls.hpp>
 #include <rhp/session/secure_link.hpp>
+#include <rhp/core/convert.hpp>
+#include <rhp/wire/frame.hpp>
+#include <rhp/wire/codec/msgpack.hpp>
 
 using namespace std::chrono_literals;
 using Rhp::errc;
@@ -71,6 +74,16 @@ struct cut_registry {
     std::vector<std::weak_ptr<cut_state>> links;
     std::atomic<bool> refuse_dials{false};
     std::atomic<int> cuts{0};
+    std::string redirect; // dial this channel name instead (guarded by mutex): a route through a relay
+
+    std::string redirect_for(const std::string& host) {
+        const std::scoped_lock lock{mutex};
+        return redirect.empty() ? host : redirect;
+    }
+    void set_redirect(std::string to) {
+        const std::scoped_lock lock{mutex};
+        redirect = std::move(to);
+    }
 
     void add(const std::shared_ptr<cut_state>& s) {
         const std::scoped_lock lock{mutex};
@@ -160,7 +173,9 @@ struct cuttable {
             io.post([on_connect = std::move(on_connect)] { on_connect(Rhp::fail(errc::kTransport, "dials refused by the test", "cuttable")); });
             return;
         }
-        Rhp::net::loopback::dial(io, ep, [&io, on_connect = std::move(on_connect)](Rhp::result<std::unique_ptr<Rhp::net::link>> l) {
+        Rhp::endpoint target = ep;
+        target.host = registry().redirect_for(ep.host);
+        Rhp::net::loopback::dial(io, target, [&io, on_connect = std::move(on_connect)](Rhp::result<std::unique_ptr<Rhp::net::link>> l) {
             if (!l) {
                 on_connect(std::move(l));
                 return;
@@ -562,6 +577,53 @@ TEST_CASE("stage5: a relay that terminates TLS can't pass the PSK handshake; a p
     }
 }
 
+TEST_CASE("stage5: a resume through a relay that terminates TLS is refused; through a plain relay it works", "[stage5][tls][resume][security]") {
+    keys k;
+    g_runs = 0;
+    constexpr Rhp::limits kShort{.heartbeat_ms = 500, .resume_ms = 1'500, .backoff_min_ms = 5, .backoff_max_ms = 40};
+    using short_cfg = Rhp::config<>::transport<cuttable>::logger<Rhp::core::null_logger>::limits<kShort>;
+    const auto at = Rhp::endpoint::listen("s5.rr_host", 1, Rhp::net::require_tls);
+    pumped_host<short_cfg> host{at, k.ring(), k.trusted()};
+    seen_events<Rhp::event::session_resumed> resumed;
+    auto sub = host->on<Rhp::event::session_resumed>(resumed.handler());
+    {
+        // The session starts direct; after the cut every dial lands on a TLS-terminating relay.
+        tls_relay mitm{Rhp::endpoint::listen("s5.rr_mitm", 1), Rhp::endpoint::dial("s5.rr_host", 1), true};
+        Rhp::client<short_cfg> c{Rhp::endpoint::dial("s5.rr_host", 1, Rhp::net::require_tls), k.as("patch"), k.dev()};
+        REQUIRE(c.exec<int>("return s5.bump()") == 1);
+        registry().set_redirect("s5.rr_mitm");
+        registry().cut_all();
+        auto r = c.exec<int>("return s5.bump()");
+        registry().set_redirect({});
+        CHECK_FALSE(r);
+        CHECK(resumed.size() == 0);
+        CHECK(g_runs == 1); // the call never reached the host through the relay
+    }
+    {
+        tls_relay dumb{Rhp::endpoint::listen("s5.rr_plain", 1), Rhp::endpoint::dial("s5.rr_host", 1), false};
+        Rhp::client<short_cfg> c{Rhp::endpoint::dial("s5.rr_host", 1, Rhp::net::require_tls), k.as("patch"), k.dev()};
+        REQUIRE(c.exec<int>("return 1") == 1);
+        registry().set_redirect("s5.rr_plain");
+        registry().cut_all();
+        CHECK(c.exec<int>("return s5.bump()") == 2);
+        registry().set_redirect({});
+        CHECK(c.info().resumes > 0);
+        CHECK(eventually([&] { return resumed.size() > 0; }));
+    }
+}
+
+TEST_CASE("stage5: over TLS the host's goodbye still arrives at once", "[stage5][tls][resume]") {
+    keys k;
+    auto host = std::make_unique<pumped_host<tcp_cfg>>(Rhp::endpoint::listen("127.0.0.1", 0, Rhp::net::require_tls), k.ring(), k.trusted());
+    const auto port = *(*host)->port();
+    Rhp::client<tcp_cfg> c{Rhp::endpoint::dial("127.0.0.1", port, Rhp::net::require_tls), k.as("patch"), k.dev()};
+    REQUIRE(c.exec("return 1"));
+    const auto started = std::chrono::steady_clock::now();
+    host.reset();
+    CHECK(eventually([&] { return !c.connected(); }, 3s));
+    CHECK(std::chrono::steady_clock::now() - started < 3s);
+}
+
 #endif
 
 TEST_CASE("stage5: which connections get TLS", "[stage5][tls][policy]") {
@@ -616,4 +678,30 @@ TEST_CASE("stage5: a host that shuts down tells its clients at once", "[stage5][
     CHECK(eventually([&] { return !c.connected(); }, 3s));
     CHECK(std::chrono::steady_clock::now() - started < 3s); // not the resume window plus redials
     CHECK(c.exec("return 1").error().code == errc::kTransport);
+}
+
+TEST_CASE("stage5: a peer can't hide a failed login by closing with kOk", "[stage5][security]") {
+    keys k;
+    const auto at = Rhp::endpoint::listen("s5.kok", 1);
+    pumped_host<loop_cfg> host{at, k.ring(), k.trusted()};
+    seen_events<Rhp::event::auth_failed> failed;
+    auto sub = host->on<Rhp::event::auth_failed>(failed.handler());
+    Rhp::net::io_context io;
+    std::unique_ptr<Rhp::net::link> raw;
+    rhp_test::recorder seen;
+    Rhp::net::loopback::dial(io, at.reversed(), [&](Rhp::result<std::unique_ptr<Rhp::net::link>> l) {
+        REQUIRE(l);
+        raw = std::move(*l);
+        raw->start(seen);
+    });
+    REQUIRE(rhp_test::poll_until({&io}, [&] { return raw != nullptr; }));
+    Rhp::utils::byte_buffer payload;
+    REQUIRE(Rhp::wire::msgpack::encode(Rhp::to_value(Rhp::make_error(errc::kOk, "nothing to see", "x")), payload));
+    Rhp::wire::frame_header h;
+    h.code = Rhp::wire::op::kError;
+    Rhp::utils::byte_buffer frame;
+    REQUIRE(Rhp::wire::encode_frame(h, payload.view(), frame, nullptr, 4096));
+    raw->send(std::move(frame));
+    rhp_test::poll_for({&io}, 100ms);
+    CHECK(eventually([&] { return failed.size() == 1; }));
 }

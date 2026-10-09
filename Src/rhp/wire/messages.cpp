@@ -162,7 +162,7 @@ result<welcome> Rhp::convert<welcome>::from_value(const value& v) {
 }
 
 value Rhp::convert<resume>::to_value(const resume& m) {
-    return map_builder{}.set("session", m.session).done();
+    return map_builder{}.set("session", m.session).set("proof", value{m.proof}).done();
 }
 
 result<resume> Rhp::convert<resume>::from_value(const value& v) {
@@ -170,7 +170,15 @@ result<resume> Rhp::convert<resume>::from_value(const value& v) {
         return not_a_map("resume", v);
     }
     RHP_WIRE_READ(session, field<Rhp::session_id>(v, "session", "resume"));
-    return resume{*session};
+    value::bytes proof;
+    if (const value* p = v.find("proof"); p != nullptr && !p->is_nil()) {
+        const auto* bytes = p->get_if<value::bytes>();
+        if (bytes == nullptr) {
+            return Rhp::fail(Rhp::errc::kProtocol, "resume.proof must be bytes", "wire");
+        }
+        proof = *bytes;
+    }
+    return resume{*session, std::move(proof)};
 }
 
 // ---- envelope and requests -----------------------------------------------------------------------

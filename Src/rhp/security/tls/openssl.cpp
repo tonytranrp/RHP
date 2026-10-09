@@ -173,6 +173,7 @@ public:
             std::array<std::byte, kReadChunk> buf{};
             for (;;) {
                 std::size_t got = 0;
+                ERR_clear_error();
                 if (SSL_read_ex(ssl_.get(), buf.data(), buf.size(), &got) == 1) {
                     plain.append(utils::bytes_view{buf.data(), got});
                     continue;
@@ -198,6 +199,7 @@ public:
         }
         if (!plain.empty()) {
             std::size_t written = 0;
+            ERR_clear_error();
             if (SSL_write_ex(ssl_.get(), plain.data(), plain.size(), &written) != 1 || written != plain.size()) {
                 return failure(errc::kTransport, "TLS write failed");
             }
@@ -230,6 +232,7 @@ public:
 
 private:
     result<void> step() {
+        ERR_clear_error(); // SSL_get_error reads the thread's queue: start from an empty one
         const int r = SSL_do_handshake(ssl_.get());
         if (r == 1) {
             established_ = true;
@@ -239,9 +242,10 @@ private:
         if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
             return {};
         }
-        if (SSL_get_verify_result(ssl_.get()) != X509_V_OK) {
-            return fail(errc::kAuth, std::format("the host's certificate didn't verify: {}", X509_verify_cert_error_string(SSL_get_verify_result(ssl_.get()))),
-                        kWhere);
+        if ((SSL_get_verify_mode(ssl_.get()) & SSL_VERIFY_PEER) != 0 && SSL_get_verify_result(ssl_.get()) != X509_V_OK) {
+            const long v = SSL_get_verify_result(ssl_.get());
+            ERR_clear_error();
+            return fail(errc::kAuth, std::format("the host's certificate didn't verify: {}", X509_verify_cert_error_string(v)), kWhere);
         }
         return failure(errc::kTransport, "TLS handshake failed");
     }

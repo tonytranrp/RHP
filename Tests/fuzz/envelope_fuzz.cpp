@@ -45,7 +45,7 @@ std::vector<std::string> rhp_fuzz_seeds() {
     namespace w = Rhp::wire;
     std::vector<std::string> out;
     out.push_back(encoded(Rhp::to_value(w::envelope{7, 99, Rhp::value{std::string{"x"}}})));
-    out.push_back(encoded(Rhp::to_value(w::resume{Rhp::session_id{12}})));
+    out.push_back(encoded(Rhp::to_value(w::resume{Rhp::session_id{12}, Rhp::value::bytes(32, std::byte{3})})));
     out.push_back(encoded(Rhp::to_value(w::welcome{Rhp::session_id{3}, "dev", Rhp::role::kAdmin, 2000, "linux"})));
     out.push_back(encoded(Rhp::to_value(w::hello{w::kProtocolRevision, "ios", Rhp::value{}})));
     out.push_back(encoded(Rhp::to_value(Rhp::make_error(Rhp::errc::kAuth, "no", "here"))));
