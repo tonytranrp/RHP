@@ -7,13 +7,13 @@
 - Warnings as errors (`/W4 /WX`, `-Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Werror`).
 - Sanitizer presets: MSVC ASan, Clang ASan+UBSan, Clang TSan.
 - Catch2 v3 and compile-fail tests.
-- Every preset runs locally with `ctest`; GitHub Actions (Stage 5) builds and tests Linux, Windows, macOS, the iOS simulator and Android.
+- Desktop and simulator test presets use `ctest`; Android suites use the adb runner. GitHub Actions defines the Stage 5 platform matrix, but workflow syntax/account blockers and platform verification are tracked in `Docs/TODO.md`.
 - Git: branch + PR per stage, conventional commits.
-- Headers only, no C++20 modules, no C API, no reflection.
+- Header-based public API with compiled runtime/dependency walls; no C++20 modules, C API or reflection.
 
 **Pins:** CPM.cmake 0.42.3, Catch2 v3.16.1 (Stage 0); Lua 5.5.1 (Stage 1, only when `RHP_ENABLE=ON`).
 
-**Planned pins:**
+**Original planned pins (historical; the as-built notes below supersede these):**
 - Asio 1.38.x and msgpack-c ≥ 9.0.0 (Stage 3)
 - Monocypher ≥ 4.0.3, replxx, CLI11 (Stage 4)
 - OpenSSL 4.0.x and mbedTLS 4.2 (Stage 5)

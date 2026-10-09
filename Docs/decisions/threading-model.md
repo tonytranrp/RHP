@@ -3,13 +3,13 @@
 **Decision**
 - Lua runs on the thread that calls `host.pump()` (`exec::pumped`).
 - RHP owns one I/O thread (`exec::owned_io_thread`; alternatives are policies).
-- Only SPSC rings and the cancel flag cross threads.
+- Host request/reply traffic uses SPSC rings and cancel relays; queued Lua events and pending client results also use mutex-protected cross-thread state.
 - Multiple hosts per process, no globals in hosts.
 - Patch points and `lua_event`s use one process-wide registry.
 - A patched point hit off the pump thread runs the C++ default and counts a miss.
 - `lua_event` is synchronous on the pump thread, queued otherwise, fire-and-forget.
 - The clock is injectable (`steady_clock` default).
-- All engine allocations go through an injectable `std::pmr::memory_resource`.
+- Current injection covers a standalone sandbox's Lua allocator and explicitly constructed `utils::byte_buffer`s. Other C++ containers/effects use their normal allocators; host-wide memory-resource injection is not implemented.
 
 **Why:** game and GUI code must only be touched on its own thread; Lua states are single-threaded; mobile cores stay portable when threads live at the edges.
 
@@ -30,6 +30,6 @@
 
 **Stage 3 review fixes:** `utils::spsc_ring::try_push` now moves its argument only when there is room (by-value pushes destroyed the item a full ring refused). Cancels are recorded in the relay and re-applied from a 20 ms network-thread timer, so none is lost to timing. Cross-thread posts (the loopback transport) go through `net::io_context::poster`, which refuses once the context shuts down. The loopback pump hands over at most 64 buffers per turn. A `zero_threads` client must `poll()` between calls.
 
-**Stage 4 (as built):** host events are published on the pump thread through a thread-safe hub (handlers run outside its lock; subscribe / unsubscribe from any thread). Blob sinks run on the pump thread. Client async results (`Rhp::pending`: `then` callbacks, `co_await` resumptions, futures) complete on the client's network thread — or inside `poll()`, a blocking call or `pending::get()` with `io<zero_threads>`. `rhp-cli`'s `watch` uses one extra thread that makes blocking calls on the client.
+**Stage 4 (as built):** host events are published on the pump thread through a thread-safe hub (handlers run outside its lock; subscribe / unsubscribe from any thread). Blob sinks run on the pump thread. Client async results (`Rhp::pending`: `then` callbacks, `co_await` resumptions, futures) normally complete on the client's network thread — or inside `poll()`, a blocking call or `pending::get()` with `io<zero_threads>`. Registering `then` after completion invokes it immediately on the registration thread; an already-ready await continues on its calling thread. `rhp-cli`'s `watch` uses one extra thread that makes blocking calls on the client.
 
 **Stage 5 (as built):** TLS engines run on the network thread inside the links. Mbed TLS calls are serialized by one process-wide lock (its PSA core isn't thread-safe in the default configuration); OpenSSL needs none.

@@ -4,13 +4,14 @@
 > **Targets:** Windows 10 1809+ · Linux (glibc 2.31+) · macOS 13+ · iOS 16+ · Android API 26+ — x86_64 + arm64
 > **Compilers:** MSVC (VS 2026) · clang-cl · Clang 17+ · AppleClang · Android NDK Clang
 > **Root namespace:** `Rhp::` · **Include root:** `<rhp/...>`
+> **Current usage:** [user guide](guide/README.md) · **Open issues / verification:** [Status and TODO](TODO.md). Stages 0–5 are implemented at `8ffc954`; broad design diagrams include Stage 6 plans. The historical decision logs below retain the decisions made at each stage.
 > **Progress model:** work advances in **stages** (Stage 0, Stage 1, …). Nothing in code, files, tags, or APIs is ever named `v1`/`v2`/`V*`. The only numbers on the wire are a plain `protocol_revision` integer and per-module `revision` counters.
 
 ---
 
 ## 0. What RHP is
 
-**One sentence:** *RHP is a portable, compile-time-configured C++23 static library that lets a running program accept authenticated, signed Lua scripts over pluggable transports, run them in a sandbox against a C++-declared API surface, stream results back, and fully undo what they did.*
+**One sentence:** *RHP is a portable, compile-time-configured C++23 static library that lets a running program accept authenticated, signed Lua scripts over pluggable transports, run them in a sandbox against a C++-declared API surface, stream results back, and undo their recorded application effects.*
 
 | Requirement | How RHP meets it |
 |---|---|
@@ -20,7 +21,7 @@
 | Loaded / unload / revert / reload | managed **modules** + an **undo ledger** + per-module revision history + global checkpoints |
 | Portable to 5 OSes | no OS headers in public API; OS code only in `Src/rhp/platform/detail/*` and backend `.cpp`s |
 | Network + error correction handled by RHP | framing, CRC32C, seq/ack, idempotency, heartbeat, reconnect, resume |
-| Easy to use | `Rhp::config<>` with zero arguments is a complete, safe config; a host is ~10 lines |
+| Easy to use | `Rhp::config<>` supplies implemented defaults; applications choose execution budgets and check setup results |
 
 **Use cases (decided):** game hot patching / modding · live tuning of dev builds · QA / test automation · server admin / ops · reverse-engineering / research tooling.
 
@@ -63,7 +64,7 @@ flowchart LR
 
 ## 2. Layered architecture
 
-Each layer may only depend on layers below it. Enforced in CMake (a lower target never links a higher one).
+Each layer may only depend on layers below it. Maintained through each module's CMake target dependencies; declaration order alone does not enforce this graph.
 
 ```mermaid
 flowchart TB
@@ -201,16 +202,16 @@ classDiagram
 | Codec | concept policy | satisfy `Rhp::wire::codec` | debug JSON codec |
 | Authenticator | concept policy | satisfy `Rhp::security::authenticator` | company SSO token |
 | Script signer | concept policy | satisfy `Rhp::security::signer` | HSM-backed signing |
-| Executor | concept policy | satisfy `Rhp::exec::executor` | your job system |
-| I/O threading | concept policy | satisfy `Rhp::exec::io_runner` | share your own `asio::io_context` |
-| Discovery | concept policy | satisfy `Rhp::net::discovery` | Steam lobby, custom beacon |
+| Executor | marker policy | `Rhp::exec::pumped` only today | alternate scheduling is not wired into the engine |
+| I/O threading | concept policy | satisfy `Rhp::exec::io_runner` start/stop contract | owned I/O thread or caller-polled `zero_threads` |
+| Discovery | planned policy | no shipped discovery concept/slot yet | Stage 6 |
 | Logger | concept policy | satisfy `Rhp::core::logger` | spdlog, logcat, os_log |
 | Error mode | policy | `Rhp::errors::expected` / `Rhp::errors::throwing` | exceptions in tools, expected in engine |
-| Memory | runtime injection | pass a `std::pmr::memory_resource*` | arena per frame |
+| Memory | runtime injection | `sandbox_options::memory` for Lua; explicit byte-buffer resource | not universal engine allocation injection |
 | Type marshaling | trait specialization | specialize `Rhp::convert<T>` | `vec3`, `entity`, `color` |
 | Bindings | type-level DSL | `Rhp::lib<"name">::fn<...>` | expose functions + handles |
-| Hot-patch sites | object | `Rhp::patch_point<"id", Sig>` | overridable behavior |
-| Native hooking | concept policy (user supplies) | satisfy `Rhp::script::hook_backend` | wrap MinHook / Dobby / own |
+| Hot-patch sites | object | `Rhp::patch_point<"id", &default_fn>` | overridable behavior |
+| Native hooking | planned integration | no shipped `hook_backend` concept/slot | application-supplied effects can use the ledger |
 | Blob sinks | runtime registration | `host.on_blob("name", fn)` | receive textures, configs |
 | Events | callbacks | `host.on<Rhp::event::X>(fn)` | audit, UI notification |
 
@@ -222,7 +223,7 @@ classDiagram
 
 ```cpp
 #include <rhp/rhp.hpp>
-using namespace Rhp::literals;                                // 32_MiB, 2_ms, ...
+using namespace Rhp::literals;                                // _KiB, _MiB, _GiB size literals
 
 using my_cfg = Rhp::config<>
     ::transport<Rhp::net::tcp>
@@ -230,35 +231,17 @@ using my_cfg = Rhp::config<>
     ::codec    <Rhp::wire::msgpack>
     ::auth     <Rhp::security::psk_keyring>                   // keys → identities → roles
     ::signer   <Rhp::security::ed25519>                       // scripts must be signed
-    ::engine   <Rhp::script::puc_lua>
     ::executor <Rhp::exec::pumped>                            // Lua runs on the thread that calls pump()
     ::io       <Rhp::exec::owned_io_thread>                   // RHP owns one network thread
-    ::discovery<Rhp::net::mdns>
     ::errors   <Rhp::errors::expected>                        // or Rhp::errors::throwing
     ::clock    <Rhp::exec::steady_clock>                      // injectable (game time, deterministic tests)
+    ::logger   <Rhp::core::stderr_logger>
     ::limits   <Rhp::limits{}>;                               // everything unlimited, scripts run to completion
 ```
 
-`Rhp::config<>` with no links equals exactly this. TLS activates automatically for non-loopback endpoints (*as built, Stage 5:* the discovery slot is still to come; see AA2–AA5). There is **no default port** — every endpoint names one.
+`Rhp::config<>` with no links equals exactly this. TLS activates automatically for non-loopback network endpoints. `engine<>` and `discovery<>` are not shipped slots; see AA2–AA5 and the guide's [configuration table](guide/configuration.md#rhpconfig). There is **no default port** — every endpoint names one.
 
-How it works:
-
-```cpp
-namespace Rhp {
-template <class... Settings>
-struct config {
-    template <net::transport T>            using transport = config<detail::replace_t<slot::transport, T, Settings...>>;
-    template <security::authenticator A>   using auth      = config<detail::replace_t<slot::auth, A, Settings...>>;
-    template <exec::executor X>            using executor  = config<detail::replace_t<slot::executor, X, Settings...>>;
-    template <Rhp::limits L>               using limits    = config<detail::replace_t<slot::limits, detail::value_tag<L>, Settings...>>;
-    // ... one alias per slot
-
-    using transport_t = detail::get_or_t<slot::transport, net::tcp,              Settings...>;
-    using auth_t      = detail::get_or_t<slot::auth,      security::psk_keyring, Settings...>;
-    // ... defaults for every slot
-};
-}
-```
+The implementation uses `config_detail::setting<slot, T>` to identify each policy, `rebind_t` to replace a prior setting, and `get_or_t` to select defaults. Host/client facades turn the resulting types into function pointers and callbacks for engines compiled once. See [`config.hpp`](../Src/rhp/config/config.hpp).
 
 Each slot is concept-constrained **where you write it**. A bad transport fails on the `::transport<X>` line, not deep inside `host.hpp`.
 
@@ -308,7 +291,7 @@ rhp.patch("combat.damage", function(original, base, target)
 end)
 ```
 
-Patches **stack** per point, so multiple modules can patch the same point and be reverted in any order. Native machine-code hooking is not shipped; users supply a `hook_backend` policy and get the same ledger/revert semantics.
+Patches **stack** per point, so multiple modules can patch the same point and be reverted in any order. Native machine-code hooking and a formal `hook_backend` policy are not shipped; an application can record its own `effect` objects in a ledger.
 
 ### 4.4 C++ → Lua events
 
@@ -512,133 +495,22 @@ A Wi-Fi blip shorter than the heartbeat window does **not** revert; a real disco
 
 ## 6. Using RHP
 
-### 6.1 Host
+The [user guide](guide/README.md) contains the current API and runnable examples; the older design-time sketches have been removed from this section.
 
-```cpp
-#include <rhp/rhp.hpp>
-
-using game_lib = Rhp::lib<"game">
-    ::fn <"spawn",   &game::spawn, Rhp::undo<&game::despawn>>
-    ::var<"gravity", &game::g_gravity>;
-
-int main() {
-    Rhp::host<Rhp::config<>> host{
-        Rhp::endpoint::listen("127.0.0.1", 7777),
-        Rhp::security::keyring{
-            { "dev", Rhp::security::key::from_env("RHP_KEY_DEV"), Rhp::role::kAdmin },
-            { "qa",  Rhp::security::key::from_env("RHP_KEY_QA"),  Rhp::role::kPatch },
-        },
-        Rhp::security::trusted_signers::from_file("rhp_signers.pub"),
-    };
-    host.install<game_lib>();
-    auto audit = host.on<Rhp::event::script_executed>(Rhp::audit::file_sink{"rhp_audit.log"});  // scoped subscription
-    host.on_blob("configs", [](Rhp::blob_view b) -> Rhp::result<void> { return game::load_config(b); });
-
-    while (game::running()) {
-        host.pump();        // runs ready scripts; returns when none are ready
-        game::update();
-    }
-}                            // ~host → revert_all()
-```
-
-What runs today (Stage 4; the key files are what `rhp-cli keygen` prints):
-
-```cpp
-Rhp::host<> host{Rhp::endpoint::listen("127.0.0.1", 7777),
-                 *Rhp::security::keyring::from_file("keys.txt"),              // name role base64-psk
-                 *Rhp::security::trusted_signers::from_file("signers.pub")};  // name base64-public-key
-host.install<game_lib>();
-auto audit = host.on_any(Rhp::audit::file_sink{"rhp_audit.log"});
-host.on_blob("configs", [](const Rhp::blob_view& b) -> Rhp::result<void> { return game::load_config(b.bytes); });
-if (auto port = host.port(); !port) { /* address in use, non-loopback without insecure_lan, ... */ }
-while (game::running()) { host.pump(); game::update(); }
-```
-
-### 6.2 Client, fleet, CLI
-
-```cpp
-Rhp::client<Rhp::config<>> c{ Rhp::endpoint::dial("192.168.1.20", 7777), identity };
-
-auto g   = c.exec<double>("return game.gravity");                        // blocking → Rhp::result<double>
-auto mod = c.load("low_grav", Rhp::source::file("scripts/low_grav.lua"));  // signed automatically by identity
-c.call(*mod, "set", 1.6);
-c.rollback(*mod, 1);
-c.unload(*mod);
-
-c.exec_async("return game.debug.dump()", [](Rhp::result<std::string> r) { /* callback */ });
-std::future<Rhp::result<int>> f = c.exec_future<int>("return game.tick");
-auto r = co_await c.async().exec<std::string>("return game.debug.dump()");    // coroutine
-c.on_output([](std::string_view line) { std::println("{}", line); });
-
-Rhp::fleet<Rhp::config<>> fleet{ identity };
-fleet.discover(Rhp::net::mdns::browse{ "_rhp._tcp" });
-auto results = fleet.exec<int>("return game.tick");                      // one result per host
-```
-
-As built (Stage 4): every op blocks or, through `c.async()`, returns an `Rhp::pending<T>` to `then` (callback on the network thread), `get`, turn into a `std::future` or `co_await` from any C++20 coroutine; `exec_async` / `exec_future` are shortcuts; `cancel(request)` stops one call. The client takes its signing key next to its credential (`client(ep, id.credential(), *id.signer_key())`); `on_output` replaces the `c.on_output(...)` setter shown above (it is a `client_options` field). `fleet` is Stage 6.
-
-Error mode `Rhp::errors::throwing` makes the same calls return `T` and throw `Rhp::exception` (carrying the `Rhp::error`). Per call, `Rhp::unwrap(c.exec<int>(...))` does the same.
-
-```bash
-rhp-cli connect 192.168.1.20:7777 --identity ~/.rhp/dev.key
-```
-
-`rhp-cli` features (decided): line editing + history · multi-line Lua input · colors · tab completion from `describe` · `watch <folder>` (save a `.lua` → reload) · non-interactive `rhp-cli run file.lua` for automation · `keygen` / `sign`.
-
-Identity file (`~/.rhp/dev.rhpid`, small TOML-like text):
-
-```text
-name        = "dev"
-psk         = "base64…"          # shared with the host's keyring
-signing_key = "base64…"          # Ed25519 private key; host trusts the public half
-```
-
-```text
-rhp> exec return game.gravity
--9.81
-rhp> load low_grav scripts/low_grav.lua
-rhp> rollback low_grav 1
-rhp> stubs > rhp_api.lua
-```
-
-### 6.3 Local API (no network)
-
-Everything the network can do, C++ can do in-process — `host.local().load(...)`, `host.local().revert_all()`, events — so engines can drive RHP from their own console or tests.
-
-### 6.4 Reverse mode
-
-```mermaid
-flowchart LR
-    subgraph Normal
-        C1["client"] -- dial --> H1["host listens"]
-    end
-    subgraph Reverse["Reverse (iOS, NAT, firewalled devices)"]
-        H2["host dials"] -- dial --> C2["client listens"]
-    end
-```
-
-```cpp
-Rhp::host<cfg>   host{ Rhp::endpoint::dial("10.0.0.5", 7777), keys, signers };   // on the phone
-Rhp::client<cfg> c   { Rhp::endpoint::listen("0.0.0.0", 7777), identity };      // on the dev PC
-```
-
-iOS: suspended apps can't service listeners, so prefer reverse mode; add `NSLocalNetworkUsageDescription` (and `NSBonjourServices` for discovery) to Info.plist.
-
-As built (Stage 4): a host with a dial endpoint dials, and dials again with capped exponential backoff and full jitter (`limits.backoff_min_ms` … `backoff_max_ms`) whenever the dial fails or the session ends; each connection is a fresh session (Stage 5: a lost link is redialed and the same session resumed, AA7). A client with a listen endpoint serves one host at a time (`port()` reports the bound port); when that host's session ends, calls in flight fail and the next call waits for a host to dial in. `rhp-cli … --listen` and `headless_server --reverse` are the tooling for it.
-
-### 6.5 HTTP REST gateway
-
-For curl and scripts, a stateless gateway transport maps HTTP onto ops:
-
-| HTTP | Op |
+| Workflow | Guide |
 |---|---|
-| `POST /exec` | exec (body = Lua source) |
-| `POST /modules/{name}` | load / reload |
-| `POST /modules/{name}/call/{fn}` | call (body = msgpack or JSON args) |
-| `POST /modules/{name}/revert` · `DELETE /modules/{name}` | revert · unload |
-| `GET /modules` · `GET /describe` | list · stubs |
+| Add a CMake target, run a signed CLI session, embed a checked host/client | [Getting started](guide/getting-started.md) |
+| Bind functions, variables and handles; supply inverses and custom conversions | [Exposing C++](guide/exposing-cpp.md) |
+| Module exports, hooks, reload, checkpoints, timers, suspension | [Writing scripts](guide/writing-scripts.md) |
+| Async consumption, callback/thread lifetimes, blobs and audit | [Host and client](guide/host-and-client.md) |
+| TLS, reverse mode, resume, CLI and custom transports | [Connecting](guide/connecting.md) |
+| Policies, execution budgets, build switches and disabled builds | [Configuration](guide/configuration.md) |
 
-Each request carries `Authorization: RHP key-id, timestamp, nonce, mac` and an `X-RHP-Signature` header for scripts. Gateway requests run under the key's identity (same `lua_State` as that key's other sessions). Non-loopback requires TLS, as for every transport.
+Local use is `Rhp::script::sandbox`, not a `host.local()` accessor. Script source arguments are strings/string views; there is no `Rhp::source::file` loader. Client credentials and signing keys are separate constructor inputs. Output callbacks are constructor options, not client setters.
+
+In normal mode the client dials a listening host. In reverse mode the host dials a listening client. Both still need application/network progress; an application suspension is not bypassed by reversing the connection.
+
+`Rhp::fleet`, discovery and HTTP gateway routes/authentication headers are Stage 6 plans, not a usable current API. Future interfaces remain subject to the stage's implementation decisions. Open defects and unverified platforms are listed in [Status and TODO](TODO.md).
 
 ---
 
@@ -793,10 +665,10 @@ flowchart LR
 | Decision | Choice |
 |---|---|
 | Who runs Lua | `exec::pumped`: the thread calling `pump()` |
-| Who runs network I/O | `exec::owned_io_thread`: one `std::jthread` running Asio (alternatives: `zero_threads` = user polls, `external_io_context`) |
-| Memory | every RHP allocation goes through an injectable `std::pmr::memory_resource*` (Lua allocator included) |
+| Who runs network I/O | `exec::owned_io_thread`: one `std::jthread` running Asio (alternative: `zero_threads` = user polls; external-context injection is not shipped) |
+| Memory | standalone Lua allocations and explicit byte buffers support a `std::pmr::memory_resource*`; other C++ allocations use their usual allocators |
 | Isolation | one `lua_State` per **key identity**, one `_ENV` per module; identities never share a state |
-| Concurrency rule | each `lua_State` is owned by exactly one thread; only the SPSC rings and the cancel flag cross threads |
+| Concurrency rule | each `lua_State` is used on one application thread; rings, cancel relays, queued events and pending client results carry cross-thread state |
 | Hosts per process | many; **no globals** in hosts (decided) |
 | Patch points / lua_events | one **process-wide registry**; any host may patch/deliver; stacking order = global ledger seq |
 | Patch point hit off the pump thread | Lua states aren't thread-safe, so the call runs the **C++ default** and increments a per-point `off_thread_misses` counter (shown in `status`) |
@@ -949,13 +821,18 @@ flowchart BT
     session --> sec
     session --> exec
     session --> wire
-    config["rhp_config"] --> session
+    config["rhp_config"] --> net
+    config --> sec
+    config --> exec
+    config --> wire
     host["rhp_host"] --> config
+    host --> session
     host --> script
     event["rhp_event"] --> core
     audit["rhp_audit"] --> event
     host --> event
     client["rhp_client"] --> config
+    client --> session
     rhp["Rhp::rhp"] --> host
     rhp --> client
     rhp --> audit
@@ -973,7 +850,7 @@ flowchart BT
 | `RHP_TLS_OPENSSL` | `AUTO` | the system's OpenSSL ≥ 3.0: `AUTO` (if found, desktop only), `ON` (required), `OFF` |
 | `RHP_TLS_MBEDTLS` | `ON` | build the Mbed TLS backend (fetched) |
 | `RHP_FUZZ` | `OFF` | Tests/fuzz as libFuzzer executables (Clang) |
-| `RHP_WITH_WEBSOCKET` · `RHP_WITH_UDP` · `RHP_WITH_HTTP` · `RHP_WITH_MDNS` | `ON` | optional transports / discovery |
+| WebSocket / UDP / HTTP / mDNS switches | not implemented | names and defaults remain Stage 6 design work |
 | `RHP_SANITIZE` | empty | `address;undefined` or `thread` |
 | `RHP_WARNINGS_AS_ERRORS` | `ON` | `/W4 /WX` · `-Wall -Wextra -Wpedantic -Werror` |
 
@@ -986,11 +863,11 @@ flowchart BT
 | `windows-msvc-asan` | MSVC AddressSanitizer | ✅ |
 | `linux-clang` / `linux-clang-asan` / `linux-clang-tsan` | Clang 17+, glibc 2.31+ | ✅ |
 | `linux-clang-fuzz` | Clang, `RHP_FUZZ=ON`, ASan+UBSan, RelWithDebInfo | libFuzzer runs (Tests/fuzz/README.md) |
-| `macos` | AppleClang, `arm64;x86_64`, macOS 13+ | ✅ |
-| `ios-sim` | Xcode + AppleClang, `CMAKE_SYSTEM_NAME=iOS`, iOS 16+, simulator | ✅ via `xcrun simctl spawn` as crosscompiling emulator (`Tools/ios/simctl_run.sh`, CI) |
+| `macos` | AppleClang, `arm64;x86_64`, macOS 13+ | workflow defined; unverified |
+| `ios-sim` | Xcode + AppleClang, `CMAKE_SYSTEM_NAME=iOS`, iOS 16+, simulator | unverified; runner uses `xcrun simctl spawn` as crosscompiling emulator (`Tools/ios/simctl_run.sh`, CI) |
 | `ios-device` | Xcode, arm64 | build only |
-| `android-x64` | NDK r30 Clang, API 26+ (`ANDROID_NDK_HOME`) | ✅ on emulator via `adb` (`Tools/android/run_tests.py`, CI) |
-| `android-arm64` | NDK r30 clang | build only (with `-DRHP_BUILD_TESTS=ON` the same runner tests on a phone) |
+| `android-x64` | NDK Clang, API 26+ (`ANDROID_NDK_HOME`); built with NDK 29 | build verified; hosted emulator job unverified; adb runner available |
+| `android-arm64` | NDK Clang; tested with NDK 29 | build only (with `-DRHP_BUILD_TESTS=ON` the same runner tests on a phone) |
 
 ```bash
 cmake --preset windows-msvc
@@ -1025,7 +902,7 @@ flowchart TB
 
 Must-have cases: revert matrix (every effect kind × load/reload/rollback/revert/revert_to/unload × cross-module interleaving) · transactional reload · scheduler (cancel from the I/O thread stops an infinite loop inside `pump()`; opt-in `slice_us` yields on time) · sandbox escapes · roles (observe can't mutate) · signing (unsigned/wrong-key rejected) · reconnect+resume exactly-once · CRC corruption → nack → resend · blob fragmentation · boundary instantiations (`Rhp::config<>`, empty `Rhp::lib<"x">`, `void` returns, minimal user transport).
 
-**CI:** none yet (decided). Every preset above runs locally with `ctest`; a GitHub Actions workflow mirroring the preset table is a later stage.
+**CI:** `.github/workflows/ci.yml` defines the Stage 5 matrix. Its current macOS step name has a YAML syntax error, and prior jobs report an account billing/spending-limit block. No hosted platform verification should be inferred until the corresponding jobs pass; see [Status and TODO](TODO.md). Android device suites use the adb runner; the iOS simulator runner integrates with ctest.
 
 ---
 
@@ -1046,7 +923,7 @@ struct exception : std::exception { error err; /* what() → err.message */ };
 
 - `Rhp::errors::expected` (default): APIs return `Rhp::result<T>`.
 - `Rhp::errors::throwing`: same APIs return `T` and throw `Rhp::exception`. `Rhp::unwrap(r)` converts one call.
-- Internally exceptions are allowed; they never cross the public API in `expected` mode. Lua is compiled as C++, so `lua_error` unwinds with exceptions and RAII stays correct; binding trampolines turn C++ exceptions into Lua errors.
+- Internally exceptions are allowed. Expected mode selects ordinary result-bearing operation errors; it does not make constructors, allocation failures or user code universally nonthrowing. Lua is compiled as C++, so `lua_error` unwinds with exceptions and RAII stays correct; binding trampolines turn C++ exceptions into Lua errors.
 - RTTI allowed.
 
 ---
@@ -1061,7 +938,7 @@ All PRIVATE; none of their headers appear in `Src/rhp/**/*.hpp`.
 | Binding | own concept binder (`Rhp::lib<>`) | — |
 | Async I/O | standalone Asio 1.38.2 (Stage 3) | BSL-1.0 |
 | Payload | own MessagePack codec for `Rhp::value` (`Rhp::wire::msgpack`; msgpack-c dropped at Stage 3, W2) | — |
-| Integrity | CRC32C (own, HW-accelerated when available) | — |
+| Integrity | CRC32C (own software slicing-by-8; hardware dispatch not implemented) | — |
 | Crypto | Monocypher 4.0.3, compiled as C++ (BLAKE2b handshake + frame MAC from Stage 3; its optional RFC 8032 Ed25519 for script signatures and BLAKE2b-256 audit hashes from Stage 4) | CC0 / BSD-2 |
 | CLI | CLI11 2.7.2 (header-only) · replxx `release-0.0.4` (line editing; upstream quiet since 2021, built by our own target) — `rhp-cli` only | BSD-3 · BSD-3 |
 | TLS | OpenSSL 4.0.x (desktop) · mbedTLS 4.2 (mobile, custom Asio stream adapter) — as built: the system's OpenSSL ≥ 3.0 and Mbed TLS 4.2.0, both behind one sans-IO engine (no Asio SSL streams) | Apache-2.0 |
@@ -1069,7 +946,7 @@ All PRIVATE; none of their headers appear in `Src/rhp/**/*.hpp`.
 | HTTP gateway | own minimal HTTP/1.1 parser on Asio | — |
 | mDNS / DNS-SD | platform APIs behind `Rhp::net::discovery`: `dns_sd` (Apple), Windows DNS-SD API, Avahi or own responder on Linux, NSD bridge on Android — exact per-OS choice researched at Stage 6 | — |
 | Tests | Catch2 v3.16 | BSL-1.0 |
-| Bench | Google Benchmark | Apache-2.0 |
+| Bench (planned; not fetched) | Google Benchmark | Apache-2.0 |
 | Fetching | CPM.cmake 0.42.x | MIT |
 
 Apache-2.0 for RHP is compatible with all of the above.
