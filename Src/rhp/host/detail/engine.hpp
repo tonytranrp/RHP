@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <span>
 #include <stop_token>
 #include <string>
 #include <string_view>
@@ -11,6 +12,9 @@
 #include <rhp/core/limits.hpp>
 #include <rhp/core/log.hpp>
 #include <rhp/core/result.hpp>
+#include <rhp/core/role.hpp>
+#include <rhp/core/value.hpp>
+#include <rhp/event/hub.hpp>
 #include <rhp/net/endpoint.hpp>
 #include <rhp/script/sandbox.hpp>
 #include <rhp/security/authenticator.hpp>
@@ -27,6 +31,17 @@ struct host_options {
     std::size_t inbox_capacity = 4096;
 };
 
+// A whole blob as a sink sees it (host.on_blob). Views are valid during the sink call only.
+struct blob_view {
+    std::string_view sink;
+    std::string_view name;     // what the client called it (a file name, free-form)
+    std::string_view identity; // who sent it
+    std::span<const std::byte> bytes;
+};
+
+// A blob sink: takes the bytes or says why not (the error goes back to the client).
+using blob_fn = std::function<result<void>(const blob_view&)>;
+
 } // namespace Rhp
 
 namespace Rhp::host_detail {
@@ -37,6 +52,9 @@ struct setup {
     net::transport_ops transport;
     wire::codec_ops codec;
     std::function<std::unique_ptr<security::host_handshake>()> begin_handshake;
+    // The signer policy's check of a script: who signed it, or kBadSignature.
+    std::function<result<std::string>(std::string_view source, const value& signature)> verify;
+    std::shared_ptr<event::hub> events;
     Rhp::limits limits{};
     bool io_thread = true; // false: pump() polls the network
     std::function<bool(log_level)> log_enabled;
@@ -60,11 +78,14 @@ struct engine_deleter {
 
 using engine_ptr = std::unique_ptr<engine, engine_deleter>;
 
-// Starts listening (errors are kept and reported by listening()).
+// Starts listening (or, in reverse mode, dialing); errors are kept and reported by listening().
 [[nodiscard]] engine_ptr make_engine(setup s);
 [[nodiscard]] result<void> listening(const engine& e);
 [[nodiscard]] std::uint16_t port(const engine& e) noexcept;
 result<void> install(engine& e, std::string_view name, installer fn);
+result<void> add_blob_sink(engine& e, std::string_view name, blob_fn fn, role need);
+void set_enabled(engine& e, bool on) noexcept;
+[[nodiscard]] bool enabled(const engine& e) noexcept;
 void pump(engine& e);
 // The network loop (the io_runner's body); returns once `stop` is signalled.
 void run_io(engine& e, std::stop_token stop);

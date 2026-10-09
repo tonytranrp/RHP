@@ -15,4 +15,5 @@ rhp_add_module(host
         Rhp::config
         Rhp::session
         Rhp::script
+        Rhp::event
 )

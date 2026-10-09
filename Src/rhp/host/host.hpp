@@ -1,9 +1,11 @@
 #pragma once
 
+#include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <stop_token>
+#include <string>
 #include <string_view>
 #include <utility>
 
@@ -11,6 +13,9 @@
 #include <rhp/core/error.hpp>
 #include <rhp/core/log.hpp>
 #include <rhp/core/result.hpp>
+#include <rhp/core/role.hpp>
+#include <rhp/event/events.hpp>
+#include <rhp/event/hub.hpp>
 #include <rhp/host/detail/engine.hpp>
 #include <rhp/net/endpoint.hpp>
 #include <rhp/platform/os.hpp>
@@ -23,19 +28,28 @@
 
 namespace Rhp {
 
-// A program that accepts remote Lua: it listens on an endpoint, authenticates every connection
-// against its authenticator (keys → identities → roles), runs each identity's scripts in that
+// A program that accepts remote Lua: it listens on an endpoint (or, in reverse mode, dials one),
+// authenticates every connection against its authenticator (keys → identities → roles), checks
+// every script's signature against its trusted signers, runs each identity's scripts in that
 // identity's own sandbox on the thread that calls pump(), and streams print / rhp.emit / results
-// back. When an identity's last session ends, everything it did is reverted and its sandbox closed.
+// back. When an identity's last session ends, everything it did is reverted and its sandbox closed
+// — except modules an admin pinned.
 //
 //   Rhp::host<> host{Rhp::endpoint::listen("127.0.0.1", 7777),
-//                    Rhp::security::keyring{{"dev", *Rhp::security::key::from_env("RHP_KEY_DEV"), Rhp::role::kAdmin}}};
+//                    Rhp::security::keyring{{"dev", *Rhp::security::key::from_env("RHP_KEY_DEV"), Rhp::role::kAdmin}},
+//                    *Rhp::security::trusted_signers::from_file("rhp_signers.pub")};
 //   host.install<game_lib>();
+//   auto audit = host.on_any(Rhp::audit::file_sink{"rhp_audit.log"});
 //   while (running) { host.pump(); game::update(); }
 //
-// pump() is the only thread that touches Lua; the network runs on the config's io policy (an
-// RHP-owned thread by default, so cancel and disconnect reach a script stuck inside pump()).
-// Stage 3 hosts listen; reverse mode (a host that dials) arrives in Stage 4.
+// Scripts (exec / load / reload) must be signed by a trusted signer, except from observe sessions;
+// `config<>::signer<Rhp::security::unsigned_scripts>` turns signing off. pump() is the only thread
+// that touches Lua; the network runs on the config's io policy (an RHP-owned thread by default, so
+// cancel and disconnect reach a script stuck inside pump()).
+//
+// Reverse mode: with Rhp::endpoint::dial(...) the host dials a listening client (a phone dialing
+// the developer's PC) and dials again, with capped exponential backoff and full jitter, whenever
+// that fails or the session ends.
 //
 // With RHP_ENABLE=0 the host is inert: it never listens, install() and port() report kDisabled.
 template <configuration Cfg = config<>>
@@ -44,13 +58,15 @@ public:
     template <class T>
     using return_t = typename Cfg::template return_t<T>;
 
-    host(net::endpoint ep, typename Cfg::auth_t auth, host_options options = {}) {
+    host(net::endpoint ep, typename Cfg::auth_t auth, typename Cfg::trust_t trust, host_options options = {}) {
 #if RHP_ENABLE
         host_detail::setup s;
         s.ep = std::move(ep);
         s.transport = net::transport_ops_for<typename Cfg::transport_t>;
         s.codec = wire::codec_ops_for<typename Cfg::codec_t>;
         s.begin_handshake = [auth = std::move(auth)] { return auth.begin(); };
+        s.verify = [trust = std::move(trust)](std::string_view source, const value& signature) { return trust.verify(source, signature); };
+        s.events = events_;
         s.limits = Cfg::limits_v;
         s.io_thread = Cfg::io_t::kOwnsThread;
         s.log_enabled = [this](log_level level) { return logger_.enabled(level); };
@@ -64,11 +80,16 @@ public:
 #else
         (void)ep;
         (void)auth;
+        (void)trust;
         (void)options;
 #endif
     }
 
-    // Stops the network, ends every session and reverts every identity.
+    // No trusted signers: only observe sessions can run code (unless the config's signer is
+    // Rhp::security::unsigned_scripts).
+    host(net::endpoint ep, typename Cfg::auth_t auth, host_options options = {}) : host(std::move(ep), std::move(auth), typename Cfg::trust_t{}, options) {}
+
+    // Stops the network, ends every session and reverts every identity (pinned modules included).
     ~host() {
 #if RHP_ENABLE
         runner_.stop();
@@ -92,6 +113,33 @@ public:
 #endif
     }
 
+    // Registers a blob sink: clients push files to it (client.blob("configs", bytes)). The whole
+    // blob (at most limits.max_blob) is handed over once it arrived, on the pump thread; the
+    // sink's result is the client's answer. `need` is the least role that may send to it.
+    // Call from the pump thread. kAlreadyLoaded if the name is taken.
+    return_t<void> on_blob(std::string_view sink, blob_fn fn, role need = role::kAdmin) {
+#if RHP_ENABLE
+        return Cfg::errors_t::finish(host_detail::add_blob_sink(*engine_, sink, std::move(fn), need));
+#else
+        (void)fn;
+        (void)need;
+        return Cfg::errors_t::finish(result<void>{fail(errc::kDisabled, "RHP is compiled out (RHP_ENABLE=0)", std::string{sink})});
+#endif
+    }
+
+    // Calls `fn` for every event of type E (Rhp::event::script_executed, session_opened, ...) until
+    // the returned subscription dies. Events are reported on the pump thread.
+    template <event::host_event E, std::invocable<const E&> F>
+    [[nodiscard]] event::subscription on(F fn) {
+        return event::subscribe<E>(events_, std::move(fn));
+    }
+
+    // Every event (an Rhp::event::any): what the audit sinks take.
+    template <std::invocable<const event::any&> F>
+    [[nodiscard]] event::subscription on_any(F fn) {
+        return event::subscribe_any(events_, std::move(fn));
+    }
+
     // One frame: runs requests that arrived, resumes suspended scripts, fires timers and queued
     // events, and hands replies to the network. With io<zero_threads> it also polls the network.
     void pump() {
@@ -100,8 +148,26 @@ public:
 #endif
     }
 
-    // The port the host listens on (the real one after listening on port 0), or why it isn't
-    // listening (address in use, a non-loopback address without insecure_lan, ...).
+    // Runtime kill switch (any thread). While off, new connections are closed and every request is
+    // answered kDisabled; what already ran stays (send revert_all first to undo it).
+    void set_enabled(bool on) noexcept {
+#if RHP_ENABLE
+        host_detail::set_enabled(*engine_, on);
+#else
+        (void)on;
+#endif
+    }
+
+    [[nodiscard]] bool enabled() const noexcept {
+#if RHP_ENABLE
+        return host_detail::enabled(*engine_);
+#else
+        return false;
+#endif
+    }
+
+    // The port the host listens on (the real one after listening on port 0; 0 in reverse mode), or
+    // why it isn't listening (address in use, a non-loopback address without insecure_lan, ...).
     [[nodiscard]] return_t<std::uint16_t> port() const {
 #if RHP_ENABLE
         auto ok = host_detail::listening(*engine_);
@@ -123,7 +189,8 @@ public:
 #endif
     }
 
-    // Identities with a live sandbox (any thread; changes in pump()).
+    // Identities with a live sandbox (any thread; changes in pump()). An identity whose sessions
+    // are gone but which has pinned modules still counts.
     [[nodiscard]] std::size_t identities() const noexcept {
 #if RHP_ENABLE
         return host_detail::identities(*engine_);
@@ -138,6 +205,7 @@ public:
 private:
     typename Cfg::logger_t logger_{};
     typename Cfg::clock_t clock_{};
+    std::shared_ptr<event::hub> events_ = std::make_shared<event::hub>();
 #if RHP_ENABLE
     typename Cfg::io_t runner_{};
     host_detail::engine_ptr engine_;
