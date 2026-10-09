@@ -1,1 +1,2 @@
 add_subdirectory(hello_console)
+add_subdirectory(frame_loop)
