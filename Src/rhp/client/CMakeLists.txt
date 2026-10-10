@@ -8,6 +8,7 @@ endif()
 rhp_add_module(client
     HEADERS
         client.hpp
+        fleet.hpp
         detail/engine.hpp
         pending.hpp
     SOURCES

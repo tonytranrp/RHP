@@ -4,8 +4,9 @@
 
 | Header | What |
 |---|---|
-| `host.hpp` | `Rhp::host<Cfg>`: `install<Lib>()`, `pump()`, `on<E>()` / `on_any()`, `on_blob()`, `set_enabled()`, `port()`, `sessions()`, `identities()` |
+| `host.hpp` | `Rhp::host<Cfg>`: `install<Lib>()`, `pump()`, `on<E>()` / `on_any()`, `on_blob()`, `set_enabled()`, `port()`, `gateway_port()`, `advertise()`, `discovery_status()`, `sessions()`, `identities()` |
 | `detail/engine.hpp` | `host_options`, `blob_view` / `blob_fn`, the type-erased `setup` and the engine's free functions |
+| `gateway.cpp`, `detail/gateway.hpp` (private, not installed) | the HTTP listener: routing, per-key logical sessions, the replay guard; the engine implements its `gateway_sink` |
 
 ```cpp
 Rhp::host<> host{Rhp::endpoint::listen("127.0.0.1", 7777),
@@ -28,9 +29,11 @@ while (running) { host.pump(); game::update(); }
 - **TLS:** non-loopback peers get TLS 1.3 (`config<>::tls<>`), `require_tls` everyone; `host_options::tls` holds the certificate (default: ephemeral self-signed). Events say `tls`.
 - **Resume:** a lost link keeps the session for `limits.resume_ms`; the client's new connection takes it over (`session_resumed`), nothing is reverted or run twice. Shutting down closes every session with a reason first.
 - **Kill switch:** `set_enabled(false)` closes new connections (reported as `auth_failed`) and answers every request `kDisabled`.
+- **HTTP:** `host_options::gateway` opens a separate TCP/HTTPS listener ([networking guide](../../../Docs/guide/networking.md#http-listener)). Per-request proofs authenticate the same identities; each key gets one logical session that ends after `limits.gateway_idle_ms` with nothing in flight. Connections share the native unauthenticated-handshake budget until their proof checks out.
+- **Discovery:** `advertise(options)` publishes through `Cfg::discovery_t`; `include_libs` separately publishes library names. Later provider errors: `discovery_status()`.
 
 ## Rules
 
-- `install`, `on_blob` and `pump` belong to one thread (the pump thread). `on` / `on_any`, `set_enabled`, `sessions`, `identities` are thread-safe.
-- Nothing from `net`, `session` or the engine leaks into `host.hpp`; config policies are type-erased into `setup`.
+- `install`, `on_blob`, `advertise`, `discovery_status` and `pump` belong to one thread (the pump thread). `on` / `on_any`, `set_enabled`, `port`, `gateway_port`, `sessions`, `identities` are thread-safe.
+- Nothing from `session` or the engine leaks into `host.hpp`; config policies are type-erased into `setup`. Gateway types stay in the private `detail/gateway.hpp`.
 - `RHP_ENABLE=0`: the host is inert (`install`, `on_blob`, `port` report `kDisabled`), no engine is built.

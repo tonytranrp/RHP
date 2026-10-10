@@ -65,6 +65,10 @@ public:
         s.transport = net::transport_ops_for<typename Cfg::transport_t>;
         s.tls = security::tls::backend_ops_for<typename Cfg::tls_t>;
         s.codec = wire::codec_ops_for<typename Cfg::codec_t>;
+        s.discovery = net::discovery_ops_for<typename Cfg::discovery_t>;
+        if constexpr (security::http_authenticator<typename Cfg::auth_t>) {
+            s.http_auth = [auth](const security::http_proof& request, std::chrono::system_clock::time_point now) { return auth.verify_http(request, now); };
+        }
         s.begin_handshake = [auth = std::move(auth)] { return auth.begin(); };
         s.verify = [trust = std::move(trust)](std::string_view source, const value& signature) { return trust.verify(source, signature); };
         s.events = events_;
@@ -179,6 +183,38 @@ public:
         return Cfg::errors_t::finish(result<std::uint16_t>{host_detail::port(*engine_)});
 #else
         return Cfg::errors_t::finish(result<std::uint16_t>{fail(errc::kDisabled, "RHP is compiled out (RHP_ENABLE=0)", "host")});
+#endif
+    }
+
+    // The HTTP listener's port (host_options::gateway; useful after asking for port 0), or why it
+    // isn't listening. Any thread.
+    [[nodiscard]] return_t<std::uint16_t> gateway_port() const {
+#if RHP_ENABLE
+        return Cfg::errors_t::finish(host_detail::gateway_port(*engine_));
+#else
+        return Cfg::errors_t::finish(result<std::uint16_t>{fail(errc::kDisabled, "RHP is compiled out (RHP_ENABLE=0)", "host.gateway")});
+#endif
+    }
+
+    // Publishes this host through Cfg::discovery_t (DNS-SD by default). Nothing is published until
+    // this is called; calling it again updates the record. Pump thread, after installing libraries
+    // (options.include_libs publishes their names). Later provider errors: discovery_status().
+    return_t<void> advertise(net::advertise_options options = {}) {
+#if RHP_ENABLE
+        return Cfg::errors_t::finish(host_detail::advertise(*engine_, std::move(options)));
+#else
+        (void)options;
+        return Cfg::errors_t::finish(result<void>{fail(errc::kDisabled, "RHP is compiled out (RHP_ENABLE=0)", "host.discovery")});
+#endif
+    }
+
+    // The advertisement's state: kAlreadyLoaded after a name conflict, kDisabled when not advertising.
+    // Pump thread.
+    [[nodiscard]] return_t<void> discovery_status() {
+#if RHP_ENABLE
+        return Cfg::errors_t::finish(host_detail::discovery_status(*engine_));
+#else
+        return Cfg::errors_t::finish(result<void>{fail(errc::kDisabled, "RHP is compiled out (RHP_ENABLE=0)", "host.discovery")});
 #endif
     }
 

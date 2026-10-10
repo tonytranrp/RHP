@@ -2,7 +2,7 @@
 # sandboxes, routing) is compiled once in host.cpp. RHP_ENABLE=OFF: the shell is inert, no engine.
 set(rhp_host_sources "")
 if(RHP_ENABLE)
-    set(rhp_host_sources host.cpp)
+    set(rhp_host_sources host.cpp gateway.cpp)
 endif()
 
 rhp_add_module(host

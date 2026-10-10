@@ -1,9 +1,11 @@
 #pragma once
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <span>
 #include <stop_token>
 #include <string>
@@ -15,9 +17,11 @@
 #include <rhp/core/role.hpp>
 #include <rhp/core/value.hpp>
 #include <rhp/event/hub.hpp>
+#include <rhp/net/discovery.hpp>
 #include <rhp/net/endpoint.hpp>
 #include <rhp/script/sandbox.hpp>
 #include <rhp/security/authenticator.hpp>
+#include <rhp/security/http_auth.hpp>
 #include <rhp/security/tls/tls.hpp>
 #include <rhp/wire/codec.hpp>
 
@@ -33,6 +37,9 @@ struct host_options {
     // TLS: the host's certificate (cert_pem + key_pem; empty = an ephemeral self-signed one) and,
     // in reverse mode where the host dials, how it checks the client's (ca_pem, server_name).
     security::tls::settings tls{};
+    // Optional HTTP/1.1 listener (Docs/guide/networking.md): the same identities, roles, signing,
+    // dispatcher and TLS settings as native sessions. Needs a security::http_authenticator.
+    std::optional<net::endpoint> gateway{};
 };
 
 // A whole blob as a sink sees it (host.on_blob). Views are valid during the sink call only.
@@ -66,6 +73,9 @@ struct setup {
     std::function<void(log_level, std::string_view)> log;
     script::clock_fn clock;
     host_options options;
+    // The authenticator's HTTP proof check; empty when it isn't a security::http_authenticator.
+    std::function<result<security::http_grant>(const security::http_proof&, std::chrono::system_clock::time_point)> http_auth;
+    net::discovery_ops discovery;
 };
 
 using installer = result<void> (*)(script::sandbox& box);
@@ -87,6 +97,9 @@ using engine_ptr = std::unique_ptr<engine, engine_deleter>;
 [[nodiscard]] engine_ptr make_engine(setup s);
 [[nodiscard]] result<void> listening(const engine& e);
 [[nodiscard]] std::uint16_t port(const engine& e) noexcept;
+[[nodiscard]] result<std::uint16_t> gateway_port(const engine& e);
+result<void> advertise(engine& e, net::advertise_options options);
+result<void> discovery_status(engine& e);
 result<void> install(engine& e, std::string_view name, installer fn);
 result<void> add_blob_sink(engine& e, std::string_view name, blob_fn fn, role need);
 void set_enabled(engine& e, bool on) noexcept;

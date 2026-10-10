@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -31,6 +32,7 @@
 #include <rhp/event/events.hpp>
 #include <rhp/event/hub.hpp>
 #include <rhp/host/detail/engine.hpp>
+#include <rhp/host/detail/gateway.hpp>
 #include <rhp/net/io_context.hpp>
 #include <rhp/net/link.hpp>
 #include <rhp/platform/os.hpp>
@@ -232,11 +234,12 @@ struct outbound {
 
 } // namespace
 
-class engine final : private session::handler {
+class engine final : private session::handler, private gateway_sink {
     static constexpr std::size_t kMaxInFlight = 4096;  // requests with an idempotency key, per session
     static constexpr std::size_t kMaxBacklog = 65'536; // requests held back while pump() is behind
     static constexpr std::chrono::milliseconds kEnforceInterval{20};
     static constexpr std::chrono::milliseconds kGoodbyeWait{500};
+    static constexpr std::chrono::seconds kIoCallTimeout{10};
 
 public:
     explicit engine(setup s)
@@ -261,6 +264,7 @@ public:
             return;
         }
         policy_ = std::move(*policy);
+        start_gateway();
         const std::string tls_note = policy_.tls() ? std::format(", TLS: {}", policy_.backend()) : std::string{", no TLS"};
         if (setup_.ep.direction == net::endpoint::mode::kDial) {
             // Reverse mode: the host dials a listening client, and keeps dialing.
@@ -277,12 +281,15 @@ public:
             return;
         }
         listener_ = std::move(*listener);
+        listen_port_ = static_cast<std::uint16_t>(listener_->port());
         enforce_cancels();
         log(log_level::kInfo, std::format("host listening on {} over {} (port {}{})", setup_.ep, setup_.transport.name, listener_->port(), tls_note));
     }
 
     // The network is stopped (or never ran on another thread) when this runs.
     ~engine() {
+        advertisement_.reset();
+        gateway_.reset();
         enforce_timer_.cancel();
         redial_timer_.cancel();
         listener_.reset();
@@ -304,6 +311,15 @@ public:
     }
 
     [[nodiscard]] std::uint16_t port() const noexcept { return listener_ != nullptr ? static_cast<std::uint16_t>(listener_->port()) : std::uint16_t{0}; }
+    [[nodiscard]] result<std::uint16_t> gateway_port() const {
+        if (gateway_error_) {
+            return fail(*gateway_error_);
+        }
+        if (gateway_port_ == 0) {
+            return fail(errc::kDisabled, "the HTTP listener was not requested (host_options::gateway)", "host.gateway");
+        }
+        return gateway_port_;
+    }
     [[nodiscard]] std::size_t ready_sessions() const noexcept { return ready_sessions_.load(std::memory_order_acquire); }
     [[nodiscard]] std::size_t identity_count() const noexcept { return identity_count_.load(std::memory_order_acquire); }
 
@@ -326,6 +342,9 @@ public:
                 log(log_level::kWarn, std::format("install {} into identity {}: {}", name, identity, ok.error()));
             }
         }
+        if (advertise_options_ && advertise_options_->include_libs) {
+            return advertise(*advertise_options_);
+        }
         return {};
     }
 
@@ -342,6 +361,61 @@ public:
 
     void run_io(std::stop_token stop) { io_.run(std::move(stop)); }
 
+    // Pump thread: builds the record (it reads the installed libs), then registers it on the I/O
+    // thread, which owns the provider.
+    result<void> advertise(net::advertise_options options) {
+        if (listen_port_ == 0 || !setup_.transport.network) {
+            return fail(errc::kInvalidArgument, "only a listening host on a network transport can advertise", "host.advertise");
+        }
+        if (options.name.empty()) {
+            if (advertise_options_) {
+                options.name = advertise_options_->name;
+            } else {
+                auto nonce = platform::random_array<4>();
+                if (!nonce) {
+                    return std::unexpected{std::move(nonce).error()};
+                }
+                options.name = "rhp-" + security::to_hex(*nonce);
+            }
+        }
+        net::service_record record;
+        record.name = options.name;
+        record.address = setup_.ep.host;
+        record.port = listen_port_;
+        record.protocol_revision = wire::kProtocolRevision;
+        record.platform = platform::kOsName;
+        record.app = options.app;
+        record.build = options.build;
+        record.transport = setup_.transport.name;
+        if (options.include_libs) {
+            for (const auto& [name, fn] : installers_) {
+                record.libs.push_back(name);
+            }
+        }
+        auto published = on_io<void>([this, record = std::move(record)]() mutable -> result<void> {
+            if (advertisement_) {
+                return advertisement_->update(std::move(record));
+            }
+            auto advertised = setup_.discovery.advertise(io_, std::move(record));
+            if (!advertised) {
+                return std::unexpected{std::move(advertised).error()};
+            }
+            advertisement_ = std::move(*advertised);
+            return {};
+        });
+        if (published) {
+            advertise_options_ = std::move(options);
+        }
+        return published;
+    }
+
+    // The provider's state (name conflicts and network errors arrive after advertise() returned).
+    result<void> discovery_status() {
+        return on_io<void>([this]() -> result<void> {
+            return advertisement_ ? advertisement_->status() : result<void>{fail(errc::kDisabled, "the host is not advertising", "host.discovery")};
+        });
+    }
+
     // Before the network stops: every session is closed with a reason ("the host is shutting
     // down"), so its client fails its calls now instead of waiting to resume; waits briefly for
     // those frames to go out. No new connections or dials after this.
@@ -350,6 +424,10 @@ public:
             stopping_ = true;
             redial_timer_.cancel();
             listener_.reset();
+            advertisement_.reset();
+            if (gateway_) {
+                gateway_->stop();
+            }
             for (auto& [id, rec] : sessions_) {
                 rec.s->close(make_error(errc::kTransport, "the host is shutting down", "host"));
             }
@@ -385,6 +463,153 @@ public:
     }
 
 private:
+    // Runs `fn` on the I/O thread and returns its result; under zero_threads the caller runs the
+    // context itself. A context that stopped answering reports kTimeout instead of blocking forever.
+    template <class T, std::invocable F>
+    result<T> on_io(F fn) {
+        struct slot {
+            std::mutex mutex;
+            std::condition_variable ready;
+            std::optional<result<T>> value;
+        };
+        auto shared = std::make_shared<slot>();
+        io_.post([shared, fn = std::move(fn)]() mutable {
+            auto outcome = fn();
+            {
+                const std::scoped_lock lock{shared->mutex};
+                shared->value = std::move(outcome);
+            }
+            shared->ready.notify_all();
+        });
+        const auto deadline = std::chrono::steady_clock::now() + kIoCallTimeout;
+        std::unique_lock lock{shared->mutex};
+        while (!shared->value) {
+            if (std::chrono::steady_clock::now() >= deadline) {
+                return fail(errc::kTimeout, "the network thread did not answer", "host");
+            }
+            if (setup_.io_thread) {
+                shared->ready.wait_until(lock, deadline);
+            } else {
+                lock.unlock();
+                io_.run_one_for(std::chrono::milliseconds{5});
+                lock.lock();
+            }
+        }
+        return std::move(*shared->value);
+    }
+
+    // ---- HTTP frontend (gateway_sink; network thread) ------------------------------------------------
+
+    void start_gateway() {
+        if (!setup_.options.gateway) {
+            return;
+        }
+        const auto& ep = *setup_.options.gateway;
+        if (ep.direction != net::endpoint::mode::kListen) {
+            gateway_error_ = make_error(errc::kInvalidArgument, "the HTTP listener must listen", "host.gateway");
+            return;
+        }
+        if (!setup_.http_auth) {
+            gateway_error_ = make_error(errc::kDisabled, "the authenticator can't check HTTP proofs (Rhp::security::http_authenticator)", "host.gateway");
+            return;
+        }
+        auto policy = session::channel_policy::make(ep, true, setup_.tls, setup_.options.tls);
+        if (!policy) {
+            gateway_error_ = std::move(policy).error();
+            return;
+        }
+        gateway_ = std::make_unique<http_gateway>(io_, setup_.limits, static_cast<gateway_sink&>(*this));
+        if (auto ok = gateway_->listen(std::move(*policy)); !ok) {
+            gateway_error_ = std::move(ok).error();
+            gateway_.reset();
+            return;
+        }
+        gateway_port_ = gateway_->port();
+    }
+
+    [[nodiscard]] bool accepting() const noexcept override { return is_enabled() && !stopping_; }
+
+    [[nodiscard]] bool acquire_handshake() noexcept override {
+        if (pending_handshakes_ >= setup_.limits.pending_handshakes) {
+            return false;
+        }
+        ++pending_handshakes_;
+        return true;
+    }
+
+    void release_handshake() noexcept override { --pending_handshakes_; }
+
+    [[nodiscard]] result<security::http_grant> authorize(const security::http_proof& request) override {
+        return setup_.http_auth(request, std::chrono::system_clock::now());
+    }
+
+    [[nodiscard]] session_id open_http(const security::http_grant& grant, const http_peer& peer) override {
+        const session_id id = session_ids_.next();
+        auto& identity = io_identities_[grant.identity];
+        if (!identity.relay) {
+            identity.relay = std::make_shared<cancel_relay>();
+        }
+        ++identity.sessions;
+        ready_sessions_.fetch_add(1, std::memory_order_acq_rel);
+        http_sessions_[id] = grant.identity;
+        inbound in;
+        in.what = inbound::kind::kOpened;
+        in.session = id;
+        in.identity = grant.identity;
+        in.granted = grant.granted;
+        in.relay = identity.relay;
+        in.peer = peer.address;
+        in.platform = "http";
+        in.tls = peer.tls;
+        (void)to_pump(std::move(in));
+        return id;
+    }
+
+    void close_http(session_id id, std::string_view name, const error& why) override {
+        if (http_sessions_.erase(id) == 0) {
+            return;
+        }
+        ready_sessions_.fetch_sub(1, std::memory_order_acq_rel);
+        if (auto identity = io_identities_.find(name); identity != io_identities_.end()) {
+            {
+                const std::scoped_lock lock{identity->second.relay->mutex};
+                identity->second.relay->end(id);
+            }
+            if (--identity->second.sessions == 0) {
+                orphans_.push_back(identity->second.relay);
+                io_identities_.erase(identity);
+            }
+        }
+        inbound in;
+        in.what = inbound::kind::kClosed;
+        in.session = id;
+        in.identity = std::string{name};
+        in.peer = "http";
+        in.reason = why;
+        (void)to_pump(std::move(in));
+    }
+
+    [[nodiscard]] bool submit_http(session_id id, std::uint64_t req, wire::op code, value body) override {
+        inbound in;
+        in.session = id;
+        in.req = req;
+        in.arrival = req; // one logical session: request numbers are the arrival order
+        in.code = code;
+        in.body = std::move(body);
+        return to_pump(std::move(in));
+    }
+
+    void cancel_http(session_id id, std::uint64_t target, std::uint64_t upto) override {
+        const auto session = http_sessions_.find(id);
+        if (session == http_sessions_.end()) {
+            return;
+        }
+        if (const auto identity = io_identities_.find(session->second); identity != io_identities_.end()) {
+            const std::scoped_lock lock{identity->second.relay->mutex};
+            identity->second.relay->cancel(id, target, upto);
+        }
+    }
+
     struct pending_reply {
         session_id session;
         std::uint64_t req = 0;
@@ -480,7 +705,7 @@ private:
     }
 
     // A connection that never got to authenticate (auth_failed, when anyone listens).
-    void refused(std::string peer, error why) {
+    void refused(std::string peer, error why) override {
         if (setup_.events == nullptr || !setup_.events->wants(event::kind_of<event::auth_failed>)) {
             return;
         }
@@ -791,6 +1016,10 @@ private:
     void drain_outbox() {
         flush_inbox_backlog();
         while (auto item = outbox_.try_pop()) {
+            if (http_sessions_.contains(item->session)) {
+                gateway_->reply(item->session, item->code, item->req, item->body);
+                continue;
+            }
             const auto it = sessions_.find(item->session);
             if (it == sessions_.end() || !it->second.ready) {
                 continue;
@@ -1632,6 +1861,13 @@ private:
     net::io_context io_;
     std::unique_ptr<net::listener> listener_;
     std::optional<error> listen_error_;
+    std::unique_ptr<http_gateway> gateway_;
+    std::optional<error> gateway_error_;
+    std::uint16_t gateway_port_ = 0;                  // fixed once the constructor returns
+    std::map<session_id, std::string> http_sessions_; // network thread
+    std::unique_ptr<net::advertisement> advertisement_;
+    std::optional<net::advertise_options> advertise_options_; // pump-thread metadata
+    std::uint16_t listen_port_ = 0; // fixed once the constructor returns (listener_ belongs to the network thread)
     std::map<session_id, io_session> sessions_;
     std::atomic<std::size_t> open_sessions_{0};
     bool stopping_ = false; // goodbye(): no new connections or dials
@@ -1684,6 +1920,18 @@ result<void> listening(const engine& e) {
 
 std::uint16_t port(const engine& e) noexcept {
     return e.port();
+}
+
+result<std::uint16_t> gateway_port(const engine& e) {
+    return e.gateway_port();
+}
+
+result<void> advertise(engine& e, net::advertise_options options) {
+    return e.advertise(std::move(options));
+}
+
+result<void> discovery_status(engine& e) {
+    return e.discovery_status();
 }
 
 result<void> install(engine& e, std::string_view name, installer fn) {

@@ -316,7 +316,9 @@ public:
 
     [[nodiscard]] session_info info() const {
         const std::scoped_lock lock{mutex_};
-        return info_;
+        auto snapshot = info_;
+        snapshot.closed = closed_;
+        return snapshot;
     }
 
 private:
