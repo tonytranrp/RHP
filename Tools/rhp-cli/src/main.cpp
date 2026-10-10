@@ -388,6 +388,26 @@ int main(int argc, char** argv) {
     sign_cmd->add_option("-i,--identity", identity, "identity file")->required()->envname("RHP_IDENTITY");
 
     connection_options conn;
+    Rhp::net::browse_options discovery;
+    int discover_ms = 1500;
+    const auto add_discovery_options = [&](CLI::App& cmd) {
+        cmd.add_option("--app", discovery.app, "discover this application only");
+        cmd.add_option("--build", discovery.build, "discover this build only");
+        cmd.add_option("--platform", discovery.platform, "discover this platform only");
+        cmd.add_option("--wait", discover_ms, "milliseconds to browse DNS-SD")->check(CLI::Range(1, 60000));
+    };
+    auto* discover_cmd = app.add_subcommand("discover", "find explicitly advertised RHP hosts via DNS-SD");
+    add_discovery_options(*discover_cmd);
+    auto* fleet_cmd = app.add_subcommand("fleet", "discover hosts and broadcast a signed Lua file, collecting every result");
+    int broadcast_timeout_ms = 10000;
+    fleet_cmd->add_option("file", file, "Lua source file")->required();
+    fleet_cmd->add_option("-i,--identity", identity, "identity file")->required()->envname("RHP_IDENTITY");
+    add_discovery_options(*fleet_cmd);
+    fleet_cmd->add_option("--timeout", broadcast_timeout_ms, "broadcast deadline in milliseconds (default 10000)")->check(CLI::Range(1, 3600000));
+    fleet_cmd->add_flag("--tls", conn.tls, "TLS even on loopback");
+    fleet_cmd->add_flag("--insecure-lan", conn.insecure_lan, "allow plaintext to non-loopback endpoints");
+    fleet_cmd->add_option("--ca", conn.ca, "validate host certificates against this CA (PEM)");
+    fleet_cmd->add_option("--server-name", conn.server_name, "expected certificate name (with --ca)");
     auto* connect_cmd = app.add_subcommand("connect", "interactive REPL (reads commands from stdin when it isn't a terminal)");
     add_connection_options(*connect_cmd, conn, true);
 
@@ -431,6 +451,69 @@ int main(int argc, char** argv) {
     }
     if (sign_cmd->parsed()) {
         return sign(file, identity);
+    }
+    discovery.duration = std::chrono::milliseconds{discover_ms};
+    discovery.protocol_revision = Rhp::wire::kProtocolRevision;
+    if (discover_cmd->parsed()) {
+        auto records = Rhp::discover<cli_cfg>(discovery);
+        if (!records) {
+            std::println(stderr, "{}", records.error());
+            return 1;
+        }
+        for (const auto& host : *records) {
+            std::println("{} {}:{} {} {} {} {}", host.name, host.address, host.port, host.platform, host.app, host.build, host.transport);
+        }
+        return 0;
+    }
+    if (fleet_cmd->parsed()) {
+        auto id = Rhp::security::identity_file::load(identity);
+        auto source = rhp_cli::read_text_file(file);
+        if (!id) {
+            std::println(stderr, "{}", id.error());
+            return 1;
+        }
+        if (!source) {
+            std::println(stderr, "can't read fleet source {}", file);
+            return 1;
+        }
+        auto signer = id->signer_key();
+        if (!signer) {
+            std::println(stderr, "fleet requires an identity with a signing key");
+            return 1;
+        }
+        Rhp::fleet_options options;
+        options.timeout = std::chrono::milliseconds{broadcast_timeout_ms};
+        options.insecure_lan = conn.insecure_lan;
+        options.tls = conn.tls ? Rhp::net::tls_mode::kRequire : Rhp::net::tls_mode::kAuto;
+        options.client.tls.server_name = conn.server_name;
+        if (!conn.ca.empty()) {
+            auto ca = rhp_cli::read_text_file(conn.ca);
+            if (!ca) {
+                std::println(stderr, "can't read fleet CA {}", conn.ca);
+                return 1;
+            }
+            options.client.tls.ca_pem = std::move(*ca);
+        }
+        Rhp::fleet<cli_cfg> group{id->credential(), std::move(*signer), std::move(options)};
+        auto discovered = group.discover(discovery);
+        if (!discovered) {
+            std::println(stderr, "{}", discovered.error());
+            return 1;
+        }
+        if (group.size() == 0) {
+            std::println(stderr, "no compatible fleet hosts discovered");
+            return 1;
+        }
+        bool ok = true;
+        for (const auto& entry : group.exec(*source)) {
+            if (entry.outcome) {
+                std::println("{}: {}", entry.host.name, rhp_cli::format_value(Rhp::value{*entry.outcome}));
+            } else {
+                std::println(stderr, "{}: {}", entry.host.name, entry.outcome.error());
+                ok = false;
+            }
+        }
+        return ok ? 0 : 1;
     }
     if (connect_cmd->parsed()) {
         return repl(conn);
