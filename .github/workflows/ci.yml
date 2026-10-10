@@ -79,7 +79,7 @@ jobs:
         with:
           xcode-version: latest-stable
       - uses: lukka/get-cmake@latest
-      - name: macOS (universal, so Mbed TLS: Homebrew's OpenSSL is arm64 only)
+      - name: "macOS (universal, so Mbed TLS: Homebrew's OpenSSL is arm64 only)"
         run: |
           cmake --preset macos -DRHP_TLS_OPENSSL=OFF
           cmake --build --preset macos
