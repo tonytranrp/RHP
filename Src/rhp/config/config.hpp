@@ -8,6 +8,7 @@
 #include <rhp/exec/executor.hpp>
 #include <rhp/exec/io_runner.hpp>
 #include <rhp/net/endpoint.hpp>
+#include <rhp/net/mdns/mdns.hpp>
 #include <rhp/net/tcp/tcp.hpp>
 #include <rhp/security/authenticator.hpp>
 #include <rhp/security/ed25519.hpp>
@@ -37,7 +38,8 @@ enum class slot : unsigned char {
     kLimits,
     kErrors,
     kClock,
-    kLogger
+    kLogger,
+    kDiscovery
 };
 
 // One link of the chain: which slot it fills and with what.
@@ -109,10 +111,11 @@ using get_or_t = typename get_or<S, Default, Settings...>::type;
 //       ::limits   <Rhp::limits{}>             // value                     default Rhp::limits{} (no script limits)
 //       ::errors   <Rhp::errors::expected>     // Rhp::errors::mode         default expected
 //       ::clock    <Rhp::exec::steady_clock>   // Rhp::exec::clock_source   default steady_clock
-//       ::logger   <Rhp::core::stderr_logger>; // Rhp::core::logger         default stderr_logger
+//       ::logger   <Rhp::core::stderr_logger>  // Rhp::core::logger         default stderr_logger
+//       ::discovery<Rhp::net::mdns>;           // Rhp::net::discovery       explicit advertise opt-in
 //
 // Rhp::config<> with no links is exactly that chain. In your own templates (a dependent context)
-// write `Cfg::template transport<X>`. The discovery slot arrives with the stage that implements it.
+// write `Cfg::template transport<X>`.
 // `signer<Rhp::security::unsigned_scripts>` is the explicit opt-out of script signing;
 // `tls<Rhp::security::tls::none>` builds without TLS (non-loopback endpoints then need insecure_lan).
 template <class... Settings>
@@ -139,6 +142,8 @@ struct config {
     using clock = config_detail::rebind_t<config_detail::slot::kClock, K, Settings...>;
     template <core::logger O>
     using logger = config_detail::rebind_t<config_detail::slot::kLogger, O, Settings...>;
+    template <net::discovery D>
+    using discovery = config_detail::rebind_t<config_detail::slot::kDiscovery, D, Settings...>;
 
     using transport_t = config_detail::get_or_t<config_detail::slot::kTransport, net::tcp, Settings...>;
     using tls_t = config_detail::get_or_t<config_detail::slot::kTls, security::tls::auto_backend, Settings...>;
@@ -153,6 +158,7 @@ struct config {
     using errors_t = config_detail::get_or_t<config_detail::slot::kErrors, ::Rhp::errors::expected, Settings...>;
     using clock_t = config_detail::get_or_t<config_detail::slot::kClock, exec::steady_clock, Settings...>;
     using logger_t = config_detail::get_or_t<config_detail::slot::kLogger, core::stderr_logger, Settings...>;
+    using discovery_t = config_detail::get_or_t<config_detail::slot::kDiscovery, net::mdns, Settings...>;
 
     static constexpr ::Rhp::limits limits_v = config_detail::get_or_t<config_detail::slot::kLimits, config_detail::limits_value<::Rhp::limits{}>, Settings...>::value;
 

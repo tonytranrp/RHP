@@ -5,6 +5,7 @@
 
 #include <rhp/audit/sinks.hpp>
 #include <rhp/client/client.hpp>
+#include <rhp/client/fleet.hpp>
 #include <rhp/client/pending.hpp>
 #include <rhp/config/config.hpp>
 #include <rhp/core/convert.hpp>
@@ -21,11 +22,16 @@
 #include <rhp/exec/executor.hpp>
 #include <rhp/exec/io_runner.hpp>
 #include <rhp/host/host.hpp>
+#include <rhp/net/discovery.hpp>
 #include <rhp/net/endpoint.hpp>
 #include <rhp/net/io_context.hpp>
 #include <rhp/net/link.hpp>
+#include <rhp/net/local/local.hpp>
 #include <rhp/net/loopback/loopback.hpp>
+#include <rhp/net/mdns/mdns.hpp>
 #include <rhp/net/tcp/tcp.hpp>
+#include <rhp/net/udp_reliable/udp_reliable.hpp>
+#include <rhp/net/websocket/websocket.hpp>
 #include <rhp/platform/os.hpp>
 #include <rhp/platform/random.hpp>
 #include <rhp/script/ledger.hpp>
@@ -39,6 +45,7 @@
 #include <rhp/security/authenticator.hpp>
 #include <rhp/security/ed25519.hpp>
 #include <rhp/security/hash.hpp>
+#include <rhp/security/http_auth.hpp>
 #include <rhp/security/identity_file.hpp>
 #include <rhp/security/key.hpp>
 #include <rhp/security/keyring.hpp>

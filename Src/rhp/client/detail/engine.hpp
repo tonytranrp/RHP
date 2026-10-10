@@ -99,6 +99,7 @@ void run_io(engine& e, std::stop_token stop);
 
 struct session_info {
     bool connected = false;
+    bool closed = false; // terminal: a fresh client is required, as distinct from a resumable detach
     session_id session;
     std::string identity;
     role granted = role::kObserve;

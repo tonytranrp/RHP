@@ -22,9 +22,10 @@ using my_cfg = Rhp::config<>
 | `errors<M>` | `Rhp::errors::mode` | `Rhp::errors::expected` |
 | `clock<K>` | `Rhp::exec::clock_source` | `Rhp::exec::steady_clock` |
 | `logger<O>` | `Rhp::core::logger` | `Rhp::core::stderr_logger` |
+| `discovery<D>` | `Rhp::net::discovery` | `Rhp::net::mdns`; `mdns_wire` forces the own responder, `no_discovery` disables it |
 
 ## Rules
 
 - Each slot is constrained where it is written: a bad transport fails on the `::transport<X>` line.
 - A later link overrides an earlier one for the same slot; the result is always a `Rhp::config<...>`.
-- The discovery slot is added by the stage that implements it (6), never as a placeholder.
+- Discovery registration is explicit through `host.advertise`; selecting a provider publishes nothing by itself.
