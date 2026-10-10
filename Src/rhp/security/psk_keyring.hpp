@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -9,6 +10,7 @@
 #include <rhp/core/result.hpp>
 #include <rhp/core/role.hpp>
 #include <rhp/security/authenticator.hpp>
+#include <rhp/security/http_auth.hpp>
 #include <rhp/security/key.hpp>
 #include <rhp/security/keyring.hpp>
 
@@ -42,11 +44,16 @@ public:
 
     [[nodiscard]] std::unique_ptr<host_handshake> begin() const;
     [[nodiscard]] const keyring& keys() const noexcept { return *keys_; }
+    // Per-request HTTP proofs against the same keys (Rhp::security::http_authenticator).
+    [[nodiscard]] result<http_grant> verify_http(const http_proof& request, std::chrono::system_clock::time_point now) const {
+        return verify_http_authorization(*keys_, request, now);
+    }
 
 private:
     std::shared_ptr<const keyring> keys_;
 };
 
 static_assert(authenticator<psk_keyring>);
+static_assert(http_authenticator<psk_keyring>);
 
 } // namespace Rhp::security
