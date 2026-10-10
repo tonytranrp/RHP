@@ -16,17 +16,11 @@
 #include <rhp/core/result.hpp>
 #include <rhp/platform/random.hpp>
 #include <rhp/security/key.hpp>
+#include <rhp/utils/base64.hpp>
 
 namespace Rhp::security {
 
 namespace {
-
-constexpr std::string_view kAlphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-[[nodiscard]] int sextet(char c) noexcept {
-    const auto at = kAlphabet.find(c);
-    return at == std::string_view::npos ? -1 : static_cast<int>(at);
-}
 
 [[nodiscard]] std::string_view trim(std::string_view text) noexcept {
     while (!text.empty() && std::isspace(static_cast<unsigned char>(text.front())) != 0) {
@@ -49,28 +43,7 @@ void secure_wipe(void* data, std::size_t size) noexcept {
 }
 
 std::string base64_encode(std::span<const std::byte> bytes) {
-    std::string out;
-    out.reserve((bytes.size() + 2) / 3 * 4);
-    std::size_t i = 0;
-    for (; i + 3 <= bytes.size(); i += 3) {
-        const auto n = (std::to_integer<std::uint32_t>(bytes[i]) << 16) | (std::to_integer<std::uint32_t>(bytes[i + 1]) << 8) |
-                       std::to_integer<std::uint32_t>(bytes[i + 2]);
-        out += kAlphabet[(n >> 18) & 63];
-        out += kAlphabet[(n >> 12) & 63];
-        out += kAlphabet[(n >> 6) & 63];
-        out += kAlphabet[n & 63];
-    }
-    if (const std::size_t rest = bytes.size() - i; rest > 0) {
-        std::uint32_t n = std::to_integer<std::uint32_t>(bytes[i]) << 16;
-        if (rest == 2) {
-            n |= std::to_integer<std::uint32_t>(bytes[i + 1]) << 8;
-        }
-        out += kAlphabet[(n >> 18) & 63];
-        out += kAlphabet[(n >> 12) & 63];
-        out += rest == 2 ? kAlphabet[(n >> 6) & 63] : '=';
-        out += '=';
-    }
-    return out;
+    return utils::base64_encode(bytes);
 }
 
 result<std::vector<std::byte>> base64_decode(std::string_view text) {
@@ -78,33 +51,11 @@ result<std::vector<std::byte>> base64_decode(std::string_view text) {
     if (text.size() % 4 != 0) {
         return fail(errc::kInvalidArgument, "base64 text length is not a multiple of 4", "security.base64");
     }
-    std::vector<std::byte> out;
-    out.reserve(text.size() / 4 * 3);
-    for (std::size_t i = 0; i < text.size(); i += 4) {
-        const bool last = i + 4 == text.size();
-        int v[4];
-        int pad = 0;
-        for (int j = 0; j < 4; ++j) {
-            const char c = text[i + static_cast<std::size_t>(j)];
-            if (c == '=' && last && j >= 2) {
-                v[j] = 0;
-                ++pad;
-                continue;
-            }
-            if (pad > 0 || (v[j] = sextet(c)) < 0) {
-                return fail(errc::kInvalidArgument, "invalid base64 character", "security.base64");
-            }
-        }
-        const auto n = static_cast<std::uint32_t>((v[0] << 18) | (v[1] << 12) | (v[2] << 6) | v[3]);
-        out.push_back(static_cast<std::byte>(n >> 16));
-        if (pad < 2) {
-            out.push_back(static_cast<std::byte>(n >> 8));
-        }
-        if (pad < 1) {
-            out.push_back(static_cast<std::byte>(n));
-        }
+    auto bytes = utils::base64_decode(text);
+    if (!bytes) {
+        return fail(errc::kInvalidArgument, "invalid base64 character", "security.base64");
     }
-    return out;
+    return std::move(*bytes);
 }
 
 // ---- key -----------------------------------------------------------------------------------------

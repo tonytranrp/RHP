@@ -1,5 +1,6 @@
 rhp_add_module(utils
     HEADERS
+        base64.hpp
         byte_buffer.hpp
         crc32c.hpp
         fixed_string.hpp
