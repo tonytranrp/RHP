@@ -106,7 +106,7 @@ target_link_libraries(my_app PRIVATE Rhp::rhp)
 | 3 | wire format, loopback + TCP, sessions, PSK roles, blocking client | ✅ |
 | 4 | async client, `rhp-cli`, signing, audit, blobs, reverse mode, pin | ✅ |
 | 5 | TLS 1.3, reconnect/resume, fuzzing, Android and iOS presets | ✅ |
-| 6 | WebSocket, UDP-reliable, local IPC, HTTP gateway, mDNS, fleet | next |
+| 6 | WebSocket, UDP-reliable, local IPC, HTTP gateway, mDNS, fleet | ✅; validation and platform limits in [Status](Docs/TODO.md) |
 
 ## Layout
 

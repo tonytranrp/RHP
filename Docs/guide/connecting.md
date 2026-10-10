@@ -69,7 +69,7 @@ auto ready = dev.connect();                                                     
 - The dialing host redials whenever the dial fails or the session ends, with capped exponential backoff and full jitter (`limits.backoff_min_ms` 250 ms to `backoff_max_ms` 30 s).
 - A listening client serves one host at a time. When that host's session ends, calls in flight fail and the next call waits for a host to dial in.
 - Tooling: `rhp-cli connect 0.0.0.0:7777 -i dev.rhpid --listen` and `headless_server --reverse HOST:PORT`.
-- iOS needs `NSLocalNetworkUsageDescription` (and `NSBonjourServices` for discovery, once Stage 6 lands) in Info.plist.
+- iOS needs `NSLocalNetworkUsageDescription` (and `NSBonjourServices` containing `_rhp._tcp` or `_rhp._udp` for discovery) in Info.plist.
 
 ## Reliability and reconnect
 
@@ -133,6 +133,6 @@ The concept allows `network` to be absent, which classifies the transport as loc
 
 Link rules: call the handler only on the `io_context`'s thread (use `io_context::post` from elsewhere), report `on_closed` exactly once and never after the link is destroyed, and write queued bytes before closing. See [`Examples/custom_transport`](../../Examples/custom_transport).
 
-## Planned (Stage 6)
+## Other transports and discovery
 
-WebSocket (for proxies), UDP-reliable, local IPC, an HTTP REST gateway, mDNS discovery and `Rhp::fleet` (broadcast a script to every discovered host) are designed but **not built**. See [TODO](../TODO.md).
+[Stage 6 networking and fleet](networking.md) documents WebSocket binary tunneling, reliable UDP, local IPC, the HTTP REST listener, explicit DNS-SD advertisement and fleet execution. They use the existing authentication, signatures and lifecycle. Advertisement is opt-in; discovery does not authenticate an endpoint.
