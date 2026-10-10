@@ -9,6 +9,7 @@ How to use RHP, what it supports, and how to configure and connect it. For *why*
 | [Writing scripts](writing-scripts.md) | the `rhp` Lua API, modules, reload, undo, scheduling |
 | [Host and client](host-and-client.md) | the C++ API of `Rhp::host` / `Rhp::client`, async calls, blobs, audit |
 | [Connecting](connecting.md) | endpoints, TLS, reverse mode, reconnect, `rhp-cli`, custom transports |
+| [Networking and fleet](networking.md) | WebSocket, UDP, IPC, HTTP, DNS-SD and collect-all execution |
 | [Configuration](configuration.md) | `Rhp::config<>` slots, `Rhp::limits`, options, CMake switches |
 | [Security](security.md) | keys, roles, signing, setting up a host safely |
 | [Reference](reference.md) | error codes, events, Lua sandbox contents |
@@ -30,21 +31,20 @@ A running C++ program (the **host**) accepts Lua scripts from a **client** (your
                                          └─────────────────────────────┘
 ```
 
-## What is available today (Stages 0–5)
+## What is available today (Stages 0–6)
 
 | Area | Supported |
 |---|---|
 | Scripting | Lua 5.5 sandbox per identity; modules with their own `_ENV`; `exec`, `load`, `call`, `reload`, `rollback`, `checkpoint` / `revert_to`, `revert`, `unload`, `pin` / `unpin`, `revert_all`; `require`; coroutine scheduler (`rhp.wait`, `rhp.next_frame`, `rhp.sleep`, `rhp.timer`); `on_save` / `on_restore` state hand-over |
 | C++ binding | `Rhp::lib<>` with `fn`, `var`, `ro`, `handle`, `sub`; `undo<>`, `irreversible`, `requires_role<>`; `Rhp::patch_point<>`; `Rhp::lua_event<>`; custom types through `Rhp::convert<T>`; LuaLS stub generation |
-| Transports | in-process `net::loopback`, `net::tcp` (IPv4 and IPv6), your own through the `net::transport` concept |
+| Transports | in-process loopback, TCP, WebSocket binary tunnel, reliable UDP, local IPC; custom transports through `net::transport` |
+| Network tooling | authenticated HTTP/1.1 gateway; opt-in DNS-SD discovery; `Rhp::fleet<Cfg>` with one outcome per host |
 | Directions | normal (client dials host) and **reverse** (host dials a listening client: phones, NAT) |
 | Security | pre-shared-key mutual authentication, 3 roles, Ed25519 script signing, TLS 1.3 (OpenSSL or Mbed TLS), TLS channel binding, per-frame MAC |
 | Reliability | CRC32C, seq / ack / nack / resend, heartbeat, **resume** after a lost link with exactly-once calls |
 | Client | blocking, `then` callbacks, `std::future`, `co_await`; cancel; blobs; output and `rhp.emit` callbacks |
 | Operations | audit events and JSON-lines log, runtime kill switch (`set_enabled`), compile-time kill switch (`RHP_ENABLE=OFF`) |
-| Tooling | `rhp-cli` (REPL, `run`, `exec`, `stubs`, `blob`, `watch`, `keygen`, `pubkey`, `sign`), `headless_server`, five examples |
+| Tooling | `rhp-cli` (REPL, `run`, `exec`, `stubs`, `blob`, `watch`, `keygen`, `pubkey`, `sign`, `discover`, `fleet`), `headless_server`, five examples |
 | Platforms | target presets for Windows, Linux, macOS, iOS and Android; verified builds and remaining platform checks are recorded in [platform decisions](../decisions/platforms-and-toolchains.md) |
 
-Start with the [runnable CLI walkthrough](getting-started.md#first-run-host-plus-rhp-cli), then the [complete local sandbox example](getting-started.md#without-any-network). The guide describes the Stage 5 source at `8ffc954`; diagrams and older examples in the architecture document also contain roadmap material. Reproduced implementation defects remain open in [Status and TODO](../TODO.md#confirmed-issues-at-the-current-commit).
-
-**Not built yet (Stage 6):** WebSocket, UDP-reliable and local-IPC transports, the HTTP REST gateway, mDNS discovery and `Rhp::fleet`. Nothing in this guide depends on them.
+Start with the [runnable CLI walkthrough](getting-started.md#first-run-host-plus-rhp-cli), then the [complete local sandbox example](getting-started.md#without-any-network). The guide describes the current Stage 6 API; historical architecture decisions retain their stage context. Reproduced earlier implementation defects remain open in [Status and TODO](../TODO.md#confirmed-issues-at-the-current-commit).

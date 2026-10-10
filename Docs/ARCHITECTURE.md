@@ -4,7 +4,7 @@
 > **Targets:** Windows 10 1809+ · Linux (glibc 2.31+) · macOS 13+ · iOS 16+ · Android API 26+ — x86_64 + arm64
 > **Compilers:** MSVC (VS 2026) · clang-cl · Clang 17+ · AppleClang · Android NDK Clang
 > **Root namespace:** `Rhp::` · **Include root:** `<rhp/...>`
-> **Current usage:** [user guide](guide/README.md) · **Open issues / verification:** [Status and TODO](TODO.md). Stages 0–5 are implemented at `8ffc954`; broad design diagrams include Stage 6 plans. The historical decision logs below retain the decisions made at each stage.
+> **Current usage:** [user guide](guide/README.md) · **Open issues / verification:** [Status and TODO](TODO.md). The current implementation includes Stages 0–6. The historical decision logs below retain the decisions made at each stage; current Stage 6 choices are recorded in [networking decisions](decisions/stage6-networking.md).
 > **Progress model:** work advances in **stages** (Stage 0, Stage 1, …). Nothing in code, files, tags, or APIs is ever named `v1`/`v2`/`V*`. The only numbers on the wire are a plain `protocol_revision` integer and per-module `revision` counters.
 
 ---
@@ -38,13 +38,14 @@ flowchart LR
     end
 
     subgraph NET["Transports (policies)"]
-        T(("TCP · TLS · WebSocket · UDP-reliable<br/>Local IPC · Loopback · HTTP REST"))
-        MD(["mDNS discovery<br/>_rhp._tcp"])
+        T(("TCP · WebSocket · UDP-reliable<br/>Local IPC · Loopback · TLS decorators"))
+        MD(["mDNS discovery<br/>_rhp._tcp · _rhp._udp"])
     end
 
     subgraph APP["Target process (game, server, mobile app)"]
         direction TB
         H["Rhp::host&lt;Cfg&gt;"]
+        HG["optional HTTP/1.1 frontend"]
         SCHED["coroutine scheduler<br/>(time-sliced by pump)"]
         SB["Lua 5.5 sandbox<br/>one lua_State per key identity"]
         API["C++ surface<br/>Rhp::lib · patch_point · blob sinks"]
@@ -54,7 +55,8 @@ flowchart LR
         API -. records inverse .-> LED
     end
 
-    CLI & TOOL & CURL <--> T <--> H
+    CLI & TOOL <--> T <--> H
+    CURL <--> HG <--> H
     H -. advertises .-> MD -. found by .-> TOOL
 ```
 
@@ -176,12 +178,11 @@ classDiagram
     config ..> Executor
     config ..> Discovery
     Transport <|.. tcp
-    Transport <|.. tls_tcp
     Transport <|.. websocket
     Transport <|.. udp_reliable
     Transport <|.. local_ipc
     Transport <|.. loopback
-    Transport <|.. http_gateway
+    host --> http_listener : optional frontend
     Transport <|.. your_transport
     Authenticator <|.. psk_keyring
     Signer <|.. ed25519
@@ -204,7 +205,7 @@ classDiagram
 | Script signer | concept policy | satisfy `Rhp::security::signer` | HSM-backed signing |
 | Executor | marker policy | `Rhp::exec::pumped` only today | alternate scheduling is not wired into the engine |
 | I/O threading | concept policy | satisfy `Rhp::exec::io_runner` start/stop contract | owned I/O thread or caller-polled `zero_threads` |
-| Discovery | planned policy | no shipped discovery concept/slot yet | Stage 6 |
+| Discovery | concept policy | `config<>::discovery<D>`, `net::discovery` | `mdns`, explicit `mdns_wire`, `no_discovery`; advertisement opt-in |
 | Logger | concept policy | satisfy `Rhp::core::logger` | spdlog, logcat, os_log |
 | Error mode | policy | `Rhp::errors::expected` / `Rhp::errors::throwing` | exceptions in tools, expected in engine |
 | Memory | runtime injection | `sandbox_options::memory` for Lua; explicit byte-buffer resource | not universal engine allocation injection |
@@ -490,7 +491,7 @@ A Wi-Fi blip shorter than the heartbeat window does **not** revert; a real disco
 *As built (Stage 5):* a lost link (or a heartbeat that died: a half-open link) detaches the session for `limits.resume_ms` (6 s); the side that dialed redials and resumes it, both ends resend what wasn't acknowledged, and nothing is reverted or run twice (AA7). Only a session that doesn't come back in time — or one closed on purpose — ends and reverts.
 
 - **`pin(mod)`** (`kAdmin`): the host takes ownership of a module, so it survives its client's disconnect. Pinned modules belong to a host-owned identity, are reverted only by `unpin` + `revert`/`unload` or `revert_all`, and are listed with `pinned: true`. This is how `rhp-cli run patch.lua --pin` applies a lasting patch. *As built (Stage 4):* the identity's own sandbox stays alive while it has pinned modules; at its last disconnect the scratch module and every module the pinned ones don't `require` are reverted and unloaded (Y7).
-- **HTTP gateway:** no connection, so an identity's gateway state is reverted after **5 minutes idle**.
+- **HTTP gateway:** logical sessions survive physical socket close and expire after **5 minutes idle**. Expiry stops their pending requests and applies normal identity cleanup, preserving other live sessions and pinned modules.
 - **Handshake flood guard:** clients are unlimited, but at most **64 unauthenticated** handshakes may be pending, each with a **5 s** timeout.
 
 ## 6. Using RHP
@@ -510,7 +511,7 @@ Local use is `Rhp::script::sandbox`, not a `host.local()` accessor. Script sourc
 
 In normal mode the client dials a listening host. In reverse mode the host dials a listening client. Both still need application/network progress; an application suspension is not bypassed by reversing the connection.
 
-`Rhp::fleet`, discovery and HTTP gateway routes/authentication headers are Stage 6 plans, not a usable current API. Future interfaces remain subject to the stage's implementation decisions. Open defects and unverified platforms are listed in [Status and TODO](TODO.md).
+Stage 6 usage is documented in [networking and fleet](guide/networking.md): typed transports, explicit DNS-SD advertisement, collect-all fleet execution, and the authenticated HTTP listener attached to the existing host. Open defects and platform verification are listed in [Status and TODO](TODO.md).
 
 ---
 
@@ -705,7 +706,7 @@ RHP/
 │       ├── platform/   os · random(.cpp)                                    (Stage 3) ← only OS #ifdefs
 │       ├── wire/       ops · frame(.cpp) · codec · codec/msgpack(.cpp) · messages(.cpp)   (Stage 3)
 │       ├── net/        endpoint · io_context(.cpp) · link · loopback/ · tcp/          (Stage 3)
-│       │               local/ · websocket/ · udp_reliable/ · http_gateway/ · mdns/     (later)
+│       │               discovery · local/ · websocket/ · udp_reliable/ · mdns/ · detail/http   (Stage 6)
 │       ├── security/   authenticator · key(.cpp) · keyring(.cpp) · psk_keyring(.cpp)  (Stage 3)
 │       │               signer · ed25519(.cpp) · signing_keys(.cpp) · identity_file(.cpp) · hash(.cpp)   (Stage 4)
 │       │   tls/        tls · openssl(.cpp) · mbedtls(.cpp) · auto_backend — Rhp::security::tls  (Stage 5)
@@ -850,7 +851,7 @@ flowchart BT
 | `RHP_TLS_OPENSSL` | `AUTO` | the system's OpenSSL ≥ 3.0: `AUTO` (if found, desktop only), `ON` (required), `OFF` |
 | `RHP_TLS_MBEDTLS` | `ON` | build the Mbed TLS backend (fetched) |
 | `RHP_FUZZ` | `OFF` | Tests/fuzz as libFuzzer executables (Clang) |
-| WebSocket / UDP / HTTP / mDNS switches | not implemented | names and defaults remain Stage 6 design work |
+| Stage 6 networking | `RHP_ENABLE` / typed policies | choose WebSocket, reliable UDP or IPC with `transport<>`; `discovery<no_discovery>` disables discovery; HTTP listener and advertisement are runtime opt-ins |
 | `RHP_SANITIZE` | empty | `address;undefined` or `thread` |
 | `RHP_WARNINGS_AS_ERRORS` | `ON` | `/W4 /WX` · `-Wall -Wextra -Wpedantic -Werror` |
 
@@ -944,7 +945,7 @@ All PRIVATE; none of their headers appear in `Src/rhp/**/*.hpp`.
 | TLS | OpenSSL 4.0.x (desktop) · mbedTLS 4.2 (mobile, custom Asio stream adapter) — as built: the system's OpenSSL ≥ 3.0 and Mbed TLS 4.2.0, both behind one sans-IO engine (no Asio SSL streams) | Apache-2.0 |
 | WebSocket | own RFC 6455 framing on Asio | — |
 | HTTP gateway | own minimal HTTP/1.1 parser on Asio | — |
-| mDNS / DNS-SD | platform APIs behind `Rhp::net::discovery`: `dns_sd` (Apple), Windows DNS-SD API, Avahi or own responder on Linux, NSD bridge on Android — exact per-OS choice researched at Stage 6 | — |
+| mDNS / DNS-SD | behind `Rhp::net::discovery`: Windows DNS-SD API, Apple `dns_sd`, own multicast responder on Linux/native Android; app NSD bridges can supply a policy (see Stage 6 decisions) | — |
 | Tests | Catch2 v3.16 | BSL-1.0 |
 | Bench (planned; not fetched) | Google Benchmark | Apache-2.0 |
 | Fetching | CPM.cmake 0.42.x | MIT |
@@ -973,7 +974,7 @@ flowchart LR
 | 3 ✅ | exec over loopback and TCP with CRC, seq/ack, roles — done: `Examples/remote_exec` runs three keys (admin / patch / observe) against one host over loopback and TCP on 127.0.0.1, streams print back, cancels a `while true do end` from the network thread while the game thread is stuck in it, and reverts a client's effects when it disconnects; `Examples/custom_transport` plugs a user transport into `Rhp::config<>`; 324 tests green on MSVC, clang-cl, MSVC-ASan, Linux Clang, Clang ASan+UBSan, Clang TSan; the `RHP_ENABLE=OFF` build (137 tests) is green without Lua, Asio or Monocypher |
 | 4 ✅ | full lifecycle from `rhp-cli`, signed scripts only, audit log written — done: `rhp-cli` (replxx + CLI11) runs keygen → host key files → a signed REPL session (multi-line Lua, load / reload / rollback / call / pin / unload, stubs, blob, watch) against `Examples/headless_server` as a separate process, which writes a JSON-lines audit log; unsigned scripts from patch/admin are refused (`kBadSignature`); reverse mode (`rhp-cli --listen`, `headless_server --reverse`), async client calls (then / get / future / `co_await`), blobs and `pin` work over loopback and TCP; 370 tests green on MSVC, clang-cl, MSVC-ASan, Linux Clang, Clang ASan+UBSan, Clang TSan; the `RHP_ENABLE=OFF` build (153 tests) is green without Lua, Asio or Monocypher |
 | 5 ✅ | TLS on all 5 OS presets; kill-the-socket test resumes exactly-once — done: TLS 1.3 through OpenSSL (system) and Mbed TLS 4.2 behind `config<>::tls<>`, the PSK handshake bound to the TLS channel (a TLS-terminating relay fails it), resume after a lost link (200 calls through 20 socket cuts run exactly once, over TLS too, reverse mode too), libFuzzer targets for frame / envelope / msgpack / sandbox_escape (the sandbox fuzzer found and fixed a Lua stack overrun); 398 tests green on MSVC, clang-cl, MSVC-ASan, Linux Clang, Clang ASan+UBSan, Clang TSan; the `RHP_ENABLE=OFF` build (155 tests) is green without Lua, Asio, Monocypher or TLS; Android: `android-arm64` / `android-x64` build with NDK 29 and every suite passed on an arm64 phone (Android 16) through `Tools/android/run_tests.py`; libFuzzer ran ~13 million inputs across the four targets clean; macOS and the iOS simulator are covered by the CI workflow, which couldn't run yet (the account's Actions billing blocks jobs) |
-| 6 | fleet finds hosts via mDNS and broadcasts a script |
+| 6 ✅ | fleet finds hosts via mDNS and broadcasts a script — the separate-process CLI discovers two hosts and collects both signed results over TLS; transports, gateway, discovery, fleet and tools are implemented. Exact checks and platform limits: [Status and TODO](TODO.md). |
 
 ---
 
@@ -1273,3 +1274,32 @@ Taken without a questionnaire: the user asked for Stage 5 to be planned and buil
 | AB10 | Android on hardware | with `-DRHP_BUILD_TESTS=ON` the `android-arm64` build runs on a phone through `run_tests.py`: every suite — integration (TLS, resume) and the fuzz replays included — passed on an arm64 device with Android 16 (API 36) |
 | AB11 | Review | the end-of-stage review (one subagent) found: (high) a resume was not bound to the new TLS connection, so a relay terminating TLS on the redial could carry a valid `kResume` through and read everything after it — both resume frames now carry a proof over the new connection's channel binding, and a test runs a resume through such a relay (refused) and through a plain relay (works); (medium) application data arriving in the same read as a TLS close_notify or alert was dropped, so a host's goodbye over TLS could be lost — it is delivered first now; a resume attempt had no time limit of its own (a link that connects and never answers ate the whole window) — each attempt gets min(handshake_timeout_ms, 2 s); errors on a resume link (an unsealed `kError`, garbage, a bad MAC) ended the session — they now give up that link and try another; the macOS universal CI build linked arm64-only Homebrew OpenSSL — it uses Mbed TLS; (low) handshake failures were reported as certificate failures when nothing was being verified, and OpenSSL's per-thread error queue could fail the next handshake once — `kAuth` only when verifying, the queue is cleared before every call; a peer could hide a failed login from `auth_failed` by closing with `kError{ok}` — hosts check `session::handed_over()` instead; with `ca_pem` and no `server_name` the dialed name is now checked. Documented, not changed: idle unauthenticated connections count against `pending_handshakes` (and a listening client's 4 candidates) and can delay a resume; a session closed while detached tells nobody (the peer's window runs out); a probe can tell a known session id from an unknown one (`kAuth` vs `kNotFound`) |
 | AB12 | Test hardening | the Stage 2 time-slice test assumed one `pump()` drains every request; under CPU load a 2 ms slice can be preempted, so it pumps (at most 50 times) until done |
+
+## 30. Decision log (round 8, Stage 6)
+
+Detailed rationale and primary sources: [Stage 6 networking decisions](decisions/stage6-networking.md). Usage: [networking and fleet](guide/networking.md).
+
+| # | Topic | Decision |
+|---|---|---|
+| AC1 | Policy boundaries | WebSocket, reliable UDP and local IPC implement the existing transport concept. DNS-SD uses the new `discovery<D>` slot. HTTP feeds the host dispatcher as an optional frontend; fleet retains ordinary client instances. |
+| AC2 | WebSocket | own RFC 6455 binary framing at `/rhp`; client masking, continuations, control frames and close handshake. TLS stays inside the byte tunnel, preserving the session channel binding. Conventional WSS and browser clients are outside this transport's contract. |
+| AC3 | Reliable UDP | 480-byte fragments, random connection tokens, selective ACK, CRC32C, retransmission and congestion backoff reconstruct the ordered stream. TLS and session resume remain above it. FEC is optional and confined to this transport. |
+| AC4 | IPC | owner-restricted overlapped named pipes on Windows; mode-0600 AF_UNIX sockets and inode-checked cleanup on POSIX; same-UID abstract AF_UNIX on Linux/Android. Authentication remains mandatory. |
+| AC5 | HTTP | timestamp/nonce request MAC plus the existing script signature; MessagePack arguments/results; logical sessions share the identity's sandbox, roles, deferred replies, cancellation, pins and cleanup. Idle expiry defaults to five minutes. |
+| AC6 | Discovery | advertisement is opt-in; library names require another opt-in. Windows native browsing resolves both native wildcard services and wire-owned constrained address records. Apple owns native A/AAAA and service records. Linux/native Android use the wire provider; APKs may supply an NSD policy. |
+| AC7 | Fleet | start every signed request before collecting; return an outcome per host with a shared broadcast deadline. Keep resumable sessions, replace terminally closed clients, and progress all members during zero-thread waits and discovery. |
+
+## 31. Stage 6 implementation notes
+
+| # | Topic | Implementation |
+|---|---|---|
+| AD1 | Module layout | Asio remains private to backend translation units. The host's HTTP frontend is isolated in `gateway.cpp`, feeding the existing inbox/outbox and dispatcher. No second script engine or dependency copy is introduced. |
+| AD2 | Input bounds | shared HTTP header parser: 16 KiB/64 fields, explicit Content-Length, no transfer coding or pipelines. DNS: 9000-byte packets, 128 records, 1024 cached records. UDP queues: 16 MiB, 64 receive fragments, 4096 close tombstones. |
+| AD3 | Shutdown | closing links drain final bytes after their wrapper is released; refused unstarted UDP peers do not retain drain timers. FIN acknowledgments remain recoverable for 12 seconds. IPC removes only its own socket inode. Native DNS callbacks retain their contexts through cancellation. |
+| AD4 | Gateway admission | native sessions and HTTP share the unauthenticated-handshake budget; successful request proofs release the slot before script execution, so suspended scripts do not prevent authenticated cancellation. |
+| AD5 | Validation | regression coverage includes loss/corruption/duplication/reordering, raw WebSocket interoperability, deferred HTTP replies/reload/cancel/expiry, surviving sessions and pins, fleet mixed outcomes/recovery, zero-thread progress, and separate-process TLS broadcasts through real DNS-SD. Actual platform results are recorded in [Status and TODO](TODO.md). |
+| AD6 | Review: codecs | WebSocket and reliable-UDP wire formats moved into sans-IO `detail/` codecs (`ws::decode_header`/`encode_frame`, `rudp::decode_packet`/`encode_packet`), unit-tested and fuzzed; typed opcodes, DNS record types and close codes replace magic numbers; one `dns_sd_service()` replaces four copies of the service-type ternary; base64 is one `utils/base64.hpp`. |
+| AD7 | Review: transports | WebSocket streams data payloads instead of buffering whole frames and fixes its role at compile time; `close()` during the upgrade no longer drops queued bytes. Reliable UDP: RFC 6298 timeout, SACK fast retransmit and one backoff per batch (the loss test went from 1.7 s to 0.2 s), deadline-armed timers instead of 25 ms polling, one receive buffer per socket instead of a 64 KiB allocation per datagram, a 1024-peer cap per socket. IPC dialers use `SECURITY_IDENTIFICATION`; Linux checks the peer UID for pathname sockets too. |
+| AD8 | Review: discovery | The wire provider is a CRTP `multicast_endpoint` shared by a `responder` and a `querier`. It no longer blocks the I/O thread on DNS, stops periodic 30 s announcements and per-second queries (RFC 6762 §5.2/§8.3), recovers from a conflict on `update()`, re-announces an unchanged name without probing, and keeps receiving after a per-datagram error. |
+| AD9 | Review: HTTP | Unknown key names cost the same work (decoy key), closing a timing probe of key names. Per-key replay quotas, expiry-ordered pruning; a request in flight keeps its identity alive and a hung-up client cancels its own request (the first cut reverted running work after 5 minutes); per-request cancel tokens; `X-RHP-Signature` carries the signer's value so custom signers work; `Expect: 100-continue`; a status per error class. The engine implements a typed `gateway_sink`, and gateway/net detail types no longer reach `host.hpp`. |
+| AD10 | Review: tests | Stage 6 unit tests follow the module layout (`websocket_tests.cpp`, `udp_reliable_tests.cpp`, `local_ipc_tests.cpp`, `http_tests.cpp`, `mdns_tests.cpp`); `[multicast]` cases share a ctest `RESOURCE_LOCK` (they collided on UDP 5353 under `ctest -j`); expiry tests wait for the HTTP session's close event instead of sleeping. |

@@ -37,6 +37,7 @@ Inside your own templates (a dependent context) write `Cfg::template transport<X
 | `errors` | `errors::expected` | `errors::throwing` |
 | `clock` | `exec::steady_clock` | your game clock or a manual clock, for `rhp.sleep` / `rhp.timer` and deterministic tests |
 | `logger` | `core::stderr_logger` | `core::null_logger`, or any type with `enabled(level)` and `write(level, msg)` (spdlog, logcat, os_log, your engine log) |
+| `discovery` | `net::mdns` | `net::no_discovery`, explicit `net::mdns_wire`, or a type satisfying `net::discovery`; advertisement remains an explicit runtime opt-in |
 
 ### Which `io` policy?
 
@@ -73,7 +74,7 @@ using cfg = Rhp::config<>::limits<Rhp::limits{.instructions = 50'000'000, .memor
 | `heartbeat_misses` | 3 | quiet heartbeat intervals before link loss; 0 disables this dead-peer threshold |
 | `resume_ms` | 6000 | how long a lost link may come back; 0 = a lost link ends the session |
 | `backoff_min_ms` / `backoff_max_ms` | 250 / 30000 | capped redial backoff for dialing hosts and resuming clients, with jitter |
-| `gateway_idle_ms` | 5 min | reserved for the Stage 6 HTTP gateway |
+| `gateway_idle_ms` | 5 min | logical HTTP identity idle expiry; stops pending requests too; 0 disables expiry |
 | `cancel_check_instructions` | 1000 | count-hook interval for cancellation and budgets; 0 uses the default interval |
 
 Instruction, memory and execution-time limits default to unlimited; slicing defaults to off. Set budgets on the **host** that executes code. Instruction/time checks run at hook boundaries and cannot preempt C++ bindings. A host pump can dispatch several operations and pump several identity sandboxes, so `slice_us` is not a hard bound on the whole application frame.

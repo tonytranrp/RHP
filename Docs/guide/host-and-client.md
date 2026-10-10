@@ -15,7 +15,9 @@ Rhp::host<> observe_only{endpoint, authenticator}; // no signers: only observe s
 | `on_blob(sink, fn, role = admin)` | register a blob sink: `fn(const blob_view&) -> result<void>` runs on the pump thread once a whole blob (≤ `limits.max_blob`) has arrived. The role is checked before a byte is buffered |
 | `on<Event>(fn)` / `on_any(fn)` | subscribe to host events; returns a `[[nodiscard]] event::subscription` that unsubscribes when destroyed. Handlers run on the pump thread |
 | `pump()` | **call every frame.** Runs requests that arrived, resumes suspended scripts, fires timers and queued events, hands replies to the network. With `io<zero_threads>` it also polls the network |
-| `port()` | bound TCP port after port 0, or a setup failure; a dialing host and loopback listener report 0 |
+| `port()` | bound network port after port 0, or a setup failure; IPC, dialing hosts and loopback report 0 |
+| `gateway_port()` | the optional HTTP listener's bound port or setup error |
+| `advertise(options)` / `discovery_status()` | explicit DNS-SD registration/update and subsequent provider errors; pump thread |
 | `sessions()` / `identities()` | authenticated sessions, including detached resumable ones / identities with a live sandbox, including sessionless pinned ones (any thread) |
 | `set_enabled(bool)` / `enabled()` | runtime kill switch: while off, new connections are closed and every request answers `kDisabled` (what already ran stays; send `revert_all` first to undo it) |
 | `logger()` / `clock()` | references to policy objects; callers must synchronize mutation with their use by RHP |
@@ -41,6 +43,7 @@ auto registered = host.on_blob("configs", [](const Rhp::blob_view& b) -> Rhp::re
 | `idempotency_bytes` | 16 MiB | byte cap on that cache |
 | `inbox_capacity` | 4096 | messages the network thread queues for `pump()` before holding more back |
 | `tls` | empty | `cert_pem` / `key_pem` for the host's certificate (empty = ephemeral self-signed), `ca_pem` / `server_name` to check the peer when the host dials |
+| `gateway` | none | separate listen endpoint for the authenticated HTTP gateway |
 
 ## `Rhp::client<Cfg>`
 
@@ -50,6 +53,8 @@ Rhp::client<> o{endpoint, credential};                                // unsigne
 ```
 
 Get them from a checked identity-file result: `id->credential()` and `id->signer_key()` (an optional). Validate both before construction; the [complete client example](getting-started.md#first-run-host-plus-rhp-cli) shows this. With the default signing policy, a client without a signing key can send code only to an observe session.
+
+[Networking and fleet](networking.md) shows discovery and `Rhp::fleet<Cfg>` execution, including its per-host result and deadline contracts.
 
 Result-bearing operations return `Rhp::result<T>` by default (see [errors](configuration.md#error-mode)). The client connects on first use, or call `connect()` yourself.
 
