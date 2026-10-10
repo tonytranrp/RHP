@@ -31,8 +31,8 @@
 #include <format>
 #include <fstream>
 #include <initializer_list>
-#include <optional>
 #include <iterator>
+#include <optional>
 #include <print>
 #include <string>
 #include <string_view>
@@ -103,6 +103,9 @@ struct options {
     std::string cert;
     std::string key;
     std::string ca;
+    bool advertise = false;
+    Rhp::net::advertise_options discovery;
+    std::optional<std::uint16_t> http_port;
 };
 
 [[nodiscard]] std::optional<options> parse(int argc, char** argv) {
@@ -123,6 +126,14 @@ struct options {
         }
         if (arg == "--tls") {
             o.tls = true;
+            continue;
+        }
+        if (arg == "--advertise") {
+            o.advertise = true;
+            continue;
+        }
+        if (arg == "--advertise-libs") {
+            o.discovery.include_libs = true;
             continue;
         }
         if (!(v = value())) {
@@ -157,6 +168,20 @@ struct options {
             o.key = *v;
         } else if (arg == "--ca") {
             o.ca = *v;
+        } else if (arg == "--app") {
+            o.discovery.app = *v;
+        } else if (arg == "--build") {
+            o.discovery.build = *v;
+        } else if (arg == "--name") {
+            o.discovery.name = *v;
+        } else if (arg == "--http-port") {
+            std::uint16_t port = 0;
+            const auto [end, ec] = std::from_chars(v->data(), v->data() + v->size(), port);
+            if (ec != std::errc{} || end != v->data() + v->size()) {
+                std::println(stderr, "invalid HTTP port");
+                return std::nullopt;
+            }
+            o.http_port = port;
         } else if (arg == "--seconds") {
             if (std::from_chars(v->data(), v->data() + v->size(), o.seconds).ec != std::errc{} || o.seconds < 0) {
                 std::println(stderr, "bad --seconds {}", *v);
@@ -169,6 +194,10 @@ struct options {
     }
     if (o.keys.empty() || (!o.port && o.reverse.empty())) {
         std::println(stderr, "usage: headless_server --port N --keys FILE [--signers FILE] [--audit FILE] [--blobs DIR] [--reverse H:N] [--tls] [--cert FILE --key FILE] [--ca FILE]");
+        return std::nullopt;
+    }
+    if (o.discovery.include_libs && !o.advertise) {
+        std::println(stderr, "--advertise-libs requires --advertise");
         return std::nullopt;
     }
     return o;
@@ -254,6 +283,11 @@ int main(int argc, char** argv) {
     }
 
     Rhp::host_options host_opts;
+    if (o->http_port) {
+        host_opts.gateway = Rhp::endpoint::listen(o->host, *o->http_port);
+        host_opts.gateway->tls = o->tls ? Rhp::net::tls_mode::kRequire : Rhp::net::tls_mode::kAuto;
+        host_opts.gateway->insecure_lan = o->insecure_lan;
+    }
     for (const auto& [path, field] : {std::pair{&o->cert, &host_opts.tls.cert_pem}, std::pair{&o->key, &host_opts.tls.key_pem}, std::pair{&o->ca, &host_opts.tls.ca_pem}}) {
         if (!path->empty()) {
             auto text = read_text(*path);
@@ -271,6 +305,20 @@ int main(int argc, char** argv) {
     if (auto installed = host.install<game::game_lib>(); !installed) {
         std::println(stderr, "{}", installed.error());
         return 1;
+    }
+    if (o->advertise) {
+        if (auto advertised = host.advertise(o->discovery); !advertised) {
+            std::println(stderr, "{}", advertised.error());
+            return 1;
+        }
+    }
+    if (o->http_port) {
+        auto port = host.gateway_port();
+        if (!port) {
+            std::println(stderr, "{}", port.error());
+            return 1;
+        }
+        std::println("HTTP gateway listening on {}:{}", o->host, *port);
     }
 
     if (!o->audit.empty()) {
@@ -319,8 +367,23 @@ int main(int argc, char** argv) {
     std::signal(SIGINT, on_signal);
     std::signal(SIGTERM, on_signal);
     const auto started = std::chrono::steady_clock::now();
+    auto next_discovery_check = started;
+    std::optional<Rhp::errc> discovery_problem; // reported once per change; the host keeps serving
     while (!g_stop.load()) {
         host.pump();
+        if (o->advertise && std::chrono::steady_clock::now() >= next_discovery_check) {
+            const auto status = host.discovery_status();
+            const auto problem = status ? std::nullopt : std::optional{status.error().code};
+            if (problem != discovery_problem) {
+                if (status) {
+                    std::println("advertising again");
+                } else {
+                    std::println(stderr, "discovery: {} (still serving direct connections)", status.error());
+                }
+                discovery_problem = problem;
+            }
+            next_discovery_check = std::chrono::steady_clock::now() + std::chrono::seconds{1};
+        }
         ++game::g_tick;
         std::this_thread::sleep_for(std::chrono::milliseconds{16}); // ~60 frames a second
         std::error_code ec;

@@ -29,5 +29,11 @@ rhp-cli connect 127.0.0.1:7777 -i dev.rhpid
 | `--tls` | TLS on every connection, loopback included (non-loopback peers always get it) |
 | `--cert FILE --key FILE` | the host's certificate chain and key (PEM); default: an ephemeral self-signed certificate |
 | `--ca FILE` | reverse mode: check the listening `rhp-cli`'s certificate against this CA |
+| `--advertise` | explicitly publish this listening host through DNS-SD |
+| `--name NAME --app APP --build BUILD` | discovery instance and filter metadata |
+| `--advertise-libs` | additionally publish installed library names; requires `--advertise` |
+| `--http-port N` | enable the HTTP gateway on the listen address; port 0 selects a free port |
 
-`Tests/tools/rhp_cli_tests.cpp` drives it as a separate process: keygen → key files → `run --pin` → a scripted REPL → blob → stubs → an unsigned identity refused → the audit log checked, and reverse mode; and TLS (`--tls` on both ends, plaintext refused).
+`Tests/tools/rhp_cli_tests.cpp` drives it as a separate process: keygen → key files → `run --pin` → a scripted REPL → blob → stubs → an unsigned identity refused → the audit log checked, reverse mode, TLS (`--tls` on both ends, plaintext refused), and DNS-SD discovery followed by a signed fleet broadcast to two hosts.
+
+See the [networking guide](../../Docs/guide/networking.md) for HTTP headers/routes and discovery/fleet usage. The supplied executable uses TCP; other transports are selected through the library's configuration type.
