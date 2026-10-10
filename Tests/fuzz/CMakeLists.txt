@@ -1,4 +1,4 @@
-# Fuzz targets (frame · envelope · msgpack · sandbox_escape). Each builds as a replay driver that
+# Fuzz targets (frame · envelope · msgpack · sandbox_escape · network). Each builds as a replay driver that
 # ctest runs (seeds + deterministic mutations) and, with RHP_FUZZ=ON (Clang), also as a libFuzzer
 # executable `rhp_fuzz_<name>` for long runs: see README.md.
 function(rhp_add_fuzz name)
@@ -23,3 +23,4 @@ rhp_add_fuzz(frame SOURCE frame_fuzz.cpp LINKS Rhp::wire)
 rhp_add_fuzz(msgpack SOURCE msgpack_fuzz.cpp LINKS Rhp::wire)
 rhp_add_fuzz(envelope SOURCE envelope_fuzz.cpp LINKS Rhp::wire)
 rhp_add_fuzz(sandbox_escape SOURCE sandbox_fuzz.cpp LINKS Rhp::script)
+rhp_add_fuzz(network SOURCE network_fuzz.cpp LINKS Rhp::net)

@@ -68,6 +68,7 @@ if(RHP_ENABLE)
             security/psk_tests.cpp
             security/signing_tests.cpp
             security/tls_tests.cpp
+            security/http_auth_tests.cpp
         LINKS
             Rhp::security
             Rhp::tls
@@ -77,8 +78,15 @@ if(RHP_ENABLE)
         SOURCES
             net/loopback_tests.cpp
             net/tcp_tests.cpp
+            net/http_tests.cpp
+            net/websocket_tests.cpp
+            net/udp_reliable_tests.cpp
+            net/local_ipc_tests.cpp
+            net/mdns_tests.cpp
+            net/datagram_relay.cpp
         LINKS
             Rhp::net
+            Rhp::asio
     )
 
     rhp_add_test_suite(rhp_session_tests

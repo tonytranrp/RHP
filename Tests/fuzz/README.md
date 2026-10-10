@@ -6,6 +6,7 @@
 | `msgpack` | MessagePack bytes | decoding fails cleanly or the value's encoding round-trips byte for byte (depth and element limits hold) |
 | `envelope` | MessagePack bytes | every wire message type that accepts the value gives back one it accepts again, unchanged |
 | `sandbox_escape` | Lua source, run as an observe identity (instruction, memory, wall limits) | the host's variable is untouched; `io`, `debug`, `package`, `dofile`, `loadfile`, `string.dump` stay hidden from a fresh module; no crash |
+| `network` | HTTP headers and multicast DNS packets | accepted header/body lengths, field/record counts and decoded names remain bounded; malformed input fails cleanly |
 
 Every build has replay drivers (`rhp_fuzz_<target>_replay`) that ctest runs as `fuzz.<target>`: the seeds, then 3000 deterministic mutations. Replay a crash file with `rhp_fuzz_<target>_replay crash-file`.
 

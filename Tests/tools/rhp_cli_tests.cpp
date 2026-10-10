@@ -36,6 +36,7 @@
 #include <rhp/security/key.hpp>
 #include <rhp/security/keyring.hpp>
 #include <rhp/security/psk_keyring.hpp>
+#include <rhp/utils/scope_guard.hpp>
 
 using namespace std::chrono_literals;
 namespace fs = std::filesystem;
@@ -488,6 +489,58 @@ TEST_CASE("rhp-cli: TLS against a headless_server that requires it", "[cli][proc
     server.join();
     CHECK(dir.read("server.log").find("TLS") != std::string::npos);
     CHECK(dir.read("audit.log").find(R"("tls":true)") != std::string::npos);
+}
+
+TEST_CASE("stage6: the CLI discovers separate hosts and broadcasts a signed script", "[cli][process][stage6][multicast]") {
+    std::string listen = "127.0.0.1";
+    SECTION("constrained publication") {}
+    SECTION("native wildcard publication") {
+        listen = "0.0.0.0";
+    }
+    scratch_dir dir;
+    const auto id = dir.path / "fleet.rhpid";
+    REQUIRE(run(std::format("{} keygen fleet --out {} > {}", kCli, q(id), q(dir.path / "keygen.txt"))) == 0);
+    REQUIRE(run(std::format("{} pubkey -i {} --role patch > {}", kCli, q(id), q(dir.path / "lines.txt"))) == 0);
+    const auto lines = dir.read("lines.txt");
+    const auto nl = lines.find('\n');
+    REQUIRE(nl != std::string::npos);
+    dir.write("keys.txt", lines.substr(0, nl + 1));
+    dir.write("signers.pub", lines.substr(nl + 1));
+    dir.write("broadcast.lua", "return 42\n");
+    const auto app = "process-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+    const auto start = [&](std::string name) {
+        return std::jthread{[&, name] {
+            (void)run(std::format("{} --host {} --port 0 --tls --keys {} --signers {} --advertise --name {} --app {} --port-file {} --stop-file {} --seconds 90 > {} 2>&1",
+                                  kHost, listen, q(dir.path / "keys.txt"), q(dir.path / "signers.pub"), name, app,
+                                  q(dir.path / (name + ".port")), q(dir.path / (name + ".stop")), q(dir.path / (name + ".log"))));
+        }};
+    };
+    auto first = start("stage6-first");
+    auto second = start("stage6-second");
+    const Rhp::utils::scope_guard stop{[&] {
+        dir.write("stage6-first.stop", "");
+        dir.write("stage6-second.stop", "");
+    }};
+    REQUIRE(eventually([&] { return !dir.read("stage6-first.port").empty() && !dir.read("stage6-second.port").empty(); }));
+    bool found = false;
+    for (int attempt = 0; attempt < 5 && !found; ++attempt) {
+        REQUIRE(run(std::format("{} discover --app {} --wait 2000 > {} 2>&1", kCli, app, q(dir.path / "discover.txt"))) == 0);
+        const auto text = dir.read("discover.txt");
+        found = text.find("stage6-first") != std::string::npos && text.find("stage6-second") != std::string::npos;
+    }
+    INFO(dir.read("discover.txt"));
+    INFO(dir.read("stage6-first.log"));
+    INFO(dir.read("stage6-second.log"));
+    REQUIRE(found);
+    const auto exit = run(std::format("{} fleet {} -i {} --tls --timeout 10000 --app {} --wait 2000 > {} 2>&1", kCli, q(dir.path / "broadcast.lua"), q(id), app, q(dir.path / "fleet.txt")));
+    INFO(dir.read("discover.txt"));
+    INFO(dir.read("fleet.txt"));
+    INFO(dir.read("stage6-first.log"));
+    INFO(dir.read("stage6-second.log"));
+    REQUIRE(exit == 0);
+    const auto results = dir.read("fleet.txt");
+    CHECK(results.find("stage6-first: {42}") != std::string::npos);
+    CHECK(results.find("stage6-second: {42}") != std::string::npos);
 }
 
 #endif

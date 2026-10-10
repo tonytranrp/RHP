@@ -1,4 +1,5 @@
 rhp_add_compile_fail(config_bad_transport SOURCE config_bad_transport.cpp LINKS Rhp::config)
+rhp_add_compile_fail(config_bad_discovery SOURCE config_bad_discovery.cpp LINKS Rhp::config)
 rhp_add_compile_fail(config_bad_signer SOURCE config_bad_signer.cpp LINKS Rhp::config)
 rhp_add_compile_fail(config_bad_tls SOURCE config_bad_tls.cpp LINKS Rhp::config)
 rhp_add_compile_fail(convert_unknown_type SOURCE convert_unknown_type.cpp LINKS Rhp::core)
