@@ -46,6 +46,7 @@ using namespace config_tests_fixtures;
 TEST_CASE("config: Rhp::config<> is the documented default chain", "[config]") {
     using cfg = Rhp::config<>;
     STATIC_REQUIRE(std::is_same_v<cfg::transport_t, Rhp::net::tcp>);
+    STATIC_REQUIRE(std::is_same_v<cfg::discovery_t, Rhp::net::mdns>);
     STATIC_REQUIRE(std::is_same_v<cfg::codec_t, Rhp::wire::msgpack>);
     STATIC_REQUIRE(std::is_same_v<cfg::auth_t, Rhp::security::psk_keyring>);
     STATIC_REQUIRE(std::is_same_v<cfg::credential_t, Rhp::security::psk_identity>);
