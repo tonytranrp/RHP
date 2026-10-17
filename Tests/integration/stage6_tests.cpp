@@ -606,12 +606,15 @@ TEST_CASE("stage6: a host can require channel-bound HTTP proofs", "[integration]
     options.gateway = Rhp::endpoint::listen("127.0.0.1", 0, Rhp::net::require_tls);
     options.http_require_binding = true;
     running_host<cfg> server{key, Rhp::endpoint::listen("127.0.0.1", 0), options};
+    std::atomic<int> refused{0};
+    auto watch = server.host.on<Rhp::event::auth_failed>([&](const Rhp::event::auth_failed&) { refused.fetch_add(1); });
     const auto port = server.host.gateway_port();
     REQUIRE(port);
     const auto unbound = http(*port, key, {.body = "stage6.bump(1); return 1", .tls = true});
     CHECK(unbound.status == 401);
     CHECK(unbound.verified); // a genuine refusal, signed for the request it refuses
     CHECK(counter.load() == 0);
+    CHECK(rhp_test::poll_until({}, [&] { return refused.load() == 1; })); // and audited as one
     const auto bound = http(*port, key, {.body = "return 42", .tls = true, .bind = true});
     CHECK(bound.status == 200);
     CHECK(bound.verified);
