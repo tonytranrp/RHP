@@ -30,9 +30,10 @@ struct http_peer {
 class gateway_sink {
 public:
     [[nodiscard]] virtual bool accepting() const noexcept = 0;
-    // The host's clock (config<>::clock): idle expiry, and the replay window through wall_now().
-    [[nodiscard]] virtual std::chrono::steady_clock::time_point steady_now() const = 0;
-    [[nodiscard]] virtual std::chrono::system_clock::time_point wall_now() const = 0;
+    // The host's clock (config<>::clock) for idle expiry: steady_clock plus the offset pump() last
+    // sampled, so the network thread never calls the user's clock. (Proof freshness and the replay
+    // window stay on the system clock: real clients sign with real time.)
+    [[nodiscard]] virtual std::chrono::steady_clock::time_point steady_now() const noexcept = 0;
     // True when steady_now() isn't std::chrono::steady_clock: the gateway then can't sleep until a
     // deadline and re-checks it on a short period instead.
     [[nodiscard]] virtual bool custom_clock() const noexcept = 0;
@@ -60,7 +61,7 @@ protected:
 // across connections and ended after `limits.gateway_idle_ms` without requests in flight.
 class http_gateway {
 public:
-    http_gateway(net::io_context& io, Rhp::limits limits, gateway_sink& sink);
+    http_gateway(net::io_context& io, Rhp::limits limits, gateway_sink& sink, bool require_binding = false);
     ~http_gateway();
 
     http_gateway(const http_gateway&) = delete;

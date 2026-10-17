@@ -35,7 +35,8 @@ Windows: overlapped byte-mode pipes, the first instance created with `FILE_FLAG_
 - Cancellation is per request (`X-RHP-Request` token, `POST /cancel/{token}`) or explicitly for every request of the key (`POST /cancel`).
 - Channel binding is opt-in per request (`X-RHP-Channel: tls-exporter`): the MAC then also covers the connection's RFC 9266 exporter value, so a TLS-terminating relay can't get a request accepted. Opt-in keeps plain HTTP clients and TLS-offloading front ends (which can't see the exporter) working; such clients must check the host certificate instead.
 - Every answer to an authenticated request carries `X-RHP-Proof`, a MAC over status, content type and body under a per-request key derived from the request's MAC, so the answer is tied to its request without the host keeping per-client state. The PSK itself never signs answers.
-- The gateway reads time through the host: idle expiry uses `config<>::clock`, the replay window uses the wall clock shifted by that clock's offset from `steady_clock` (zero by default). With a custom clock the idle timer re-checks every 25 ms instead of sleeping to a deadline it can't predict.
+- Idle expiry follows the host's `config<>::clock` through an offset from `steady_clock` that `pump()` samples into an atomic: the network thread never calls the user's clock, which may be advanced by the game thread. With a custom clock the idle timer re-checks every 25 ms instead of sleeping to a deadline it can't predict. Proof freshness and the replay window stay on the system clock: shifting them with a game clock would reject real clients, and a clock that jumps and returns would reopen the window for replays.
+- `host_options::http_require_binding` refuses unbound requests (signed 401), for hosts that want the native handshake's guarantee over HTTP.
 - `script_executed` carries a `peer` for every request; over HTTP it is that request's caller, since one logical session has many.
 
 ## Sources

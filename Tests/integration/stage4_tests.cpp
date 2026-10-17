@@ -350,9 +350,16 @@ TEST_CASE("stage4: a request still suspended at revert is audited as cancelled",
     auto sub = host->on<Rhp::event::script_executed>(scripts.handler());
     host.start();
     {
-        Rhp::client<loop_cfg> c{host.dial_at(at), k.as("patch"), k.dev()};
-        auto forever = c.async().exec("while true do rhp.next_frame() end");
-        std::this_thread::sleep_for(50ms); // it has started and suspended
+        std::atomic<bool> started{false};
+        Rhp::client_options watch;
+        watch.on_output = [&](std::uint64_t, std::string_view line) {
+            if (line.find("started") != std::string_view::npos) {
+                started = true;
+            }
+        };
+        Rhp::client<loop_cfg> c{host.dial_at(at), k.as("patch"), k.dev(), watch};
+        auto forever = c.async().exec("print('started') while true do rhp.next_frame() end");
+        REQUIRE(eventually([&] { return started.load(); })); // it ran and suspended
         CHECK(scripts.size() == 0);
     } // the last session closes: the identity is reverted with the request still suspended
     REQUIRE(eventually([&] { return scripts.size() == 1; }));

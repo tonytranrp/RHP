@@ -162,7 +162,8 @@ void respond(const http::http_reply& reply, const error& why, const answer_key& 
 // ---- gateway -----------------------------------------------------------------------------------
 
 struct http_gateway::impl {
-    impl(net::io_context& context, Rhp::limits budget, gateway_sink& s) : io(context), limits(budget), sink(s), replay(kReplayPerIdentity), idle_timer(context) {}
+    impl(net::io_context& context, Rhp::limits budget, gateway_sink& s, bool bind)
+        : io(context), limits(budget), sink(s), require_binding(bind), replay(kReplayPerIdentity), idle_timer(context) {}
 
     struct pending_request {
         http::http_reply reply;
@@ -188,6 +189,7 @@ struct http_gateway::impl {
     net::io_context& io;
     Rhp::limits limits;
     gateway_sink& sink;
+    bool require_binding = false;
     session::channel_policy policy;
     std::unique_ptr<net::listener> listener;
     std::map<std::uint64_t, connection> connections;
@@ -233,8 +235,13 @@ struct http_gateway::impl {
                                          r.head.header("x-rhp-channel"), r.binding};
         auto grant = sink.authorize(proof);
         if (grant) {
-            if (auto fresh = replay.admit(*grant, sink.wall_now()); !fresh) {
+            if (auto fresh = replay.admit(*grant); !fresh) {
                 grant = std::unexpected{std::move(fresh).error()};
+            } else if (require_binding && !grant->bound) {
+                // Genuine but unbound: answered (and signed), not run.
+                respond(reply, make_error(errc::kAuth, "this host accepts only HTTP proofs bound to their TLS connection (X-RHP-Channel: tls-exporter)", kWhere),
+                        grant->answer_key);
+                return;
             }
         }
         if (!grant) {
@@ -413,7 +420,8 @@ struct http_gateway::impl {
     }
 };
 
-http_gateway::http_gateway(net::io_context& io, Rhp::limits limits, gateway_sink& sink) : impl_(std::make_unique<impl>(io, limits, sink)) {}
+http_gateway::http_gateway(net::io_context& io, Rhp::limits limits, gateway_sink& sink, bool require_binding)
+    : impl_(std::make_unique<impl>(io, limits, sink, require_binding)) {}
 
 http_gateway::~http_gateway() {
     stop();

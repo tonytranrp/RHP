@@ -246,6 +246,7 @@ public:
         : setup_(std::move(s)),
           inbox_(setup_.options.inbox_capacity),
           outbox_(setup_.options.inbox_capacity) {
+        sample_clock();
         session_options_.limits = setup_.limits;
         session_options_.codec = setup_.codec;
         session_options_.platform = std::string{platform::kOsName};
@@ -445,6 +446,7 @@ public:
     // ---- pump thread ---------------------------------------------------------------------------------
 
     void pump() {
+        sample_clock();
         if (!setup_.io_thread) {
             io_.poll();
         }
@@ -518,7 +520,7 @@ private:
             gateway_error_ = std::move(policy).error();
             return;
         }
-        gateway_ = std::make_unique<http_gateway>(io_, setup_.limits, static_cast<gateway_sink&>(*this));
+        gateway_ = std::make_unique<http_gateway>(io_, setup_.limits, static_cast<gateway_sink&>(*this), setup_.options.http_require_binding);
         if (auto ok = gateway_->listen(std::move(*policy)); !ok) {
             gateway_error_ = std::move(ok).error();
             gateway_.reset();
@@ -529,19 +531,19 @@ private:
 
     [[nodiscard]] bool accepting() const noexcept override { return is_enabled() && !stopping_; }
 
-    [[nodiscard]] std::chrono::steady_clock::time_point steady_now() const override { return setup_.clock ? setup_.clock() : std::chrono::steady_clock::now(); }
-
-    // The wall clock shifted by how far the host's clock is from steady_clock (zero by default), so
-    // advancing a test clock moves the HTTP replay window with it.
-    [[nodiscard]] std::chrono::system_clock::time_point wall_now() const override {
-        const auto wall = std::chrono::system_clock::now();
-        if (!setup_.custom_clock) {
-            return wall;
-        }
-        return wall + std::chrono::duration_cast<std::chrono::system_clock::duration>(steady_now() - std::chrono::steady_clock::now());
+    [[nodiscard]] std::chrono::steady_clock::time_point steady_now() const noexcept override {
+        return std::chrono::steady_clock::now() + std::chrono::nanoseconds{clock_offset_ns_.load(std::memory_order_relaxed)};
     }
 
     [[nodiscard]] bool custom_clock() const noexcept override { return setup_.custom_clock; }
+
+    // Pump thread: how far the host's clock is from steady_clock, for the network thread's reads.
+    void sample_clock() noexcept {
+        if (setup_.custom_clock && setup_.clock) {
+            const auto offset = std::chrono::duration_cast<std::chrono::nanoseconds>(setup_.clock() - std::chrono::steady_clock::now());
+            clock_offset_ns_.store(offset.count(), std::memory_order_relaxed);
+        }
+    }
 
     [[nodiscard]] bool acquire_handshake() noexcept override {
         if (pending_handshakes_ >= setup_.limits.pending_handshakes) {
@@ -554,7 +556,7 @@ private:
     void release_handshake() noexcept override { --pending_handshakes_; }
 
     [[nodiscard]] result<security::http_grant> authorize(const security::http_proof& request) override {
-        return setup_.http_auth(request, wall_now());
+        return setup_.http_auth(request, std::chrono::system_clock::now());
     }
 
     [[nodiscard]] session_id open_http(const security::http_grant& grant, const http_peer& peer) override {
@@ -1935,6 +1937,8 @@ private:
     std::map<std::string, blob_sink, std::less<>> blob_sinks_;
     std::deque<outbound> outbox_backlog_;
     std::atomic<std::size_t> identity_count_{0};
+    // config<>::clock minus steady_clock, sampled by pump() (and at construction) for the gateway.
+    std::atomic<std::int64_t> clock_offset_ns_{0};
     // The audit record of the request request() is handling (reply_error fills in its outcome).
     event::script_executed* audit_ = nullptr;
     session_id audit_session_;
