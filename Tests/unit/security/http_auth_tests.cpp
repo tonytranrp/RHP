@@ -33,12 +33,14 @@ struct http_fixture {
 
 TEST_CASE("http proof grants the key's identity and role", "[security][http]") {
     const http_fixture f;
-    const auto header = f.sign();
+    const auto signed_at = std::chrono::system_clock::now();
+    const auto header = f.sign(signed_at);
     auto grant = verify_http_authorization(f.keys, f.request(header));
     REQUIRE(grant);
     CHECK(grant->identity == "dev");
     CHECK(grant->granted == Rhp::role::kPatch);
-    CHECK(grant->expires > std::chrono::system_clock::now() + Rhp::security::kHttpSkew);
+    // Remembered past the window measured from the proof's own time (not from a later now()).
+    CHECK(grant->expires > signed_at + Rhp::security::kHttpSkew);
     CHECK(f.sign() != header); // a fresh nonce every time
 }
 
