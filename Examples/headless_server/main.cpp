@@ -369,6 +369,7 @@ int main(int argc, char** argv) {
     const auto started = std::chrono::steady_clock::now();
     auto next_discovery_check = started;
     std::optional<Rhp::errc> discovery_problem; // reported once per change; the host keeps serving
+    const char* reason = "signal";              // why the loop ended, in the last line
     while (!g_stop.load()) {
         host.pump();
         if (o->advertise && std::chrono::steady_clock::now() >= next_discovery_check) {
@@ -388,12 +389,15 @@ int main(int argc, char** argv) {
         std::this_thread::sleep_for(std::chrono::milliseconds{16}); // ~60 frames a second
         std::error_code ec;
         if (!o->stop_file.empty() && std::filesystem::exists(o->stop_file, ec)) {
+            reason = "stop file";
             break;
         }
         if (o->seconds > 0 && std::chrono::steady_clock::now() - started > std::chrono::seconds{o->seconds}) {
+            reason = "time limit";
             break;
         }
     }
-    std::println("headless_server stopping (gravity {}, score {}, entities {})", game::g_gravity, game::g_score, game::g_entities);
+    const auto ran = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started);
+    std::println("headless_server stopping after {} ms ({}; gravity {}, score {}, entities {})", ran.count(), reason, game::g_gravity, game::g_score, game::g_entities);
     return 0;
 }
