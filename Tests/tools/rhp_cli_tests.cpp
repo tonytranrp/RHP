@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <format>
 #include <fstream>
+#include <iostream>
 #include <functional>
 #include <iterator>
 #include <mutex>
@@ -99,7 +100,19 @@ struct scratch_dir {
         fs::create_directories(path);
     }
     ~scratch_dir() {
+        // The processes' own logs (server.log, ...): ctest shows them with a failing case's output,
+        // the only way to see why a spawned host failed on a machine we can't log into (CI).
         std::error_code ec;
+        for (const auto& entry : fs::directory_iterator{path, ec}) {
+            if (entry.is_regular_file(ec) && entry.path().extension() == ".log") {
+                const auto text = read(entry.path().filename().string());
+                std::cout << "---- " << entry.path().filename().string() << " ----
+" << text.substr(0, 8192) << (text.size() > 8192 ? "
+[...]
+" : "
+");
+            }
+        }
         fs::remove_all(path, ec);
     }
     scratch_dir(const scratch_dir&) = delete;

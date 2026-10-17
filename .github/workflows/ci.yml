@@ -63,8 +63,9 @@ jobs:
         run: cmake --preset ${{ matrix.preset }}
       - name: Build
         run: cmake --build --preset ${{ matrix.preset }}
-      # Hosted Windows VMs have no working system DNS-SD resolution: real-multicast cases are left
-      # out here (Docs/TODO.md); they run on Linux runners and on developer machines.
+      # Hosted Windows and macOS VMs can't pass real multicast DNS-SD (no working system resolver on
+      # Windows; local-network restrictions on macOS): those cases are left out there (Docs/TODO.md)
+      # and run on Linux runners and on developer machines.
       - name: Test
         run: ctest --preset ${{ matrix.preset }} -j 4 --timeout 600 -LE multicast
 
@@ -85,19 +86,23 @@ jobs:
         run: |
           cmake --preset macos -DRHP_TLS_OPENSSL=OFF
           cmake --build --preset macos
-          ctest --preset macos -j 4 --timeout 600
+          ctest --preset macos -j 4 --timeout 600 -LE multicast
+      # The iOS steps run even when the macOS tests failed, so one run reports both platforms.
       - name: Boot an iOS simulator
+        if: ${{ !cancelled() }}
         run: |
           udid=$(xcrun simctl list devices available -j | python3 -c "import json,sys; d=json.load(sys.stdin)['devices']; print(next(x['udid'] for k,v in d.items() if 'iOS' in k for x in v if x['name'].startswith('iPhone')))")
           echo "RHP_SIM_DEVICE=$udid" >> "$GITHUB_ENV"
           xcrun simctl boot "$udid"
           xcrun simctl bootstatus "$udid" -b
       - name: iOS simulator (Mbed TLS)
+        if: ${{ !cancelled() }}
         run: |
           cmake --preset ios-sim
           cmake --build --preset ios-sim -- -quiet
-          ctest --preset ios-sim -j 2 --timeout 900
+          ctest --preset ios-sim -j 2 --timeout 900 -LE multicast
       - name: iOS device (build only)
+        if: ${{ !cancelled() }}
         run: |
           cmake --preset ios-device
           cmake --build --preset ios-device -- -quiet
