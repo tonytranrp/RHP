@@ -135,11 +135,13 @@ struct manual_clock {
     }
 };
 
-sandbox make_box(capture& out, Rhp::limits limits = {}, Rhp::script::clock_fn clock = {}) {
+sandbox make_box(capture& out, Rhp::limits limits = {}, Rhp::script::clock_fn clock = {},
+                 Rhp::script::handler_error_policy policy = Rhp::script::handler_error_policy::kReport) {
     fx::g_counter = 0;
     fx::g_stop = false;
     sandbox_options options;
     options.limits = limits;
+    options.handler_errors = policy;
     options.clock = std::move(clock);
     options.output = [&out](std::string_view line) {
         out.lines.emplace_back(line);
@@ -1159,7 +1161,7 @@ TEST_CASE("rhp.timer validates its arguments", "[script][scheduler]") {
 TEST_CASE("a failing timer callback faults its module", "[script][scheduler]") {
     manual_clock clock;
     capture out;
-    sandbox box = make_box(out, {}, clock.fn());
+    sandbox box = make_box(out, {}, clock.fn(), Rhp::script::handler_error_policy::kFault);
     const auto mod = box.load("tests.sched.timer_boom", "counter.value = 1 rhp.timer(0, function() error('timer boom') end, true)");
     REQUIRE(mod.has_value());
     CHECK(fx::g_counter == 1);
@@ -1402,7 +1404,7 @@ TEST_CASE("cancel(request) of a suspended request made inside a run is not lost"
 TEST_CASE("cancelling a timer or event request faults its module", "[script][scheduler]") {
     manual_clock clock;
     capture out;
-    sandbox box = make_box(out, {}, clock.fn());
+    sandbox box = make_box(out, {}, clock.fn(), Rhp::script::handler_error_policy::kFault);
 
     SECTION("event handler") {
         const auto mod = box.load("tests.sched.cancel_event", R"lua(

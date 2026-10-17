@@ -10,6 +10,7 @@
 #include <variant>
 #include <vector>
 
+#include <rhp/core/subscription.hpp>
 #include <rhp/event/events.hpp>
 
 namespace Rhp::event {
@@ -17,7 +18,7 @@ namespace Rhp::event {
 // The handlers of one host. Thread-safe: subscribe and unsubscribe from any thread; publish calls
 // matching handlers on the publishing thread, outside the lock (a handler may unsubscribe itself).
 // A handler that is running when it is unsubscribed may finish that one call.
-class hub {
+class hub final : public Rhp::subscribable {
 public:
     using handler = std::function<void(const any&)>;
     static constexpr std::size_t kAnyKind = std::variant_size_v<any>;
@@ -30,10 +31,11 @@ public:
         return id;
     }
 
-    void remove(std::uint64_t id) noexcept {
+    void unsubscribe(std::uint64_t id) noexcept override {
         const std::scoped_lock lock{mutex_};
         std::erase_if(entries_, [id](const entry& e) { return e.id == id; });
     }
+    void remove(std::uint64_t id) noexcept { unsubscribe(id); }
 
     // True if anyone listens to `kind` (lets the host skip building events nobody wants).
     [[nodiscard]] bool wants(std::size_t kind) const {
@@ -73,43 +75,8 @@ private:
     std::uint64_t last_ = 0;
 };
 
-// Keeps a handler subscribed for as long as it lives (move-only). Outliving the host is fine: it
-// then does nothing.
-class [[nodiscard]] subscription {
-public:
-    subscription() = default;
-    subscription(std::weak_ptr<hub> h, std::uint64_t id) noexcept : hub_(std::move(h)), id_(id) {}
-    ~subscription() { reset(); }
-
-    subscription(subscription&& other) noexcept : hub_(std::move(other.hub_)), id_(std::exchange(other.id_, 0)) {}
-    subscription& operator=(subscription&& other) noexcept {
-        if (this != &other) {
-            reset();
-            hub_ = std::move(other.hub_);
-            id_ = std::exchange(other.id_, 0);
-        }
-        return *this;
-    }
-    subscription(const subscription&) = delete;
-    subscription& operator=(const subscription&) = delete;
-
-    // Unsubscribes now.
-    void reset() noexcept {
-        if (id_ != 0) {
-            if (const auto h = hub_.lock()) {
-                h->remove(id_);
-            }
-            id_ = 0;
-        }
-        hub_.reset();
-    }
-
-    [[nodiscard]] bool active() const noexcept { return id_ != 0 && !hub_.expired(); }
-
-private:
-    std::weak_ptr<hub> hub_;
-    std::uint64_t id_ = 0;
-};
+// Keeps a handler subscribed for as long as it lives (move-only); see Rhp::subscription.
+using subscription = Rhp::subscription;
 
 template <host_event E, std::invocable<const E&> F>
 [[nodiscard]] subscription subscribe(const std::shared_ptr<hub>& h, F fn) {

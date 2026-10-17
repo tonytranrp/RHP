@@ -26,6 +26,7 @@
 #include <rhp/core/ids.hpp>
 #include <rhp/core/result.hpp>
 #include <rhp/core/role.hpp>
+#include <rhp/core/subscription.hpp>
 #include <rhp/script/detail/context.hpp>
 #include <rhp/script/detail/event_registry.hpp>
 #include <rhp/script/ledger.hpp>
@@ -40,12 +41,21 @@ using steady = std::chrono::steady_clock;
 
 inline constexpr int kNoRef = -2; // LUA_NOREF
 
+class sandbox_impl;
+
+// The sandbox that owns a Lua state (any of its threads).
+[[nodiscard]] sandbox_impl& impl_of(lua_State* L) noexcept;
+
 // Converts the Lua error object on top of the stack (popped) into an Rhp::error. `status` is the
 // lua_pcall / lua_resume status. Recovers the structured error raised by stack::raise.
 [[nodiscard]] error take_lua_error(lua_State* L, int status);
 
 // Message handler for lua_pcall: stores a traceback in the sandbox and returns the error unchanged.
 int traceback_handler(lua_State* L);
+
+// Milliseconds argument (>= 0) or a raised error naming `where`.
+double checked_ms(lua_State* L, int index, std::string_view where);
+steady::duration milliseconds(double ms);
 
 // Stops a run for good once a limit is hit: re-raised at every hook tick, so pcall can't swallow it.
 enum class sticky_stop : std::uint8_t {
@@ -94,8 +104,22 @@ enum class request_kind : std::uint8_t {
     kExec,
     kLoad, // a module's top level + on_load, for its first load or a reload
     kCall,
-    kTimer,
-    kEvent
+    kTimer, // rhp.timer / rhp.after / rhp.every
+    kEvent, // rhp.on / rhp.once
+    kFrame, // rhp.every_frame / rhp.every_frames
+    kTask   // rhp.spawn
+};
+
+// Requests that run a script's handler: a failure follows the handler error policy, not the fault policy.
+[[nodiscard]] constexpr bool is_handler(request_kind k) noexcept {
+    return k == request_kind::kTimer || k == request_kind::kEvent || k == request_kind::kFrame || k == request_kind::kTask;
+}
+
+// What a suspended request waits for besides a frame or a time.
+enum class wait_kind : std::uint8_t {
+    kNone,
+    kEvent, // rhp.wait_event: resumed by a delivery (woken) or its timeout (wake_time)
+    kTask   // task:join(): resumed when the task ends (woken)
 };
 
 // One script request: a coroutine the scheduler runs, suspends and resumes.
@@ -112,15 +136,43 @@ struct request_record {
     bool sliced = false;         // the hook yielded it at the end of a time slice
     std::uint64_t wake_frame = 0;
     std::optional<steady::time_point> wake_time; // script clock
+    int start_args = -1;                         // >= 0: not started yet; the first resume passes this many arguments (tasks)
+    bool woken = false;                          // a delivery or a joined task's end: resume at the next resume pass
+    wait_kind waiting = wait_kind::kNone;
+    std::string wait_event{};    // kEvent: the event waited for
+    std::uint64_t wait_task = 0; // kTask: the task joined
+    int resume_ref = kNoRef;     // kEvent: the delivered arguments, packed {n = count, ...}
+    // Handlers: what started it, for the overlap guard, rhp.off and failure reports.
+    std::uint64_t schedule_key = 0;
+    std::uint64_t task_key = 0;
+    std::uint64_t handler_seq = 0;
+    std::string source{}; // the event name, or "timer" / "frame" / "task"
+    handler_error_policy policy = handler_error_policy::kReport;
 };
 
-struct timer_record {
-    effect_owner owner;
+enum class schedule_kind : std::uint8_t {
+    kTimer, // script clock
+    kFrames // pump() count
+};
+
+// A timer or a frame callback: one call per due time, each as its own request.
+struct schedule_entry {
+    effect_owner owner{};
     int fn_ref = kNoRef;
-    steady::time_point due;
-    steady::duration interval{};
+    schedule_kind kind = schedule_kind::kTimer;
     bool repeating = false;
-    std::uint64_t seq = 0; // its ledger entry (the id rhp.off takes)
+    bool paused = false;
+    steady::time_point due{};             // timers: next call
+    steady::duration interval{};          // timers: period (or the one delay)
+    steady::duration remaining{};         // timers: left when paused
+    std::uint64_t next_frame = 0;         // frame callbacks: next call once frame_ >= next_frame
+    std::uint64_t every = 1;              // frame callbacks: pumps between calls
+    std::uint64_t remaining_frames = 0;   // frame callbacks: left when paused
+    std::uint32_t runs = 0;               // calls started
+    std::optional<std::uint32_t> times{}; // calls before it removes itself
+    handler_error_policy policy = handler_error_policy::kReport;
+    request_id active{};   // its latest call (no new call while that one is suspended)
+    std::uint64_t seq = 0; // its ledger entry (the id the script holds)
 };
 
 struct subscription {
@@ -128,6 +180,91 @@ struct subscription {
     effect_owner owner;
     int fn_ref = kNoRef;
     std::uint64_t seq = 0; // its ledger entry (the id rhp.off takes)
+    std::int64_t priority = 0;
+    bool once = false;
+    bool paused = false;
+    handler_error_policy policy = handler_error_policy::kReport;
+};
+
+enum class task_state : std::uint8_t {
+    kSuspended, // not started yet, or waiting
+    kRunning,
+    kDone,
+    kFailed,
+    kCancelled
+};
+
+[[nodiscard]] constexpr std::string_view to_string(task_state s) noexcept {
+    switch (s) {
+    case task_state::kSuspended: return "suspended";
+    case task_state::kRunning: return "running";
+    case task_state::kDone: return "done";
+    case task_state::kFailed: return "failed";
+    case task_state::kCancelled: return "cancelled";
+    }
+    return "unknown";
+}
+
+// An rhp.spawn task: one request of its own, owned by the spawning module.
+struct task_record {
+    std::uint64_t key = 0;
+    std::uint64_t seq = 0; // its ledger entry (the id the script holds)
+    effect_owner owner{};  // spawning module and revision
+    request_id request{};  // while it runs or waits
+    bool finished = false;
+    task_state state = task_state::kSuspended; // meaningful once finished
+    int results_ref = kNoRef;                  // kDone: the results, packed {n = count, ...}
+    std::optional<error> failure{};
+    std::vector<request_id> joiners{};
+    std::uint32_t handles = 0;     // live Lua handles (rhp.task userdata)
+    bool cancel_requested = false; // its end is a cancellation, not a failure
+};
+
+// An rhp.publish waiting for the next pump(), or for the C++ listeners at the end of one.
+struct queued_script_event {
+    std::string name;
+    module_id publisher{};
+    value_list args{};
+};
+
+// A failed handler call waiting for its policy.
+struct pending_failure {
+    effect_owner owner{};
+    request_kind kind = request_kind::kTimer;
+    std::string source{};
+    std::uint64_t handler_seq = 0;
+    handler_error_policy policy = handler_error_policy::kReport;
+    error err{};
+};
+
+// C++ callbacks for script events (sandbox::on_script_event). Shared so subscriptions may outlive
+// the sandbox; subscribe and unsubscribe from any thread.
+class script_listener_table final : public subscribable {
+public:
+    std::uint64_t add(std::string name, script_event_fn fn);
+    void unsubscribe(std::uint64_t id) noexcept override;
+    [[nodiscard]] bool empty() const noexcept { return count_.load(std::memory_order_acquire) == 0; }
+    // The callbacks for `name` ("*" entries included), copied out under the lock.
+    [[nodiscard]] std::vector<std::shared_ptr<script_event_fn>> matching(std::string_view name) const;
+
+private:
+    struct entry {
+        std::uint64_t id = 0;
+        std::string name; // "*" = every name
+        std::shared_ptr<script_event_fn> fn;
+    };
+
+    mutable std::mutex mutex_;
+    std::vector<entry> entries_;
+    std::uint64_t last_ = 0;
+    std::atomic<std::size_t> count_{0};
+};
+
+// Options from the table a script passes last (rhp.every(ms, fn, {times = 3})).
+struct handler_opts {
+    std::optional<std::uint32_t> times{};
+    std::int64_t priority = 0;
+    std::optional<handler_error_policy> on_error{};
 };
 
 class sandbox_impl final : public context, public event_listener {
@@ -148,8 +285,8 @@ public:
 
     // ---- event_listener ------------------------------------------------------------------------
     [[nodiscard]] std::thread::id listener_thread() const noexcept override { return thread_.load(std::memory_order_acquire); }
-    void deliver(std::string_view event, event_pusher args) override;
-    void enqueue(std::string_view event, std::function<int(stack&)> args) noexcept override;
+    void deliver(std::string_view event, const event_args& args) override;
+    void enqueue(std::string_view event, const event_args& args) noexcept override;
 
     // ---- sandbox operations ------------------------------------------------------------------
     result<void> install_lib(std::string_view name, c_function build, std::string (*describe)(role));
@@ -177,6 +314,8 @@ public:
     [[nodiscard]] std::size_t memory_used() const noexcept { return memory_used_; }
     [[nodiscard]] const ledger& effects() const noexcept { return ledger_; }
     [[nodiscard]] std::string stubs() const;
+    [[nodiscard]] Rhp::subscription on_script_event(std::string_view name, script_event_fn fn);
+    [[nodiscard]] sandbox_stats stats() const noexcept;
 
     // ---- used by stack.cpp, the hook, the allocator and the Lua-side builtins -------------------
     struct raised_error {
@@ -196,13 +335,44 @@ public:
     // The request whose own thread is `L` and may yield right now; raises (naming `what`) otherwise.
     request_record& suspendable(lua_State* L, std::string_view what);
     [[nodiscard]] steady::time_point script_now() const;
-    // rhp.timer / rhp.on / rhp.off / require: push their result or raise.
-    std::uint64_t add_timer(lua_State* L, double ms, int fn_index, bool repeating);
-    std::uint64_t subscribe(lua_State* L, std::string_view event, int fn_index);
+    // The request running right now (innermost), or nullptr.
+    [[nodiscard]] request_record* running_request() noexcept;
+
+    // The Lua-side builtins (sandbox.cpp, schedule.cpp, script_events.cpp, tasks.cpp): push their
+    // result or raise.
+    std::uint64_t add_timer(lua_State* L, double ms, int fn_index, bool repeating, const handler_opts& opts, std::string label);
+    std::uint64_t add_frames(lua_State* L, std::uint64_t every, int fn_index, const handler_opts& opts);
+    std::uint64_t subscribe(lua_State* L, std::string_view event, int fn_index, bool once, const handler_opts& opts);
     void remove_by_id(lua_State* L, std::uint64_t seq);
+    void set_paused(lua_State* L, std::uint64_t seq, bool paused);
+    void reschedule(lua_State* L, std::uint64_t seq, double interval);
+    void push_timers(lua_State* L);
+    bool publish(lua_State* L, std::string_view event, int first_arg);
+    int wait_event(lua_State* L, std::string_view event, std::optional<double> timeout_ms);
+    int finish_wait_event(lua_State* L); // the continuation of rhp.wait_event
+    void push_stats(lua_State* L);
     void push_required(lua_State* L, std::string_view name);
-    // Called by the effects behind rhp.timer / rhp.on when they are undone or destroyed.
-    void remove_timer(std::uint64_t key) noexcept;
+    // Reads the options table at `index` (none / nil: defaults); raises naming `where`.
+    static constexpr unsigned kOptTimes = 1;
+    static constexpr unsigned kOptPriority = 2;
+    static constexpr unsigned kOptOnError = 4;
+    handler_opts read_opts(lua_State* L, int index, std::string_view where, unsigned allowed);
+
+    // Tasks (tasks.cpp).
+    void spawn(lua_State* L);
+    void push_tasks(lua_State* L);
+    [[nodiscard]] task_record* task(std::uint64_t key) noexcept;
+    [[nodiscard]] task_record* task_by_seq(std::uint64_t seq) noexcept;
+    [[nodiscard]] std::string_view task_status(const task_record& t) const noexcept;
+    bool cancel_task(std::uint64_t key, std::string_view why);
+    int join_task(lua_State* L, std::uint64_t key);   // pushes the results, raises, or yields
+    int finish_join(lua_State* L, std::uint64_t key); // the continuation of a join
+    void push_task_handle(lua_State* L, task_record& t);
+    void handle_released(std::uint64_t key) noexcept; // a task handle was collected
+    [[nodiscard]] bool closing() const noexcept { return closing_; }
+
+    // Called by the effects behind the schedule and subscriptions when undone or destroyed.
+    void remove_schedule(std::uint64_t key) noexcept;
     void unsubscribe(const std::string& event, std::uint64_t key) noexcept;
 
     static void* allocate(void* ud, void* ptr, std::size_t old_size, std::size_t new_size) noexcept;
@@ -221,6 +391,7 @@ private:
     };
 
     void open_libraries();
+    void open_stage7_libraries(); // the task metatable (tasks.cpp)
     void reset_hook() noexcept;
     [[nodiscard]] std::uint32_t check_interval() const noexcept;
     void check_cancels() noexcept;
@@ -261,8 +432,42 @@ private:
     void drain();
     // Runs `op` now, or queues it if a run is active (returns true when queued).
     bool defer_if_running(std::function<void()> op);
-    void fire_timers();
+    void fire_schedule();
+    void fire_entry(std::uint64_t key, steady::time_point now);
     void resume_ready();
+
+    // Every request's end (complete() and abandon_requests()): waiters, joiners, tasks, overlap guards.
+    // `abandoned`: ended by abandon_requests (its module is going away), not by its own outcome.
+    void request_ended(request_record& req, const result<value_list>* outcome, bool abandoned) noexcept;
+    void finish_task(request_record& req, const result<value_list>* outcome, bool abandoned) noexcept;
+    void stop_waiting(request_record& req) noexcept;
+    // Ends one suspended request (abandon_requests for a single id).
+    void abandon_request(request_id id, std::string_view why);
+    // A handler request failed: apply its policy now, or when the run around it ends.
+    void handler_failed_or_defer(const request_record& req, error err);
+    void apply_failure(pending_failure f);
+    // Interest in an event name (subscriptions and waiters) attaches to a C++ event while any exists.
+    // `state` is nullptr for script events.
+    void acquire_interest(std::string_view event, event_state* state);
+    void release_interest(const std::string& event) noexcept;
+    // Resolves a name for rhp.on / rhp.wait_event: the C++ event's state, nullptr for a script
+    // event, or raises (a name two C++ events share, a name that isn't dotted lowercase).
+    event_state* resolve_event(lua_State* L, std::string_view event, std::string_view where);
+    // Runs the handlers and wakes the waiters of one delivery. `values` is set for script events.
+    void deliver_now(std::string_view event, event_pusher args, module_id publisher, const value_list* values);
+    // Queues a script event for the next pump(); false when limits.event_queue is full.
+    bool queue_script_event(std::string name, module_id publisher, value_list args);
+    void call_listeners();
+    void report_failures();
+    // Packs the `n` values on top of L into a registry table {n = n, ...} (pops them).
+    int pack_top(lua_State* L, int n);
+    // Pushes a packed table's values onto L; returns how many.
+    int unpack_ref(lua_State* L, int ref);
+    [[nodiscard]] schedule_entry* schedule_by_seq(std::uint64_t seq) noexcept;
+    [[nodiscard]] subscription* subscription_by_seq(std::uint64_t seq) noexcept;
+    // The calling module owns the ledger entry `seq`.
+    [[nodiscard]] bool owns_entry(std::uint64_t seq) const noexcept;
+    void output_for(request_id request, module_id mod, std::string_view line);
 
     revert_report revert_module(module_record& mod);
     revert_report unload_module(module_record& mod);
@@ -287,14 +492,25 @@ private:
     request_id last_request_;
     request_id last_resumed_; // round robin in resume_ready()
     std::uint64_t frame_ = 0;
-    std::map<std::uint64_t, timer_record> timers_;
-    std::uint64_t timer_keys_ = 0;
+    std::map<std::uint64_t, schedule_entry> schedule_;
+    std::uint64_t schedule_keys_ = 0;
     std::map<std::string, std::vector<subscription>, std::less<>> subscriptions_;
+    std::map<std::string, std::vector<request_id>, std::less<>> waiters_; // rhp.wait_event
     std::map<std::string, event_state*, std::less<>> attached_;
     std::uint64_t subscription_keys_ = 0;
+    std::map<std::uint64_t, task_record> tasks_;
+    std::uint64_t task_keys_ = 0;
+    std::vector<std::uint64_t> collected_tasks_;     // handles collected (__gc only appends)
+    bool closing_ = false;                           // the destructor runs: __gc does nothing
+    std::vector<queued_script_event> script_events_; // for the next pump()
+    std::uint64_t handler_failures_ = 0;
+    std::shared_ptr<script_listener_table> listeners_ = std::make_shared<script_listener_table>();
 
     // Work applied when no run is active.
     std::vector<std::pair<effect_owner, error>> pending_faults_;
+    std::vector<pending_failure> pending_failures_;
+    std::vector<handler_failure> failure_reports_;
+    std::vector<queued_script_event> listener_calls_;
     std::vector<std::function<void()>> deferred_;
     std::vector<std::pair<request_id, result<value_list>>> finished_;
 
@@ -310,6 +526,7 @@ private:
     std::mutex inbox_mutex_; // guards cancel_ids_ and inbox_
     std::vector<request_id> cancel_ids_;
     std::vector<std::pair<std::string, std::function<int(stack&)>>> inbox_;
+    std::atomic<std::uint64_t> dropped_events_{0};
 };
 
 } // namespace Rhp::script::detail

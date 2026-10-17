@@ -211,15 +211,100 @@ function rhp.sleep(ms) end
 ---@return integer id
 function rhp.timer(ms, fn, repeating) end
 
----Calls `handler` each time C++ fires the event. Removed when this module is reverted.
+---Calls `fn` once after `ms` milliseconds. Removed when this module is reverted.
+---@param ms number
+---@param fn fun()
+---@param opts? rhp.handler_options
+---@return integer id
+function rhp.after(ms, fn, opts) end
+
+---Calls `fn` every `ms` milliseconds, at most once per pump(); `opts.times` limits the calls.
+---@param ms number
+---@param fn fun()
+---@param opts? rhp.handler_options
+---@return integer id
+function rhp.every(ms, fn, opts) end
+
+---Calls `fn` every pump(), starting with the next one. Removed when this module is reverted.
+---@param fn fun()
+---@param opts? rhp.handler_options
+---@return integer id
+function rhp.every_frame(fn, opts) end
+
+---Calls `fn` every `frames` pump() calls (the first `frames` pumps from now).
+---@param frames integer
+---@param fn fun()
+---@param opts? rhp.handler_options
+---@return integer id
+function rhp.every_frames(frames, fn, opts) end
+
+---Stops a timer, frame callback or subscription of this module from firing until rhp.resume(id).
+---@param id integer
+function rhp.pause(id) end
+
+---Lets a paused timer, frame callback or subscription fire again (timers keep their remaining time).
+---@param id integer
+function rhp.resume(id) end
+
+---Sets a timer's interval (milliseconds) or a frame callback's period (frames) and restarts its countdown.
+---@param id integer
+---@param interval number
+function rhp.reschedule(id, interval) end
+
+---This module's timers and frame callbacks.
+---@return rhp.schedule_info[]
+function rhp.timers() end
+
+---Calls `handler` each time the event fires: a C++ event of that name, else an rhp.publish of this identity. Removed when this module is reverted.
 ---@param event string
 ---@param handler fun(...)
+---@param opts? rhp.handler_options
 ---@return integer id
-function rhp.on(event, handler) end
+function rhp.on(event, handler, opts) end
 
----Removes a timer or event subscription made by this module.
+---Like rhp.on, removed after the first delivery.
+---@param event string
+---@param handler fun(...)
+---@param opts? rhp.handler_options
+---@return integer id
+function rhp.once(event, handler, opts) end
+
+---Calls `handler` with a table describing each failed timer, frame callback, event handler or task of this identity.
+---@param handler fun(failure: rhp.handler_failure)
+---@param opts? rhp.handler_options
+---@return integer id
+function rhp.on_error(handler, opts) end
+
+---Removes a timer, frame callback or subscription, or cancels a task, made by this module.
 ---@param id integer
 function rhp.off(id) end
+
+---Delivers an event to every rhp.on / rhp.once / rhp.wait_event of this identity at the next pump(). Values are copied (no functions or userdata). Returns false if the event queue was full.
+---@param event string
+---@param ... any
+---@return boolean queued
+function rhp.publish(event, ...) end
+
+---Suspends this script until `event` fires (a C++ event or an rhp.publish); returns true and its arguments, or false, "timeout" after `timeout_ms`.
+---@param event string
+---@param timeout_ms? number
+---@return boolean fired
+---@return any ...
+function rhp.wait_event(event, timeout_ms) end
+
+---Runs `fn(...)` as a background task of this module, starting at the next pump(). Cancelled when this module is reverted.
+---@param fn fun(...): ...
+---@param ... any
+---@return rhp.task
+function rhp.spawn(fn, ...) end
+
+---This module's tasks that have not finished.
+---@return rhp.task[]
+function rhp.tasks() end
+
+---Queue and handler counters of this identity's sandbox.
+---@return rhp.stats
+function rhp.stats() end
 
 ---Streams a value to the host while the script keeps running.
 ---@param value any
@@ -233,6 +318,49 @@ function rhp.frame() end
 ---@param name string
 ---@return table
 function require(name) end
+
+---@class rhp.handler_options
+---@field times? integer calls before it removes itself (rhp.every, frame callbacks)
+---@field priority? integer higher runs first (rhp.on, rhp.once); ties keep subscription order
+---@field on_error? "report"|"remove"|"fault" what a failing call does (default: the sandbox's policy)
+
+---@class rhp.schedule_info
+---@field id integer
+---@field kind "timer"|"frames"
+---@field interval number milliseconds, or frames
+---@field remaining number milliseconds, or frames
+---@field runs integer
+---@field times? integer
+---@field repeating boolean
+---@field paused boolean
+---@field running boolean
+
+---@class rhp.task
+---@field id integer
+---@field status fun(self: rhp.task): "suspended"|"running"|"done"|"failed"|"cancelled"
+---@field cancel fun(self: rhp.task): boolean
+---@field join fun(self: rhp.task): ...
+
+---@class rhp.handler_failure
+---@field module string
+---@field kind "timer"|"frame"|"event"|"task"
+---@field source string
+---@field id integer
+---@field action "report"|"remove"|"fault"
+---@field code string
+---@field message string
+---@field where string
+---@field traceback string
+
+---@class rhp.stats
+---@field dropped_events integer
+---@field queued_events integer
+---@field timers integer
+---@field subscriptions integer
+---@field tasks integer
+---@field waiting integer
+---@field handler_failures integer
+---@field memory integer
 
 ---@class rhp.module
 ---@field on_load? fun()

@@ -19,6 +19,7 @@
 #include <rhp/core/limits.hpp>
 #include <rhp/core/result.hpp>
 #include <rhp/core/role.hpp>
+#include <rhp/core/subscription.hpp>
 #include <rhp/core/value.hpp>
 #include <rhp/script/detail/lib_builder.hpp>
 #include <rhp/script/ledger.hpp>
@@ -66,6 +67,73 @@ struct module_info {
     std::vector<module_id> dependencies{}; // modules this one require()s
 };
 
+// What a failing timer, frame callback, event handler or task does (rhp.* `on_error` option,
+// sandbox_options::handler_errors). A memory stop always faults: the state's memory is shared.
+enum class handler_error_policy : std::uint8_t {
+    kReport, // report it and undo what that one call did; the handler and its module stay
+    kRemove, // the same, and remove the handler
+    kFault   // fault the module (revert it, kFaulted until reloaded), as any request failure
+};
+
+[[nodiscard]] constexpr std::string_view to_string(handler_error_policy p) noexcept {
+    switch (p) {
+    case handler_error_policy::kReport: return "report";
+    case handler_error_policy::kRemove: return "remove";
+    case handler_error_policy::kFault: return "fault";
+    }
+    return "unknown";
+}
+
+enum class handler_kind : std::uint8_t {
+    kTimer, // rhp.timer / rhp.after / rhp.every
+    kFrame, // rhp.every_frame / rhp.every_frames
+    kEvent, // rhp.on / rhp.once
+    kTask   // rhp.spawn
+};
+
+[[nodiscard]] constexpr std::string_view to_string(handler_kind k) noexcept {
+    switch (k) {
+    case handler_kind::kTimer: return "timer";
+    case handler_kind::kFrame: return "frame";
+    case handler_kind::kEvent: return "event";
+    case handler_kind::kTask: return "task";
+    }
+    return "unknown";
+}
+
+// One failed handler call (sandbox_options::on_handler_error).
+struct handler_failure {
+    request_id request{};
+    module_id module{};
+    std::string module_name{};
+    handler_kind kind = handler_kind::kTimer;
+    std::string source{};   // the event name, or "timer" / "frame" / "task"
+    std::uint64_t handler = 0; // the id the script holds (rhp.off), 0 if none
+    handler_error_policy action = handler_error_policy::kReport; // what was done
+    error err{};
+};
+
+// One rhp.publish as C++ sees it (sandbox::on_script_event). Views are valid during the call only.
+struct script_event {
+    std::string_view name{};
+    module_id module{};             // the publishing module (0: the sandbox itself, e.g. rhp.handler_failed)
+    std::string_view module_name{}; // empty when module is 0 or it was unloaded meanwhile
+    std::span<const value> args{};
+};
+
+using script_event_fn = std::function<void(const script_event&)>;
+
+// Counters of one sandbox (sandbox::stats, rhp.stats()).
+struct sandbox_stats {
+    std::uint64_t dropped_events = 0;   // queued events refused because limits.event_queue was full
+    std::size_t queued_events = 0;      // waiting for the next pump()
+    std::size_t schedule_entries = 0;   // timers and frame callbacks
+    std::size_t subscriptions = 0;      // rhp.on / rhp.once handlers
+    std::size_t tasks = 0;              // unfinished rhp.spawn tasks
+    std::size_t waiting = 0;            // requests in rhp.wait_event or task:join()
+    std::uint64_t handler_failures = 0; // handler calls that failed so far
+};
+
 // Tag for unload(mod, Rhp::script::force): unload even if other modules require this one.
 struct force_t {
     explicit constexpr force_t() = default;
@@ -94,6 +162,12 @@ struct sandbox_options {
     clock_fn clock{};
     // Shown in errors and module listings.
     std::string identity = "local";
+    // What a failing timer, frame callback, event handler or task does when it sets no on_error.
+    handler_error_policy handler_errors = handler_error_policy::kReport;
+    // Receives every failed handler call, on the sandbox's thread at the end of the operation,
+    // pump() or game-code event fire it failed in (it may re-enter the sandbox); empty = one
+    // "[handler failed] ..." line through on_output / output.
+    std::function<void(const handler_failure&)> on_handler_error{};
 };
 
 namespace detail {
@@ -224,6 +298,14 @@ public:
     [[nodiscard]] std::size_t memory_used() const noexcept;
     [[nodiscard]] const ledger& effects() const noexcept;
 
+    // Calls fn for every rhp.publish of `name` ("*": every name) this sandbox delivers, at the end of
+    // the pump() that delivered it, until the returned subscription dies (it may outlive the
+    // sandbox). Thread-safe to subscribe and unsubscribe; fn runs on the sandbox's thread and may
+    // re-enter the sandbox. With RHP_ENABLE=0 it is never called.
+    [[nodiscard]] Rhp::subscription on_script_event(std::string_view name, script_event_fn fn);
+
+    [[nodiscard]] sandbox_stats stats() const noexcept;
+
     // LuaLS annotations for everything this identity can use: the rhp API and every installed lib,
     // filtered by caller_role().
     [[nodiscard]] std::string stubs() const;
@@ -237,6 +319,20 @@ private:
 };
 
 } // namespace Rhp::script
+
+template <>
+struct std::formatter<Rhp::script::handler_error_policy> : std::formatter<std::string_view> {
+    auto format(Rhp::script::handler_error_policy p, std::format_context& ctx) const {
+        return std::formatter<std::string_view>::format(Rhp::script::to_string(p), ctx);
+    }
+};
+
+template <>
+struct std::formatter<Rhp::script::handler_kind> : std::formatter<std::string_view> {
+    auto format(Rhp::script::handler_kind k, std::format_context& ctx) const {
+        return std::formatter<std::string_view>::format(Rhp::script::to_string(k), ctx);
+    }
+};
 
 template <>
 struct std::formatter<Rhp::script::module_state> : std::formatter<std::string_view> {

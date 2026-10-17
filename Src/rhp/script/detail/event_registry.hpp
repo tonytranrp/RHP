@@ -10,6 +10,7 @@
 #include <vector>
 
 #include <rhp/core/result.hpp>
+#include <rhp/core/value.hpp>
 
 namespace Rhp::script {
 
@@ -27,24 +28,27 @@ struct event_pusher {
 };
 
 // The arguments of one fire(), type-erased: `push` reads them in place, `own` copies them into a
-// function that outlives the call (for listeners on other threads).
+// function that outlives the call (for listeners on other threads), `values` converts them
+// (Rhp::to_value; nil for an argument without a conversion) for listeners outside Lua.
 struct event_args {
     const void* data = nullptr;
     int (*push)(stack& s, const void* data) = nullptr;
     std::function<int(stack&)> (*own)(const void* data) = nullptr;
+    std::vector<value> (*values)(const void* data) = nullptr;
 };
 
-// A sandbox subscribed to an event.
+// A sandbox (or a host forwarding events to its clients) subscribed to an event.
 class event_listener {
 public:
     // The thread that owns the listener's Lua state (the thread that calls its pump()).
     [[nodiscard]] virtual std::thread::id listener_thread() const noexcept = 0;
 
     // On the listener's thread: run the subscribed handlers now.
-    virtual void deliver(std::string_view event, event_pusher args) = 0;
+    virtual void deliver(std::string_view event, const event_args& args) = 0;
 
-    // From any other thread, under the event's lock: queue for the listener's next pump().
-    virtual void enqueue(std::string_view event, std::function<int(stack&)> args) noexcept = 0;
+    // From any other thread, under the event's lock: queue (a copy of what the listener needs) for
+    // its next pump().
+    virtual void enqueue(std::string_view event, const event_args& args) noexcept = 0;
 
 protected:
     event_listener() = default;

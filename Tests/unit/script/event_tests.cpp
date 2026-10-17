@@ -89,11 +89,14 @@ namespace fx = event_tests_fixtures;
 struct capture {
     std::vector<std::string> lines;
     std::vector<std::pair<Rhp::request_id, Rhp::result<value_list>>> results;
+    std::vector<Rhp::script::handler_failure> failures;
 };
 
-sandbox make_box(capture& out, Rhp::limits limits = {}) {
+sandbox make_box(capture& out, Rhp::limits limits = {}, Rhp::script::handler_error_policy policy = Rhp::script::handler_error_policy::kReport) {
     sandbox_options options;
     options.limits = limits;
+    options.handler_errors = policy;
+    options.on_handler_error = [&out](const Rhp::script::handler_failure& f) { out.failures.push_back(f); };
     options.output = [&out](std::string_view line) { out.lines.emplace_back(line); };
     options.on_result = [&out](Rhp::request_id id, const Rhp::result<value_list>& r) { out.results.emplace_back(id, r); };
     sandbox box{std::move(options)};
@@ -234,7 +237,7 @@ TEST_CASE("handlers run in subscription order, each as its own request", "[scrip
 TEST_CASE("a failing handler faults only its own module, at once outside a run", "[script][events]") {
     fx::g_counter = 0;
     capture out;
-    sandbox box = make_box(out);
+    sandbox box = make_box(out, {}, Rhp::script::handler_error_policy::kFault);
     const auto bad = box.load("tests.events.bad", R"lua(
         counter.value = 1
         rhp.on("tests.events.ping", function() error("handler failed") end)
@@ -277,7 +280,7 @@ TEST_CASE("handlers may wait", "[script][events]") {
 TEST_CASE("an event fired inside a run is delivered within it", "[script][events]") {
     fx::g_counter = 0;
     capture out;
-    sandbox box = make_box(out);
+    sandbox box = make_box(out, {}, Rhp::script::handler_error_policy::kFault);
     const auto counting = box.load("tests.events.counting", "rhp.on('tests.events.ping', function(n) counter.value = counter.value + n end)");
     REQUIRE(counting.has_value());
     CHECK(box.exec<int>("trigger.ping(5) return counter.value") == 5);
@@ -344,7 +347,8 @@ TEST_CASE("rhp.on validates the event and the handler", "[script][events]") {
     sandbox box = make_box(out);
     fx::dup_int.fire(1);
     fx::dup_double.fire(1.0);
-    CHECK(code_of(box.exec("rhp.on('tests.events.nope', function() end)")) == errc::kNotFound);
+    CHECK(code_of(box.exec("rhp.on('Not An Event', function() end)")) == errc::kInvalidArgument);
+    CHECK(code_of(box.exec("rhp.on('tests.events.nope', function() end)")) == errc::kOk); // a script event
     CHECK(code_of(box.exec("rhp.on('tests.events.dup', function() end)")) == errc::kAlreadyLoaded);
     CHECK(code_of(box.exec("rhp.on('tests.events.ping', 5)")) == errc::kTypeMismatch);
     CHECK(code_of(box.exec("rhp.on(5, function() end)")) == errc::kTypeMismatch);
@@ -410,12 +414,15 @@ TEST_CASE("a handler can unsubscribe a later handler of the same delivery", "[sc
     CHECK(out.lines == std::vector<std::string>{"first"});
     CHECK(box.status(*mod)->effects == 1);
 
-    // Next time the id is unknown: rhp.off fails, which faults the module (and drops its handler).
+    // Next time the id is unknown: rhp.off fails, which is reported (the handler and its module stay).
     fx::ping.fire(0, "");
     CHECK(out.lines == std::vector<std::string>{"first", "first"});
-    CHECK(box.status(*mod)->state == module_state::kFaulted);
-    CHECK(box.status(*mod)->fault->code == errc::kNotFound);
-    CHECK(fx::ping.listeners() == 0);
+    CHECK(box.status(*mod)->state == module_state::kActive);
+    REQUIRE(out.failures.size() == 1);
+    CHECK(out.failures[0].err.code == errc::kNotFound);
+    CHECK(out.failures[0].kind == Rhp::script::handler_kind::kEvent);
+    CHECK(out.failures[0].source == "tests.events.ping");
+    CHECK(fx::ping.listeners() == 1);
 }
 
 TEST_CASE("handlers from game code have their own budget", "[script][events]") {
@@ -430,14 +437,14 @@ TEST_CASE("handlers from game code have their own budget", "[script][events]") {
     REQUIRE(spin.has_value());
     REQUIRE(busy.has_value());
     fx::ping.fire(0, "");
-    const auto info = box.status(*spin);
-    CHECK(info->state == module_state::kFaulted);
-    REQUIRE(info->fault.has_value());
-    CHECK(info->fault->code == errc::kBudgetExceeded);
-    for (int i = 0; i < 10; ++i) { // ~10 x 10k instructions in total, each delivery fits
+    CHECK(box.status(*spin)->state == module_state::kActive); // reported, not faulted
+    REQUIRE(out.failures.size() == 1);
+    CHECK(out.failures[0].err.code == errc::kBudgetExceeded);
+    for (int i = 0; i < 10; ++i) { // each delivery has a budget of its own
         fx::ping.fire(0, "");
     }
     CHECK(out.lines.size() == 11);
+    CHECK(out.failures.size() == 11);
     CHECK(box.status(*busy)->state == module_state::kActive);
 }
 

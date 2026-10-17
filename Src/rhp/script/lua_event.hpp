@@ -7,7 +7,10 @@
 #include <string_view>
 #include <tuple>
 #include <type_traits>
+#include <vector>
 
+#include <rhp/core/convert.hpp>
+#include <rhp/core/value.hpp>
 #include <rhp/script/detail/event_registry.hpp>
 #include <rhp/script/detail/lib_builder.hpp>
 #include <rhp/script/lib.hpp>
@@ -79,7 +82,7 @@ public:
             return;
         }
         const refs_t refs{args...};
-        state_.fire(name, script::detail::event_args{&refs, &push_refs, &own_refs});
+        state_.fire(name, script::detail::event_args{&refs, &push_refs, &own_refs, &value_refs});
 #else
         ((void)args, ...);
 #endif
@@ -109,6 +112,19 @@ private:
     static std::function<int(script::stack&)> own_refs(const void* data) {
         owned_t copy = std::apply([](const Args&... v) { return owned_t{v...}; }, *static_cast<const refs_t*>(data));
         return [copy = std::move(copy)](script::stack& s) { return push_all(s, copy); };
+    }
+
+    template <class T>
+    static value to_value_or_nil(const T& v) {
+        if constexpr (to_value_convertible<T>) {
+            return Rhp::to_value(v);
+        } else {
+            return value{};
+        }
+    }
+
+    static std::vector<value> value_refs(const void* data) {
+        return std::apply([](const auto&... v) { return std::vector<value>{to_value_or_nil(v)...}; }, *static_cast<const refs_t*>(data));
     }
 
     static inline constinit script::detail::event_state state_{};
