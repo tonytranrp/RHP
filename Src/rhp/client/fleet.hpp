@@ -2,18 +2,23 @@
 
 #include <chrono>
 #include <concepts>
-#include <condition_variable>
 #include <cstddef>
 #include <functional>
-#include <memory>
-#include <mutex>
 #include <optional>
+#include <span>
+#include <stop_token>
+#include <string>
 #include <string_view>
-#include <thread>
 #include <utility>
 #include <vector>
 
 #include <rhp/client/client.hpp>
+#include <rhp/client/detail/fleet_engine.hpp>
+#include <rhp/core/convert.hpp>
+#include <rhp/core/error.hpp>
+#include <rhp/core/ids.hpp>
+#include <rhp/core/result.hpp>
+#include <rhp/core/value.hpp>
 #include <rhp/net/discovery.hpp>
 #include <rhp/wire/ops.hpp>
 
@@ -22,13 +27,6 @@ namespace Rhp {
 // What a broadcast can collect from each host: the raw return values, or one converted value.
 template <class T>
 concept broadcastable = std::same_as<T, value_list> || from_value_convertible<T>;
-
-struct fleet_options {
-    client_options client{};
-    std::chrono::milliseconds timeout{10000}; // per broadcast, shared by every host; zero waits without a deadline
-    net::tls_mode tls = net::tls_mode::kAuto;
-    bool insecure_lan = false; // the caller's opt-in only: never taken from discovery records
-};
 
 template <broadcastable T>
 struct host_result {
@@ -71,190 +69,224 @@ template <configuration Cfg = config<>>
     return discover<Cfg>(std::move(options), [] {});
 }
 
-// A group of hosts addressed together: exec() starts the script on every member, then collects
-// one outcome per host within the shared deadline (a slow or failed host never hides the others).
-// Members keep their authenticated sessions and effects between broadcasts; clear() or
-// destruction ends them. One caller thread.
+// A group of hosts addressed together. A broadcast (exec, load, call) starts the request on every
+// member, then collects one outcome per host, in member order, within the shared deadline
+// (fleet_options::timeout): a slow or failed host never hides the others, and one that missed the
+// deadline gets kTimeout (its request is cancelled). Members keep their authenticated sessions and
+// effects between broadcasts; one whose session closed for good is replaced on the next broadcast
+// or discovery; clear() or destruction ends them.
+//
+// Every member runs on the fleet's one network reactor: one I/O thread for the whole fleet with
+// io<owned_io_thread>, none with io<zero_threads> (then the broadcasts and discover() run it, and
+// poll() does while idle). The fleet itself is used from one thread. client_options callbacks
+// (on_output, on_emit) run on the network thread: never call the fleet from them.
+//
+// With RHP_ENABLE=0 every outcome is kDisabled.
 template <configuration Cfg = config<>>
 class fleet {
-    using member_cfg = typename Cfg::template errors<errors::expected>;
-    using member_client = client<member_cfg>;
-
 public:
     template <class T>
     using return_t = typename Cfg::template return_t<T>;
+    using signing_key_t = typename Cfg::signing_key_t;
 
-    explicit fleet(typename Cfg::credential_t identity, fleet_options options = {}) : identity_(std::move(identity)), options_(std::move(options)) {}
-    fleet(typename Cfg::credential_t identity, typename Cfg::signing_key_t signing, fleet_options options = {})
-        : identity_(std::move(identity)), signing_(std::move(signing)), options_(std::move(options)) {}
+    explicit fleet(typename Cfg::credential_t identity, fleet_options options = {}) : fleet(std::move(identity), std::nullopt, std::move(options)) {}
+    fleet(typename Cfg::credential_t identity, signing_key_t signing, fleet_options options = {})
+        : fleet(std::move(identity), std::optional<signing_key_t>{std::move(signing)}, std::move(options)) {}
+
+    ~fleet() {
+#if RHP_ENABLE
+        fleet_detail::close(*engine_);
+        runner_.stop();
+        engine_.reset();
+#endif
+    }
 
     fleet(const fleet&) = delete;
     fleet& operator=(const fleet&) = delete;
+    fleet(fleet&&) = delete;
+    fleet& operator=(fleet&&) = delete;
 
     // Browses and adds every compatible host not already a member; returns how many were added.
     // Malformed or foreign records from the network are skipped, not errors.
     return_t<std::size_t> discover(net::browse_options options = {}) {
         auto found = Rhp::discover<Cfg>(std::move(options), [this] { poll(); });
         if (!found) {
-            return Cfg::errors_t::finish(result<std::size_t>{std::unexpected{std::move(found).error()}});
+            return finish(result<std::size_t>{std::unexpected{std::move(found).error()}});
         }
         std::size_t added = 0;
         for (auto& record : *found) {
-            if (compatible(record)) {
+            if (fleet_detail::compatible(record, Cfg::transport_t::name)) {
                 added += join(std::move(record)) ? 1 : 0;
             }
         }
-        return Cfg::errors_t::finish(result<std::size_t>{added});
+        return finish(result<std::size_t>{added});
     }
 
     // Adds one host by hand (or refreshes the member at the same address and port).
     return_t<void> add(net::service_record record) {
-        if (!compatible(record)) {
-            return Cfg::errors_t::finish(result<void>{fail(errc::kInvalidArgument, "the record needs an address, a port, this transport and this wire revision", "fleet.add")});
+        if (!fleet_detail::compatible(record, Cfg::transport_t::name)) {
+            return finish(result<void>{fail(errc::kInvalidArgument, "the record needs an address, a port, this transport and this wire revision", "fleet.add")});
         }
         (void)join(std::move(record));
-        return Cfg::errors_t::finish(result<void>{});
+        return finish(result<void>{});
     }
 
-    [[nodiscard]] std::size_t size() const noexcept { return members_.size(); }
-    void clear() { members_.clear(); }
+    [[nodiscard]] std::size_t size() const noexcept {
+#if RHP_ENABLE
+        return fleet_detail::size(*engine_);
+#else
+        return records_.size();
+#endif
+    }
+
+    void clear() {
+#if RHP_ENABLE
+        fleet_detail::clear(*engine_);
+#else
+        records_.clear();
+#endif
+    }
 
     // Drives every member's network under io<zero_threads> (no-op otherwise).
     void poll() {
-        for (auto& m : members_) {
-            m.connection->poll();
-        }
+#if RHP_ENABLE
+        fleet_detail::poll(*engine_);
+#endif
     }
 
+    // ---- broadcasts --------------------------------------------------------------------------------
+
+    // Runs source in each member's scratch module (as client::exec): the returned values, or the first one converted.
     template <broadcastable T = value_list>
     [[nodiscard]] std::vector<host_result<T>> exec(std::string_view source) {
-        auto pending = std::make_shared<collector<T>>(members_.size());
-        std::vector<std::uint64_t> requests;
-        requests.reserve(members_.size());
-        for (std::size_t i = 0; i < members_.size(); ++i) {
-            auto& m = members_[i];
-            if (m.connection->info().closed) {
-                m.connection = make_client(m.record); // a resumable detach keeps its session; a closed one can't
-            }
-            auto call = [&] {
-                if constexpr (std::same_as<T, value_list>) {
-                    return m.connection->async().exec(source);
-                } else {
-                    return m.connection->async().template exec<T>(source);
-                }
-            }();
-            requests.push_back(call.request());
-            std::move(call).then([pending, i](result<T> outcome) { pending->complete(i, std::move(outcome)); });
+#if RHP_ENABLE
+        return returned<T>(fleet_detail::exec(*engine_, source));
+#else
+        (void)source;
+        return disabled<T>("fleet.exec");
+#endif
+    }
+
+    // Loads (signed) the module on every member: each host's own module id.
+    [[nodiscard]] std::vector<host_result<module_id>> load(std::string_view name, std::string_view source) {
+#if RHP_ENABLE
+        auto raw = fleet_detail::load(*engine_, name, source);
+        std::vector<host_result<module_id>> out;
+        out.reserve(raw.size());
+        for (auto& o : raw) {
+            out.push_back({std::move(o.host), o.body ? Rhp::from_value<module_id>(*o.body) : result<module_id>{std::unexpected{std::move(o.body).error()}}});
         }
-        wait(*pending);
-        std::vector<host_result<T>> out;
-        out.reserve(members_.size());
-        for (std::size_t i = 0; i < members_.size(); ++i) {
-            auto outcome = pending->take(i);
-            if (!outcome) {
-                members_[i].connection->cancel(requests[i]);
-                outcome = fail(errc::kTimeout, "the host missed the broadcast deadline", "fleet.exec");
+        return out;
+#else
+        (void)name;
+        (void)source;
+        return disabled<module_id>("fleet.load");
+#endif
+    }
+
+    // Calls a function of the module named `module` on every member (by name: its id differs per host).
+    template <broadcastable T = value_list>
+    [[nodiscard]] std::vector<host_result<T>> call(std::string_view module, std::string_view function, std::span<const value> args = {}) {
+#if RHP_ENABLE
+        return returned<T>(fleet_detail::call(*engine_, module, function, args));
+#else
+        (void)module;
+        (void)function;
+        (void)args;
+        return disabled<T>("fleet.call");
+#endif
+    }
+
+    template <broadcastable T = value_list, to_value_convertible A0, to_value_convertible... A>
+    [[nodiscard]] std::vector<host_result<T>> call(std::string_view module, std::string_view function, const A0& a0, const A&... rest) {
+        const value args[] = {Rhp::to_value(a0), Rhp::to_value(rest)...};
+        return call<T>(module, function, std::span<const value>{args});
+    }
+
+private:
+    fleet(typename Cfg::credential_t identity, std::optional<signing_key_t> signing, fleet_options options) {
+#if RHP_ENABLE
+        fleet_detail::setup s;
+        s.member.transport = net::transport_ops_for<typename Cfg::transport_t>;
+        s.member.tls = security::tls::backend_ops_for<typename Cfg::tls_t>;
+        s.member.codec = wire::codec_ops_for<typename Cfg::codec_t>;
+        s.member.begin_handshake = [identity = std::move(identity)] { return identity.begin(); };
+        s.member.limits = Cfg::limits_v;
+        s.member.io_thread = Cfg::io_t::kOwnsThread;
+        s.member.options = std::move(options.client);
+        if (signing) {
+            s.sign = [key = std::move(*signing)](std::string_view source) -> result<value> { return key.sign(source); };
+        }
+        s.transport = std::string{Cfg::transport_t::name};
+        s.timeout = options.timeout;
+        s.tls = options.tls;
+        s.insecure_lan = options.insecure_lan;
+        engine_ = fleet_detail::make_engine(std::move(s));
+        if constexpr (Cfg::io_t::kOwnsThread) {
+            runner_.start([engine = engine_.get()](std::stop_token stop) { fleet_detail::run_io(*engine, std::move(stop)); });
+        }
+#else
+        (void)identity;
+        (void)signing;
+        (void)options;
+#endif
+    }
+
+    template <class T>
+    static return_t<T> finish(result<T>&& r) {
+        return Cfg::errors_t::finish(std::move(r));
+    }
+
+    // True when the (compatible) record is a new member.
+    bool join(net::service_record record) {
+#if RHP_ENABLE
+        auto joined = fleet_detail::join(*engine_, std::move(record));
+        return joined && *joined;
+#else
+        for (auto& r : records_) {
+            if (r.address == record.address && r.port == record.port) {
+                r = std::move(record);
+                return false;
             }
-            out.push_back({members_[i].record, std::move(*outcome)});
+        }
+        records_.push_back(std::move(record));
+        return true;
+#endif
+    }
+
+#if RHP_ENABLE
+    template <broadcastable T>
+    static std::vector<host_result<T>> returned(std::vector<fleet_detail::outcome>&& raw) {
+        std::vector<host_result<T>> out;
+        out.reserve(raw.size());
+        for (auto& o : raw) {
+            auto list = fleet_detail::values(std::move(o.body));
+            if constexpr (std::same_as<T, value_list>) {
+                out.push_back({std::move(o.host), std::move(list)});
+            } else if (!list) {
+                out.push_back({std::move(o.host), std::unexpected{std::move(list).error()}});
+            } else {
+                out.push_back({std::move(o.host), Rhp::from_value<T>(list->empty() ? value{} : list->front())});
+            }
         }
         return out;
     }
 
-private:
-    struct member {
-        net::service_record record;
-        std::unique_ptr<member_client> connection;
-    };
-
-    // Outcomes arrive on the members' network threads.
-    template <class T>
-    struct collector {
-        explicit collector(std::size_t n) : outcomes(n) {}
-
-        void complete(std::size_t i, result<T> outcome) {
-            {
-                const std::scoped_lock lock{mutex};
-                if (outcomes[i]) {
-                    return;
-                }
-                outcomes[i] = std::move(outcome);
-                ++done;
-            }
-            changed.notify_all();
+    typename Cfg::io_t runner_{};
+    fleet_detail::engine_ptr engine_;
+#else
+    template <broadcastable T>
+    std::vector<host_result<T>> disabled(const char* where) const {
+        std::vector<host_result<T>> out;
+        out.reserve(records_.size());
+        for (const auto& r : records_) {
+            out.push_back({r, fail(errc::kDisabled, "RHP is compiled out (RHP_ENABLE=0)", where)});
         }
-
-        [[nodiscard]] std::optional<result<T>> take(std::size_t i) {
-            const std::scoped_lock lock{mutex};
-            return std::exchange(outcomes[i], std::nullopt);
-        }
-
-        std::mutex mutex;
-        std::condition_variable changed;
-        std::vector<std::optional<result<T>>> outcomes;
-        std::size_t done = 0;
-    };
-
-    template <class T>
-    void wait(collector<T>& pending) {
-        const bool bounded = options_.timeout.count() != 0;
-        const auto deadline = std::chrono::steady_clock::now() + options_.timeout;
-        const auto finished = [&] { return pending.done == pending.outcomes.size(); };
-        if constexpr (Cfg::io_t::kOwnsThread) {
-            std::unique_lock lock{pending.mutex};
-            if (bounded) {
-                (void)pending.changed.wait_until(lock, deadline, finished);
-            } else {
-                pending.changed.wait(lock, finished);
-            }
-        } else {
-            // Nobody else runs the members' networks: progress them here.
-            for (;;) {
-                poll();
-                {
-                    const std::scoped_lock lock{pending.mutex};
-                    if (finished() || (bounded && std::chrono::steady_clock::now() >= deadline)) {
-                        return;
-                    }
-                }
-                std::this_thread::sleep_for(std::chrono::milliseconds{1});
-            }
-        }
+        return out;
     }
 
-    [[nodiscard]] static bool compatible(const net::service_record& record) noexcept {
-        return record.port != 0 && !record.address.empty() && record.protocol_revision == wire::kProtocolRevision && record.transport == Cfg::transport_t::name;
-    }
-
-    // True when the record is a new member.
-    bool join(net::service_record record) {
-        for (auto& m : members_) {
-            if (m.record.address == record.address && m.record.port == record.port) {
-                m.record = std::move(record);
-                if (m.connection->info().closed) {
-                    m.connection = make_client(m.record);
-                }
-                return false;
-            }
-        }
-        auto connection = make_client(record);
-        members_.push_back(member{std::move(record), std::move(connection)});
-        return true;
-    }
-
-    [[nodiscard]] std::unique_ptr<member_client> make_client(const net::service_record& record) const {
-        auto ep = endpoint::dial(record.address, record.port);
-        ep.tls = options_.tls;
-        ep.insecure_lan = options_.insecure_lan;
-        if (signing_) {
-            return std::make_unique<member_client>(ep, identity_, *signing_, options_.client);
-        }
-        return std::make_unique<member_client>(ep, identity_, options_.client);
-    }
-
-    typename Cfg::credential_t identity_;
-    std::optional<typename Cfg::signing_key_t> signing_;
-    fleet_options options_;
-    std::vector<member> members_;
+    std::vector<net::service_record> records_;
+#endif
 };
 
 } // namespace Rhp

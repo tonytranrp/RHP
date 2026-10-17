@@ -48,6 +48,10 @@ struct client_options {
 
 } // namespace Rhp
 
+namespace Rhp::net {
+class io_context;
+} // namespace Rhp::net
+
 namespace Rhp::client_detail {
 
 struct setup {
@@ -59,6 +63,10 @@ struct setup {
     Rhp::limits limits{};
     bool io_thread = true; // false: the calling thread runs the network while it waits
     client_options options;
+    // A reactor shared with other engines (a fleet's) instead of one of the engine's own. Its owner
+    // runs it (one thread, or the waits when io_thread is false), outlives the engine, never calls
+    // run_io for it, and destroys the engine on the thread running the reactor or once it stopped.
+    net::io_context* shared_io = nullptr;
 };
 
 class engine;
