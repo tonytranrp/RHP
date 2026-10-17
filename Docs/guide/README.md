@@ -7,13 +7,15 @@ How to use RHP, what it supports, and how to configure and connect it. For *why*
 | [Getting started](getting-started.md) | add RHP to a CMake project, build, run the first host and client |
 | [Exposing C++ to Lua](exposing-cpp.md) | `Rhp::lib`, `undo`, patch points, events, custom types |
 | [Writing scripts](writing-scripts.md) | the `rhp` Lua API, modules, reload, undo, scheduling |
+| [Scheduling and events](scheduling-and-events.md) | a walkthrough: per-frame work, background tasks, script events, C++ and tool listeners, handler failures |
 | [Host and client](host-and-client.md) | the C++ API of `Rhp::host` / `Rhp::client`, async calls, blobs, audit |
 | [Connecting](connecting.md) | endpoints, TLS, reverse mode, reconnect, `rhp-cli`, custom transports |
 | [Networking and fleet](networking.md) | WebSocket, UDP, IPC, HTTP, DNS-SD and collect-all execution |
 | [Configuration](configuration.md) | `Rhp::config<>` slots, `Rhp::limits`, options, CMake switches |
 | [Security](security.md) | keys, roles, signing, setting up a host safely |
 | [Reference](reference.md) | error codes, events, Lua sandbox contents |
-| [Status and TODO](../TODO.md) | what is built, what is next, known limits |
+| [Limitations](limitations.md) | what RHP doesn't do, or does only partly |
+| [Status and TODO](../TODO.md) | what is built, what is next, recorded validation |
 
 ## What RHP is
 

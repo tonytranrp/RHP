@@ -31,11 +31,10 @@ The executable is `build/Debug/rhp_demo.exe`. Run it from the directory holding 
 For a project that already uses CPM, replace `add_subdirectory` with a pinned package declaration:
 
 ```cmake
-CPMAddPackage(NAME rhp GITHUB_REPOSITORY tonytranrp/RHP
-    GIT_TAG 8ffc954784eb24c4ee492d4bbcb7a909c90c06c5)
+CPMAddPackage(NAME rhp GITHUB_REPOSITORY tonytranrp/RHP GIT_TAG stage-7)
 ```
 
-That pin is the Stage 5 implementation described by this guide. Choose a tested commit when updating it. RHP's tests, tools and examples default to OFF when consumed as a subproject; build the CLI from RHP's own checkout as described next.
+`stage-7` is the release this guide describes (releases are tagged by stage). Pin a commit sha instead if you need a fixed build between releases; a host and its clients must use the same protocol revision. RHP's tests, tools and examples default to OFF when consumed as a subproject; build the CLI from RHP's own checkout as described next.
 
 `Rhp::rhp` links everything and provides `<rhp/rhp.hpp>`. For local scripting, link `Rhp::script` and include `<rhp/script/sandbox.hpp>`. A client-only tool can link `Rhp::client` and include `<rhp/client/client.hpp>` without linking Lua. Targets propagate C++23, include paths, platform definitions and `RHP_ENABLE`; use those targets rather than copying include directories and libraries by hand.
 

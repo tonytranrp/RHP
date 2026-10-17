@@ -95,6 +95,7 @@ rhp-cli exec "return game.gravity" -c HOST:PORT -i dev.rhpid
 rhp-cli stubs -c HOST:PORT -i dev.rhpid -o rhp_api.lua
 rhp-cli blob configs settings.json -c HOST:PORT -i dev.rhpid
 rhp-cli watch scripts -c HOST:PORT -i dev.rhpid                # save a .lua, it reloads
+rhp-cli events game.round_over -c HOST:PORT -i dev.rhpid       # print host events until Ctrl+C
 rhp-cli sign file.lua -i dev.rhpid                             # signature for other tools
 ```
 
@@ -108,7 +109,7 @@ rhp-cli sign file.lua -i dev.rhpid                             # signature for o
 | `--cert` / `--key` | this side's certificate (with `--listen`) |
 | `--insecure-lan` | plaintext to a non-loopback address |
 
-Ctrl+C cancels an executing Lua chunk. In the REPL, Ctrl+C at a continuation prompt drops unfinished input; EOF with unfinished Lua is an error. Temporary link loss is resumed within the session window; permanent session failure requires a new CLI connection. One-shot commands disconnect on exit, so use `run --pin` with an admin key when a loaded module must survive the command. `watch` watches saves after it starts; it does not initially load every existing file. Exit status is 0 on success, 1 on failure and 2 for usage errors.
+Ctrl+C cancels an executing Lua chunk. In the REPL, Ctrl+C at a continuation prompt drops unfinished input; EOF with unfinished Lua is an error. Temporary link loss is resumed within the session window; permanent session failure requires a new CLI connection. One-shot commands disconnect on exit, so use `run --pin` with an admin key when a loaded module must survive the command. `watch` watches saves after it starts; it does not initially load every existing file. `events` (and `subscribe` / `unsubscribe` in the REPL) print the host's C++ events and your identity's script events ([scheduling and events](scheduling-and-events.md#5-watch-events-from-a-tool)). Exit status is 0 on success, 1 on failure and 2 for usage errors.
 
 ## `headless_server`
 
