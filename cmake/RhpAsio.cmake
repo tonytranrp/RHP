@@ -11,11 +11,14 @@ find_package(Threads REQUIRED)
 
 add_library(rhp_asio INTERFACE)
 add_library(Rhp::asio ALIAS rhp_asio)
-# The upstream repo keeps headers in asio/include (a symlink to include/ in some checkouts).
-if(EXISTS "${asio_SOURCE_DIR}/asio/include/asio.hpp")
-    set(rhp_asio_include "${asio_SOURCE_DIR}/asio/include")
-else()
+# Since asio-1-38 the headers live in include/ and asio/include is a git symlink to it (older
+# releases have only asio/include). Prefer the real directory: clang-cl doesn't resolve the symlink
+# where git created one (GitHub's Windows runners), and checkouts without symlink support turn it
+# into a one-line file.
+if(EXISTS "${asio_SOURCE_DIR}/include/asio.hpp")
     set(rhp_asio_include "${asio_SOURCE_DIR}/include")
+else()
+    set(rhp_asio_include "${asio_SOURCE_DIR}/asio/include")
 endif()
 target_include_directories(rhp_asio SYSTEM INTERFACE "${rhp_asio_include}")
 target_compile_definitions(rhp_asio INTERFACE ASIO_STANDALONE ASIO_NO_DEPRECATED)
