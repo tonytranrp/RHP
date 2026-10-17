@@ -106,11 +106,8 @@ struct scratch_dir {
         for (const auto& entry : fs::directory_iterator{path, ec}) {
             if (entry.is_regular_file(ec) && entry.path().extension() == ".log") {
                 const auto text = read(entry.path().filename().string());
-                std::cout << "---- " << entry.path().filename().string() << " ----
-" << text.substr(0, 8192) << (text.size() > 8192 ? "
-[...]
-" : "
-");
+                std::cout << "---- " << entry.path().filename().string() << " ----\n" << text.substr(0, 8192)
+                          << (text.size() > 8192 ? "\n[...]\n" : "\n");
             }
         }
         fs::remove_all(path, ec);
