@@ -59,4 +59,13 @@ TEST_CASE("disabled: fleet never discovers or executes remotely", "[client][disa
     auto results = group.exec<int>("return 42");
     REQUIRE(results.size() == 1);
     CHECK(results.front().outcome.error().code == Rhp::errc::kDisabled);
+    auto loaded = group.load("m", "return {}");
+    REQUIRE(loaded.size() == 1);
+    CHECK(loaded.front().outcome.error().code == Rhp::errc::kDisabled);
+    auto called = group.call<int>("m", "f", 1, 2);
+    REQUIRE(called.size() == 1);
+    CHECK(called.front().outcome.error().code == Rhp::errc::kDisabled);
+    group.poll();
+    group.clear();
+    CHECK(group.size() == 0);
 }
