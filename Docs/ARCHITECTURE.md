@@ -310,6 +310,8 @@ rhp.on("player.died", function(id, cause) print(id, cause) end)   -- subscriptio
 
 Like patch points, `lua_event`s live in a **process-wide registry** (any host may deliver them to its scripts). Delivery is synchronous in sandboxes owned by the firing thread and queued to the next `pump()` of every other subscribed sandbox (arguments copied). Each handler runs as its own script request, so it may `rhp.wait`. A handle-type argument arrives as the handle userdata of whichever installed lib declares that type.
 
+Since Stage 7 (§33) scripts also define events of their own: `rhp.publish("game.round_over", ...)` queues copies of the values for the next `pump()` of the same identity's sandbox, where `rhp.on` / `rhp.once` handlers (ordered by `priority`) and `rhp.wait_event` callers receive them. A name a C++ `lua_event` uses always means that event (scripts can't publish it). C++ hears script events through `sandbox::on_script_event` / `host.on_script_event`, and clients through `client.on(name, fn)`, which also subscribes to the host's C++ events remotely.
+
 ### 4.5 Opaque handles
 
 `::handle<"entity", game::entity_id, &game::is_alive>` makes `entity` a distinct userdata type in Lua. Using a handle whose validity check fails raises a Lua error (`kStaleHandle`) — never a silent `nil`.
@@ -407,7 +409,7 @@ stateDiagram-v2
 
 ### 5.3 Scheduler, limits, cancel
 
-**Decided:** totals are unlimited and scripts **run to completion** by default (`slice_us = 0`). Every script still runs as a coroutine, so `rhp.wait(frames)`, `rhp.sleep(ms)`, `rhp.next_frame()` and `rhp.timer(ms, fn)` (ledger-tracked) let scripts spread work across frames **when they choose to**.
+**Decided:** totals are unlimited and scripts **run to completion** by default (`slice_us = 0`). Every script still runs as a coroutine, so `rhp.wait(frames)`, `rhp.sleep(ms)`, `rhp.next_frame()`, `rhp.wait_event(name)`, `rhp.timer` / `rhp.after` / `rhp.every` / `rhp.every_frame(s)` and background tasks (`rhp.spawn`, all ledger-tracked) let scripts spread work across frames **when they choose to**. A `pump()` delivers queued events (C++ fires from other threads, then script events), fires frame callbacks and due timers, then resumes ready requests (§33 AF3).
 
 ```mermaid
 flowchart LR
@@ -427,7 +429,9 @@ flowchart LR
 | Knob | Default | Effect |
 |---|---|---|
 | `limits.slice_us` | `0` = run to completion | opt-in time slicing per `pump()` |
-| `limits.instructions` / `memory` / `wall_ms` | `0` = unlimited | opt-in totals, per config or per role; **sticky** when hit (re-raise every tick, allocator keeps refusing) so `pcall` can't swallow them |
+| `limits.instructions` / `memory` / `wall_ms` | `0` = unlimited | opt-in totals, per config or per role; **sticky** when hit (re-raise every tick, allocator keeps refusing) so `pcall` can't swallow them; a background task's instruction and wall budgets bound each resume |
+| `limits.event_queue` | `65536` | events queued per sandbox for its next `pump()` (other threads' fires, `rhp.publish`); more are dropped and counted (`stats().dropped_events`) |
+| `sandbox_options::handler_errors` | `report` | what a failing timer, frame callback, event handler or task does: `report` (undo that call only), `remove` (also drop the handler) or `fault` (the module, as before Stage 7); a memory stop always faults |
 | cancel flag | always on | set by the **I/O thread** (atomic) when `cancel` / `revert_all` / disconnect arrives; the count hook checks it, so a runaway loop can always be stopped **even while `pump()` is stuck inside it** |
 
 > ⚠ Run-to-completion means an infinite loop holds the thread that called `pump()` (e.g. the game thread) until someone sends `cancel` or the client disconnects (§5.7). A count hook can't interrupt a long **C++** call, so bound functions must return.
@@ -458,7 +462,9 @@ flowchart LR
 | `::var` write | restore old value |
 | `rhp.patch` | pop that handler from the point's stack |
 | `::fn<..., Rhp::undo<F>>` | `F(result)` |
-| `rhp.on(event)` / `rhp.timer` | unsubscribe / cancel |
+| `rhp.on` / `rhp.once` / `rhp.on_error` | unsubscribe |
+| `rhp.timer` / `rhp.after` / `rhp.every` / `rhp.every_frame(s)` | remove |
+| `rhp.spawn` | cancel the task (its own effects are undone as its module's) |
 | `hook_backend` install | uninstall |
 | `::fn<..., Rhp::irreversible>` | none — reported as `irreversible_effects: N` |
 | plain `::fn` | none (treated as pure) |
@@ -964,6 +970,7 @@ flowchart LR
     S3 --> S4["Stage 4<br/>client · rhp-cli · signing<br/>audit · blobs · reverse mode"]
     S4 --> S5["Stage 5<br/>TLS · reconnect/resume<br/>fuzzing · mobile presets"]
     S5 --> S6["Stage 6<br/>WebSocket · UDP-reliable<br/>HTTP gateway · mDNS · fleet"]
+    S6 --> S7["Stage 7<br/>frame callbacks · tasks<br/>script events · remote subscribe<br/>handler errors"]
 ```
 
 | Stage | Done when |
@@ -975,6 +982,7 @@ flowchart LR
 | 4 ✅ | full lifecycle from `rhp-cli`, signed scripts only, audit log written — done: `rhp-cli` (replxx + CLI11) runs keygen → host key files → a signed REPL session (multi-line Lua, load / reload / rollback / call / pin / unload, stubs, blob, watch) against `Examples/headless_server` as a separate process, which writes a JSON-lines audit log; unsigned scripts from patch/admin are refused (`kBadSignature`); reverse mode (`rhp-cli --listen`, `headless_server --reverse`), async client calls (then / get / future / `co_await`), blobs and `pin` work over loopback and TCP; 370 tests green on MSVC, clang-cl, MSVC-ASan, Linux Clang, Clang ASan+UBSan, Clang TSan; the `RHP_ENABLE=OFF` build (153 tests) is green without Lua, Asio or Monocypher |
 | 5 ✅ | TLS on all 5 OS presets; kill-the-socket test resumes exactly-once — done: TLS 1.3 through OpenSSL (system) and Mbed TLS 4.2 behind `config<>::tls<>`, the PSK handshake bound to the TLS channel (a TLS-terminating relay fails it), resume after a lost link (200 calls through 20 socket cuts run exactly once, over TLS too, reverse mode too), libFuzzer targets for frame / envelope / msgpack / sandbox_escape (the sandbox fuzzer found and fixed a Lua stack overrun); 398 tests green on MSVC, clang-cl, MSVC-ASan, Linux Clang, Clang ASan+UBSan, Clang TSan; the `RHP_ENABLE=OFF` build (155 tests) is green without Lua, Asio, Monocypher or TLS; Android: `android-arm64` / `android-x64` build with NDK 29 and every suite passed on an arm64 phone (Android 16) through `Tools/android/run_tests.py`; libFuzzer ran ~13 million inputs across the four targets clean; macOS and the iOS simulator are covered by the CI workflow, which couldn't run yet (the account's Actions billing blocks jobs) |
 | 6 ✅ | fleet finds hosts via mDNS and broadcasts a script — the separate-process CLI discovers two hosts and collects both signed results over TLS; transports, gateway, discovery, fleet and tools are implemented. The review follow-ups are finished (§32): HTTP answer proofs and channel binding, host-clock idle expiry, per-request audit peers, a compiled fleet engine on one shared reactor with `load`/`call` broadcasts, and the four earlier runtime defects. Exact checks and platform limits: [Status and TODO](TODO.md). |
+| 7 ✅ | scripts schedule work and talk through events without a client request held open — done: `rhp.every_frame(s)` / `rhp.after` / `rhp.every` with pause, resume, reschedule and `rhp.timers()`; `rhp.spawn` tasks with status / cancel / join; `rhp.publish` / `rhp.once` / priorities / `rhp.wait_event`; `sandbox` and `host.on_script_event`; `client.on` / `rhp-cli events` subscribe to host events (protocol revision 4); a failing handler is reported and undoes only its own call (`handler_failed`). Decisions §33, checks: [Status and TODO](TODO.md). |
 
 ---
 
@@ -1317,3 +1325,22 @@ Taken without a questionnaire: the user asked for the Stage 6 follow-ups to be f
 | AE5 | HTTP audit | `script_executed` has a `peer` field for every request (JSON `"peer"`); over HTTP it is that request's caller rather than the first caller of the key. |
 | AE6 | Fleet engine | `Rhp::fleet<Cfg>` is a thin template over `fleet_detail::engine` (`client/fleet.cpp`). Members are client engines on the fleet's single `net::io_context` (`client_detail::setup::shared_io`), run by one I/O thread for the whole fleet (`owned_io_thread`) or by the broadcasts, `discover()` and `poll()` (`zero_threads`). An engine on a shared reactor never runs it; its posts and dial/accept completions check a liveness token, and it is destroyed on the reactor's thread (posted, after its own queued work) or once the reactor stopped. `exec`, `load` and `call` (module by name: ids differ per host) share one path: sign once, submit everywhere, collect within one deadline, cancel late requests, return outcomes in member order. `Rhp::client<Cfg>` is unchanged. |
 | AE7 | Tests | `stage6_fleet_tests.cpp` covers load/call broadcasts, signing, the shared deadline and one network thread per fleet (`on_output` thread ids). The fleet recovery test keeps one listener bound for the whole test (`tcp_gate`) instead of re-binding a released port. A TCP relay that terminates TLS (optionally rewriting answers) covers binding and answer proofs end to end. `[multicast]` cases carry the ctest label `multicast` (`ctest -LE multicast` on machines without usable multicast). Expiry tests wait for the revert as well as `session_closed` (published first); the CLI fleet test uses per-run DNS-SD instance names; the suspended-at-revert audit test waits for the script's own output instead of sleeping. |
+
+## 33. Decision log (round 9, Stage 7)
+
+Taken without a questionnaire: the user asked for every listed scheduling and event feature to be built, with one research pass first and one review at the end. Each choice took the option the research recommended (and the existing rounds pointed to). Per-topic reasoning: [Stage 7 decisions](decisions/stage7-scheduling-events.md); checks and open items: [Status and TODO](TODO.md).
+
+| # | Topic | Decision |
+|---|---|---|
+| AF1 | Workflow | One branch (`stage-7-scheduling-events`) and PR; a read-only research subagent mapped the code first, one review subagent checked the result. |
+| AF2 | Schedule entries | Timers and frame callbacks share one `schedule_entry` (kind, interval or period, `times`, paused state, the policy, its latest call). `rhp.timer(ms, fn, repeating)` keeps its signature and becomes one of its forms. Every entry is a ledger effect, so revert, unload and a reload swap remove it. |
+| AF3 | Firing order | `pump()`: queued C++ events, queued script events, frame callbacks (registration order), due timers (due order), then ready requests. Entries made during a pump wait for the next one; an entry a call paused or rescheduled is checked again before it fires; a repeating entry never starts a call while its previous call is suspended (no overlap, no catch-up bursts). |
+| AF4 | Timer control | `rhp.after` / `rhp.every(ms, fn, {times, on_error})`, `rhp.every_frame(fn)` / `rhp.every_frames(n, fn)`; `rhp.pause` / `rhp.resume` (timers keep their remaining time, frame callbacks their remaining frames; subscriptions too), `rhp.reschedule(id, interval)` restarts the countdown, `rhp.timers()` lists the calling module's entries. Ids are ledger sequence numbers; only the owning module may control them. Unknown option keys are errors. |
+| AF5 | Tasks | `rhp.spawn(fn, ...)` starts a request of its own at the next `pump()` (never inside the spawner, which returns at once), owned by the spawning module and the request that spawned it, so revert, unload, a reload swap, a failed exec or a failed handler cancel it. `task:status()`, `task:cancel()` (abandons a suspended task at once, closing its to-be-closed variables; a task cancelling itself stops at the next hook tick), `task:join()` (continuation-based: results, the task's error, or `kCancelled`; self-joins and cycles are refused), `task.id` for `rhp.off`, `rhp.tasks()`. Instruction and wall limits bound each resume of a task, not its life. A finished task's record lives while a handle does. |
+| AF6 | Script events | `rhp.publish(name, ...)` is same-sandbox only (identities don't see each other's events), queued for the next `pump()` (no recursion, the publisher's budget isn't charged for the handlers) and copies its values (no functions or userdata). Names are dotted; `rhp.` names and names a C++ `lua_event` uses are refused. `rhp.on` with a name no C++ event registered subscribes to script events, so a mistyped C++ event name is no longer an error. |
+| AF7 | Subscriptions | `rhp.once`; `{priority = n}` (higher first, ties in subscription order); `limits.event_queue` caps both queued kinds per sandbox and counts drops; `sandbox::stats()` / `rhp.stats()`. |
+| AF8 | wait_event | `rhp.wait_event(name [, timeout_ms])` returns `true, ...` or `false, "timeout"` (unambiguous for argument-less events), from any request's own thread including exec / load / call top levels. A waiter keeps the sandbox attached to a C++ event without a subscription. An event and a timeout in the same pump resolve as the event. |
+| AF9 | C++ listeners | `sandbox::on_script_event(name or "*", fn)` runs at the end of the pump that delivered the event and returns an `Rhp::subscription` (moved to core, with the `subscribable` interface the host hub now implements). `host.on_script_event` reports every identity's events (`event::script_event`, deliberately not in `event::any`, so audit sinks don't log application traffic). |
+| AF10 | Handler errors | `handler_error_policy`: `report` (default: undo only the failed call's effects; the handler and module stay), `remove` (also drop the handler), `fault` (the old behaviour). Per handler (`{on_error = ...}`) or per sandbox / host (`sandbox_options::handler_errors`, `host_options::handler_errors`). A memory stop always faults (the state's memory is shared). Failures reach C++ (`on_handler_error`, else one output line; the host publishes `event::handler_failed`, logs and routes the line to the identity's sessions) and Lua (`rhp.handler_failed`, `rhp.on_error`; an error handler's own failures aren't republished). Patch handlers keep faulting their module. |
+| AF11 | Remote subscription | Protocol revision 4: `kSubscribe` / `kUnsubscribe` (observe) and `kEvent` (sequenced, `req` 0). A name resolves like `rhp.on`: a C++ event (program-wide; the host engine is itself the event listener) or the session's identity's script events (`*`: all). Subscriptions belong to the host session, so they survive a resume; a reverse-mode client subscribes again for a new host session. `host_options::remote_events_per_pump` caps deliveries per session; the next event says how many were dropped. The HTTP gateway has no event stream. |
+| AF12 | rhp-cli | `subscribe <event>` / `unsubscribe <event>` in the REPL; `rhp-cli events <name>...` prints events until Ctrl+C. |

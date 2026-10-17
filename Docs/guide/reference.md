@@ -8,7 +8,7 @@ Result-bearing operations report `Rhp::error { code, message, where, traceback }
 |---|---|
 | `transport` | connection failed, closed, or a TLS alert |
 | `protocol` | malformed frame or message |
-| `protocol_revision_mismatch` | host and client speak different protocol revisions (currently 3) |
+| `protocol_revision_mismatch` | host and client speak different protocol revisions (currently 4) |
 | `auth` | authentication/MAC/resume-proof failure, or a certificate verification failure when certificate checks are enabled |
 | `forbidden` | role too low, pinned module, or a non-loopback address without TLS or `insecure_lan` |
 | `bad_signature` | script unsigned (and not observe), unknown signer, or signature does not verify |
@@ -45,18 +45,20 @@ All carry `time`. `peer` is the transport address of the client.
 | `script_executed` | any request that runs code or changes state, refused ones included | `session`, `identity`, `granted`, `op`, `module`, `hash` (BLAKE2b-256 hex), `signer`, `outcome` |
 | `blob_received` | a blob finished or was refused | `sink`, `file`, `size`, `hash`, `outcome` |
 | `identity_reverted` | an identity's last session ended and the host reverted it | `undone`, `irreversible`, `failures`, `pinned` |
+| `handler_failed` | a script's timer, frame callback, event handler or task failed | `identity`, `module`, `kind`, `source`, `handler` (the script's id), `action` (`report` / `remove` / `fault`), `outcome` |
 
-`Rhp::event::to_json(event)` returns JSON text; sinks append a newline when writing it. `script_executed` currently describes dispatch, not reliable final completion for a suspended script; see [audit semantics](host-and-client.md#events-and-audit). Session and blob events' `peer`/identity describe the connected peer, which may be a dialing host in reverse mode.
+`Rhp::event::to_json(event)` returns JSON text; sinks append a newline when writing it. A suspended request's `script_executed` reports its final outcome; see [audit semantics](host-and-client.md#events-and-audit). Session and blob events' `peer`/identity describe the connected peer, which may be a dialing host in reverse mode. `event::script_event` (`host.on_script_event`) is application traffic and not part of `event::any`.
 
 ## Operations
 
-`exec`, `load`, `call`, `reload`, `rollback`, `checkpoint`, `revert_to`, `revert`, `unload`, `pin`, `unpin`, `revert_all`, `list`, `status`, `describe`, `blob`, and `cancel` (client side). Minimum roles are in [Host and client](host-and-client.md#rhpclientcfg).
+`exec`, `load`, `call`, `reload`, `rollback`, `checkpoint`, `revert_to`, `revert`, `unload`, `pin`, `unpin`, `revert_all`, `list`, `status`, `describe`, `blob`, `subscribe` / `unsubscribe` (`client.on` / `off`), and `cancel` (client side). Minimum roles are in [Host and client](host-and-client.md#rhpclientcfg).
 
 ## Wire protocol (for custom clients)
 
 - 28-byte little-endian header: magic `RHP\0`, 8-bit `protocol_revision`, 8-bit flags, 16-bit op, 64-bit seq, 64-bit ack, 32-bit payload length. Then MessagePack, a 4-byte CRC32C trailer (omitted on TLS links), and a 32-byte keyed MAC once authenticated.
 - Ops 1–15 handshake (`hello`, `challenge`, `response`, `welcome`, `resume`), 16–47 requests, 48–63 replies, 64+ control frames (`ping`, `pong`, `ack`, `nack`). Controls do not join data sequencing; their seq field carries a replay-protection counter, not always zero.
 - Requests and replies are envelopes `{req, idem?, body}`; req correlates output/results and idem identifies a retry within the retained session cache. Handshake messages are direct payloads; session-ending errors are unsequenced direct error maps.
+- `subscribe` (33) / `unsubscribe` (34) carry `{name}` and are answered nil; each delivery is an `event` reply (52) with `req` 0 and `{name, module, args, dropped}`.
 - Max frame 4 MiB; blobs are sent as chunked requests.
 
 Details: [`../decisions/wire-format.md`](../decisions/wire-format.md) and `Docs/ARCHITECTURE.md` §8. The protocol revision is a plain integer; there is no "v" naming anywhere in RHP.

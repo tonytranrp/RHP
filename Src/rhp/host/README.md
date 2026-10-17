@@ -4,7 +4,7 @@
 
 | Header | What |
 |---|---|
-| `host.hpp` | `Rhp::host<Cfg>`: `install<Lib>()`, `pump()`, `on<E>()` / `on_any()`, `on_blob()`, `set_enabled()`, `port()`, `gateway_port()`, `advertise()`, `discovery_status()`, `sessions()`, `identities()` |
+| `host.hpp` | `Rhp::host<Cfg>`: `install<Lib>()`, `pump()`, `on<E>()` / `on_any()`, `on_script_event()`, `on_blob()`, `set_enabled()`, `port()`, `gateway_port()`, `advertise()`, `discovery_status()`, `sessions()`, `identities()` |
 | `detail/engine.hpp` | `host_options`, `blob_view` / `blob_fn`, the type-erased `setup` and the engine's free functions |
 | `gateway.cpp`, `detail/gateway.hpp` (private, not installed) | the HTTP listener: routing, per-key logical sessions, the replay guard; the engine implements its `gateway_sink` |
 
@@ -23,7 +23,9 @@ while (running) { host.pump(); game::update(); }
 - **Sessions:** the network thread authenticates every connection (`config<>::auth`), at most `limits.pending_handshakes` at a time, and hands requests to `pump()` through SPSC rings.
 - **Identities:** one sandbox per key identity, created on its first session. When its last session ends everything it did is reverted and the sandbox closed — unless an admin pinned some of its modules (`pin`): those, and the modules they require, stay (with the calls running in them); the rest is reverted. `revert` / `unload` / `revert_to` refuse to touch pinned modules.
 - **Roles and signatures:** each request's least role is checked (`wire::required_role`); `exec`, `load` and `reload` must carry a signature by a trusted signer (`config<>::signer`, Ed25519 by default) unless the session is observe. A signature that is present must verify.
-- **Events:** `script_executed` for every request that runs code or changes state (refused ones too), sessions, auth failures, blobs, reverts — on the pump thread.
+- **Events:** `script_executed` for every request that runs code or changes state (refused ones too), sessions, auth failures, blobs, reverts, `handler_failed` — on the pump thread. `on_script_event` reports every identity's `rhp.publish` (each sandbox's script events are forwarded through `sandbox::on_script_event("*")`).
+- **Subscriptions:** `kSubscribe` / `kUnsubscribe` (observe) name a C++ `lua_event` (the engine is itself an `event_listener`, attached while any session wants that event, detached when the last one unsubscribes or closes and when the engine stops) or the session's identity's script events. Deliveries are `kEvent` frames with `req` 0, at most `host_options::remote_events_per_pump` per session per pump; the next one reports how many were dropped. Subscriptions belong to the host session and survive a resume.
+- **Handler failures:** `host_options::handler_errors` is every sandbox's default policy; a failure is logged, published as `handler_failed` and sent to the identity's sessions as an output line.
 - **Blobs:** `on_blob(sink, fn, role)`; chunks are checked (sink, role, `limits.max_blob`) on the first one, buffered, and the whole blob goes to `fn` on the pump thread. The sink's result is the client's answer. One transfer per session; a new one replaces a transfer the client gave up on.
 - **Reverse mode:** with a dial endpoint the host dials a listening client and redials (capped exponential backoff, full jitter) whenever that fails or the session ends; a lost link is redialed to resume the same session.
 - **TLS:** non-loopback peers get TLS 1.3 (`config<>::tls<>`), `require_tls` everyone; `host_options::tls` holds the certificate (default: ephemeral self-signed). Events say `tls`.
@@ -34,6 +36,7 @@ while (running) { host.pump(); game::update(); }
 
 ## Rules
 
-- `install`, `on_blob`, `advertise`, `discovery_status` and `pump` belong to one thread (the pump thread). `on` / `on_any`, `set_enabled`, `port`, `gateway_port`, `sessions`, `identities` are thread-safe.
+- `install`, `on_blob`, `advertise`, `discovery_status` and `pump` belong to one thread (the pump thread). `on` / `on_any` / `on_script_event`, `set_enabled`, `port`, `gateway_port`, `sessions`, `identities` are thread-safe.
+- Lock order for C++ events: an event's own mutex, then the engine's `program_mutex_` (fires from other threads queue there); attach and detach never run under `program_mutex_`.
 - Nothing from `session` or the engine leaks into `host.hpp`; config policies are type-erased into `setup`. Gateway types stay in the private `detail/gateway.hpp`.
 - `RHP_ENABLE=0`: the host is inert (`install`, `on_blob`, `port` report `kDisabled`), no engine is built.

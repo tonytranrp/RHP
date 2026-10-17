@@ -14,6 +14,7 @@ Rhp::host<> observe_only{endpoint, authenticator}; // no signers: only observe s
 | `install<Lib>()` | make a lib visible to every identity (call from the pump thread). `kAlreadyLoaded` on a duplicate name |
 | `on_blob(sink, fn, role = admin)` | register a blob sink: `fn(const blob_view&) -> result<void>` runs on the pump thread once a whole blob (≤ `limits.max_blob`) has arrived. The role is checked before a byte is buffered |
 | `on<Event>(fn)` / `on_any(fn)` | subscribe to host events; returns a `[[nodiscard]] event::subscription` that unsubscribes when destroyed. Handlers run on the pump thread |
+| `on_script_event(name, fn)` | every `rhp.publish` of `name` (`"*"`: all, `rhp.handler_failed` included) in any identity's sandbox, as an `event::script_event` (`identity`, `module`, `event`, `args`), on the pump thread |
 | `pump()` | **call every frame.** Runs requests that arrived, resumes suspended scripts, fires timers and queued events, hands replies to the network. With `io<zero_threads>` it also polls the network |
 | `port()` | bound network port after port 0, or a setup failure; IPC, dialing hosts and loopback report 0 |
 | `gateway_port()` | the optional HTTP listener's bound port or setup error |
@@ -45,6 +46,8 @@ auto registered = host.on_blob("configs", [](const Rhp::blob_view& b) -> Rhp::re
 | `tls` | empty | `cert_pem` / `key_pem` for the host's certificate (empty = ephemeral self-signed), `ca_pem` / `server_name` to check the peer when the host dials |
 | `gateway` | none | separate listen endpoint for the authenticated HTTP gateway |
 | `http_require_binding` | false | refuse HTTP requests whose proof isn't bound to their TLS connection (`X-RHP-Channel: tls-exporter`) |
+| `handler_errors` | `report` | what a failing timer, frame callback, event handler or task does in every identity's sandbox when the script sets no `on_error` |
+| `remote_events_per_pump` | 256 | subscribed events sent to one session per `pump()`; the rest are dropped and the next event says how many |
 
 ## `Rhp::client<Cfg>`
 
@@ -74,6 +77,7 @@ Result-bearing operations return `Rhp::result<T>` by default (see [errors](confi
 | `list()` / `status(mod)` | `module_status` data | any |
 | `describe()` | LuaLS stubs filtered by your role | any |
 | `cancel()` / `cancel(request)` | stops everything in flight / one request | any thread |
+| `on(name, fn)` / `off(id)` | subscribe to host events: a C++ `lua_event` of that name, or an `rhp.publish` of this identity (`"*"`: every publish); `fn` gets a `remote_event` (`name`, `module`, `args`, `dropped`) on the network thread | observe |
 | `info()` / `connected()` | who the host says you are | |
 
 `mod` is a `module_id` or name (`"low_grav"`) within this identity. `exec<T>` converts the first returned value, or nil if none; untyped `exec` and `call` return a `value_list`. Remote load/reload/call replies wait for suspended Lua to finish. `revert_summary::clean()` checks undo failures, not the `irreversible` count; inspect both before asserting full restoration.
@@ -113,7 +117,7 @@ Inside an existing coroutine:
 auto result = co_await c.async().exec<int>("return game.tick");
 ```
 
-RHP supplies an awaiter, not a coroutine task type. At the current commit, the awaiting coroutine **must remain alive until completion**: destroying a suspended coroutine leaves a stale waiter handle. Cancellation is a request to stop work, not synchronous completion. This defect is tracked in [Status and TODO](../TODO.md#confirmed-issues-at-the-current-commit).
+RHP supplies an awaiter, not a coroutine task type. Destroying a suspended awaiting coroutine unregisters it (the result is then kept, not delivered); it must not race with that call's completion on the network thread. Cancellation is a request to stop work, not synchronous completion.
 
 ### `Rhp::client_options`
 
@@ -123,6 +127,7 @@ RHP supplies an awaiter, not a coroutine task type. At the current commit, the a
 | `request_timeout` | 0 | per-call reply wait; 0 = until reply or session end |
 | `on_output` | none | every `print()` line, with its request id (network thread; keep it short, never call the client from it) |
 | `on_emit` | none | every `rhp.emit(value)` with request and module |
+| (events) | | `client.on(name, fn)` callbacks follow the same thread rules as `on_output` |
 | `blob_chunk` / `blob_window` | 1 MiB / 4 | blob chunk size and chunks in flight |
 | `tls` | empty | `ca_pem` + `server_name` to check the host's certificate; `cert_pem` / `key_pem` when the client listens (reverse mode) |
 
@@ -137,7 +142,7 @@ RHP supplies an awaiter, not a coroutine task type. At the current commit, the a
 
 Events are published on the pump thread. Subscribe with `host.on<E>(fn)` or `host.on_any(fn)`:
 
-`session_opened`, `session_resumed`, `session_closed`, `auth_failed`, `script_executed`, `blob_received`, `identity_reverted` (fields in the [reference](reference.md#host-events)).
+`session_opened`, `session_resumed`, `session_closed`, `auth_failed`, `script_executed`, `blob_received`, `identity_reverted`, `handler_failed` (fields in the [reference](reference.md#host-events)). Script events are not host events: subscribe to them with `on_script_event`.
 
 ```cpp
 auto audit = host.on_any(Rhp::audit::file_sink{"rhp_audit.log"}); // JSON lines, flushed per line
@@ -150,4 +155,15 @@ auto mine = host.on<Rhp::event::session_opened>([](const auto& e) { /* ... */ })
 
 Keep each returned subscription alive for the desired observation period; an immediately destroyed subscription unsubscribes. `file_sink::ok()` reports open/write failure, so check it at startup and when audit availability matters. `ostream_sink` borrows its stream, which must outlive the subscription. A callback already executing when unsubscribed may finish. A thrown event-handler exception is caught and logged; remaining handlers in that publication are not guaranteed to run.
 
-At the current commit, `script_executed` is published when request dispatch returns. For a suspended script, its reported `ok` is not the later final outcome. Treat the client result as authoritative until the [audit defect](../TODO.md#confirmed-issues-at-the-current-commit) is fixed. Hash and signer fields are populated for new-source operations; `call`, rollback and cleanup operations do not carry new signed source.
+`script_executed` for a request that suspended is published when it finishes, with its final outcome (or `cancelled` when its identity is torn down first). Hash and signer fields are populated for new-source operations; `call`, rollback and cleanup operations do not carry new signed source. Subscribing and unsubscribing (`client.on` / `off`) are not audited.
+
+### Watching events from a client
+
+```cpp
+auto id = client.on("game.round_over", [](const Rhp::remote_event& e) {
+    // network thread: e.name, e.module (0 for a C++ event), e.args, e.dropped
+});
+// ... client.off(*id);
+```
+
+The first callback for a name subscribes on the host; the last `off` unsubscribes. Subscriptions belong to the session: they survive a resume and end with it (a reverse-mode client subscribes again for the next host). A slow client loses events rather than its session: past `host_options::remote_events_per_pump` per pump the host drops them and the next delivery's `dropped` says how many. `rhp-cli` has `subscribe <event>` / `unsubscribe <event>` and `rhp-cli events <name>...`. The HTTP gateway has no event stream.

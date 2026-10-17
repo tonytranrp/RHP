@@ -76,6 +76,7 @@ using cfg = Rhp::config<>::limits<Rhp::limits{.instructions = 50'000'000, .memor
 | `backoff_min_ms` / `backoff_max_ms` | 250 / 30000 | capped redial backoff for dialing hosts and resuming clients, with jitter |
 | `gateway_idle_ms` | 5 min | logical HTTP identity idle expiry; stops pending requests too; 0 disables expiry |
 | `cancel_check_instructions` | 1000 | count-hook interval for cancellation and budgets; 0 uses the default interval |
+| `event_queue` | 65536 | events queued per sandbox for its next pump (C++ fires from other threads, `rhp.publish`); more are dropped and counted; 0 = unlimited |
 
 Instruction, memory and execution-time limits default to unlimited; slicing defaults to off. Set budgets on the **host** that executes code. Instruction/time checks run at hook boundaries and cannot preempt C++ bindings. A host pump can dispatch several operations and pump several identity sandboxes, so `slice_us` is not a hard bound on the whole application frame.
 
@@ -93,8 +94,12 @@ Passed to the constructors at run time: [`Rhp::host_options`](host-and-client.md
 | `output` / `on_output` | receive `print()` lines (with request and module for `on_output`) |
 | `on_emit` | receive `rhp.emit` values |
 | `on_result` | receive the final result of requests that suspended |
-| `clock` | script time for `rhp.sleep` / `rhp.timer` |
+| `clock` | script time for `rhp.sleep` / `rhp.timer` / `rhp.after` / `rhp.every` / `rhp.wait_event` timeouts |
 | `identity` | caller-supplied label for this local identity |
+| `handler_errors` | what a failing timer, frame callback, event handler or task does when it sets no `on_error`: `report` (default), `remove` or `fault` |
+| `on_handler_error` | receives each failed handler call (`handler_failure`); empty = one `[handler failed] ...` output line |
+
+`sandbox::on_script_event(name, fn)` and `sandbox::stats()` complete the standalone sandbox's Stage 7 API (see [script events](writing-scripts.md#script-events)).
 
 The supplied memory resource must outlive the sandbox. It covers Lua allocations, not every C++ container or effect allocation. The host does not expose a memory-resource constructor option. `on_result` runs for requests that suspended at least once; synchronous outcomes are returned by the operation itself.
 
