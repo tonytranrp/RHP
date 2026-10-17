@@ -1,7 +1,7 @@
 # Platforms and toolchains
 
 **Decision**
-- Platforms: Windows 10 1809+, Linux glibc 2.31+, macOS 13+, iOS 16+, Android API 26+; x86_64 and arm64.
+- Platforms: Windows 10 1809+, Linux glibc 2.31+, macOS 13.3+, iOS 16.3+, Android API 26+; x86_64 and arm64. (13.3 / 16.3 rather than 13 / 16: Apple's libc++ ships floating-point `std::to_chars`, which `std::format` of a `double` needs, only from those releases. The first hosted macOS build, Stage 6 completion, failed on it.)
 - Compilers: MSVC (VS 2026), clang-cl, Clang 17+, AppleClang, Android NDK r30 Clang. GCC is not a target.
 
 **Presets**

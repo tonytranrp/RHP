@@ -1,7 +1,7 @@
 # RHP — Remote Hot Patch · Architecture
 
 > **Language:** C++23 · **Build:** CMake ≥ 3.28, Ninja Multi-Config, CPM.cmake · **License:** Apache-2.0
-> **Targets:** Windows 10 1809+ · Linux (glibc 2.31+) · macOS 13+ · iOS 16+ · Android API 26+ — x86_64 + arm64
+> **Targets:** Windows 10 1809+ · Linux (glibc 2.31+) · macOS 13.3+ · iOS 16.3+ · Android API 26+ — x86_64 + arm64
 > **Compilers:** MSVC (VS 2026) · clang-cl · Clang 17+ · AppleClang · Android NDK Clang
 > **Root namespace:** `Rhp::` · **Include root:** `<rhp/...>`
 > **Current usage:** [user guide](guide/README.md) · **Open issues / verification:** [Status and TODO](TODO.md). The current implementation includes Stages 0–6. The historical decision logs below retain the decisions made at each stage; current Stage 6 choices are recorded in [networking decisions](decisions/stage6-networking.md).
@@ -864,8 +864,8 @@ flowchart BT
 | `windows-msvc-asan` | MSVC AddressSanitizer | ✅ |
 | `linux-clang` / `linux-clang-asan` / `linux-clang-tsan` | Clang 17+, glibc 2.31+ | ✅ |
 | `linux-clang-fuzz` | Clang, `RHP_FUZZ=ON`, ASan+UBSan, RelWithDebInfo | libFuzzer runs (Tests/fuzz/README.md) |
-| `macos` | AppleClang, `arm64;x86_64`, macOS 13+ | workflow defined; unverified |
-| `ios-sim` | Xcode + AppleClang, `CMAKE_SYSTEM_NAME=iOS`, iOS 16+, simulator | unverified; runner uses `xcrun simctl spawn` as crosscompiling emulator (`Tools/ios/simctl_run.sh`, CI) |
+| `macos` | AppleClang, `arm64;x86_64`, macOS 13.3+ | workflow defined; unverified |
+| `ios-sim` | Xcode + AppleClang, `CMAKE_SYSTEM_NAME=iOS`, iOS 16.3+, simulator | unverified; runner uses `xcrun simctl spawn` as crosscompiling emulator (`Tools/ios/simctl_run.sh`, CI) |
 | `ios-device` | Xcode, arm64 | build only |
 | `android-x64` | NDK Clang, API 26+ (`ANDROID_NDK_HOME`); built with NDK 29 | build verified; hosted emulator job unverified; adb runner available |
 | `android-arm64` | NDK Clang; tested with NDK 29 | build only (with `-DRHP_BUILD_TESTS=ON` the same runner tests on a phone) |
