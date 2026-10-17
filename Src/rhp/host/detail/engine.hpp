@@ -44,6 +44,12 @@ struct host_options {
     // tls-exporter), so a relay that terminates TLS can't pass any request; plaintext
     // connections can't bind, so they are refused too.
     bool http_require_binding = false;
+    // What a failing timer, frame callback, event handler or task does in every identity's sandbox
+    // when the script sets no on_error (Rhp::script::handler_error_policy).
+    script::handler_error_policy handler_errors = script::handler_error_policy::kReport;
+    // Subscribed events (client.on) sent to one session per pump(); the rest are dropped and the
+    // next delivery says how many, so a slow client can't fall behind until the session ends.
+    std::size_t remote_events_per_pump = 256;
 };
 
 // A whole blob as a sink sees it (host.on_blob). Views are valid during the sink call only.
@@ -71,6 +77,7 @@ struct setup {
     // The signer policy's check of a script: who signed it, or kBadSignature.
     std::function<result<std::string>(std::string_view source, const value& signature)> verify;
     std::shared_ptr<event::hub> events;
+    std::shared_ptr<event::script_hub> script_events;
     Rhp::limits limits{};
     bool io_thread = true; // false: pump() polls the network
     std::function<bool(log_level)> log_enabled;

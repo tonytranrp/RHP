@@ -15,6 +15,7 @@
 #include <optional>
 #include <random>
 #include <set>
+#include <span>
 #include <stop_token>
 #include <string>
 #include <string_view>
@@ -28,6 +29,7 @@
 #include <rhp/core/log.hpp>
 #include <rhp/core/result.hpp>
 #include <rhp/core/role.hpp>
+#include <rhp/core/subscription.hpp>
 #include <rhp/core/value.hpp>
 #include <rhp/event/events.hpp>
 #include <rhp/event/hub.hpp>
@@ -37,7 +39,9 @@
 #include <rhp/net/link.hpp>
 #include <rhp/platform/os.hpp>
 #include <rhp/platform/random.hpp>
+#include <rhp/script/detail/event_registry.hpp>
 #include <rhp/script/ledger.hpp>
+#include <rhp/utils/fixed_string.hpp>
 #include <rhp/script/sandbox.hpp>
 #include <rhp/security/hash.hpp>
 #include <rhp/session/secure_link.hpp>
@@ -219,7 +223,9 @@ struct outbound {
     case wire::op::kStatus:
     case wire::op::kDescribe:
     case wire::op::kCancel:
-    case wire::op::kBlob: return false;
+    case wire::op::kBlob:
+    case wire::op::kSubscribe:
+    case wire::op::kUnsubscribe: return false;
     default: return true;
     }
 }
@@ -234,7 +240,7 @@ struct outbound {
 
 } // namespace
 
-class engine final : private session::handler, private gateway_sink {
+class engine final : private session::handler, private gateway_sink, private script::detail::event_listener {
     static constexpr std::size_t kMaxInFlight = 4096;  // requests with an idempotency key, per session
     static constexpr std::size_t kMaxBacklog = 65'536; // requests held back while pump() is behind
     static constexpr std::chrono::milliseconds kEnforceInterval{20};
@@ -289,6 +295,10 @@ public:
 
     // The network is stopped (or never ran on another thread) when this runs.
     ~engine() {
+        for (const auto& [name, state] : program_attached_) {
+            state->detach(this); // a game thread may still fire: never after this
+        }
+        program_attached_.clear();
         advertisement_.reset();
         gateway_.reset();
         enforce_timer_.cancel();
@@ -446,15 +456,20 @@ public:
     // ---- pump thread ---------------------------------------------------------------------------------
 
     void pump() {
+        pump_thread_.store(std::this_thread::get_id(), std::memory_order_release);
         sample_clock();
         if (!setup_.io_thread) {
             io_.poll();
+        }
+        for (auto& [id, sess] : pump_sessions_) {
+            sess.sent_this_pump = 0;
         }
         std::vector<inbound> batch;
         while (auto item = inbox_.try_pop()) {
             batch.push_back(std::move(*item));
         }
         process(batch);
+        deliver_program_events();
         for (auto& [name, id] : identities_) {
             id.box->pump();
         }
@@ -647,6 +662,7 @@ private:
         session_id current_session; // the network request inside a sandbox call
         std::uint64_t current_req = 0;
         std::set<module_id> pinned; // kept when the last session ends
+        Rhp::subscription script_listener; // the sandbox's script events → host.on_script_event and clients
     };
 
     // A blob arriving on one session (one at a time).
@@ -664,6 +680,10 @@ private:
         std::string peer;
         std::optional<blob_transfer> blob;
         std::uint64_t failed_transfer = 0; // later chunks of a refused blob are refused quietly
+        std::set<std::string, std::less<>> script_subs;  // rhp.publish names of its identity ("*": all)
+        std::set<std::string, std::less<>> program_subs; // C++ lua_event names
+        std::size_t sent_this_pump = 0;
+        std::uint64_t dropped = 0; // events not sent since the last one that was
     };
 
     struct blob_sink {
@@ -1135,7 +1155,11 @@ private:
     }
 
     void opened(inbound& in) {
-        pump_sessions_[in.session] = pump_session{in.identity, in.granted, in.peer, std::nullopt, 0};
+        pump_session fresh;
+        fresh.identity = in.identity;
+        fresh.granted = in.granted;
+        fresh.peer = in.peer;
+        pump_sessions_[in.session] = std::move(fresh);
         auto it = identities_.find(in.identity);
         if (it == identities_.end()) {
             identity_runtime rt;
@@ -1152,6 +1176,8 @@ private:
                 const std::scoped_lock lock{rt.relay->mutex};
                 rt.relay->box = rt.box.get();
             }
+            rt.script_listener =
+                rt.box->on_script_event("*", [this, identity = in.identity](const script::script_event& e) { forward_script_event(identity, e); });
             it = identities_.emplace(in.identity, std::move(rt)).first;
             identity_count_.store(identities_.size(), std::memory_order_release);
             log(log_level::kInfo, std::format("identity {} ({}) has a sandbox", in.identity, in.granted));
@@ -1174,6 +1200,11 @@ private:
     }
 
     void closed(inbound& in) {
+        if (const auto ps = pump_sessions_.find(in.session); ps != pump_sessions_.end()) {
+            for (const std::string& name : ps->second.program_subs) {
+                drop_program_sub(name, in.session);
+            }
+        }
         pump_sessions_.erase(in.session);
         if (wants<event::session_closed>()) {
             publish(event::session_closed{now(), in.session, in.identity, in.peer, in.reason});
@@ -1278,7 +1309,161 @@ private:
             route(identity, r, wire::op::kEmit, Rhp::to_value(wire::emit_message{mod, v}));
         };
         o.on_result = [this, identity](request_id r, const result<script::value_list>& res) { finished(identity, r, res); };
+        o.handler_errors = setup_.options.handler_errors;
+        o.on_handler_error = [this, identity](const script::handler_failure& f) { handler_failed(identity, f); };
         return o;
+    }
+
+    // A script's handler failed: a host event, a log line and an output line for its sessions.
+    void handler_failed(const std::string& identity, const script::handler_failure& f) {
+        const std::string line =
+            std::format("[handler failed] {} ({} {}): {} ({})", f.module_name.empty() ? "?" : f.module_name, f.kind, f.source, f.err, f.action);
+        log(log_level::kWarn, std::format("[{}] {}", identity, line));
+        route(identity, f.request, wire::op::kOutput, value{line});
+        if (wants<event::handler_failed>()) {
+            publish(event::handler_failed{now(), identity, f.module_name, std::string{script::to_string(f.kind)}, f.source, f.handler,
+                                          std::string{script::to_string(f.action)}, f.err});
+        }
+    }
+
+    // ---- pump thread: events ------------------------------------------------------------------------
+
+    // An rhp.publish of `identity`'s sandbox: host.on_script_event and the identity's subscribed sessions.
+    void forward_script_event(const std::string& identity, const script::script_event& e) {
+        if (setup_.script_events != nullptr && setup_.script_events->wants(e.name)) {
+            event::script_event copy{now(), identity, std::string{e.module_name}, std::string{e.name}, {e.args.begin(), e.args.end()}};
+            try {
+                setup_.script_events->publish(copy);
+            } catch (const std::exception& ex) {
+                log(log_level::kError, std::format("a script event handler threw: {}", ex.what()));
+            } catch (...) {
+                log(log_level::kError, "a script event handler threw");
+            }
+        }
+        const auto it = identities_.find(identity);
+        if (it == identities_.end()) {
+            return;
+        }
+        for (const session_id s : it->second.sessions) {
+            const auto ps = pump_sessions_.find(s);
+            if (ps != pump_sessions_.end() && (ps->second.script_subs.contains(e.name) || ps->second.script_subs.contains("*"))) {
+                send_event(s, ps->second, e.name, e.module, e.args);
+            }
+        }
+    }
+
+    // One kEvent to one session, at most remote_events_per_pump per pump(); the rest are counted.
+    void send_event(session_id s, pump_session& sess, std::string_view name, module_id module, std::span<const value> args) {
+        if (sess.sent_this_pump >= setup_.options.remote_events_per_pump) {
+            ++sess.dropped;
+            return;
+        }
+        ++sess.sent_this_pump;
+        wire::event_message m{std::string{name}, module, value::array{args.begin(), args.end()}, std::exchange(sess.dropped, 0)};
+        to_network({s, wire::op::kEvent, 0, Rhp::to_value(m)});
+    }
+
+    // C++ lua_events for subscribed sessions (event_listener; attached while any session subscribes).
+    [[nodiscard]] std::thread::id listener_thread() const noexcept override { return pump_thread_.load(std::memory_order_acquire); }
+
+    void deliver(std::string_view event, const script::detail::event_args& args) override {
+        send_program_event(event, args.values(args.data));
+    }
+
+    void enqueue(std::string_view event, const script::detail::event_args& args) noexcept override {
+        try {
+            const std::uint32_t cap = setup_.limits.event_queue;
+            const std::scoped_lock lock{program_mutex_};
+            if (cap != 0 && program_inbox_.size() >= cap) {
+                return; // each session's next event says nothing about these: they never queued
+            }
+            program_inbox_.emplace_back(std::string{event}, args.values(args.data));
+        } catch (...) { // out of memory: the clients miss this one
+        }
+    }
+
+    void deliver_program_events() {
+        std::vector<std::pair<std::string, std::vector<value>>> queued;
+        {
+            const std::scoped_lock lock{program_mutex_};
+            queued.swap(program_inbox_);
+        }
+        for (const auto& [event, args] : queued) {
+            send_program_event(event, args);
+        }
+    }
+
+    void send_program_event(std::string_view event, const std::vector<value>& args) {
+        const auto subs = program_subs_.find(event);
+        if (subs == program_subs_.end()) {
+            return;
+        }
+        for (const session_id s : subs->second) {
+            if (const auto ps = pump_sessions_.find(s); ps != pump_sessions_.end()) {
+                send_event(s, ps->second, event, module_id{}, args);
+            }
+        }
+    }
+
+    void drop_program_sub(const std::string& name, session_id s) {
+        const auto subs = program_subs_.find(name);
+        if (subs == program_subs_.end()) {
+            return;
+        }
+        subs->second.erase(s);
+        if (!subs->second.empty()) {
+            return;
+        }
+        program_subs_.erase(subs);
+        if (const auto attached = program_attached_.find(name); attached != program_attached_.end()) {
+            attached->second->detach(this);
+            program_attached_.erase(attached);
+        }
+    }
+
+    // kSubscribe / kUnsubscribe: a C++ event (program-wide) or the identity's script events.
+    void subscription_request(pump_session& sess, const inbound& in) {
+        auto m = Rhp::from_value<wire::subscribe_request>(in.body);
+        if (!m) {
+            return reply_error(in.session, in.req, m.error());
+        }
+        const std::string& name = m->name;
+        const std::string_view op = wire::to_string(in.code);
+        if (name != "*" && !utils::is_dotted_name(name)) {
+            return reply_error(in.session, in.req,
+                               make_error(errc::kInvalidArgument, std::format("'{}' is not an event name (dotted lowercase, or *)", name), std::string{op}));
+        }
+        script::detail::event_state* state = nullptr;
+        if (name != "*") {
+            auto found = script::detail::find_event(name);
+            if (found) {
+                state = (*found)->state;
+            } else if (found.error().code != errc::kNotFound) {
+                return reply_error(in.session, in.req, make_error(found.error().code, found.error().message, std::string{op}));
+            }
+        }
+        if (in.code == wire::op::kUnsubscribe) {
+            if (state != nullptr) {
+                if (sess.program_subs.erase(name) != 0) {
+                    drop_program_sub(name, in.session);
+                }
+            } else {
+                sess.script_subs.erase(name);
+            }
+            return reply(in.session, in.req, value{});
+        }
+        if (state != nullptr) {
+            if (sess.program_subs.insert(name).second) {
+                program_subs_[name].insert(in.session);
+                if (!program_attached_.contains(name)) {
+                    program_attached_.emplace(name, state);
+                    state->attach(this);
+                }
+            }
+        } else {
+            sess.script_subs.insert(name);
+        }
+        reply(in.session, in.req, value{});
     }
 
     // print / emit: to the network request that caused it, else to every session of the identity.
@@ -1528,6 +1713,10 @@ private:
         }
         if (in.code == wire::op::kBlob) {
             blob(sess, in);
+            return;
+        }
+        if (in.code == wire::op::kSubscribe || in.code == wire::op::kUnsubscribe) {
+            subscription_request(sess, in);
             return;
         }
         const running_scope running{*rt.relay, in};
@@ -1944,6 +2133,12 @@ private:
     session_id audit_session_;
     std::uint64_t audit_req_ = 0;
     bool audit_deferred_ = false; // the request suspended: identity_runtime::audits reports it
+    // Remote subscriptions to C++ events: who wants each name, and the event states listened to.
+    std::map<std::string, std::set<session_id>, std::less<>> program_subs_;
+    std::map<std::string, script::detail::event_state*, std::less<>> program_attached_;
+    std::atomic<std::thread::id> pump_thread_{std::this_thread::get_id()};
+    std::mutex program_mutex_; // guards program_inbox_ (fires from other threads)
+    std::vector<std::pair<std::string, std::vector<value>>> program_inbox_;
 
 };
 

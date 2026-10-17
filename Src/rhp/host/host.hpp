@@ -72,6 +72,7 @@ public:
         s.begin_handshake = [auth = std::move(auth)] { return auth.begin(); };
         s.verify = [trust = std::move(trust)](std::string_view source, const value& signature) { return trust.verify(source, signature); };
         s.events = events_;
+        s.script_events = script_events_;
         s.limits = Cfg::limits_v;
         s.io_thread = Cfg::io_t::kOwnsThread;
         s.log_enabled = [this](log_level level) { return logger_.enabled(level); };
@@ -145,6 +146,14 @@ public:
     template <std::invocable<const event::any&> F>
     [[nodiscard]] event::subscription on_any(F fn) {
         return event::subscribe_any(events_, std::move(fn));
+    }
+
+    // Calls `fn` for every rhp.publish of `name` ("*": every name, rhp.handler_failed included) in
+    // any identity's sandbox, on the pump thread, until the returned subscription dies.
+    template <std::invocable<const event::script_event&> F>
+    [[nodiscard]] event::subscription on_script_event(std::string_view name, F fn) {
+        const std::uint64_t id = script_events_->add(std::string{name}, std::move(fn));
+        return event::subscription{std::weak_ptr<subscribable>{script_events_}, id};
     }
 
     // One frame: runs requests that arrived, resumes suspended scripts, fires timers and queued
@@ -245,6 +254,7 @@ private:
     typename Cfg::logger_t logger_{};
     typename Cfg::clock_t clock_{};
     std::shared_ptr<event::hub> events_ = std::make_shared<event::hub>();
+    std::shared_ptr<event::script_hub> script_events_ = std::make_shared<event::script_hub>();
 #if RHP_ENABLE
     typename Cfg::io_t runner_{};
     host_detail::engine_ptr engine_;

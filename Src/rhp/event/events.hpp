@@ -7,10 +7,12 @@
 #include <string_view>
 #include <type_traits>
 #include <variant>
+#include <vector>
 
 #include <rhp/core/error.hpp>
 #include <rhp/core/ids.hpp>
 #include <rhp/core/role.hpp>
+#include <rhp/core/value.hpp>
 
 namespace Rhp::event {
 
@@ -101,8 +103,33 @@ struct identity_reverted {
     std::uint64_t pinned = 0; // modules kept
 };
 
-// Every host event, for handlers that take them all (the audit sinks).
-using any = std::variant<session_opened, session_closed, auth_failed, script_executed, blob_received, identity_reverted, session_resumed>;
+// A timer, frame callback, event handler or task of a script failed (script::handler_error_policy
+// decides what was done: `action` is "report", "remove" or "fault").
+struct handler_failed {
+    static constexpr std::string_view name = "handler_failed";
+    time_point time;
+    std::string identity;
+    std::string module;
+    std::string kind;   // "timer", "frame", "event" or "task"
+    std::string source; // the event name, or "timer" / "frame" / "task"
+    std::uint64_t handler = 0; // the id the script holds (0: none)
+    std::string action;
+    error outcome;
+};
+
+// Every host event, for handlers that take them all (the audit sinks). New kinds go at the end.
+using any = std::variant<session_opened, session_closed, auth_failed, script_executed, blob_received, identity_reverted, session_resumed, handler_failed>;
+
+// An rhp.publish of some identity's script (host.on_script_event). Not part of `any`: script events
+// are application traffic, not an audit record.
+struct script_event {
+    static constexpr std::string_view name = "script_event";
+    time_point time;
+    std::string identity;
+    std::string module; // the publishing module (empty: the sandbox itself, e.g. rhp.handler_failed)
+    std::string event;
+    std::vector<value> args;
+};
 
 namespace detail {
 

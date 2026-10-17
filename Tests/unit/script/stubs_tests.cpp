@@ -279,5 +279,13 @@ TEST_CASE("rhp_api filters rhp.patch by role", "[script][stubs]") {
         CHECK(api.contains("function require(name) end\n"));
         CHECK(api.ends_with("---@field on_restore? fun(state: any)\n"));
         CHECK(!api.ends_with("\n\n"));
+        for (const char* fn : {"function rhp.after(ms, fn, opts) end", "function rhp.every(ms, fn, opts) end", "function rhp.every_frame(fn, opts) end",
+                               "function rhp.every_frames(frames, fn, opts) end", "function rhp.pause(id) end", "function rhp.resume(id) end",
+                               "function rhp.reschedule(id, interval) end", "function rhp.timers() end", "function rhp.on(event, handler, opts) end",
+                               "function rhp.once(event, handler, opts) end", "function rhp.on_error(handler, opts) end", "function rhp.publish(event, ...) end",
+                               "function rhp.wait_event(event, timeout_ms) end", "function rhp.spawn(fn, ...) end", "function rhp.tasks() end",
+                               "function rhp.stats() end", "---@class rhp.task", "---@class rhp.handler_options"}) {
+            CHECK(api.contains(fn));
+        }
     }
 }

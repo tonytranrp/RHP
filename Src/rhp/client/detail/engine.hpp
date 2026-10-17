@@ -46,6 +46,16 @@ struct client_options {
     security::tls::settings tls{};
 };
 
+// One delivery of a subscribed event (client.on). Views are valid during the callback only.
+struct remote_event {
+    std::string_view name{};
+    module_id module{};            // the publishing module on the host (0: a C++ event or the sandbox itself)
+    std::span<const value> args{};
+    std::uint64_t dropped = 0;     // deliveries to this session the host dropped since the previous one
+};
+
+using remote_event_fn = std::function<void(const remote_event&)>;
+
 } // namespace Rhp
 
 namespace Rhp::net {
@@ -99,6 +109,10 @@ void cancel(engine& e, std::uint64_t req = 0) noexcept;
 // Closes the session (the host reverts this identity if it was its last session) and waits briefly
 // for the close to go out.
 void close(engine& e) noexcept;
+// Adds a callback for `name` (subscribing on the host the first time); returns its id.
+[[nodiscard]] result<std::uint64_t> subscribe(engine& e, std::string_view name, remote_event_fn fn);
+// Removes one callback (unsubscribing on the host with the last one for its name).
+[[nodiscard]] result<void> unsubscribe(engine& e, std::uint64_t id);
 // zero_threads: runs whatever the network has ready, without blocking. No-op with an I/O thread.
 void poll(engine& e);
 // zero_threads: what an async result's get() runs while it waits; empty with an I/O thread.

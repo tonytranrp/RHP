@@ -362,6 +362,39 @@ TEST_CASE("rhp-cli: watch reloads a saved file", "[cli][shell]") {
     CHECK(out.last().find("is not a folder") != std::string::npos);
 }
 
+TEST_CASE("rhp-cli: subscribe prints host events and unsubscribe stops them", "[cli][shell]") {
+    const auto dev = *Rhp::security::ed25519_secret_key::generate();
+    const auto psk = *Rhp::security::key::generate();
+    const auto at = Rhp::endpoint::listen("cli.subscribe", 1);
+    Rhp::host<cfg> host{at, Rhp::security::keyring{{"dev", psk, Rhp::role::kPatch}}, Rhp::security::trusted_signers{{"dev", dev.public_key()}}};
+    REQUIRE(host.install<cli_lib>());
+    std::jthread game{[&host](std::stop_token stop) {
+        while (!stop.stop_requested()) {
+            host.pump();
+            std::this_thread::sleep_for(1ms);
+        }
+    }};
+    screen out;
+    Rhp::client<cfg> c{at.reversed(), Rhp::security::psk_identity{"dev", psk}, Rhp::security::signing_key{"dev", dev}};
+    rhp_cli::shell<cfg> sh{c, out.printer()};
+    CHECK(sh.feed("subscribe game.score"));
+    CHECK(out.has("subscribed to game.score"));
+    CHECK(sh.feed("exec rhp.publish('game.score', 'red', 3)"));
+    CHECK(eventually([&] { return out.has("event game.score [#"); })); // the publishing module (the scratch one here)
+    CHECK(out.has("\"red\"	3"));
+    CHECK(sh.feed("unsubscribe game.score"));
+    CHECK(out.has("unsubscribed from game.score"));
+    CHECK(sh.feed("exec rhp.publish('game.score', 'blue', 1)"));
+    CHECK(sh.feed("return 1"));
+    std::this_thread::sleep_for(50ms);
+    CHECK_FALSE(out.has("blue"));
+    const int failed = sh.failures();
+    CHECK(sh.feed("unsubscribe game.score"));
+    CHECK(sh.failures() == failed + 1);
+    CHECK(sh.feed("subscribe Bad Name"));
+    CHECK(sh.failures() == failed + 2);
+}
+
 // ---- the real binaries ---------------------------------------------------------------------------------------
 
 #if defined(RHP_CLI_EXE) && defined(RHP_HEADLESS_EXE)

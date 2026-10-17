@@ -84,3 +84,16 @@ TEST_CASE("disabled lua_event fire is a no-op", "[script][disabled]") {
     ping.fire(1, "nobody");
     REQUIRE(decltype(ping)::listeners() == 0);
 }
+
+TEST_CASE("disabled sandbox stats are zero and on_script_event never fires", "[script][disabled]") {
+    Rhp::script::sandbox box;
+    int calls = 0;
+    auto sub = box.on_script_event("*", [&](const Rhp::script::script_event&) { ++calls; });
+    box.pump();
+    CHECK(calls == 0);
+    CHECK_FALSE(sub.active());
+    const auto st = box.stats();
+    CHECK(st.dropped_events == 0);
+    CHECK(st.tasks == 0);
+    CHECK(st.handler_failures == 0);
+}

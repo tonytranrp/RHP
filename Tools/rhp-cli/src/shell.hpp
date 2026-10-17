@@ -80,7 +80,10 @@ public:
     // `interrupted` is polled while a script runs (Ctrl+C): true cancels it on the host.
     shell(Rhp::client<Cfg>& c, printer out, std::function<bool()> interrupted = {}) : client_(c), out_(std::move(out)), interrupted_(std::move(interrupted)) {}
 
-    ~shell() { unwatch(); }
+    ~shell() {
+        unwatch();
+        unsubscribe_all();
+    }
 
     shell(const shell&) = delete;
     shell& operator=(const shell&) = delete;
@@ -191,6 +194,14 @@ public:
         } else if (cmd == "unwatch") {
             unwatch();
             info("stopped watching");
+        } else if (cmd == "subscribe") {
+            if (need(1, "subscribe <event>")) {
+                (void)subscribe(arg(1));
+            }
+        } else if (cmd == "unsubscribe") {
+            if (need(1, "unsubscribe <event>")) {
+                (void)unsubscribe(arg(1));
+            }
         } else if (cmd == "whoami") {
             const auto who = client_.info();
             info(std::format("{} ({}) on a {} host, session {}", who.identity, who.granted, who.host_platform, who.session));
@@ -308,6 +319,58 @@ public:
     }
 
     // Reloads <folder>/*.lua whenever one is saved (module name = file stem). Replaces an earlier watch.
+    // Prints every delivery of `event` (a C++ event of the host, or an rhp.publish of this identity's
+    // scripts; "*": every publish) until unsubscribe.
+    bool subscribe(const std::string& event) {
+        if (subs_.contains(event)) {
+            info(std::format("already subscribed to {}", event));
+            return true;
+        }
+        auto id = client_.on(event, [print = out_](const Rhp::remote_event& e) {
+            std::string line = std::format("event {}", e.name);
+            if (e.module) {
+                line += std::format(" [#{}]", e.module);
+            }
+            if (!e.args.empty()) {
+                line += ' ';
+                line += format_values(std::vector<Rhp::value>{e.args.begin(), e.args.end()});
+            }
+            if (e.dropped != 0) {
+                line += std::format(" (dropped {})", e.dropped);
+            }
+            print(style::kOutput, line);
+        });
+        if (!id) {
+            error(id.error());
+            return false;
+        }
+        subs_.emplace(event, *id);
+        info(std::format("subscribed to {}", event));
+        return true;
+    }
+
+    bool unsubscribe(const std::string& event) {
+        const auto it = subs_.find(event);
+        if (it == subs_.end()) {
+            error(std::format("not subscribed to {}", event));
+            return false;
+        }
+        auto r = client_.off(it->second);
+        subs_.erase(it);
+        if (!r) {
+            error(r.error());
+            return false;
+        }
+        info(std::format("unsubscribed from {}", event));
+        return true;
+    }
+
+    void unsubscribe_all() {
+        for (const auto& [event, id] : std::exchange(subs_, {})) {
+            (void)client_.off(id);
+        }
+    }
+
     bool watch(const std::string& folder) {
         unwatch();
         std::error_code ec;
@@ -367,8 +430,8 @@ public:
     }
 
     [[nodiscard]] static std::vector<std::string> commands() {
-        return {"help", "exec", "load", "reload", "call", "rollback", "revert", "unload", "pin", "unpin", "checkpoint",
-                "revert_to", "revert_all", "list", "status", "stubs", "blob", "watch", "unwatch", "whoami", "quit"};
+        return {"help", "exec", "load", "reload", "call", "rollback", "revert", "unload", "pin", "unpin", "checkpoint", "revert_to", "revert_all",
+                "list", "status", "stubs", "blob", "watch", "unwatch", "subscribe", "unsubscribe", "whoami", "quit"};
     }
 
     [[nodiscard]] int failures() const noexcept { return failures_; }
@@ -391,7 +454,8 @@ private:
   checkpoint <tag>            mark the ledger             revert_to <tag>          undo back to the mark
   revert_all                  panic button (admin)        list / status <module>   introspection
   stubs [> file]              LuaLS annotations           blob <sink> <file>       push a file to a host sink
-  watch <folder> / unwatch    reload *.lua on save        whoami / quit
+  watch <folder> / unwatch    reload *.lua on save        subscribe / unsubscribe <event>  print host events
+  whoami / quit
 Ctrl+C cancels a running script.)");
     }
 
@@ -473,6 +537,7 @@ Ctrl+C cancels a running script.)");
     std::string buffer_;
     std::optional<std::vector<std::string>> names_;
     std::atomic<int> failures_{0};
+    std::map<std::string, std::uint64_t> subs_; // subscribed event → client.on id
     std::jthread watcher_;
 };
 
