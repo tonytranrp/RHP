@@ -27,17 +27,14 @@ void event_state::fire(std::string_view name, const event_args& args) {
                 local.push_back(listener);
                 continue;
             }
-            try {
-                listener->enqueue(name, args.own(args.data));
-            } catch (const std::exception&) { // out of memory: this listener misses the event
-            }
+            listener->enqueue(name, args); // noexcept: a listener that can't copy misses the event
         }
     }
     // Delivered unlocked: handlers may subscribe, unsubscribe or fire other events. A listener that
     // detached meanwhile (a handler reverted its sandbox's subscription) is skipped.
     for (event_listener* listener : local) {
         if (attached(listener)) {
-            listener->deliver(name, event_pusher{args.data, args.push});
+            listener->deliver(name, args);
         }
     }
 }

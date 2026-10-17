@@ -140,4 +140,12 @@ std::string sandbox::stubs() const {
     return {};
 }
 
+Rhp::subscription sandbox::on_script_event(std::string_view, script_event_fn) {
+    return {};
+}
+
+sandbox_stats sandbox::stats() const noexcept {
+    return {};
+}
+
 } // namespace Rhp::script

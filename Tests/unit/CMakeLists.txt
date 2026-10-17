@@ -120,6 +120,7 @@ if(RHP_ENABLE)
         SOURCES
             script/binding_tests.cpp
             script/event_tests.cpp
+            script/handler_error_tests.cpp
             script/ledger_tests.cpp
             script/lib_tests.cpp
             script/limits_tests.cpp
@@ -127,8 +128,11 @@ if(RHP_ENABLE)
             script/reload_tests.cpp
             script/require_tests.cpp
             script/sandbox_tests.cpp
+            script/schedule_tests.cpp
             script/scheduler_tests.cpp
+            script/script_event_tests.cpp
             script/stubs_tests.cpp
+            script/task_tests.cpp
         LINKS
             Rhp::script
     )

@@ -23,6 +23,7 @@ struct limits {
     std::uint32_t backoff_max_ms = 30'000;
     std::uint32_t gateway_idle_ms = 5u * 60u * 1000u;
     std::uint32_t cancel_check_instructions = 1'000;
+    std::uint32_t event_queue = 65'536; // events queued per sandbox for its next pump() (other threads' fires, rhp.publish); 0 = unlimited
 
     [[nodiscard]] constexpr bool operator==(const limits&) const = default;
 };

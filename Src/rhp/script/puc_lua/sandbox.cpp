@@ -27,6 +27,7 @@
 #include <rhp/script/detail/event_registry.hpp>
 #include <rhp/script/detail/patch_layers.hpp>
 #include <rhp/script/detail/patch_registry.hpp>
+#include <rhp/script/puc_lua/builtins.hpp>
 #include <rhp/script/puc_lua/sandbox_impl.hpp>
 #include <rhp/script/sandbox.hpp>
 #include <rhp/script/stubs.hpp>
@@ -38,11 +39,31 @@ namespace Rhp::script {
 
 namespace detail {
 
+sandbox_impl& impl_of(lua_State* L) noexcept {
+    return static_cast<sandbox_impl&>(**static_cast<context**>(lua_getextraspace(L)));
+}
+
+namespace {
+constexpr double kMaxMilliseconds = 1e12; // ~31 years: keeps duration conversions in range
+} // namespace
+
+steady::duration milliseconds(double ms) {
+    return std::chrono::duration_cast<steady::duration>(std::chrono::duration<double, std::milli>{std::min(ms, kMaxMilliseconds)});
+}
+
+double checked_ms(lua_State* L, int index, std::string_view where) {
+    const stack s{L};
+    const auto ms = s.to_number(index);
+    if (!ms || !(*ms >= 0.0)) {
+        s.raise(make_error(errc::kInvalidArgument, std::format("expected milliseconds >= 0, got {}", s.type_name(index)), std::string{where}));
+    }
+    return *ms;
+}
+
 namespace {
 
 constexpr std::size_t kAlignment = alignof(std::max_align_t);
 constexpr std::uint32_t kDefaultCheckInterval = 1'000;
-constexpr double kMaxMilliseconds = 1e12;                         // ~31 years: keeps duration conversions in range
 constexpr const char* kModuleProxyKey = "rhp.module";             // metatable of require() proxies
 constexpr const char* kModuleProxiesKey = "rhp.module_proxies";   // registry: module id → its proxy
 constexpr const char* kRequestThreadsKey = "rhp.request_threads"; // registry: weak set of request coroutines
@@ -62,10 +83,6 @@ return function(chunk, env)
     return exports
 end
 )lua";
-
-sandbox_impl& impl_of(lua_State* L) noexcept {
-    return static_cast<sandbox_impl&>(**static_cast<context**>(lua_getextraspace(L)));
-}
 
 int on_panic(lua_State* L) {
     const char* message = lua_tostring(L, -1);
@@ -90,20 +107,6 @@ result<void> protect(lua_State* L, F&& fn) {
 
 std::uint32_t source_hash(std::string_view source) noexcept {
     return utils::crc32c(utils::bytes_view{reinterpret_cast<const std::byte*>(source.data()), source.size()});
-}
-
-steady::duration milliseconds(double ms) {
-    return std::chrono::duration_cast<steady::duration>(std::chrono::duration<double, std::milli>{std::min(ms, kMaxMilliseconds)});
-}
-
-// Milliseconds argument (>= 0) or a raised error naming `where`.
-double checked_ms(lua_State* L, int index, std::string_view where) {
-    const stack s{L};
-    const auto ms = s.to_number(index);
-    if (!ms || !(*ms >= 0.0)) {
-        s.raise(make_error(errc::kInvalidArgument, std::format("expected milliseconds >= 0, got {}", s.type_name(index)), std::string{where}));
-    }
-    return *ms;
 }
 
 // ---- Lua-side builtins ---------------------------------------------------------------------------
@@ -264,38 +267,12 @@ int lua_rhp_emit(lua_State* L) {
     return 0;
 }
 
-// rhp.timer(ms, fn [, repeating]) → id: calls fn as its own request after ms (every ms if repeating).
-int lua_rhp_timer(lua_State* L) {
-    const stack s{L};
-    const double ms = checked_ms(L, 1, "rhp.timer");
-    if (lua_type(L, 2) != LUA_TFUNCTION) {
-        s.raise(make_error(errc::kTypeMismatch, std::format("expected function, got {}", s.type_name(2)), "rhp.timer"));
-    }
-    const bool repeating = lua_toboolean(L, 3) != 0;
-    lua_pushinteger(L, static_cast<lua_Integer>(impl_of(L).add_timer(L, ms, 2, repeating)));
-    return 1;
-}
-
-// rhp.on(event, handler) → id: runs handler as its own request each time C++ fires the event.
-int lua_rhp_on(lua_State* L) {
-    const stack s{L};
-    const auto event = s.to_string(1);
-    if (!event) {
-        s.raise(make_error(errc::kTypeMismatch, std::format("expected an event name, got {}", s.type_name(1)), "rhp.on"));
-    }
-    if (lua_type(L, 2) != LUA_TFUNCTION) {
-        s.raise(make_error(errc::kTypeMismatch, std::format("expected function, got {}", s.type_name(2)), "rhp.on"));
-    }
-    lua_pushinteger(L, static_cast<lua_Integer>(impl_of(L).subscribe(L, *event, 2)));
-    return 1;
-}
-
-// rhp.off(id): removes a timer or subscription the calling module made.
+// rhp.off(id): removes a timer, frame callback or subscription, or cancels a task, the calling module made.
 int lua_rhp_off(lua_State* L) {
     const stack s{L};
     const auto id = s.to_integer(1);
     if (!id || *id <= 0) {
-        s.raise(make_error(errc::kTypeMismatch, std::format("expected a timer or subscription id, got {}", s.type_name(1)), "rhp.off"));
+        s.raise(make_error(errc::kTypeMismatch, std::format("expected an id, got {}", s.type_name(1)), "rhp.off"));
     }
     impl_of(L).remove_by_id(L, static_cast<std::uint64_t>(*id));
     return 0;
@@ -430,6 +407,7 @@ sandbox_impl::sandbox_impl(sandbox_options options)
     current_ = effect_owner{scratch_};
     auto opened = protect(state_, [this] {
         open_libraries();
+        open_stage7_libraries();
         module_record scratch;
         scratch.id = scratch_;
         scratch.name = "scratch";
@@ -448,6 +426,7 @@ sandbox_impl::~sandbox_impl() {
     if (state_ == nullptr) {
         return;
     }
+    closing_ = true;
     try {
         std::vector<module_id> ids;
         for (const auto& [id, mod] : modules_) {
@@ -537,8 +516,23 @@ void sandbox_impl::open_libraries() {
         {"frame", &lua_rhp_frame},
         {"emit", &lua_rhp_emit},
         {"timer", &lua_rhp_timer},
+        {"after", &lua_rhp_after},
+        {"every", &lua_rhp_every},
+        {"every_frame", &lua_rhp_every_frame},
+        {"every_frames", &lua_rhp_every_frames},
+        {"pause", &lua_rhp_pause},
+        {"resume", &lua_rhp_resume},
+        {"reschedule", &lua_rhp_reschedule},
+        {"timers", &lua_rhp_timers},
         {"on", &lua_rhp_on},
+        {"once", &lua_rhp_once},
+        {"on_error", &lua_rhp_on_error},
         {"off", &lua_rhp_off},
+        {"publish", &lua_rhp_publish},
+        {"wait_event", &lua_rhp_wait_event},
+        {"stats", &lua_rhp_stats},
+        {"spawn", &lua_rhp_spawn},
+        {"tasks", &lua_rhp_tasks},
     };
     lua_createtable(L, 0, static_cast<int>(std::size(builtins)) + 1);
     for (const auto& [name, fn] : builtins) {
@@ -851,165 +845,43 @@ request_record& sandbox_impl::suspendable(lua_State* L, std::string_view what) {
                               std::string{what}));
 }
 
-// ---- timers and subscriptions ----------------------------------------------------------------------
+// ---- ids the scripts hold --------------------------------------------------------------------------
 
-namespace {
-
-class timer_effect final : public effect {
-public:
-    timer_effect(sandbox_impl& box, std::uint64_t key) : box_(&box), key_(key) {}
-    timer_effect(const timer_effect&) = delete;
-    timer_effect& operator=(const timer_effect&) = delete;
-    ~timer_effect() override { box_->remove_timer(key_); }
-
-    void undo() override { box_->remove_timer(key_); }
-
-private:
-    sandbox_impl* box_;
-    std::uint64_t key_;
-};
-
-class subscription_effect final : public effect {
-public:
-    subscription_effect(sandbox_impl& box, std::string event, std::uint64_t key) : box_(&box), event_(std::move(event)), key_(key) {}
-    subscription_effect(const subscription_effect&) = delete;
-    subscription_effect& operator=(const subscription_effect&) = delete;
-    ~subscription_effect() override { box_->unsubscribe(event_, key_); }
-
-    void undo() override { box_->unsubscribe(event_, key_); }
-
-private:
-    sandbox_impl* box_;
-    std::string event_;
-    std::uint64_t key_;
-};
-
-} // namespace
-
-std::uint64_t sandbox_impl::add_timer(lua_State* L, double ms, int fn_index, bool repeating) {
-    lua_pushvalue(L, fn_index);
-    const int fn_ref = luaL_ref(L, LUA_REGISTRYINDEX);
-    const std::uint64_t key = ++timer_keys_;
-    const steady::duration interval = milliseconds(ms);
-    timers_.emplace(key, timer_record{current_, fn_ref, script_now() + interval, interval, repeating, 0});
-    const std::uint64_t seq = record_effect(repeating ? "rhp.timer (repeating)" : "rhp.timer", std::make_unique<timer_effect>(*this, key));
-    if (const auto it = timers_.find(key); it != timers_.end()) {
-        it->second.seq = seq;
-    }
-    return seq;
+bool sandbox_impl::owns_entry(std::uint64_t seq) const noexcept {
+    const ledger::entry* entry = ledger_.find(seq);
+    return entry != nullptr && entry->owner == current_.module;
 }
 
-void sandbox_impl::remove_timer(std::uint64_t key) noexcept {
-    const auto it = timers_.find(key);
-    if (it == timers_.end()) {
-        return;
-    }
-    luaL_unref(state_, LUA_REGISTRYINDEX, it->second.fn_ref);
-    timers_.erase(it);
-}
-
-std::uint64_t sandbox_impl::subscribe(lua_State* L, std::string_view event, int fn_index) {
-    std::optional<error> failure;
-    event_state* state = nullptr;
-    {
-        auto found = find_event(event);
-        if (found) {
-            state = (*found)->state;
-        } else {
-            failure = std::move(found).error();
-            failure->where = "rhp.on";
+request_record* sandbox_impl::running_request() noexcept {
+    for (auto it = running_.rbegin(); it != running_.rend(); ++it) {
+        if (it->request != nullptr) {
+            return it->request;
         }
     }
-    if (failure) {
-        stack{L}.raise(*failure);
-    }
-    lua_pushvalue(L, fn_index);
-    const int fn_ref = luaL_ref(L, LUA_REGISTRYINDEX);
-    const std::uint64_t key = ++subscription_keys_;
-    auto& subs = subscriptions_[std::string{event}];
-    subs.push_back(subscription{key, current_, fn_ref, 0});
-    if (!attached_.contains(event)) {
-        attached_.emplace(std::string{event}, state);
-        state->attach(this);
-    }
-    const std::uint64_t seq =
-        record_effect(std::format("rhp.on {}", event), std::make_unique<subscription_effect>(*this, std::string{event}, key));
-    for (subscription& sub : subscriptions_[std::string{event}]) {
-        if (sub.key == key) {
-            sub.seq = seq;
-        }
-    }
-    return seq;
-}
-
-void sandbox_impl::unsubscribe(const std::string& event, std::uint64_t key) noexcept {
-    const auto it = subscriptions_.find(event);
-    if (it == subscriptions_.end()) {
-        return;
-    }
-    auto& subs = it->second;
-    const auto sub = std::ranges::find(subs, key, &subscription::key);
-    if (sub == subs.end()) {
-        return;
-    }
-    luaL_unref(state_, LUA_REGISTRYINDEX, sub->fn_ref);
-    subs.erase(sub);
-    if (!subs.empty()) {
-        return;
-    }
-    subscriptions_.erase(it);
-    if (const auto attached = attached_.find(event); attached != attached_.end()) {
-        attached->second->detach(this);
-        attached_.erase(attached);
-    }
+    return nullptr;
 }
 
 void sandbox_impl::remove_by_id(lua_State* L, std::uint64_t seq) {
-    const ledger::entry* entry = ledger_.find(seq);
     bool known = false;
-    if (entry != nullptr && entry->owner == current_.module) {
-        known = std::ranges::any_of(timers_, [seq](const auto& t) { return t.second.seq == seq; });
-        for (const auto& [event, subs] : subscriptions_) {
-            known = known || std::ranges::any_of(subs, [seq](const subscription& s) { return s.seq == seq; });
-        }
+    if (owns_entry(seq)) {
+        const task_record* t = task_by_seq(seq);
+        known = schedule_by_seq(seq) != nullptr || subscription_by_seq(seq) != nullptr || (t != nullptr && !t->finished);
     }
     if (!known) {
-        stack{L}.raise(make_error(errc::kNotFound, std::format("no timer or subscription {} of this module", seq), "rhp.off"));
+        stack{L}.raise(make_error(errc::kNotFound, std::format("no timer, frame callback, subscription or task {} of this module", seq), "rhp.off"));
     }
     (void)ledger_.revert_entry(seq);
 }
 
 // ---- events ------------------------------------------------------------------------------------------
 
-void sandbox_impl::deliver(std::string_view event, event_pusher args) {
+void sandbox_impl::deliver(std::string_view event, const event_args& args) {
     (void)protect(state_, [&] {
         const slice_scope slice{*this};
-        const auto it = subscriptions_.find(event);
-        if (it == subscriptions_.end()) {
-            return;
-        }
-        const std::vector<subscription> snapshot = it->second; // handlers may (un)subscribe
-        for (const subscription& sub : snapshot) {
-            const auto now = subscriptions_.find(event);
-            if (now == subscriptions_.end() || std::ranges::find(now->second, sub.key, &subscription::key) == now->second.end()) {
-                continue;
-            }
-            const module_record* mod = record(sub.owner.module);
-            std::string label = std::format("{} (event {})", mod != nullptr ? mod->name : "?", event);
-            lua_rawgeti(state_, LUA_REGISTRYINDEX, sub.fn_ref);
-            stack s{state_};
-            const int nargs = args(s);
-            request_record& req = start_request(request_kind::kEvent, sub.owner, std::move(label), nargs, false);
-            (void)step(req, nargs);
-        }
+        deliver_now(event, event_pusher{args.data, args.push}, module_id{}, nullptr);
     });
-}
-
-void sandbox_impl::enqueue(std::string_view event, std::function<int(stack&)> args) noexcept {
-    try {
-        const std::scoped_lock lock{inbox_mutex_};
-        inbox_.emplace_back(std::string{event}, std::move(args));
-    } catch (...) { // out of memory: this sandbox misses the event
+    if (running_.empty()) {
+        report_failures(); // a fire from game code: no operation or pump() ends after it
     }
 }
 
@@ -1126,12 +998,21 @@ void sandbox_impl::abandon_requests(Pred pred, std::string_view why) {
     }
     for (const request_id id : doomed) {
         auto node = requests_.extract(id);
+        if (node.empty()) {
+            continue;
+        }
         request_record& req = *node.mapped();
+        const result<value_list> outcome = fail(errc::kCancelled, std::string{why}, req.label);
+        request_ended(req, &outcome, true);
         close_thread(req, true);
         if (req.suspended_once) {
-            finished_.emplace_back(id, fail(errc::kCancelled, std::string{why}, req.label));
+            finished_.emplace_back(id, outcome);
         }
     }
+}
+
+void sandbox_impl::abandon_request(request_id id, std::string_view why) {
+    abandon_requests([id](const request_record& r) { return r.id == id; }, why);
 }
 
 request_record& sandbox_impl::start_request(request_kind kind, const effect_owner& owner, std::string label, int nargs, bool from_operation) {
@@ -1169,6 +1050,11 @@ std::optional<result<value_list>> sandbox_impl::step(request_record& req, int na
     req.sliced = false;
     req.wake_frame = 0;
     req.wake_time.reset();
+    req.woken = false;
+    if (req.kind == request_kind::kTask && req.budget.sticky == sticky_stop::kNone) {
+        req.budget.instructions = 0; // a task's instruction and wall limits bound each resume
+        req.budget.active = {};
+    }
     req.running = true;
     lua_State* from = running_.empty() || running_.back().thread == nullptr ? state_ : running_.back().thread;
     int status = LUA_OK;
@@ -1183,7 +1069,7 @@ std::optional<result<value_list>> sandbox_impl::step(request_record& req, int na
     if (status == LUA_YIELD) {
         lua_pop(req.thread, nresults);
         if (stop == sticky_stop::kNone) {
-            if (req.wake_frame == 0 && !req.wake_time) {
+            if (req.wake_frame == 0 && !req.wake_time && req.waiting == wait_kind::kNone) {
                 req.wake_frame = frame_ + 1; // a time slice ran out, or a plain coroutine.yield()
             }
             req.suspended_once = true;
@@ -1228,20 +1114,46 @@ result<value_list> sandbox_impl::complete(request_id id, result<int> outcome) {
         out = collect_results(req.thread, 1, *outcome);
     } else if (req.kind == request_kind::kLoad) {
         out = mod != nullptr ? complete_load(*mod, req.owner.revision, req.thread) : fail(errc::kNotFound, "the module was unloaded");
+    } else if (req.kind == request_kind::kTask) {
+        out = collect_results(req.thread, 1, *outcome);
+        if (task_record* t = task(req.task_key)) {
+            const int n = *outcome;
+            auto packed = protect(state_, [&] {
+                luaL_checkstack(state_, 2, "rhp: task results");
+                lua_createtable(state_, n, 1);
+                for (int i = 1; i <= n; ++i) {
+                    lua_pushvalue(req.thread, i);
+                    lua_xmove(req.thread, state_, 1);
+                    lua_rawseti(state_, -2, i);
+                }
+                lua_pushinteger(state_, n);
+                lua_setfield(state_, -2, "n");
+                t->results_ref = luaL_ref(state_, LUA_REGISTRYINDEX);
+            });
+            if (!packed) {
+                out = std::unexpected{std::move(packed).error()};
+            }
+        }
     }
 
     if (!out) {
         if (out.error().where.empty() && !req.label.empty()) {
             out.error().where = req.label;
         }
+        const task_record* t = req.kind == request_kind::kTask ? task(req.task_key) : nullptr;
         if (req.kind == request_kind::kExec) {
             (void)ledger_.revert_request(scratch_, req.id); // only this request's effects
         } else if (req.kind == request_kind::kLoad && mod != nullptr && mod->pending && mod->pending->revision == req.owner.revision) {
             abort_reload(*mod); // the old revision is untouched
+        } else if (t != nullptr && t->cancel_requested) {
+            // a cancelled task: not a failure
+        } else if (is_handler(req.kind)) {
+            handler_failed_or_defer(req, out.error());
         } else {
             fault_or_defer(req.owner, out.error());
         }
     }
+    request_ended(req, &out, false);
     close_thread(req, !out.has_value());
     if (req.suspended_once) {
         finished_.emplace_back(req.id, out);
@@ -1367,6 +1279,108 @@ value_list sandbox_impl::collect_results(lua_State* L, int first, int last) {
     return out;
 }
 
+// ---- the end of a request ---------------------------------------------------------------------------
+
+void sandbox_impl::request_ended(request_record& req, const result<value_list>* outcome, bool abandoned) noexcept {
+    stop_waiting(req);
+    if (req.resume_ref != kNoRef) {
+        luaL_unref(state_, LUA_REGISTRYINDEX, req.resume_ref);
+        req.resume_ref = kNoRef;
+    }
+    if (req.schedule_key != 0) {
+        if (const auto it = schedule_.find(req.schedule_key); it != schedule_.end() && it->second.active == req.id) {
+            it->second.active = {};
+        }
+    }
+    if (req.kind == request_kind::kTask) {
+        finish_task(req, outcome, abandoned);
+    }
+}
+
+// ---- handler failures ----------------------------------------------------------------------------
+
+void sandbox_impl::handler_failed_or_defer(const request_record& req, error err) {
+    pending_failure f;
+    f.owner = req.owner;
+    f.kind = req.kind;
+    f.source = req.source;
+    f.handler_seq = req.handler_seq;
+    // The state's memory is shared: a module that exhausted it would keep failing every handler.
+    f.policy = err.code == errc::kMemoryExceeded ? handler_error_policy::kFault : req.policy;
+    f.err = std::move(err);
+    if (running_.empty()) {
+        apply_failure(std::move(f));
+    } else {
+        pending_failures_.push_back(std::move(f)); // undo nothing while a run is active
+    }
+}
+
+void sandbox_impl::apply_failure(pending_failure f) {
+    ++handler_failures_;
+    const module_record* mod = record(f.owner.module);
+    handler_failure report;
+    report.request = f.owner.request;
+    report.module = f.owner.module;
+    report.module_name = mod != nullptr ? mod->name : std::string{};
+    switch (f.kind) {
+    case request_kind::kFrame: report.kind = handler_kind::kFrame; break;
+    case request_kind::kEvent: report.kind = handler_kind::kEvent; break;
+    case request_kind::kTask: report.kind = handler_kind::kTask; break;
+    default: report.kind = handler_kind::kTimer; break;
+    }
+    report.source = f.source;
+    report.handler = f.handler_seq;
+    report.action = f.policy;
+    report.err = f.err;
+    switch (f.policy) {
+    case handler_error_policy::kFault: fault(f.owner, f.err); break;
+    case handler_error_policy::kRemove:
+        (void)ledger_.revert_request(f.owner.module, f.owner.request);
+        if (f.handler_seq != 0) {
+            (void)ledger_.revert_entry(f.handler_seq);
+        }
+        break;
+    case handler_error_policy::kReport: (void)ledger_.revert_request(f.owner.module, f.owner.request); break;
+    }
+    // Lua hears about it through rhp.handler_failed, except about its own handlers' failures.
+    if (f.source != kHandlerFailedEvent) {
+        value::map info;
+        info.emplace_back(value{"module"}, value{report.module_name});
+        info.emplace_back(value{"kind"}, value{std::string{to_string(report.kind)}});
+        info.emplace_back(value{"source"}, value{report.source});
+        info.emplace_back(value{"id"}, value{static_cast<std::int64_t>(report.handler)});
+        info.emplace_back(value{"action"}, value{std::string{to_string(report.action)}});
+        info.emplace_back(value{"code"}, value{std::string{to_string(report.err.code)}});
+        info.emplace_back(value{"message"}, value{report.err.message});
+        info.emplace_back(value{"where"}, value{report.err.where});
+        info.emplace_back(value{"traceback"}, value{report.err.traceback});
+        (void)queue_script_event(kHandlerFailedEvent, module_id{}, value_list{value{std::move(info)}});
+    }
+    failure_reports_.push_back(std::move(report));
+}
+
+void sandbox_impl::report_failures() {
+    for (auto& f : std::exchange(failure_reports_, {})) {
+        if (options_.on_handler_error) {
+            options_.on_handler_error(f);
+        } else {
+            output_for(f.request, f.module,
+                       std::format("[handler failed] {} ({} {}): {} ({})", f.module_name.empty() ? "?" : f.module_name, f.kind, f.source, f.err, f.action));
+        }
+    }
+}
+
+void sandbox_impl::output_for(request_id request, module_id mod, std::string_view line) {
+    if (options_.on_output) {
+        options_.on_output(request, mod, line);
+    } else if (options_.output) {
+        options_.output(line);
+    } else {
+        std::fwrite(line.data(), 1, line.size(), stdout);
+        std::fputc('\n', stdout);
+    }
+}
+
 // ---- faults --------------------------------------------------------------------------------------
 
 void sandbox_impl::fault_or_defer(const effect_owner& owner, error err) {
@@ -1463,10 +1477,26 @@ void sandbox_impl::drain() {
     for (auto& [owner, err] : std::exchange(pending_faults_, {})) {
         fault(owner, std::move(err));
     }
+    for (auto& f : std::exchange(pending_failures_, {})) {
+        apply_failure(std::move(f));
+    }
     for (auto& op : std::exchange(deferred_, {})) {
         op();
     }
-    // Last: the callback may re-enter the sandbox.
+    for (const std::uint64_t key : std::exchange(collected_tasks_, {})) {
+        if (task_record* t = task(key)) {
+            if (t->handles > 0) {
+                --t->handles;
+            }
+            if (t->handles == 0 && t->finished) {
+                luaL_unref(state_, LUA_REGISTRYINDEX, t->results_ref);
+                tasks_.erase(key);
+            }
+        }
+    }
+    // Last: these callbacks may re-enter the sandbox.
+    report_failures();
+    call_listeners();
     if (options_.on_result) {
         for (auto& [id, r] : std::exchange(finished_, {})) {
             options_.on_result(id, r);
@@ -1478,47 +1508,11 @@ void sandbox_impl::drain() {
 
 // ---- the frame ---------------------------------------------------------------------------------------
 
-void sandbox_impl::fire_timers() {
-    const steady::time_point now = script_now();
-    std::vector<std::pair<steady::time_point, std::uint64_t>> due;
-    for (const auto& [key, timer] : timers_) {
-        if (timer.due <= now) {
-            due.emplace_back(timer.due, key);
-        }
-    }
-    std::ranges::sort(due);
-    for (const auto& [when, key] : due) {
-        const auto it = timers_.find(key);
-        if (it == timers_.end()) {
-            continue; // an earlier callback removed it
-        }
-        timer_record& timer = it->second;
-        const effect_owner owner = timer.owner;
-        std::uint64_t retire = 0;
-        if (timer.repeating) {
-            timer.due += timer.interval;
-            if (timer.due <= now) {
-                timer.due = now + timer.interval; // fell behind: no burst of catch-up calls
-            }
-        } else {
-            retire = timer.seq;
-        }
-        const module_record* mod = record(owner.module);
-        std::string label = std::format("{} (timer)", mod != nullptr ? mod->name : "?");
-        lua_rawgeti(state_, LUA_REGISTRYINDEX, timer.fn_ref);
-        request_record& req = start_request(request_kind::kTimer, owner, std::move(label), 0, false);
-        if (retire != 0) {
-            (void)ledger_.revert_entry(retire); // a one-shot timer is spent once its call starts
-        }
-        (void)step(req, 0);
-    }
-}
-
 void sandbox_impl::resume_ready() {
     const steady::time_point now = script_now();
     std::vector<request_id> ready;
     for (const auto& [id, req] : requests_) {
-        if (!req->running && ((req->wake_frame != 0 && frame_ >= req->wake_frame) || (req->wake_time && now >= *req->wake_time))) {
+        if (!req->running && (req->woken || (req->wake_frame != 0 && frame_ >= req->wake_frame) || (req->wake_time && now >= *req->wake_time))) {
             ready.push_back(id);
         }
     }
@@ -1529,9 +1523,11 @@ void sandbox_impl::resume_ready() {
         if (slice_deadline_ && steady::now() >= *slice_deadline_) {
             return; // the rest stay ready for the next pump()
         }
-        if (const auto it = requests_.find(id); it != requests_.end()) {
+        if (const auto it = requests_.find(id); it != requests_.end() && !it->second->running) {
             last_resumed_ = id;
-            (void)step(*it->second, 0);
+            request_record& req = *it->second;
+            const int nargs = req.start_args >= 0 ? std::exchange(req.start_args, -1) : 0; // a task's first resume
+            (void)step(req, nargs);
         }
     }
 }
@@ -1974,14 +1970,26 @@ void sandbox_impl::pump() {
         const std::scoped_lock lock{inbox_mutex_};
         inbox.swap(inbox_);
     }
+    const std::vector<queued_script_event> published = std::exchange(script_events_, {});
     (void)protect(state_, [&] {
         const slice_scope slice{*this};
         for (auto& [event, args] : inbox) {
-            deliver(event, event_pusher{&args, [](stack& s, const void* data) {
-                                            return (*static_cast<const std::function<int(stack&)>*>(data))(s);
-                                        }});
+            deliver_now(event, event_pusher{&args, [](stack& s, const void* data) {
+                                                return (*static_cast<const std::function<int(stack&)>*>(data))(s);
+                                            }},
+                        module_id{}, nullptr);
         }
-        fire_timers();
+        for (const queued_script_event& e : published) {
+            deliver_now(e.name, event_pusher{&e.args, [](stack& s, const void* data) {
+                                                 const auto& values = *static_cast<const value_list*>(data);
+                                                 for (const value& v : values) {
+                                                     s.push_value(v);
+                                                 }
+                                                 return static_cast<int>(values.size());
+                                             }},
+                        e.publisher, &e.args);
+        }
+        fire_schedule();
         resume_ready();
     });
     drain();
@@ -2116,6 +2124,14 @@ const ledger& sandbox::effects() const noexcept {
 
 std::string sandbox::stubs() const {
     return impl_->stubs();
+}
+
+Rhp::subscription sandbox::on_script_event(std::string_view name, script_event_fn fn) {
+    return impl_->on_script_event(name, std::move(fn));
+}
+
+sandbox_stats sandbox::stats() const noexcept {
+    return impl_->stats();
 }
 
 } // namespace Rhp::script

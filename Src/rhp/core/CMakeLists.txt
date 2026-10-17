@@ -8,6 +8,7 @@ rhp_add_module(core
         log.hpp
         result.hpp
         role.hpp
+        subscription.hpp
         value.hpp
     SOURCES
         log.cpp
