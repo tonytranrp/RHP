@@ -45,9 +45,16 @@ These issues were reproduced during the 2026-10-09 review of `8ffc954` and fixed
 
 The 398-test suite of that review did not cover these cases; the regressions named above do.
 
+## Hosted CI (first runs, 2026-10-16)
+
+GitHub Actions runs again. Fixed for it: Apple deployment targets 13.3 / 16.3 (floating-point `std::to_chars`), no floating-point `std::from_chars` in `rhp-cli`, no separate `dns_sd` library on Apple, Asio included from its real `include/` (clang-cl can't read the `asio/include` symlink on Windows runners), and the iOS simulator preset on Ninja (the Xcode generator's per-SDK paths hid every suite from ctest). Windows, Linux (Clang, ASan+UBSan, TSan), Android, the iOS simulator (445/445) and the iOS device build pass there.
+
+- [ ] **macOS: cross-process CLI tests.** On the hosted macOS runner the three `[process]` cases fail: a separately launched `headless_server` accepts one connection (an in-process probe from the test connects), then nothing listens on its port any more (`lsof` is empty, later connects are refused) while the process keeps running to its time limit; in reverse mode the host's dial never reaches `rhp-cli`'s listener. In-process TCP host/client tests pass on the same runner, and the cases pass on Windows, Linux and Android. Needs a Mac to debug; until then CI leaves out the `process` label on macOS (`ctest -LE "multicast|process"`).
+- [ ] Real multicast cases are left out on hosted Windows and macOS/iOS runners (see the Stage 6 review list).
+
 ## Open items before or alongside Stage 6
 
-- [ ] **Hosted platform verification:** resolve the recorded Actions billing/spending-limit block and run the full matrix; macOS, iOS and the hosted Android emulator remain unverified until their jobs actually pass. The workflow syntax is corrected.
+- [x] **Hosted platform verification:** the Actions block is gone and the full matrix runs (see Hosted CI above); macOS runs except the `[process]` and multicast cases, iOS simulator tests pass, the hosted Android job passes.
 - [ ] Verify macOS and iOS (simulator and device) on real hardware; update `decisions/platforms-and-toolchains.md` afterwards.
 - [x] Run the TSan preset on resume, cancellation, TLS and Stage 6: full 427-test suite and final affected-case rerun pass.
 - [x] Isolate the concrete Stage 6 host responsibility boundary: HTTP routing/logical sessions live in `host/gateway.cpp`; script dispatch and identity ownership remain in the existing engine.
