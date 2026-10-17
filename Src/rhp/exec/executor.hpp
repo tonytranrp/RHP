@@ -18,8 +18,10 @@ struct pumped {
 
 static_assert(executor<pumped>);
 
-// Clock policy for Rhp::config<>::clock<...>: script time (rhp.sleep, rhp.timer). Inject game time
-// or a manual clock for deterministic tests; limits and heartbeats always use the steady clock.
+// Clock policy for Rhp::config<>::clock<...>: script time (rhp.sleep, rhp.timer) and the HTTP
+// listener's idle expiry (through an offset host.pump() samples, so now() is only called on the
+// pump thread). Inject game time or a manual clock for deterministic tests; limits, heartbeats and
+// HTTP proof freshness always use the steady / system clocks.
 template <class K>
 concept clock_source = std::default_initializable<K> && requires(const K& k) {
     { k.now() } -> std::same_as<std::chrono::steady_clock::time_point>;

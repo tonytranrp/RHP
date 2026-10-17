@@ -40,6 +40,10 @@ struct host_options {
     // Optional HTTP/1.1 listener (Docs/guide/networking.md): the same identities, roles, signing,
     // dispatcher and TLS settings as native sessions. Needs a security::http_authenticator.
     std::optional<net::endpoint> gateway{};
+    // Refuse HTTP requests whose proof isn't bound to their TLS connection (X-RHP-Channel:
+    // tls-exporter), so a relay that terminates TLS can't pass any request; plaintext
+    // connections can't bind, so they are refused too.
+    bool http_require_binding = false;
 };
 
 // A whole blob as a sink sees it (host.on_blob). Views are valid during the sink call only.

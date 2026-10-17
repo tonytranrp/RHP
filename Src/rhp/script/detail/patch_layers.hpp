@@ -44,10 +44,15 @@ concept patch_param = convertible<T> && (!std::is_reference_v<T> || std::is_cons
 // A result that only views memory it doesn't own. A Lua override's result is pulled from a Lua
 // string that is unrooted once the handler returns, so a view of it would dangle at the next GC:
 // patch points return owning values (std::string, not std::string_view).
+// (A user Rhp::convert<T>::pull must likewise return a value that owns its data.)
 template <class T>
-concept borrowed_result = std::same_as<std::remove_cv_t<T>, std::string_view> || std::same_as<std::remove_cv_t<T>, const char*> ||
-                          std::same_as<std::remove_cv_t<T>, char*> ||
-                          (std::is_array_v<T> && std::same_as<std::remove_cv_t<std::remove_extent_t<T>>, char>);
+inline constexpr bool borrowed_result_v = std::same_as<std::remove_cv_t<T>, std::string_view>;
+
+template <class T>
+inline constexpr bool borrowed_result_v<std::optional<T>> = borrowed_result_v<T>;
+
+template <class T>
+concept borrowed_result = borrowed_result_v<std::remove_cv_t<T>>;
 
 template <class T>
 concept patch_return = std::is_void_v<T> || (convertible<T> && !std::is_reference_v<T> && !borrowed_result<T>);

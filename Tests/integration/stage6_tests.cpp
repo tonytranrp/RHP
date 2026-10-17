@@ -18,6 +18,7 @@
 #include <rhp/rhp.hpp>
 #include <rhp/security/tls/auto_backend.hpp>
 #include <rhp/session/secure_link.hpp>
+#include <rhp/utils/scope_guard.hpp>
 
 namespace stage6_fixtures {
 
@@ -244,7 +245,6 @@ struct http_call {
     std::string* reuse_proof = nullptr;  // first call stores its Authorization, later calls resend it
     bool tls = false;                    // TLS without checking the certificate
     bool bind = false;                   // X-RHP-Channel: tls-exporter (needs tls)
-    std::chrono::seconds skew{0};        // signs as if the client's clock were this far ahead
 };
 
 // One raw HTTP/1.1 exchange with the host's gateway.
@@ -265,7 +265,7 @@ public:
         const auto signature = call.sign ? key.signature(call.body) : std::string{};
         const std::string_view channel = call.bind ? Rhp::security::kHttpChannelTlsExporter : std::string_view{};
         const Rhp::security::http_proof proof{{}, call.method, call.target, signature, call.content_type, Rhp::utils::as_bytes(call.body), channel, call.bind ? link_->channel_binding() : std::span<const std::byte>{}};
-        auto authorization = Rhp::security::http_authorization(identity_, proof, std::chrono::system_clock::now() + call.skew);
+        auto authorization = Rhp::security::http_authorization(identity_, proof);
         REQUIRE(authorization);
         if (call.reuse_proof != nullptr) {
             if (call.reuse_proof->empty()) {
@@ -569,10 +569,11 @@ TEST_CASE("stage6: HTTP channel binding refuses a relay that terminates TLS", "[
     CHECK(passed.verified);
 }
 
-TEST_CASE("stage6: HTTP expiry and the replay window follow the host clock", "[integration][stage6][http]") {
+TEST_CASE("stage6: HTTP idle expiry follows the host clock", "[integration][stage6][http]") {
     using namespace stage6_fixtures;
     using clock_cfg = cfg::clock<shifted_clock>::limits<Rhp::limits{.gateway_idle_ms = 3'600'000}>;
     g_clock_shift_ms = 0;
+    const Rhp::utils::scope_guard unshift{[] { g_clock_shift_ms = 0; }};
     keys key;
     Rhp::host_options options;
     options.gateway = Rhp::endpoint::listen("127.0.0.1", 0);
@@ -592,14 +593,28 @@ TEST_CASE("stage6: HTTP expiry and the replay window follow the host clock", "[i
     g_clock_shift_ms = 2 * 3'600'000;
     // Expired and reverted without waiting an hour (the revert runs just after session_closed).
     REQUIRE(rhp_test::poll_until({}, [&] { return http_closed.load() == 1 && counter.load() == 0; }, std::chrono::seconds{3}));
-    // The host's time is two hours ahead now: a proof made with the real time is stale,
-    const auto stale = http(*port, key, {.body = "return 1"});
-    CHECK(stale.status == 401);
-    // one made at the host's time is fresh.
-    const auto fresh = http(*port, key, {.body = "return 1", .skew = std::chrono::hours{2}});
+    // Proof freshness stays on the system clock: a client signing with real time is still accepted.
+    const auto fresh = http(*port, key, {.body = "return 1"});
     CHECK(fresh.status == 200);
     CHECK(fresh.verified);
-    g_clock_shift_ms = 0;
+}
+
+TEST_CASE("stage6: a host can require channel-bound HTTP proofs", "[integration][stage6][http][tls][security]") {
+    using namespace stage6_fixtures;
+    keys key;
+    Rhp::host_options options;
+    options.gateway = Rhp::endpoint::listen("127.0.0.1", 0, Rhp::net::require_tls);
+    options.http_require_binding = true;
+    running_host<cfg> server{key, Rhp::endpoint::listen("127.0.0.1", 0), options};
+    const auto port = server.host.gateway_port();
+    REQUIRE(port);
+    const auto unbound = http(*port, key, {.body = "stage6.bump(1); return 1", .tls = true});
+    CHECK(unbound.status == 401);
+    CHECK(unbound.verified); // a genuine refusal, signed for the request it refuses
+    CHECK(counter.load() == 0);
+    const auto bound = http(*port, key, {.body = "return 42", .tls = true, .bind = true});
+    CHECK(bound.status == 200);
+    CHECK(bound.verified);
 }
 
 TEST_CASE("stage6: HTTP audit records name the caller of each request", "[integration][stage6][http][audit]") {

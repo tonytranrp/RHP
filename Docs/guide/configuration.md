@@ -79,7 +79,7 @@ using cfg = Rhp::config<>::limits<Rhp::limits{.instructions = 50'000'000, .memor
 
 Instruction, memory and execution-time limits default to unlimited; slicing defaults to off. Set budgets on the **host** that executes code. Instruction/time checks run at hook boundaries and cannot preempt C++ bindings. A host pump can dispatch several operations and pump several identity sandboxes, so `slice_us` is not a hard bound on the whole application frame.
 
-`executor<pumped>` is the only implemented script execution model; accepting a custom marker does not install a scheduler. `clock` affects script sleep/timer time on a host or local sandbox, not protocol deadlines. The client logger/clock slots do not currently supply engine callbacks. `engine<>` and `discovery<>` are not available slots.
+`executor<pumped>` is the only implemented script execution model; accepting a custom marker does not install a scheduler. `clock` affects script sleep/timer time on a host or local sandbox, and the HTTP listener's idle expiry (`pump()` samples the clock's offset from `steady_clock` for the network thread, so the clock is only ever called on the pump thread); not protocol deadlines, heartbeats or HTTP proof freshness. The client logger/clock slots do not currently supply engine callbacks. `engine<>` and `discovery<>` are not available slots.
 
 ## Option structs
 
