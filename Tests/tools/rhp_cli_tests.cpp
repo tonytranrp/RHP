@@ -418,7 +418,15 @@ TEST_CASE("rhp-cli: the full lifecycle against a headless_server process", "[cli
     const std::string probe = probe_tcp(static_cast<std::uint16_t>(std::stoi(port)));
     INFO("in-process TCP probe of " << at << ": " << probe);
 
-    CHECK(run(std::format("{} exec \"return game.gravity\" {} > {}", kCli, who, q(dir.path / "exec1.txt"))) == 0);
+    const bool first_exec = run(std::format("{} exec \"return game.gravity\" {} > {} 2>&1", kCli, who, q(dir.path / "exec1.txt"))) == 0;
+    if (!first_exec) {
+        // Diagnostics for a host this process reaches but the CLI process doesn't: is it still listening?
+        INFO("in-process TCP probe after the CLI failed: " << probe_tcp(static_cast<std::uint16_t>(std::stoi(port))));
+#if !defined(_WIN32)
+        (void)run(std::format("lsof -nP -iTCP:{} > {} 2>&1", port, q(dir.path / "lsof.txt")));
+#endif
+        CHECK(first_exec);
+    }
     CHECK(dir.read("exec1.txt").find("-9.81") != std::string::npos);
 
     // A pinned patch outlives the rhp-cli process that applied it.

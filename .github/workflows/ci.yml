@@ -99,7 +99,7 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           cmake --preset ios-sim
-          cmake --build --preset ios-sim -- -quiet
+          cmake --build --preset ios-sim
           ctest --preset ios-sim -j 2 --timeout 900 -LE multicast
       - name: iOS device (build only)
         if: ${{ !cancelled() }}
