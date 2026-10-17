@@ -92,6 +92,8 @@ struct http_connection::impl final : link_handler, std::enable_shared_from_this<
         request.head = std::move(head);
         request.peer = stream->peer();
         request.encrypted = stream->encrypted();
+        const auto binding = stream->channel_binding();
+        request.binding.assign(binding.begin(), binding.end());
         input.clear();
         dispatched = true;
         timer.cancel();

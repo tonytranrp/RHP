@@ -26,6 +26,7 @@ event::script_executed sample() {
     e.session = session_id{7};
     e.identity = "dev";
     e.granted = role::kAdmin;
+    e.peer = "127.0.0.1:5000";
     e.op = "load";
     e.module = "low \"grav\"\n";
     e.hash = "ab12";
@@ -47,7 +48,7 @@ TEST_CASE("events have names and kinds", "[event]") {
 TEST_CASE("to_json writes one escaped line", "[event][json]") {
     const std::string line = event::to_json(sample());
     CHECK(line ==
-          R"({"event":"script_executed","time":"2026-10-08T22:00:13.123Z","session":7,"identity":"dev","role":"admin","op":"load","module":"low \"grav\"\n","hash":"ab12","signer":"dev","outcome":{"code":"ok"}})");
+          R"({"event":"script_executed","time":"2026-10-08T22:00:13.123Z","session":7,"identity":"dev","role":"admin","peer":"127.0.0.1:5000","op":"load","module":"low \"grav\"\n","hash":"ab12","signer":"dev","outcome":{"code":"ok"}})");
     event::auth_failed failed;
     failed.peer = "127.0.0.1:5000";
     failed.reason = make_error(errc::kAuth, "bad\tproof\x01", "psk");

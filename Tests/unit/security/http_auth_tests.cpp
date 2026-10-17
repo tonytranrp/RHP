@@ -99,6 +99,75 @@ TEST_CASE("http proof refuses malformed and foreign authorization", "[security][
     CHECK_FALSE(verify_http_authorization(f.keys, f.request(noncanonical)));
 }
 
+TEST_CASE("http proof binds the TLS channel when asked to", "[security][http]") {
+    const http_fixture f;
+    const std::string client_side(32, 'c');
+    const std::string relay_side(32, 'r');
+    auto bound = f.request();
+    bound.channel = Rhp::security::kHttpChannelTlsExporter;
+    bound.binding = Rhp::utils::as_bytes(client_side);
+    auto header = Rhp::security::http_authorization(f.identity, bound);
+    REQUIRE(header);
+    bound.authorization = *header;
+    // The host on the same TLS connection computes the same binding.
+    auto grant = verify_http_authorization(f.keys, bound);
+    REQUIRE(grant);
+    CHECK(grant->bound);
+    // A relay that terminated TLS has another connection to the host: another binding.
+    auto relayed = bound;
+    relayed.binding = Rhp::utils::as_bytes(relay_side);
+    CHECK_FALSE(verify_http_authorization(f.keys, relayed));
+    // Dropping the header (an unbound transcript) doesn't match either.
+    auto stripped = bound;
+    stripped.channel = {};
+    stripped.binding = {};
+    CHECK_FALSE(verify_http_authorization(f.keys, stripped));
+    // Asked for, but the connection has no TLS: refused on both ends.
+    auto plaintext = bound;
+    plaintext.binding = {};
+    CHECK_FALSE(verify_http_authorization(f.keys, plaintext));
+    plaintext.authorization = {};
+    CHECK_FALSE(Rhp::security::http_authorization(f.identity, plaintext));
+    auto unknown = bound;
+    unknown.channel = "tls-unique";
+    CHECK_FALSE(verify_http_authorization(f.keys, unknown));
+    // An unbound proof isn't marked bound.
+    auto plain = verify_http_authorization(f.keys, f.request(f.sign()));
+    REQUIRE(plain);
+    CHECK_FALSE(plain->bound);
+}
+
+TEST_CASE("http answer proof covers status content type and body of one request", "[security][http]") {
+    const http_fixture f;
+    const auto header = f.sign();
+    auto grant = verify_http_authorization(f.keys, f.request(header));
+    REQUIRE(grant);
+    REQUIRE(grant->answer_key);
+    const std::string body = "answer";
+    const Rhp::security::http_answer answer{200, "application/msgpack", Rhp::utils::as_bytes(body)};
+    const auto proof = Rhp::security::http_answer_proof(*grant->answer_key, answer);
+    CHECK(Rhp::security::verify_http_answer(f.identity, header, answer, proof));
+
+    const auto rejected = [&](const Rhp::security::http_answer& changed, std::string_view with = {}) {
+        const auto checked = Rhp::security::verify_http_answer(f.identity, header, changed, with.empty() ? std::string_view{proof} : with);
+        return !checked && checked.error().code == Rhp::errc::kIntegrity;
+    };
+    const std::string other = "answe!";
+    CHECK(rejected({500, answer.content_type, answer.body}));
+    CHECK(rejected({200, "text/plain", answer.body}));
+    CHECK(rejected({200, answer.content_type, Rhp::utils::as_bytes(other)}));
+    CHECK(rejected(answer, "not a proof"));
+    CHECK_FALSE(Rhp::security::verify_http_answer(f.identity, header, answer, ""));
+    // The proof answers this request only: another request's key gives another proof.
+    const auto second = f.sign();
+    CHECK_FALSE(Rhp::security::verify_http_answer(f.identity, second, answer, proof));
+    // Someone without the key can't make one.
+    const Rhp::security::psk_identity stranger{"dev", *Rhp::security::key::generate()};
+    CHECK_FALSE(Rhp::security::verify_http_answer(stranger, header, answer, proof));
+    const Rhp::security::psk_identity renamed{"other", f.secret};
+    CHECK_FALSE(Rhp::security::verify_http_answer(renamed, header, answer, proof));
+}
+
 TEST_CASE("http replay guard admits a proof once per identity quota", "[security][http]") {
     const auto now = std::chrono::system_clock::now();
     Rhp::security::http_replay_guard guard{2};

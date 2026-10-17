@@ -77,6 +77,7 @@ public:
         s.log_enabled = [this](log_level level) { return logger_.enabled(level); };
         s.log = [this](log_level level, std::string_view message) { logger_.write(level, message); };
         s.clock = [this] { return clock_.now(); };
+        s.custom_clock = !std::is_same_v<typename Cfg::clock_t, exec::steady_clock>;
         s.options = options;
         engine_ = host_detail::make_engine(std::move(s));
         if constexpr (Cfg::io_t::kOwnsThread) {

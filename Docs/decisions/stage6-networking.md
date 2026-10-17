@@ -33,7 +33,10 @@ Windows: overlapped byte-mode pipes, the first instance created with `FILE_FLAG_
 - Proofs: keyed BLAKE2b over the request, ±30 s, one use. Unknown key names are checked against a per-process decoy key, so timing doesn't reveal valid names. The replay cache gives each key its own quota (4096 per window) so one key can't fill it for everyone, and prunes in expiry order.
 - `X-RHP-Signature` carries the signer policy's signature value as base64 MessagePack, so custom `signer<S>` policies work over HTTP (the first cut rebuilt Ed25519's internal format by hand).
 - Cancellation is per request (`X-RHP-Request` token, `POST /cancel/{token}`) or explicitly for every request of the key (`POST /cancel`).
-- HTTP proofs are not channel-bound and answers carry no MAC; HTTP clients must verify the host certificate. A response MAC and optional channel binding are recorded as follow-ups in [TODO](../TODO.md).
+- Channel binding is opt-in per request (`X-RHP-Channel: tls-exporter`): the MAC then also covers the connection's RFC 9266 exporter value, so a TLS-terminating relay can't get a request accepted. Opt-in keeps plain HTTP clients and TLS-offloading front ends (which can't see the exporter) working; such clients must check the host certificate instead.
+- Every answer to an authenticated request carries `X-RHP-Proof`, a MAC over status, content type and body under a per-request key derived from the request's MAC, so the answer is tied to its request without the host keeping per-client state. The PSK itself never signs answers.
+- The gateway reads time through the host: idle expiry uses `config<>::clock`, the replay window uses the wall clock shifted by that clock's offset from `steady_clock` (zero by default). With a custom clock the idle timer re-checks every 25 ms instead of sleeping to a deadline it can't predict.
+- `script_executed` carries a `peer` for every request; over HTTP it is that request's caller, since one logical session has many.
 
 ## Sources
 

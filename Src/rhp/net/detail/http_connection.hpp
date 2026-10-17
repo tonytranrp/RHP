@@ -24,6 +24,7 @@ struct http_request {
     utils::byte_buffer body;
     std::string peer;
     bool encrypted = false;
+    std::vector<std::byte> binding; // the link's channel binding (tls-exporter under TLS), else empty
 };
 
 struct http_response {

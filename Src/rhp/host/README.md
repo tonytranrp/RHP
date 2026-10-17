@@ -29,7 +29,7 @@ while (running) { host.pump(); game::update(); }
 - **TLS:** non-loopback peers get TLS 1.3 (`config<>::tls<>`), `require_tls` everyone; `host_options::tls` holds the certificate (default: ephemeral self-signed). Events say `tls`.
 - **Resume:** a lost link keeps the session for `limits.resume_ms`; the client's new connection takes it over (`session_resumed`), nothing is reverted or run twice. Shutting down closes every session with a reason first.
 - **Kill switch:** `set_enabled(false)` closes new connections (reported as `auth_failed`) and answers every request `kDisabled`.
-- **HTTP:** `host_options::gateway` opens a separate TCP/HTTPS listener ([networking guide](../../../Docs/guide/networking.md#http-listener)). Per-request proofs authenticate the same identities; each key gets one logical session that ends after `limits.gateway_idle_ms` with nothing in flight. Connections share the native unauthenticated-handshake budget until their proof checks out.
+- **HTTP:** `host_options::gateway` opens a separate TCP/HTTPS listener ([networking guide](../../../Docs/guide/networking.md#http-listener)). Per-request proofs authenticate the same identities (optionally bound to the TLS channel) and every authenticated answer carries an `X-RHP-Proof`; each key gets one logical session that ends after `limits.gateway_idle_ms` with nothing in flight, measured on the host's clock. Connections share the native unauthenticated-handshake budget until their proof checks out. Audit records carry each request's own caller.
 - **Discovery:** `advertise(options)` publishes through `Cfg::discovery_t`; `include_libs` separately publishes library names. Later provider errors: `discovery_status()`.
 
 ## Rules

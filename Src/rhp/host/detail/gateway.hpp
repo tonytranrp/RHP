@@ -2,6 +2,7 @@
 
 // Private to host.cpp and gateway.cpp (not installed): the HTTP frontend and the engine's side of it.
 
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -29,6 +30,12 @@ struct http_peer {
 class gateway_sink {
 public:
     [[nodiscard]] virtual bool accepting() const noexcept = 0;
+    // The host's clock (config<>::clock): idle expiry, and the replay window through wall_now().
+    [[nodiscard]] virtual std::chrono::steady_clock::time_point steady_now() const = 0;
+    [[nodiscard]] virtual std::chrono::system_clock::time_point wall_now() const = 0;
+    // True when steady_now() isn't std::chrono::steady_clock: the gateway then can't sleep until a
+    // deadline and re-checks it on a short period instead.
+    [[nodiscard]] virtual bool custom_clock() const noexcept = 0;
     // The unauthenticated-connection budget native handshakes use too.
     [[nodiscard]] virtual bool acquire_handshake() noexcept = 0;
     virtual void release_handshake() noexcept = 0;
@@ -37,7 +44,7 @@ public:
     [[nodiscard]] virtual session_id open_http(const security::http_grant& grant, const http_peer& peer) = 0;
     virtual void close_http(session_id session, std::string_view identity, const error& why) = 0;
     // False when the pump's queue is full.
-    [[nodiscard]] virtual bool submit_http(session_id session, std::uint64_t req, wire::op code, value body) = 0;
+    [[nodiscard]] virtual bool submit_http(session_id session, std::uint64_t req, wire::op code, value body, const http_peer& peer) = 0;
     // One request (`target`), or with target 0 every request numbered up to `upto`.
     virtual void cancel_http(session_id session, std::uint64_t target, std::uint64_t upto) = 0;
     virtual void refused(std::string peer, error why) = 0;

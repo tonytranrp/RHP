@@ -148,7 +148,7 @@ struct inbound {
     std::uint64_t req = 0;
     std::uint64_t arrival = 0; // per-session order in which the network received requests
     value body;
-    std::string peer;     // kOpened, kClosed, kAuthFailed, kResumed
+    std::string peer;     // kOpened, kClosed, kAuthFailed, kResumed; an HTTP kRequest's caller
     std::string platform; // kOpened
     error reason;         // kClosed, kAuthFailed
     bool tls = false;     // kOpened, kResumed
@@ -529,6 +529,20 @@ private:
 
     [[nodiscard]] bool accepting() const noexcept override { return is_enabled() && !stopping_; }
 
+    [[nodiscard]] std::chrono::steady_clock::time_point steady_now() const override { return setup_.clock ? setup_.clock() : std::chrono::steady_clock::now(); }
+
+    // The wall clock shifted by how far the host's clock is from steady_clock (zero by default), so
+    // advancing a test clock moves the HTTP replay window with it.
+    [[nodiscard]] std::chrono::system_clock::time_point wall_now() const override {
+        const auto wall = std::chrono::system_clock::now();
+        if (!setup_.custom_clock) {
+            return wall;
+        }
+        return wall + std::chrono::duration_cast<std::chrono::system_clock::duration>(steady_now() - std::chrono::steady_clock::now());
+    }
+
+    [[nodiscard]] bool custom_clock() const noexcept override { return setup_.custom_clock; }
+
     [[nodiscard]] bool acquire_handshake() noexcept override {
         if (pending_handshakes_ >= setup_.limits.pending_handshakes) {
             return false;
@@ -540,7 +554,7 @@ private:
     void release_handshake() noexcept override { --pending_handshakes_; }
 
     [[nodiscard]] result<security::http_grant> authorize(const security::http_proof& request) override {
-        return setup_.http_auth(request, std::chrono::system_clock::now());
+        return setup_.http_auth(request, wall_now());
     }
 
     [[nodiscard]] session_id open_http(const security::http_grant& grant, const http_peer& peer) override {
@@ -589,9 +603,10 @@ private:
         (void)to_pump(std::move(in));
     }
 
-    [[nodiscard]] bool submit_http(session_id id, std::uint64_t req, wire::op code, value body) override {
+    [[nodiscard]] bool submit_http(session_id id, std::uint64_t req, wire::op code, value body, const http_peer& peer) override {
         inbound in;
         in.session = id;
+        in.peer = peer.address; // a logical session has many callers: each request names its own
         in.req = req;
         in.arrival = req; // one logical session: request numbers are the arrival order
         in.code = code;
@@ -1459,6 +1474,7 @@ private:
             audit->session = in.session;
             audit->identity = sess.identity;
             audit->granted = sess.granted;
+            audit->peer = in.peer.empty() ? sess.peer : in.peer;
             audit->op = std::string{wire::to_string(in.code)};
         }
         audit_ = audit ? &*audit : nullptr;
