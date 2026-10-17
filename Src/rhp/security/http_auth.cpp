@@ -54,7 +54,6 @@ public:
     void bytes(std::span<const std::byte> data) noexcept { crypto_blake2b_update(&ctx_, reinterpret_cast<const std::uint8_t*>(data.data()), data.size()); }
 
 private:
-
     crypto_blake2b_ctx ctx_{};
 };
 

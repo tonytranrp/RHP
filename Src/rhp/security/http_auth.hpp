@@ -1,10 +1,10 @@
 #pragma once
 
+#include <array>
 #include <chrono>
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
-#include <array>
 #include <map>
 #include <optional>
 #include <set>
