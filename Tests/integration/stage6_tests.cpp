@@ -503,8 +503,8 @@ TEST_CASE("stage6: HTTP expiry and the replay window follow the host clock", "[i
     rhp_test::poll_for({}, std::chrono::milliseconds{100});
     CHECK(http_closed.load() == 0); // an hour of idle time hasn't passed on the host's clock
     g_clock_shift_ms = 2 * 3'600'000;
-    REQUIRE(rhp_test::poll_until({}, [&] { return http_closed.load() == 1; }, std::chrono::seconds{3}));
-    CHECK(counter.load() == 0); // expired and reverted, without waiting an hour
+    // Expired and reverted without waiting an hour (the revert runs just after session_closed).
+    REQUIRE(rhp_test::poll_until({}, [&] { return http_closed.load() == 1 && counter.load() == 0; }, std::chrono::seconds{3}));
     // The host's time is two hours ahead now: a proof made with the real time is stale,
     const auto stale = http(*port, key, {.body = "return 1"});
     CHECK(stale.status == 401);
@@ -581,8 +581,8 @@ TEST_CASE("stage6: HTTP cancels an abandoned request and expires the idle identi
         CHECK(done.status == 200);
         CHECK(http_closed.load() == 0);
     }
-    REQUIRE(rhp_test::poll_until({}, [&] { return http_closed.load() == 1; }, std::chrono::seconds{3})); // then idle
-    CHECK(counter.load() == 0); // its effects were reverted with the identity
+    // Then idle: session_closed is published before the identity's revert runs, so wait for both.
+    REQUIRE(rhp_test::poll_until({}, [&] { return http_closed.load() == 1 && counter.load() == 0; }, std::chrono::seconds{3}));
     http_client abandoned{*port, key, {.body = "stage6.bump(5); rhp.sleep(60000); return 1"}};
     REQUIRE(rhp_test::poll_until({}, [&] { return counter.load() == 5; }, std::chrono::seconds{3}));
     abandoned.abandon();
