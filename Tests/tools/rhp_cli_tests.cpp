@@ -166,6 +166,8 @@ TEST_CASE("rhp-cli: values / words / literals / stubs / module names", "[cli][te
 
     CHECK(rhp_cli::parse_literal("42") == value{std::int64_t{42}});
     CHECK(rhp_cli::parse_literal("-1.5") == value{-1.5});
+    CHECK(rhp_cli::parse_literal("2.5e3") == value{2500.0});
+    CHECK(rhp_cli::parse_literal("1.5x") == value{std::string{"1.5x"}}); // not a whole number: a string
     CHECK(rhp_cli::parse_literal("true") == value{true});
     CHECK(rhp_cli::parse_literal("nil").is_nil());
     CHECK(rhp_cli::parse_literal("'x y'") == value{"x y"});
