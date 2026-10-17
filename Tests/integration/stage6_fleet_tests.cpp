@@ -203,7 +203,7 @@ TEST_CASE("stage6 fleet: load and call share one deadline per broadcast", "[inte
     stalled_host first{key};
     stalled_host second{key};
     Rhp::fleet_options options;
-    options.timeout = std::chrono::milliseconds{1500};
+    options.timeout = std::chrono::milliseconds{3000};
     Rhp::fleet<cfg> fleet{key.identity(), key.signing(), options};
     REQUIRE(fleet.add(record_for("live", live.host.port())));
     REQUIRE(fleet.add(record_for("first", first.host.port())));
@@ -218,9 +218,10 @@ TEST_CASE("stage6 fleet: load and call share one deadline per broadcast", "[inte
         REQUIRE_FALSE(loaded[i].outcome);
         CHECK(loaded[i].outcome.error().code == Rhp::errc::kTimeout);
     }
-    // One deadline for the whole broadcast, not one per stalled host.
-    CHECK(took >= std::chrono::milliseconds{1400});
-    CHECK(took < std::chrono::milliseconds{2900});
+    // One deadline for the whole broadcast, not one per stalled host (that would be 6 s or more);
+    // the upper bound leaves almost a full deadline of slack for slow (sanitizer) machines.
+    CHECK(took >= std::chrono::milliseconds{2900});
+    CHECK(took < std::chrono::milliseconds{5900});
 
     auto called = fleet.call<int>("tests.fleet6.deadline", "get");
     REQUIRE(called.size() == 3);

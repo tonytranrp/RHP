@@ -222,6 +222,9 @@ public:
         explicit awaiter(std::shared_ptr<client_detail::pending_state<T>> state) noexcept : state_(std::move(state)) {}
         awaiter(const awaiter&) = delete;
         awaiter& operator=(const awaiter&) = delete;
+        // Movable before it suspends (adapters store awaitables by value); never move a suspended one.
+        awaiter(awaiter&& other) noexcept : state_(std::move(other.state_)), suspended_(std::exchange(other.suspended_, {})) {}
+        awaiter& operator=(awaiter&&) = delete;
         ~awaiter() {
             if (state_ && suspended_) {
                 state_->abandon(suspended_);

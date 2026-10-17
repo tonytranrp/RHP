@@ -238,9 +238,10 @@ struct http_gateway::impl {
             if (auto fresh = replay.admit(*grant); !fresh) {
                 grant = std::unexpected{std::move(fresh).error()};
             } else if (require_binding && !grant->bound) {
-                // Genuine but unbound: answered (and signed), not run.
-                respond(reply, make_error(errc::kAuth, "this host accepts only HTTP proofs bound to their TLS connection (X-RHP-Channel: tls-exporter)", kWhere),
-                        grant->answer_key);
+                // Genuine but unbound: answered (and signed), not run, and reported like any refusal.
+                auto unbound = make_error(errc::kAuth, "this host accepts only HTTP proofs bound to their TLS connection (X-RHP-Channel: tls-exporter)", kWhere);
+                sink.refused(r.peer, unbound);
+                respond(reply, unbound, grant->answer_key);
                 return;
             }
         }
