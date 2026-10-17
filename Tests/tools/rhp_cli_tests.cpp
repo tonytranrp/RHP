@@ -30,7 +30,9 @@
 #include <rhp/core/role.hpp>
 #include <rhp/core/value.hpp>
 #include <rhp/host/host.hpp>
+#include <rhp/net/io_context.hpp>
 #include <rhp/net/loopback/loopback.hpp>
+#include <rhp/net/tcp/tcp.hpp>
 #include <rhp/platform/random.hpp>
 #include <rhp/script/lib.hpp>
 #include <rhp/security/ed25519.hpp>
@@ -104,7 +106,7 @@ struct scratch_dir {
         // the only way to see why a spawned host failed on a machine we can't log into (CI).
         std::error_code ec;
         for (const auto& entry : fs::directory_iterator{path, ec}) {
-            if (entry.is_regular_file(ec) && entry.path().extension() == ".log") {
+            if (entry.is_regular_file(ec) && (entry.path().extension() == ".log" || entry.path().extension() == ".txt")) {
                 const auto text = read(entry.path().filename().string());
                 std::cout << "---- " << entry.path().filename().string() << " ----\n"
                           << text.substr(0, 8192)
@@ -123,6 +125,21 @@ struct scratch_dir {
         return {std::istreambuf_iterator<char>{in}, std::istreambuf_iterator<char>{}};
     }
 };
+
+// Whether this process can open a TCP connection to 127.0.0.1:port at all: tells "the spawned
+// host isn't reachable" from "rhp-cli can't reach it" when a process test fails.
+[[nodiscard]] std::string probe_tcp(std::uint16_t port) {
+    Rhp::net::io_context io;
+    std::optional<std::string> outcome;
+    Rhp::net::tcp::dial(io, Rhp::endpoint::dial("127.0.0.1", port), [&](Rhp::result<std::unique_ptr<Rhp::net::link>> r) {
+        outcome = r ? std::string{"connected"} : std::format("{}", r.error());
+    });
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+    while (!outcome && std::chrono::steady_clock::now() < deadline) {
+        io.run_one_for(std::chrono::milliseconds{10});
+    }
+    return outcome.value_or("timed out");
+}
 
 } // namespace cli_fixtures
 
@@ -398,6 +415,8 @@ TEST_CASE("rhp-cli: the full lifecycle against a headless_server process", "[cli
     const std::string port = std::to_string(std::stoi(dir.read("port.txt")));
     const std::string at = "127.0.0.1:" + port;
     const std::string who = std::format("-c {} -i {}", at, q(id));
+    const std::string probe = probe_tcp(static_cast<std::uint16_t>(std::stoi(port)));
+    INFO("in-process TCP probe of " << at << ": " << probe);
 
     CHECK(run(std::format("{} exec \"return game.gravity\" {} > {}", kCli, who, q(dir.path / "exec1.txt"))) == 0);
     CHECK(dir.read("exec1.txt").find("-9.81") != std::string::npos);
