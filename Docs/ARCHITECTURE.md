@@ -864,10 +864,10 @@ flowchart BT
 | `windows-msvc-asan` | MSVC AddressSanitizer | ✅ |
 | `linux-clang` / `linux-clang-asan` / `linux-clang-tsan` | Clang 17+, glibc 2.31+ | ✅ |
 | `linux-clang-fuzz` | Clang, `RHP_FUZZ=ON`, ASan+UBSan, RelWithDebInfo | libFuzzer runs (Tests/fuzz/README.md) |
-| `macos` | AppleClang, `arm64;x86_64`, macOS 13.3+ | workflow defined; unverified |
-| `ios-sim` | Ninja Multi-Config + AppleClang, `CMAKE_SYSTEM_NAME=iOS`, iOS 16.3+, simulator (plain executables: the Xcode generator's per-SDK paths are invisible to ctest) | unverified; runner uses `xcrun simctl spawn` as crosscompiling emulator (`Tools/ios/simctl_run.sh`, CI) |
+| `macos` | AppleClang, `arm64;x86_64`, macOS 13.3+ | hosted CI passes (without real multicast and the `[process]` cases: [TODO](TODO.md#hosted-ci-first-runs-2026-10-16)) |
+| `ios-sim` | Ninja Multi-Config + AppleClang, `CMAKE_SYSTEM_NAME=iOS`, iOS 16.3+, simulator (plain executables: the Xcode generator's per-SDK paths are invisible to ctest) | hosted CI passes (without real multicast); runner uses `xcrun simctl spawn` as crosscompiling emulator (`Tools/ios/simctl_run.sh`) |
 | `ios-device` | Xcode, arm64 | build only |
-| `android-x64` | NDK Clang, API 26+ (`ANDROID_NDK_HOME`); built with NDK 29 | build verified; hosted emulator job unverified; adb runner available |
+| `android-x64` | NDK Clang, API 26+ (`ANDROID_NDK_HOME`); built with NDK 29 | build verified; hosted CI job passes; adb runner available |
 | `android-arm64` | NDK Clang; tested with NDK 29 | build only (with `-DRHP_BUILD_TESTS=ON` the same runner tests on a phone) |
 
 ```bash
