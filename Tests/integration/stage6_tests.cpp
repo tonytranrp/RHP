@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <span>
 #include <string>
@@ -78,6 +79,92 @@ struct running_host {
 };
 
 using cfg = Rhp::config<>::logger<Rhp::core::null_logger>;
+
+// A TCP address that stays bound for the whole test: until open_to() it drops every connection
+// (a dial that reaches nobody), then it relays each one to the given local port. No port number
+// is ever released and bound again, so another process can't take it in between.
+class tcp_gate final {
+public:
+    tcp_gate() {
+        auto l = Rhp::net::tcp::listen(io_, Rhp::endpoint::listen("127.0.0.1", 0), [this](std::unique_ptr<Rhp::net::link> link) { accept(std::move(link)); });
+        REQUIRE(l);
+        listener_ = std::move(*l);
+        thread_ = std::jthread{[this](std::stop_token stop) { io_.run(std::move(stop)); }};
+    }
+
+    ~tcp_gate() {
+        thread_.request_stop();
+        thread_.join();
+        pipes_.clear();
+        listener_.reset();
+    }
+
+    tcp_gate(const tcp_gate&) = delete;
+    tcp_gate& operator=(const tcp_gate&) = delete;
+
+    [[nodiscard]] std::uint16_t port() const { return static_cast<std::uint16_t>(listener_->port()); }
+    void open_to(std::uint16_t target) { target_.store(target); }
+
+private:
+    struct side final : Rhp::net::link_handler {
+        std::unique_ptr<Rhp::net::link> link;
+        side* other = nullptr;
+        std::vector<Rhp::utils::byte_buffer> held; // until the other side is connected
+
+        void on_bytes(Rhp::utils::bytes_view data) override {
+            Rhp::utils::byte_buffer b;
+            b.append(data);
+            if (other->link != nullptr) {
+                other->link->send(std::move(b));
+            } else {
+                held.push_back(std::move(b));
+            }
+        }
+        void on_closed(const Rhp::error&) override {
+            if (other->link != nullptr) {
+                other->link->close();
+            }
+        }
+    };
+
+    struct pipe {
+        side front;
+        side back;
+    };
+
+    // On the gate's thread.
+    void accept(std::unique_ptr<Rhp::net::link> link) {
+        const std::uint16_t target = target_.load();
+        if (target == 0) {
+            return; // destroyed: the dialer sees the connection drop
+        }
+        auto p = std::make_unique<pipe>();
+        pipe& ref = *p;
+        pipes_.push_back(std::move(p));
+        ref.front.other = &ref.back;
+        ref.back.other = &ref.front;
+        ref.front.link = std::move(link);
+        ref.front.link->start(ref.front);
+        Rhp::net::tcp::dial(io_, Rhp::endpoint::dial("127.0.0.1", target), [&ref](Rhp::result<std::unique_ptr<Rhp::net::link>> back) {
+            if (!back) {
+                ref.front.link->close();
+                return;
+            }
+            ref.back.link = std::move(*back);
+            ref.back.link->start(ref.back);
+            for (auto& held : ref.front.held) {
+                ref.back.link->send(std::move(held));
+            }
+            ref.front.held.clear();
+        });
+    }
+
+    Rhp::net::io_context io_;
+    std::atomic<std::uint16_t> target_{0};
+    std::unique_ptr<Rhp::net::listener> listener_;
+    std::vector<std::unique_ptr<pipe>> pipes_;
+    std::jthread thread_;
+};
 
 template <Rhp::net::transport T>
 void authenticated_transport(Rhp::endpoint ep) {
@@ -719,22 +806,18 @@ TEST_CASE("stage6: fleet preserves errors deadlines and terminal recovery", "[in
     options.timeout = std::chrono::milliseconds{3000};
     Rhp::fleet<cfg> fleet{key.identity(), key.signing(), options};
     REQUIRE(fleet.add(record));
-    // Reserve a real endpoint, then remove its listener to force a failed dial.
-    Rhp::net::io_context io;
-    auto reserve = Rhp::net::tcp::listen(io, Rhp::endpoint::listen("127.0.0.1", 0), [](auto) {});
-    REQUIRE(reserve);
-    const auto recovered_port = (*reserve)->port();
-    reserve->reset();
-    io.poll();
+    // A held address that drops connections makes the dial fail; later it leads to a real host.
+    tcp_gate gate;
     record.name = "recover";
-    record.port = recovered_port;
+    record.port = gate.port();
     REQUIRE(fleet.add(record));
     auto mixed = fleet.exec<int>("return 42");
     REQUIRE(mixed.size() == 2);
     CHECK(mixed.front().outcome);
     CHECK_FALSE(mixed.back().outcome);
     REQUIRE(mixed.back().outcome.error().code == Rhp::errc::kTransport);
-    running_host<cfg> recovered{key, Rhp::endpoint::listen("127.0.0.1", recovered_port)};
+    running_host<cfg> recovered{key};
+    gate.open_to(*recovered.host.port());
     REQUIRE(fleet.add(record));
     auto results = fleet.exec<int>("return 43");
     REQUIRE(results.size() == 2);
