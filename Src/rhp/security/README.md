@@ -12,7 +12,7 @@ Who may connect and what each frame proves. Namespace `Rhp::security`.
 | `ed25519.hpp` | `ed25519` (the default signer): `ed25519_secret_key` / `ed25519_public_key`, `signing_key` (client), `trusted_signers` (host; parses `name base64-public-key` files) |
 | `identity_file.hpp` | a developer's `.rhpid` file: name, PSK, signing key; prints the host's keyring / signers lines |
 | `hash.hpp` | `blake2b_256`, `to_hex` (audit hashes) |
-| `http_auth.hpp` | per-request HTTP proofs (`http_proof`, `http_authorization`, `verify_http_authorization`), the `http_authenticator` concept, `http_replay_guard`, the `X-RHP-Signature` encoding: see the [networking guide](../../../Docs/guide/networking.md#authenticating-requests) |
+| `http_auth.hpp` | per-request HTTP proofs (`http_proof`, `http_authorization`, `verify_http_authorization`) with optional TLS channel binding, answer proofs (`http_answer_proof`, `verify_http_answer`), the `http_authenticator` concept, `http_replay_guard`, the `X-RHP-Signature` encoding: see the [networking guide](../../../Docs/guide/networking.md#authenticating-requests) |
 | `tls/` | `Rhp::security::tls` — TLS 1.3 engines (OpenSSL, Mbed TLS) behind the `tls::backend` concept: see [tls/README.md](tls/README.md) |
 
 ## PSK handshake
@@ -33,7 +33,7 @@ MAC = keyed BLAKE2b-256 (Monocypher). Proofs and MACs are compared in constant t
 
 - `monocypher.h` only in this folder's `.cpp` files. The session layer sees `host_handshake`, `client_handshake` and `wire::frame_sealer` only.
 - Authentication is mutual: a client never sends its proof to a host that failed to prove the key first.
-- HTTP requests carry a per-request MAC instead of that handshake. Unknown key names are checked against a per-process decoy key, so timing can't probe them either. Proofs are accepted once (`http_replay_guard`, a quota per key). They aren't channel-bound: HTTPS clients must verify the host certificate.
+- HTTP requests carry a per-request MAC instead of that handshake. Unknown key names are checked against a per-process decoy key, so timing can't probe them either. Proofs are accepted once (`http_replay_guard`, a quota per key). With `X-RHP-Channel: tls-exporter` they are channel-bound like the handshake; answers carry `X-RHP-Proof`, a MAC under a key derived from the request's MAC, so clients can check them without trusting the transport.
 - An unknown key name gets a normal-looking challenge (made with a random secret), so key names can't be probed.
 - Secrets are wiped (`crypto_wipe`) when keys, handshakes and sealers die.
 - Script signatures are Ed25519 (RFC 8032) over `"rhp/script\0" ‖ source`; the host checks them before anything runs, except unsigned code from observe sessions.

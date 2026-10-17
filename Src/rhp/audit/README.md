@@ -11,7 +11,7 @@ auto audit = host.on_any(Rhp::audit::file_sink{"rhp_audit.log"});
 ```
 
 ```text
-{"event":"script_executed","time":"2026-10-09T08:45:11.817Z","session":1,"identity":"dev","role":"admin","op":"load","module":"low","hash":"ea78…","signer":"dev","outcome":{"code":"ok"}}
+{"event":"script_executed","time":"2026-10-09T08:45:11.817Z","session":1,"identity":"dev","role":"admin","peer":"127.0.0.1:51234","op":"load","module":"low","hash":"ea78…","signer":"dev","outcome":{"code":"ok"}}
 ```
 
 ## Rules

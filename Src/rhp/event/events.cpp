@@ -169,6 +169,7 @@ std::string to_json(const any& e) {
                                   .number("session", x.session.value())
                                   .string("identity", x.identity)
                                   .string("role", to_string(x.granted))
+                                  .string("peer", x.peer)
                                   .string("op", x.op)
                                   .string("module", x.module)
                                   .string("hash", x.hash)

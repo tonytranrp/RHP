@@ -72,6 +72,7 @@ struct setup {
     std::function<bool(log_level)> log_enabled;
     std::function<void(log_level, std::string_view)> log;
     script::clock_fn clock;
+    bool custom_clock = false; // `clock` isn't std::chrono::steady_clock (a test or game clock)
     host_options options;
     // The authenticator's HTTP proof check; empty when it isn't a security::http_authenticator.
     std::function<result<security::http_grant>(const security::http_proof&, std::chrono::system_clock::time_point)> http_auth;

@@ -1,8 +1,13 @@
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <mutex>
+#include <span>
+#include <string>
 #include <thread>
+#include <vector>
 
 #include <catch2/catch_message.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -10,6 +15,8 @@
 
 #include <rhp/net/detail/http.hpp>
 #include <rhp/rhp.hpp>
+#include <rhp/security/tls/auto_backend.hpp>
+#include <rhp/session/secure_link.hpp>
 
 namespace stage6_fixtures {
 
@@ -115,7 +122,29 @@ void reverse_transport(Rhp::endpoint ep) {
 struct http_result {
     unsigned status = 0;
     Rhp::value body;
+    std::string proof;     // X-RHP-Proof
+    bool verified = false; // the proof checks out for this request (security::verify_http_answer)
 };
+
+// A host clock a test can move: steady_clock plus an offset (config<>::clock).
+inline std::atomic<std::int64_t> g_clock_shift_ms{0};
+struct shifted_clock {
+    [[nodiscard]] std::chrono::steady_clock::time_point now() const noexcept {
+        return std::chrono::steady_clock::now() + std::chrono::milliseconds{g_clock_shift_ms.load()};
+    }
+};
+
+// A TLS client context that doesn't check the host's certificate (the case channel binding is for).
+[[nodiscard]] std::unique_ptr<Rhp::net::link> tls_over(std::unique_ptr<Rhp::net::link> plain) {
+    static const auto context = [] {
+        auto c = Rhp::security::tls::auto_backend::client({});
+        REQUIRE(c);
+        return *c;
+    }();
+    auto engine = context->make_engine();
+    REQUIRE(engine);
+    return Rhp::session::tls_client(std::move(plain), std::move(*engine));
+}
 
 struct http_call {
     std::string_view method = "POST";
@@ -126,21 +155,31 @@ struct http_call {
     std::string_view content_type = "text/plain";
     std::string_view request_token = {}; // X-RHP-Request
     std::string* reuse_proof = nullptr; // first call stores its Authorization, later calls resend it
+    bool tls = false;                   // TLS without checking the certificate
+    bool bind = false;                  // X-RHP-Channel: tls-exporter (needs tls)
+    std::chrono::seconds skew{0};       // signs as if the client's clock were this far ahead
 };
 
 // One raw HTTP/1.1 exchange with the host's gateway.
 class http_client {
 public:
-    http_client(unsigned short port, const keys& key, const http_call& call) {
+    http_client(unsigned short port, const keys& key, const http_call& call) : identity_{call.identity, key.secret} {
         Rhp::net::tcp::dial(io_, Rhp::endpoint::dial("127.0.0.1", port), [&](auto connected) {
             REQUIRE(connected);
-            link_ = std::move(*connected);
+            link_ = call.tls ? tls_over(std::move(*connected)) : std::move(*connected);
         });
         REQUIRE(rhp_test::poll_until({&io_}, [&] { return link_ != nullptr; }));
         link_->start(response_);
+        if (call.tls) {
+            // The binding exists once the handshake finished.
+            REQUIRE(rhp_test::poll_until({&io_}, [&] { return !link_->channel_binding().empty() || response_.closed; }));
+            REQUIRE_FALSE(response_.closed);
+        }
         const auto signature = call.sign ? key.signature(call.body) : std::string{};
-        const Rhp::security::http_proof proof{{}, call.method, call.target, signature, call.content_type, Rhp::utils::as_bytes(call.body)};
-        auto authorization = Rhp::security::http_authorization({call.identity, key.secret}, proof);
+        const std::string_view channel = call.bind ? Rhp::security::kHttpChannelTlsExporter : std::string_view{};
+        const Rhp::security::http_proof proof{{}, call.method, call.target, signature, call.content_type, Rhp::utils::as_bytes(call.body), channel,
+                                              call.bind ? link_->channel_binding() : std::span<const std::byte>{}};
+        auto authorization = Rhp::security::http_authorization(identity_, proof, std::chrono::system_clock::now() + call.skew);
         REQUIRE(authorization);
         if (call.reuse_proof != nullptr) {
             if (call.reuse_proof->empty()) {
@@ -158,6 +197,10 @@ public:
         if (!call.request_token.empty()) {
             request.append(std::format("X-RHP-Request: {}\r\n", call.request_token));
         }
+        if (call.bind) {
+            request.append(std::format("X-RHP-Channel: {}\r\n", channel));
+        }
+        authorization_ = *authorization;
         request.append("\r\n");
         request.append(call.body);
         link_->send(std::move(request));
@@ -178,21 +221,129 @@ public:
         const auto space = parsed.first_line.find(' ');
         REQUIRE(space != std::string::npos);
         const auto status = static_cast<unsigned>(std::stoi(parsed.first_line.substr(space + 1, 3)));
-        if (parsed.content_length == 0) {
-            return {status, {}};
+        const auto bytes = response_.received.view().subspan(parsed.bytes, parsed.content_length);
+        http_result out{status, {}, std::string{parsed.header("x-rhp-proof")}, false};
+        out.verified = Rhp::security::verify_http_answer(identity_, authorization_, {status, parsed.header("content-type"), bytes}, out.proof).has_value();
+        if (parsed.content_length != 0) {
+            auto body = Rhp::wire::msgpack::decode(bytes);
+            REQUIRE(body);
+            out.body = std::move(*body);
         }
-        auto body = Rhp::wire::msgpack::decode(response_.received.view().subspan(parsed.bytes, parsed.content_length));
-        REQUIRE(body);
-        return {status, std::move(*body)};
+        return out;
     }
 
     // Hangs up without waiting for the answer.
     void abandon() { link_.reset(); }
 
 private:
+    Rhp::security::psk_identity identity_;
+    std::string authorization_;
     Rhp::net::io_context io_;
     std::unique_ptr<Rhp::net::link> link_;
     rhp_test::recorder response_;
+};
+
+// A TCP relay in front of the host's HTTP port. `terminate`: it accepts the client's TLS with its
+// own certificate and opens its own TLS to the host (a man in the middle the client doesn't
+// detect without checking certificates). `tamper`: it flips the last byte of every answer chunk.
+class http_relay final {
+public:
+    http_relay(unsigned short host_port, bool terminate, bool tamper) : host_port_(host_port), terminate_(terminate), tamper_(tamper) {
+        auto server = Rhp::security::tls::auto_backend::server({});
+        REQUIRE(server);
+        server_ = *server;
+        auto l = Rhp::net::tcp::listen(io_, Rhp::endpoint::listen("127.0.0.1", 0), [this](std::unique_ptr<Rhp::net::link> l) { accept(std::move(l)); });
+        REQUIRE(l);
+        listener_ = std::move(*l);
+        thread_ = std::jthread{[this](std::stop_token stop) { io_.run(std::move(stop)); }};
+    }
+
+    ~http_relay() {
+        thread_.request_stop();
+        thread_.join();
+        pipes_.clear();
+        listener_.reset();
+    }
+
+    http_relay(const http_relay&) = delete;
+    http_relay& operator=(const http_relay&) = delete;
+
+    [[nodiscard]] unsigned short port() const { return listener_->port(); }
+
+private:
+    struct side final : Rhp::net::link_handler {
+        std::unique_ptr<Rhp::net::link> link;
+        side* other = nullptr;
+        bool tamper = false;
+        std::vector<std::byte> answer;             // tamper: the whole answer, changed when it ends
+        std::vector<Rhp::utils::byte_buffer> held; // until the other side exists
+
+        void on_bytes(Rhp::utils::bytes_view data) override {
+            if (data.empty()) {
+                return; // a TLS handshake finished
+            }
+            if (tamper) {
+                answer.insert(answer.end(), data.begin(), data.end());
+                return;
+            }
+            Rhp::utils::byte_buffer b;
+            b.append(data);
+            if (other != nullptr && other->link != nullptr) {
+                other->link->send(std::move(b));
+            } else {
+                held.push_back(std::move(b));
+            }
+        }
+        void on_closed(const Rhp::error&) override {
+            if (other == nullptr || other->link == nullptr) {
+                return;
+            }
+            if (!answer.empty()) {
+                answer.back() ^= std::byte{0x01}; // the last byte of the body
+                Rhp::utils::byte_buffer b;
+                b.append(std::span<const std::byte>{answer});
+                other->link->send(std::move(b));
+            }
+            other->link->close();
+        }
+    };
+
+    struct pipe {
+        side front;
+        side back;
+    };
+
+    void accept(std::unique_ptr<Rhp::net::link> l) {
+        auto p = std::make_unique<pipe>();
+        pipe& ref = *p;
+        pipes_.push_back(std::move(p));
+        ref.front.other = &ref.back;
+        ref.back.other = &ref.front;
+        ref.back.tamper = tamper_;
+        ref.front.link = terminate_ ? Rhp::session::tls_server(std::move(l), server_, false) : std::move(l);
+        ref.front.link->start(ref.front);
+        Rhp::net::tcp::dial(io_, Rhp::endpoint::dial("127.0.0.1", host_port_), [this, &ref](Rhp::result<std::unique_ptr<Rhp::net::link>> b) {
+            if (!b) {
+                ref.front.link->close();
+                return;
+            }
+            ref.back.link = terminate_ ? tls_over(std::move(*b)) : std::move(*b);
+            ref.back.link->start(ref.back);
+            for (auto& held : ref.front.held) {
+                ref.back.link->send(std::move(held));
+            }
+            ref.front.held.clear();
+        });
+    }
+
+    unsigned short host_port_;
+    bool terminate_;
+    bool tamper_;
+    Rhp::net::io_context io_;
+    std::shared_ptr<Rhp::security::tls::context> server_;
+    std::unique_ptr<Rhp::net::listener> listener_;
+    std::vector<std::unique_ptr<pipe>> pipes_;
+    std::jthread thread_;
 };
 
 http_result http(unsigned short port, const keys& key, const http_call& call, const std::function<void()>& meanwhile = {}) {
@@ -235,6 +386,7 @@ TEST_CASE("stage6: HTTP shares identities and completes suspended requests", "[i
     CHECK(*Rhp::from_value<int>(shared->front()) == 7);
     auto yielded = http(*port, key, {.body = "rhp.next_frame(); return stage6.value()"});
     REQUIRE(yielded.status == 200);
+    CHECK(yielded.verified); // a suspended request's late answer is signed too
     REQUIRE(yielded.body.is_array());
     CHECK(*Rhp::from_value<int>(yielded.body.get_if<Rhp::value::array>()->front()) == 7);
     CHECK(http(*port, key, {.body = "return 1", .sign = false}).status == 403);
@@ -261,6 +413,141 @@ TEST_CASE("stage6: HTTP shares identities and completes suspended requests", "[i
     CHECK(counter.load() == 0);
     CHECK(http(*port, key, {.method = "DELETE", .target = "/modules/tests.http.shared", .sign = false}).status == 200);
     CHECK(counter.load() == 0);
+}
+
+TEST_CASE("stage6: HTTP answers carry a proof for their own request", "[integration][stage6][http][security]") {
+    using namespace stage6_fixtures;
+    keys key;
+    Rhp::host_options options;
+    options.gateway = Rhp::endpoint::listen("127.0.0.1", 0);
+    running_host<cfg> server{key, Rhp::endpoint::listen("127.0.0.1", 0), options};
+    const auto port = server.host.gateway_port();
+    REQUIRE(port);
+    const auto ok = http(*port, key, {.body = "return 42"});
+    CHECK(ok.status == 200);
+    CHECK_FALSE(ok.proof.empty());
+    CHECK(ok.verified);
+    // Refusals after the proof checked out are signed as well.
+    const auto refused = http(*port, key, {.body = "return 1", .sign = false});
+    CHECK(refused.status == 403);
+    CHECK(refused.verified);
+    const auto missing = http(*port, key, {.method = "GET", .target = "/nowhere", .sign = false});
+    CHECK(missing.status == 404);
+    CHECK(missing.verified);
+    // Without a valid proof there is no answer key: nothing to sign with.
+    std::string proof;
+    REQUIRE(http(*port, key, {.method = "GET", .target = "/modules", .sign = false, .reuse_proof = &proof}).verified);
+    const auto replayed = http(*port, key, {.method = "GET", .target = "/modules", .sign = false, .reuse_proof = &proof});
+    CHECK(replayed.status == 401);
+    CHECK(replayed.proof.empty());
+    CHECK_FALSE(replayed.verified);
+}
+
+TEST_CASE("stage6: HTTP channel binding refuses a relay that terminates TLS", "[integration][stage6][http][tls][security]") {
+    using namespace stage6_fixtures;
+    keys key;
+    Rhp::host_options options;
+    options.gateway = Rhp::endpoint::listen("127.0.0.1", 0, Rhp::net::require_tls);
+    running_host<cfg> server{key, Rhp::endpoint::listen("127.0.0.1", 0), options};
+    const auto port = server.host.gateway_port();
+    REQUIRE(port);
+    // Direct: the client's exporter value is the host's.
+    const auto direct = http(*port, key, {.body = "return 42", .tls = true, .bind = true});
+    CHECK(direct.status == 200);
+    CHECK(direct.verified);
+    {
+        // A relay with its own certificate: two TLS connections, two bindings.
+        http_relay mitm{*port, true, false};
+        const auto bound = http(mitm.port(), key, {.body = "stage6.bump(1); return 1", .tls = true, .bind = true});
+        CHECK(bound.status == 401);
+        CHECK_FALSE(bound.verified);
+        CHECK(counter.load() == 0); // nothing ran
+        // Unbound, the request gets through, and so does an honest answer.
+        const auto unbound = http(mitm.port(), key, {.body = "return 42", .tls = true});
+        CHECK(unbound.status == 200);
+        CHECK(unbound.verified);
+    }
+    {
+        // A relay that changes the answer: the proof gives it away.
+        http_relay forger{*port, true, true};
+        const auto forged = http(forger.port(), key, {.body = "return 42", .tls = true});
+        CHECK(forged.status == 200);
+        CHECK_FALSE(forged.verified);
+        REQUIRE(forged.body.is_array());
+        CHECK(*Rhp::from_value<int>(forged.body.get_if<Rhp::value::array>()->front()) == 43);
+    }
+    // A plain relay passes TLS through untouched: binding still matches end to end.
+    http_relay plain{*port, false, false};
+    const auto passed = http(plain.port(), key, {.body = "return 42", .tls = true, .bind = true});
+    CHECK(passed.status == 200);
+    CHECK(passed.verified);
+}
+
+TEST_CASE("stage6: HTTP expiry and the replay window follow the host clock", "[integration][stage6][http]") {
+    using namespace stage6_fixtures;
+    using clock_cfg = cfg::clock<shifted_clock>::limits<Rhp::limits{.gateway_idle_ms = 3'600'000}>;
+    g_clock_shift_ms = 0;
+    keys key;
+    Rhp::host_options options;
+    options.gateway = Rhp::endpoint::listen("127.0.0.1", 0);
+    running_host<clock_cfg> server{key, Rhp::endpoint::listen("127.0.0.1", 0), options};
+    std::atomic<int> http_closed{0};
+    auto watch = server.host.on<Rhp::event::session_closed>([&](const Rhp::event::session_closed& e) {
+        if (e.peer == "http") {
+            http_closed.fetch_add(1);
+        }
+    });
+    const auto port = server.host.gateway_port();
+    REQUIRE(port);
+    REQUIRE(http(*port, key, {.target = "/modules/tests.http.clocked", .body = "stage6.bump(4); return {}"}).status == 200);
+    CHECK(counter.load() == 4);
+    rhp_test::poll_for({}, std::chrono::milliseconds{100});
+    CHECK(http_closed.load() == 0); // an hour of idle time hasn't passed on the host's clock
+    g_clock_shift_ms = 2 * 3'600'000;
+    REQUIRE(rhp_test::poll_until({}, [&] { return http_closed.load() == 1; }, std::chrono::seconds{3}));
+    CHECK(counter.load() == 0); // expired and reverted, without waiting an hour
+    // The host's time is two hours ahead now: a proof made with the real time is stale,
+    const auto stale = http(*port, key, {.body = "return 1"});
+    CHECK(stale.status == 401);
+    // one made at the host's time is fresh.
+    const auto fresh = http(*port, key, {.body = "return 1", .skew = std::chrono::hours{2}});
+    CHECK(fresh.status == 200);
+    CHECK(fresh.verified);
+    g_clock_shift_ms = 0;
+}
+
+TEST_CASE("stage6: HTTP audit records name the caller of each request", "[integration][stage6][http][audit]") {
+    using namespace stage6_fixtures;
+    keys key;
+    Rhp::host_options options;
+    options.gateway = Rhp::endpoint::listen("127.0.0.1", 0);
+    running_host<cfg> server{key, Rhp::endpoint::listen("127.0.0.1", 0), options};
+    std::mutex mutex;
+    std::vector<Rhp::event::script_executed> scripts;
+    std::vector<Rhp::event::session_opened> opened;
+    auto s1 = server.host.on<Rhp::event::script_executed>([&](const Rhp::event::script_executed& e) {
+        const std::scoped_lock lock{mutex};
+        scripts.push_back(e);
+    });
+    auto s2 = server.host.on<Rhp::event::session_opened>([&](const Rhp::event::session_opened& e) {
+        const std::scoped_lock lock{mutex};
+        opened.push_back(e);
+    });
+    const auto port = server.host.gateway_port();
+    REQUIRE(port);
+    REQUIRE(http(*port, key, {.body = "return 1"}).status == 200);
+    REQUIRE(http(*port, key, {.body = "return 2"}).status == 200);
+    REQUIRE(rhp_test::poll_until({}, [&] {
+        const std::scoped_lock lock{mutex};
+        return scripts.size() == 2;
+    }));
+    const std::scoped_lock lock{mutex};
+    REQUIRE(opened.size() == 1); // one logical session for the key
+    CHECK(scripts[0].session == scripts[1].session);
+    CHECK(scripts[0].peer.starts_with("127.0.0.1:"));
+    CHECK(scripts[1].peer.starts_with("127.0.0.1:"));
+    CHECK(scripts[0].peer != scripts[1].peer); // two connections, two callers
+    CHECK(scripts[0].peer == opened[0].peer);
 }
 
 TEST_CASE("stage6: TLS is preserved over WebSocket and reliable UDP", "[integration][stage6][tls]") {

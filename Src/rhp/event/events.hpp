@@ -69,6 +69,7 @@ struct script_executed {
     session_id session;
     std::string identity;
     role granted = role::kObserve;
+    std::string peer; // who sent this request (over HTTP each request has its own)
     std::string op;
     std::string module;
     std::string hash;

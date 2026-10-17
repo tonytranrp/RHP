@@ -125,7 +125,7 @@ Rhp::host<> host{Rhp::endpoint::listen("127.0.0.1", 7777), keys, signers, option
 
 Answers are MessagePack: the result, or an RHP error. Status codes: 200, 400 (bad request or arguments), 401 (proof refused or replayed), 403 (role or signature), 404, 408 (headers too slow), 409 (cancelled), 413 (too large), 422 (the script or module failed), 429 (too many requests), 500, 503 (host disabled), 504 (timed out). A suspended script answers when it finishes. Requests need `Content-Length` (no chunked bodies, no pipelining); `Expect: 100-continue` is answered. Heads are limited to 16 KiB and 64 fields, bodies to `limits.max_frame`.
 
-Each key has one logical session, kept across connections. It ends after `limits.gateway_idle_ms` (five minutes) with nothing in flight, which reverts its effects like any last session (pinned modules and other live sessions of the identity are kept). A request in flight is never expired while its client is connected; a client that hangs up cancels its request.
+Each key has one logical session, kept across connections. It ends after `limits.gateway_idle_ms` (five minutes) with nothing in flight, which reverts its effects like any last session (pinned modules and other live sessions of the identity are kept). A request in flight is never expired while its client is connected; a client that hangs up cancels its request. Idle time is measured on the host's clock (`config<>::clock<>`), and the replay window below follows that clock's offset from `steady_clock`: a test clock that jumps ahead expires identities without real waiting. A custom clock is read on the network thread too. Audit records (`script_executed`) name the caller of each request in `peer`, not the first caller of the key.
 
 ### Authenticating requests
 
@@ -133,6 +133,7 @@ Each key has one logical session, kept across connections. It ends after `limits
 Authorization:   RHP <key-name>,<unix-seconds>,<base64 16-byte nonce>,<base64 MAC>
 X-RHP-Signature: <base64 MessagePack of the signer's signature value>    (patch/admin source)
 X-RHP-Request:   <your token, for /cancel/{token}>                       (optional)
+X-RHP-Channel:   tls-exporter                                            (optional, TLS only)
 ```
 
 ```cpp
@@ -148,4 +149,16 @@ auto authorization = Rhp::security::http_authorization(identity, request); // th
 
 The MAC is keyed BLAKE2b-256 under the key's PSK over `rhp/http\0`, the timestamp (8 bytes little-endian), then key name, nonce, method, target, `X-RHP-Signature` and `Content-Type`, each as an 8-byte little-endian length and the bytes, then the body the same way. The PSK never leaves either end. The host accepts a proof once, within 30 seconds of its clock; each key may have up to 4096 proofs in that window, so a busy key can't lock out others. Unknown key names cost the host the same work as known ones, so timing doesn't reveal which names exist.
 
-HTTP proofs are not bound to the TLS channel, and answers carry no MAC: unlike a native client, an HTTP client must check the host's certificate (pin it or give it a CA) to know it reached the real host.
+**Channel binding.** Over HTTPS a client can bind its proof to its TLS connection: it sends `X-RHP-Channel: tls-exporter` and fills `http_proof::channel` and `http_proof::binding` (its connection's RFC 9266 exporter value, what `link::channel_binding()` returns); the MAC then also covers both, each length-prefixed after the body. The host mixes in its own connection's value. A relay that terminates TLS with its own certificate has two connections and two values, so a bound request through it is refused with 401, as the native handshake is. Binding on a connection without TLS is refused.
+
+**Answer proofs.** Every answer to a request whose proof checked out (results and errors alike) carries `X-RHP-Proof`: keyed BLAKE2b-256 over `rhp/http-answer\0`, the status (8 bytes little-endian), then `Content-Type` and the body, each length-prefixed, under a key derived from the request's own MAC (keyed BLAKE2b-256 of the PSK over `rhp/http-answer-key\0` and the 32 MAC bytes). Answers to refused proofs (401, 503 before authentication) carry none.
+
+```cpp
+// After the answer arrived: its status, Content-Type, body and X-RHP-Proof header.
+auto genuine = Rhp::security::verify_http_answer(identity, *authorization, {status, content_type, body}, proof_header);
+if (!genuine) {
+    return std::unexpected{genuine.error()}; // kIntegrity: changed, or not from a holder of the key
+}
+```
+
+So an HTTP client knows an answer is unmodified and answers its own request even without checking the host's certificate. Without binding (or a checked certificate), a relay can still read requests and answers and pass them along; with binding it can't get a request accepted at all.

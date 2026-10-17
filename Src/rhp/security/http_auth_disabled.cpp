@@ -11,4 +11,12 @@ result<http_grant> verify_http_authorization(const keyring&, const http_proof&, 
     return fail(errc::kDisabled, "RHP is compiled out (RHP_ENABLE=0)", "security.http");
 }
 
+std::string http_answer_proof(const http_answer_key&, const http_answer&) {
+    return {};
+}
+
+result<void> verify_http_answer(const psk_identity&, std::string_view, const http_answer&, std::string_view) {
+    return fail(errc::kDisabled, "RHP is compiled out (RHP_ENABLE=0)", "security.http");
+}
+
 } // namespace Rhp::security
