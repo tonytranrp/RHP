@@ -5,6 +5,7 @@ rhp_add_test_suite(rhp_integration_tests
         stage4_tests.cpp
         stage5_tests.cpp
         stage6_tests.cpp
+        stage6_fleet_tests.cpp
     LINKS
         Rhp::host
         Rhp::client
