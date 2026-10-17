@@ -6,7 +6,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <format>
+#include <locale>
 #include <set>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -294,8 +296,11 @@ Rhp::value parse_literal(std::string_view text) {
     if (const auto [end, ec] = std::from_chars(text.data(), text.data() + text.size(), i); ec == std::errc{} && end == text.data() + text.size()) {
         return Rhp::value{i};
     }
+    // Not std::from_chars: Apple's libc++ only has the floating-point overload from macOS 26.
     double d = 0;
-    if (const auto [end, ec] = std::from_chars(text.data(), text.data() + text.size(), d); ec == std::errc{} && end == text.data() + text.size()) {
+    std::istringstream number{std::string{text}};
+    number.imbue(std::locale::classic());
+    if (number >> d && number.peek() == std::char_traits<char>::eof()) {
         return Rhp::value{d};
     }
     return Rhp::value{std::string{text}};
