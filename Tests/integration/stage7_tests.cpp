@@ -35,14 +35,18 @@ using Rhp::value;
 
 namespace stage7_fixtures {
 
-inline int g_ticks = 0;
+inline std::atomic<int> g_ticks{0}; // the pump thread counts, the test thread reads
+
+inline void tick() {
+    ++g_ticks;
+}
 inline constexpr Rhp::lua_event<"itest.s7.alarm", int, std::string_view> alarm_event{};
 
 inline void raise_alarm(int level) {
     alarm_event.fire(level, "from a script");
 }
 
-using test_lib = Rhp::lib<"s7">::var<"ticks", &g_ticks>::fn<"alarm", &raise_alarm>;
+using test_lib = Rhp::lib<"s7">::fn<"tick", &tick>::fn<"alarm", &raise_alarm>;
 
 using cfg = Rhp::config<>::transport<Rhp::net::loopback>::logger<Rhp::core::null_logger>;
 using fast_redial_cfg = cfg::limits<Rhp::limits{.backoff_min_ms = 5, .backoff_max_ms = 40}>;
@@ -335,11 +339,11 @@ TEST_CASE("stage7: tasks are cancelled when the identity's last session ends", "
     g_ticks = 0;
     {
         Rhp::client<cfg> c{at.reversed(), k.as("patch"), k.signer()};
-        REQUIRE(c.exec("rhp.spawn(function() while true do s7.ticks = s7.ticks + 1 rhp.next_frame() end end)"));
+        REQUIRE(c.exec("rhp.spawn(function() while true do s7.tick() rhp.next_frame() end end)"));
         REQUIRE(eventually([] { return g_ticks > 3; }));
     }
     REQUIRE(eventually([&] { return host->identities() == 0; }));
-    const int after = g_ticks;
+    const int after = g_ticks.load();
     std::this_thread::sleep_for(30ms);
     CHECK(g_ticks == after);
 }
@@ -352,11 +356,11 @@ TEST_CASE("stage7: a pinned module's task survives its session", "[stage7][tasks
     g_ticks = 0;
     {
         Rhp::client<cfg> c{at.reversed(), k.as("admin"), k.signer()};
-        const auto mod = c.load("tests.s7.ticker", "rhp.spawn(function() while true do s7.ticks = s7.ticks + 1 rhp.next_frame() end end)");
+        const auto mod = c.load("tests.s7.ticker", "rhp.spawn(function() while true do s7.tick() rhp.next_frame() end end)");
         REQUIRE(mod);
         REQUIRE(c.pin(*mod));
     }
-    const int before = g_ticks;
+    const int before = g_ticks.load();
     CHECK(eventually([&] { return g_ticks > before + 5; }));
     Rhp::client<cfg> back{at.reversed(), k.as("admin"), k.signer()};
     REQUIRE(back.revert_all());
