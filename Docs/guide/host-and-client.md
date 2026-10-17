@@ -44,6 +44,7 @@ auto registered = host.on_blob("configs", [](const Rhp::blob_view& b) -> Rhp::re
 | `inbox_capacity` | 4096 | messages the network thread queues for `pump()` before holding more back |
 | `tls` | empty | `cert_pem` / `key_pem` for the host's certificate (empty = ephemeral self-signed), `ca_pem` / `server_name` to check the peer when the host dials |
 | `gateway` | none | separate listen endpoint for the authenticated HTTP gateway |
+| `http_require_binding` | false | refuse HTTP requests whose proof isn't bound to their TLS connection (`X-RHP-Channel: tls-exporter`) |
 
 ## `Rhp::client<Cfg>`
 

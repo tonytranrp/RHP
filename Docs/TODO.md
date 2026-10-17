@@ -1,6 +1,6 @@
 # Status and TODO
 
-Last updated 2026-10-09. Stages 0–6 are implemented and the Stage 6 acceptance workflow passes. Progress is tracked as "Stage N" only (no `v1` / `v2` naming anywhere). Platform verification and earlier runtime defects are recorded separately below.
+Last updated 2026-10-16. Stages 0–6 are implemented, the Stage 6 acceptance workflow passes, and the Stage 6 review follow-ups and the four reproduced runtime defects are fixed (ARCHITECTURE §32). Progress is tracked as "Stage N" only (no `v1` / `v2` naming anywhere). What remains is platform verification (macOS/iOS, hosted CI) and the optional items below.
 
 ## Stage 6 — complete
 
@@ -19,29 +19,31 @@ Acceptance is exercised by the real CLI discovering two separately running hosts
 
 ### Stage 6 review (2026-10-09)
 
-A code review of the Stage 6 working tree rewrote the transports' protocol code into sans-IO codecs and fixed what it found (ARCHITECTURE §31, AD6–AD10). Still open from that review:
+A code review of the Stage 6 working tree rewrote the transports' protocol code into sans-IO codecs and fixed what it found (ARCHITECTURE §31, AD6–AD10). Its follow-ups were finished on 2026-10-16 (ARCHITECTURE §32, AE1–AE7):
 
-- [ ] **HTTP answer integrity:** proofs aren't bound to the TLS channel and answers carry no MAC, so an HTTP client that doesn't verify the host certificate can be fooled by a TLS-terminating relay. Add `X-RHP-Proof` (MAC over request nonce, status, content type and body) and an optional channel-bound proof; add the Stage 5 relay test for HTTP.
-- [ ] **HTTP audit attribution:** `script_executed` names the logical session; the peer recorded is the first HTTP caller of that key. Carry the peer per request.
-- [ ] **Gateway clock:** idle expiry and the replay window use the system clocks, not the host's injectable clock, so expiry tests wait on real time.
-- [ ] **Fleet engine:** fleets are header-only with one client (and, by default, one I/O thread) per member. Move the loop into a compiled engine on one shared I/O context; add `call`/`load` broadcasts.
-- [ ] **Fleet recovery test** reserves a TCP port, closes it, then listens on that number again; another process can take it in between.
+- [x] **HTTP answer integrity:** every authenticated answer carries `X-RHP-Proof` (MAC over status, content type and body under a key derived from the request's MAC; `security::verify_http_answer`), and proofs can be bound to the TLS channel (`X-RHP-Channel: tls-exporter`; `host_options::http_require_binding` makes it mandatory). A TLS-terminating relay test covers both.
+- [x] **HTTP audit attribution:** `script_executed` carries the `peer` of each request.
+- [x] **Gateway clock:** idle expiry follows `config<>::clock` through an offset `pump()` samples (the network thread never calls the user's clock); expiry tests advance a test clock. Proof freshness and the replay window deliberately stay on the system clock.
+- [x] **Fleet engine:** `fleet.cpp` compiled engine; every member on one shared `io_context` with one I/O thread per fleet (none with `zero_threads`); `load` and `call` broadcasts (`stage6_fleet_tests.cpp`).
+- [x] **Fleet recovery test** keeps one listener bound for the whole test (`tcp_gate`); no port number is released and re-bound.
 - [ ] **Apple DNS-SD backend** (`mdns/native.cpp`) has been checked against the header only: build and run it on macOS/iOS.
-- [ ] `[multicast]` tests use the real LAN (and on Windows the system DNS-SD service); they are serialized under ctest but still depend on the machine's network.
+- [ ] `[multicast]` tests use the real LAN (and on Windows the system DNS-SD service); they are serialized under ctest and now carry the ctest label `multicast`, so `ctest -LE multicast` leaves them out on machines without usable multicast. They still depend on the machine's network when run.
+
+Possible follow-ups (not required for Stage 6): close fleet members in parallel at teardown (now one after another, each with the existing 1 s close wait); `rhp-cli fleet` `load`/`call` modes; carry `http_grant::bound` into audit events.
 
 Process for the stage: one branch + PR per stage, conventional commits (`feat:`, `fix:`, `test:`, `docs:`, `ci:`), rebase-merge only when told to.
 
 ## Confirmed issues at the current commit
 
-These issues were reproduced during the 2026-10-09 review of `8ffc954`. They remain unfixed in the implementation; documentation changes do not close them.
+These issues were reproduced during the 2026-10-09 review of `8ffc954` and fixed on 2026-10-16 with regressions (ARCHITECTURE §32 AE1):
 
-- [ ] **P1 — async coroutine lifetime:** [`pending.hpp`](../Src/rhp/client/pending.hpp) retains a raw waiter handle after its coroutine is destroyed; later completion resumes freed memory. Until fixed, keep an awaiting coroutine alive until completion, including cancellation completion.
-- [ ] **P1 — borrowed patch results:** [`patch_layers.hpp`](../Src/rhp/script/detail/patch_layers.hpp) accepts `std::string_view` results backed by an unrooted Lua string. Later garbage collection invalidates the view. Use owning strings for patched return values; define/restrict the supported borrowed-result contract.
-- [ ] **P2 — ledger replacement:** [`ledger.hpp`](../Src/rhp/script/ledger.hpp) default move assignment discards a nonempty destination's effects without undoing them. Avoid move-assigning over live effects; add cleanup semantics and a nonempty-destination regression.
-- [ ] **P2 — deferred audit outcomes:** [`host.cpp`](../Src/rhp/host/host.cpp) publishes `script_executed` before a suspended request completes; a later failure can leave an `ok` audit event. Retain audit state through final completion; until then, the client result is authoritative.
+- [x] **P1 — async coroutine lifetime:** [`pending.hpp`](../Src/rhp/client/pending.hpp)'s awaiter unregisters its handle when a suspended coroutine is destroyed; the result is kept instead of resuming freed memory (`pending: destroying a suspended coroutine unregisters it`). Destroying the coroutine must still not race with its completion on the network thread.
+- [x] **P1 — borrowed patch results:** [`patch_layers.hpp`](../Src/rhp/script/detail/patch_layers.hpp) rejects patch points whose default returns `std::string_view` (also inside `std::optional`) at compile time (`compile_fail/patch_point_borrowed_*.cpp`). User `convert<T>::pull` types must own their data.
+- [x] **P2 — ledger replacement:** [`ledger.hpp`](../Src/rhp/script/ledger.hpp) move assignment undoes the destination's effects first; moved-from ledgers are empty.
+- [x] **P2 — deferred audit outcomes:** [`host.cpp`](../Src/rhp/host/host.cpp) publishes a suspended request's `script_executed` when it finishes, with its final outcome, or as `kCancelled` when the identity is torn down first.
 - [x] **CI syntax:** the macOS step name containing `TLS: ` in [ci.yml](../.github/workflows/ci.yml) is quoted, and the workflow parses with all four platform jobs. This fixes the syntax failure independently of the account billing block.
 
-The existing 398-test suite passed in the review, but it did not cover the four reproduced runtime cases above. Add focused regressions when fixing them.
+The 398-test suite of that review did not cover these cases; the regressions named above do.
 
 ## Open items before or alongside Stage 6
 
@@ -50,7 +52,7 @@ The existing 398-test suite passed in the review, but it did not cover the four 
 - [x] Run the TSan preset on resume, cancellation, TLS and Stage 6: full 427-test suite and final affected-case rerun pass.
 - [x] Isolate the concrete Stage 6 host responsibility boundary: HTTP routing/logical sessions live in `host/gateway.cpp`; script dispatch and identity ownership remain in the existing engine.
 - [ ] Branch hygiene: inspect current local and live remote refs before deciding which completed-stage branches to keep or prune; cached tracking refs can outlive deleted remote branches.
-- [ ] Decide whether `CLAUDE.md` and `.claude/` are committed or ignored (inspect the current tracked/ignored state before changing policy).
+- [ ] Decide whether `CLAUDE.md` and `.claude/` are committed or ignored (inspect the current tracked/ignored state before changing policy). Agent worktrees (`.claude/worktrees/`) are ignored; `.claude/handoff.md` is a tracked, hook-generated file.
 - [ ] Benchmarks: `Tests/bench` is planned ("when there is a hot path to measure"); nothing there yet.
 - [ ] Optional: a second script engine behind a `config<>::engine<>` slot (the `engine` concept is deferred until a second engine exists).
 
@@ -71,6 +73,24 @@ The existing 398-test suite passed in the review, but it did not cover the four 
 - [x] Current API documentation separated from roadmap sketches: architecture §6 links to the guide; implemented configuration slots, allocation scope and platform verification are stated explicitly. Historical decision logs retain their stage context.
 - [x] Add the [networking guide](guide/networking.md) and transport-local READMEs for Stage 6.
 - [x] Update the guide's available API table through Stage 6.
+
+## Recorded validation (Stage 6 completion, 2026-10-16)
+
+Debug builds on this Windows/WSL host and an Android phone. Desktop results are at `7cbcf88`; the one later commit only changes the expiry assertion of one HTTP unit test (a timing flake the phone found), and the phone was rerun after it:
+
+| Check | Result |
+|---|---|
+| MSVC x64 (fresh build directory) | 459/459 |
+| clang-cl x64 | 459/459 |
+| MSVC x64 + ASan | 459/459 |
+| `RHP_ENABLE=OFF`, MSVC | 161/161 |
+| Linux Clang 21 (`-Wconversion -Wsign-conversion -Wshadow -Werror`) | 459/459 |
+| Linux Clang ASan + UBSan | 459/459 |
+| Linux Clang TSan (Mbed TLS) | 459/459; fleet, async and pending cases also repeated 10–25 times |
+| Android arm64, NDK 29, SM-S948U1, API 36 | all 17 executables pass: 12 Catch2 suites and 5 fuzz replay drivers |
+| Guide snippets (`networking.md` HTTP proofs) | compile under MSVC `/W4 /WX` |
+
+Not run: macOS/iOS (no Apple host), hosted CI (billing block), long libFuzzer runs (the replay drivers ran), Release builds.
 
 ## Recorded validation (Stage 6)
 
