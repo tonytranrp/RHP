@@ -23,7 +23,7 @@ ctest --preset windows-msvc
 ## Rules
 
 - Test files are named `<thing>_tests.cpp`.
-- Cases that use real multicast DNS-SD are tagged `[multicast]`: ctest gives them one `RESOURCE_LOCK`, since they share UDP 5353.
+- Cases that use real multicast DNS-SD are tagged `[multicast]`: ctest gives them one `RESOURCE_LOCK`, since they share UDP 5353, and the label `multicast`. They depend on the machine's network (and on Windows the system DNS-SD service); `ctest -LE multicast` leaves them out where there is none.
 - Tag every test case `[module][thing]`.
 - Prefer `STATIC_REQUIRE` for anything checkable at compile time.
 - Cover boundaries, not just the happy path: empty packs, minimal types satisfying a concept, out-of-range values.

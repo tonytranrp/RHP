@@ -2,7 +2,8 @@ include(Catch)
 
 # rhp_add_test_suite(<name> SOURCES <files...> LINKS <targets...>)
 # One executable per module; every TEST_CASE is registered with ctest individually. Cases tagged
-# [multicast] share the mDNS port and group, so they hold one RESOURCE_LOCK under ctest -j.
+# [multicast] share the mDNS port and group, so they hold one RESOURCE_LOCK under ctest -j; they
+# carry the ctest label `multicast` too (they need a working LAN): `ctest -LE multicast` skips them.
 function(rhp_add_test_suite name)
     cmake_parse_arguments(PARSE_ARGV 1 arg "" "" "SOURCES;LINKS")
     add_executable(${name} ${arg_SOURCES})
@@ -11,7 +12,7 @@ function(rhp_add_test_suite name)
     rhp_set_warnings(${name})
     set_target_properties(${name} PROPERTIES FOLDER "tests")
     catch_discover_tests(${name} TEST_PREFIX "${name}." DISCOVERY_MODE PRE_TEST TEST_SPEC "~[multicast]")
-    catch_discover_tests(${name} TEST_PREFIX "${name}." DISCOVERY_MODE PRE_TEST TEST_SPEC "[multicast]" PROPERTIES RESOURCE_LOCK multicast)
+    catch_discover_tests(${name} TEST_PREFIX "${name}." DISCOVERY_MODE PRE_TEST TEST_SPEC "[multicast]" PROPERTIES RESOURCE_LOCK multicast LABELS multicast)
 endfunction()
 
 # rhp_add_compile_fail(<name> SOURCE <file> LINKS <targets...>)
