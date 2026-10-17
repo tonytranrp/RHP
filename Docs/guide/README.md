@@ -38,7 +38,7 @@ A running C++ program (the **host**) accepts Lua scripts from a **client** (your
 | Scripting | Lua 5.5 sandbox per identity; modules with their own `_ENV`; `exec`, `load`, `call`, `reload`, `rollback`, `checkpoint` / `revert_to`, `revert`, `unload`, `pin` / `unpin`, `revert_all`; `require`; coroutine scheduler (`rhp.wait`, `rhp.next_frame`, `rhp.sleep`, `rhp.timer`); `on_save` / `on_restore` state hand-over |
 | C++ binding | `Rhp::lib<>` with `fn`, `var`, `ro`, `handle`, `sub`; `undo<>`, `irreversible`, `requires_role<>`; `Rhp::patch_point<>`; `Rhp::lua_event<>`; custom types through `Rhp::convert<T>`; LuaLS stub generation |
 | Transports | in-process loopback, TCP, WebSocket binary tunnel, reliable UDP, local IPC; custom transports through `net::transport` |
-| Network tooling | authenticated HTTP/1.1 gateway; opt-in DNS-SD discovery; `Rhp::fleet<Cfg>` with one outcome per host |
+| Network tooling | authenticated HTTP/1.1 gateway with signed answers and optional channel binding; opt-in DNS-SD discovery; `Rhp::fleet<Cfg>` `exec`/`load`/`call` broadcasts with one outcome per host, on one shared network thread |
 | Directions | normal (client dials host) and **reverse** (host dials a listening client: phones, NAT) |
 | Security | pre-shared-key mutual authentication, 3 roles, Ed25519 script signing, TLS 1.3 (OpenSSL or Mbed TLS), TLS channel binding, per-frame MAC |
 | Reliability | CRC32C, seq / ack / nack / resend, heartbeat, **resume** after a lost link with exactly-once calls |
