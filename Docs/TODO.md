@@ -91,6 +91,7 @@ GitHub Actions runs again. Fixed for it: Apple deployment targets 13.3 / 16.3 (f
 - Builds that must not accept remote code should use `RHP_ENABLE=OFF`; enabled builds need their own deployment/distribution review.
 - A runaway timer, frame callback, event handler or task run by `pump()` (not by a network request) can't be cancelled from the network, and ending the identity's last session doesn't stop it either: set `instructions` / `wall_ms` or `slice_us` for untrusted scripts.
 - `rhp.on` with a name no C++ `lua_event` registered subscribes to script events, so a mistyped C++ event name is not an error.
+- `remote_events_per_pump` bounds the event rate per session, not the backlog: a session detached (or not reading) for long while subscribed events flow ends at its unacknowledged-bytes limit.
 - Remote event deliveries carry `Rhp::value`s: a C++ event argument whose type has no `Rhp::convert` (a handle-only type) arrives as nil. The HTTP gateway has no event stream.
 
 ## Documentation

@@ -456,8 +456,7 @@ TEST_CASE("stage4: a pinned module outlives its identity's sessions", "[stage4][
     }
     // The admin left: the pinned module and its effect stay, the rest is gone.
     REQUIRE(eventually([&] { return host->sessions() == 0; }));
-    std::this_thread::sleep_for(20ms);
-    CHECK(host->identities() == 1);
+    CHECK(eventually([&] { return host->identities() == 1; })); // the patch identity's teardown follows its close
     // Game state is read through a client (the pump thread owns it).
     Rhp::client<loop_cfg> viewer{host.dial_at(at), k.as("observe")};
     CHECK(viewer.exec<int>("return s4.level") == 5);

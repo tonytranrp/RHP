@@ -171,20 +171,27 @@ std::string_view sandbox_impl::task_status(const task_record& t) const noexcept 
 }
 
 void sandbox_impl::push_task_handle(lua_State* L, task_record& t) {
-    auto* h = static_cast<task_handle*>(lua_newuserdatauv(L, sizeof(task_handle), 0));
-    h->key = t.key;
-    h->seq = t.seq;
-    luaL_setmetatable(L, kTaskKey);
+    // Counted before allocating: a collection the allocation runs may not release the record.
     ++t.handles;
+    const std::uint64_t key = t.key;
+    const std::uint64_t seq = t.seq;
+    auto* h = static_cast<task_handle*>(lua_newuserdatauv(L, sizeof(task_handle), 0));
+    h->key = key;
+    h->seq = seq;
+    luaL_setmetatable(L, kTaskKey);
 }
 
 void sandbox_impl::spawn(lua_State* L) {
+    refuse_while_closing(L, "rhp.spawn");
     const int nargs = lua_gettop(L) - 1;
     const std::uint64_t key = ++task_keys_;
     const module_record* mod = record(current_.module);
     std::string label = std::format("{} (task)", mod != nullptr && !mod->scratch ? mod->name : std::string{"exec"});
     // The function and its arguments go to the main stack, where start_request takes them from.
-    luaL_checkstack(state_, nargs + 2, "rhp: too many arguments");
+    // Checked here, so nothing raises on the main state while this coroutine runs.
+    if (lua_checkstack(state_, nargs + 8) == 0) {
+        stack{L}.raise(make_error(errc::kLimitExceeded, std::format("{} arguments are too many", nargs), "rhp.spawn"));
+    }
     lua_xmove(L, state_, nargs + 1);
     request_record& req = start_request(request_kind::kTask, effect_owner{current_.module, current_.revision}, label, nargs, false);
     req.start_args = nargs;

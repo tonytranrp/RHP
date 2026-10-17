@@ -318,7 +318,6 @@ public:
         return true;
     }
 
-    // Reloads <folder>/*.lua whenever one is saved (module name = file stem). Replaces an earlier watch.
     // Prints every delivery of `event` (a C++ event of the host, or an rhp.publish of this identity's
     // scripts; "*": every publish) until unsubscribe.
     bool subscribe(const std::string& event) {
@@ -371,6 +370,7 @@ public:
         }
     }
 
+    // Reloads <folder>/*.lua whenever one is saved (module name = file stem). Replaces an earlier watch.
     bool watch(const std::string& folder) {
         unwatch();
         std::error_code ec;

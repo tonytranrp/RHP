@@ -320,8 +320,8 @@ function rhp.frame() end
 function require(name) end
 
 ---@class rhp.handler_options
----@field times? integer calls before it removes itself (rhp.every, frame callbacks)
----@field priority? integer higher runs first (rhp.on, rhp.once); ties keep subscription order
+---@field times? integer calls before it removes itself (rhp.every and frame callbacks only)
+---@field priority? integer higher runs first (rhp.on, rhp.once, rhp.on_error only); ties keep subscription order
 ---@field on_error? "report"|"remove"|"fault" what a failing call does (default: the sandbox's policy)
 
 ---@class rhp.schedule_info

@@ -690,3 +690,16 @@ TEST_CASE("sandbox: returning deeply nested tables never overruns the Lua stack"
     CHECK(too_deep->front().is_string());
     CHECK(box.exec("return _G"));
 }
+
+TEST_CASE("calls with many arguments fit the request coroutine", "[script][sandbox]") {
+    Rhp::script::sandbox box;
+    const auto mod = box.load("tests.sandbox.many_args", "function count(...) return select('#', ...) end");
+    REQUIRE(mod.has_value());
+    std::vector<Rhp::value> args;
+    for (int i = 0; i < 64; ++i) {
+        args.emplace_back(i);
+    }
+    const auto r = box.call(*mod, "count", args);
+    REQUIRE(r.has_value());
+    CHECK(r->at(0) == Rhp::value{64});
+}

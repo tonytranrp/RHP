@@ -55,8 +55,8 @@ std::uint64_t checked_id(lua_State* L, int index, std::string_view where) {
 std::uint64_t checked_frames(lua_State* L, int index, std::string_view where) {
     const stack s{L};
     const auto n = s.to_integer(index);
-    if (!n || *n < 1) {
-        s.raise(make_error(errc::kInvalidArgument, std::format("expected a frame count >= 1, got {}", s.type_name(index)), std::string{where}));
+    if (!n || *n < 1 || *n > 1'000'000'000'000'000) {
+        s.raise(make_error(errc::kInvalidArgument, std::format("expected a frame count from 1 to 1e15, got {}", s.type_name(index)), std::string{where}));
     }
     return static_cast<std::uint64_t>(*n);
 }
@@ -203,7 +203,14 @@ handler_opts sandbox_impl::read_opts(lua_State* L, int index, std::string_view w
 
 // ---- entries -------------------------------------------------------------------------------------
 
+void sandbox_impl::refuse_while_closing(lua_State* L, std::string_view where) const {
+    if (closing_lua_) {
+        stack{L}.raise(make_error(errc::kUnloaded, "the sandbox is closing", std::string{where}));
+    }
+}
+
 std::uint64_t sandbox_impl::add_timer(lua_State* L, double ms, int fn_index, bool repeating, const handler_opts& opts, std::string label) {
+    refuse_while_closing(L, "rhp.timer");
     lua_pushvalue(L, fn_index);
     const int fn_ref = luaL_ref(L, LUA_REGISTRYINDEX);
     const std::uint64_t key = ++schedule_keys_;
@@ -225,6 +232,7 @@ std::uint64_t sandbox_impl::add_timer(lua_State* L, double ms, int fn_index, boo
 }
 
 std::uint64_t sandbox_impl::add_frames(lua_State* L, std::uint64_t every, int fn_index, const handler_opts& opts) {
+    refuse_while_closing(L, "rhp.every_frame");
     lua_pushvalue(L, fn_index);
     const int fn_ref = luaL_ref(L, LUA_REGISTRYINDEX);
     const std::uint64_t key = ++schedule_keys_;
@@ -308,7 +316,8 @@ void sandbox_impl::reschedule(lua_State* L, std::uint64_t seq, double interval) 
         e->remaining = e->interval;
         return;
     }
-    if (interval < 1.0 || interval != static_cast<double>(static_cast<std::uint64_t>(interval))) {
+    constexpr double kMaxFrames = 1e15; // far beyond any run; keeps the cast and frame_ + every in range
+    if (interval < 1.0 || interval > kMaxFrames || interval != static_cast<double>(static_cast<std::uint64_t>(interval))) {
         stack{L}.raise(make_error(errc::kInvalidArgument, "a frame callback's interval is a frame count >= 1", "rhp.reschedule"));
     }
     e->every = static_cast<std::uint64_t>(interval);
@@ -421,7 +430,10 @@ void sandbox_impl::fire_entry(std::uint64_t key, steady::time_point now) {
     req.handler_seq = seq;
     req.policy = policy;
     req.source = frames ? "frame" : "timer";
-    e.active = req.id;
+    // Looked up again: start_request allocates, and a finalizer it triggers may have removed the entry.
+    if (const auto again = schedule_.find(key); again != schedule_.end()) {
+        again->second.active = req.id;
+    }
     if (last) {
         (void)ledger_.revert_entry(seq); // spent once its last call starts (the function is on the coroutine)
     }

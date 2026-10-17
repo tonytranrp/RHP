@@ -54,6 +54,12 @@ std::vector<std::string> rhp_fuzz_seeds() {
         R"(return math.tointeger(2^63), math.maxinteger // -1, 1 // 0)",
         R"(rhp.wait(1) game.secret = 3)",
         R"(return string.rep('a', 100, 'b'):gsub('a', '%0%0'))",
+        R"(local t = {} for i = 1, 200 do t[i] = i end rhp.spawn(function() end, table.unpack(t)))",
+        R"(local t = {} for i = 1, 200 do t[i] = i end rhp.on('a.b', function() end) rhp.publish('a.b', table.unpack(t)))",
+        R"(rhp.spawn(function() while true do end end))",
+        R"(rhp.every_frame(function() error('x') end))",
+        R"(_G.k = setmetatable({}, {__gc = function() pcall(rhp.every, 1, print) pcall(rhp.spawn, print) end}))",
+        R"(rhp.reschedule(rhp.every_frames(1, print), math.huge))",
     };
 }
 

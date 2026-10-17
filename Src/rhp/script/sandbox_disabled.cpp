@@ -144,7 +144,7 @@ Rhp::subscription sandbox::on_script_event(std::string_view, script_event_fn) {
     return {};
 }
 
-sandbox_stats sandbox::stats() const noexcept {
+sandbox_stats sandbox::stats() const {
     return {};
 }
 

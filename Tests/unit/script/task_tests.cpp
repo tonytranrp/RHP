@@ -409,3 +409,39 @@ TEST_CASE("a task spawned by a failed handler is cancelled under report", "[scri
     CHECK(out.failures.size() == 1);
     CHECK(box.stats().tasks == 0);
 }
+
+TEST_CASE("a task takes many arguments and returns many results", "[script][tasks]") {
+    capture out;
+    sandbox box = make_box(out);
+    const auto mod = box.load("tests.tasks.many", R"lua(
+        local args = {}
+        for i = 1, 64 do args[i] = i end
+        t = rhp.spawn(function(...)
+            local r = {}
+            for i = 1, select("#", ...) do r[i] = select(i, ...) * 2 end
+            return table.unpack(r)
+        end, table.unpack(args))
+        function sum() local s = 0 for _, v in ipairs({t:join()}) do s = s + v end return s, select("#", t:join()) end
+    )lua");
+    REQUIRE(mod.has_value());
+    box.pump();
+    CHECK(*box.call(*mod, "sum") == value_list{Rhp::value{64 * 65}, Rhp::value{64}});
+}
+
+TEST_CASE("a failed task stays failed under remove and fault", "[script][tasks]") {
+    for (const auto policy : {Rhp::script::handler_error_policy::kRemove, Rhp::script::handler_error_policy::kFault}) {
+        capture out;
+        sandbox_options options;
+        options.handler_errors = policy;
+        options.on_handler_error = [&out](const Rhp::script::handler_failure& f) { out.failures.push_back(f); };
+        sandbox box{std::move(options)};
+        // The failing task belongs to the scratch module so that `fault` doesn't take the checker down.
+        REQUIRE(box.exec("failing = rhp.spawn(function() error('task broke') end)"));
+        box.pump();
+        const auto r = box.exec("local ok, err = pcall(failing.join, failing) return failing:status(), tostring(err):match('%[([%w_]+)%]')");
+        REQUIRE(r.has_value());
+        CHECK(*r == value_list{Rhp::value{"failed"}, Rhp::value{"runtime"}});
+        REQUIRE(out.failures.size() == 1);
+        CHECK(out.failures[0].action == policy);
+    }
+}

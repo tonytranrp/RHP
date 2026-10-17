@@ -197,6 +197,7 @@ void sandbox_impl::release_interest(const std::string& event) noexcept {
 // ---- subscriptions -------------------------------------------------------------------------------
 
 std::uint64_t sandbox_impl::subscribe(lua_State* L, std::string_view event, int fn_index, bool once, const handler_opts& opts) {
+    refuse_while_closing(L, once ? "rhp.once" : "rhp.on");
     event_state* state = resolve_event(L, event, once ? "rhp.once" : "rhp.on");
     lua_pushvalue(L, fn_index);
     const int fn_ref = luaL_ref(L, LUA_REGISTRYINDEX);
@@ -295,21 +296,29 @@ void sandbox_impl::deliver_now(std::string_view event, event_pusher args, module
             (void)step(req, nargs);
         }
     }
-    // 2. Waiters: they resume at the next resume pass with the arguments.
-    if (const auto it = waiters_.find(event); it != waiters_.end()) {
-        const std::vector<request_id> waiting = std::exchange(it->second, {});
-        for (const request_id id : waiting) {
-            const auto req = requests_.find(id);
+    // 2. Waiters: they resume at the next resume pass with the arguments. One at a time, so a
+    // failure part way (memory) leaves the rest waiting rather than stranded.
+    if (waiters_.contains(event)) {
+        const std::string name{event};
+        for (;;) {
+            const auto it = waiters_.find(name);
+            if (it == waiters_.end() || it->second.empty()) {
+                break;
+            }
+            const auto req = requests_.find(it->second.front());
             if (req == requests_.end() || req->second->waiting != wait_kind::kEvent) {
+                it->second.erase(it->second.begin());
                 continue;
             }
             stack s{state_};
             const int nargs = args(s);
+            const int packed = pack_top(state_, nargs);
+            it->second.erase(it->second.begin());
             luaL_unref(state_, LUA_REGISTRYINDEX, req->second->resume_ref);
-            req->second->resume_ref = pack_top(state_, nargs);
+            req->second->resume_ref = packed;
             req->second->woken = true;
         }
-        release_interest(std::string{event});
+        release_interest(name);
     }
     // 3. C++ listeners (script events), at the end of this operation or pump().
     if (values != nullptr && !listeners_->empty()) {
@@ -360,6 +369,7 @@ bool sandbox_impl::publish(lua_State* L, std::string_view event, int first_arg) 
 // ---- waiting -------------------------------------------------------------------------------------
 
 int sandbox_impl::wait_event(lua_State* L, std::string_view event, std::optional<double> timeout_ms) {
+    refuse_while_closing(L, "rhp.wait_event");
     event_state* state = resolve_event(L, event, "rhp.wait_event");
     request_record& me = suspendable(L, "rhp.wait_event");
     waiters_[std::string{event}].push_back(me.id);
@@ -451,7 +461,7 @@ void sandbox_impl::call_listeners() {
 
 // ---- stats ---------------------------------------------------------------------------------------
 
-sandbox_stats sandbox_impl::stats() const noexcept {
+sandbox_stats sandbox_impl::stats() const {
     sandbox_stats out;
     out.dropped_events = dropped_events_.load(std::memory_order_relaxed);
     {

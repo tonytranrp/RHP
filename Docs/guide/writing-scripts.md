@@ -178,7 +178,7 @@ if not fired then print("no round ended within 5 s") end
 
 ## When a handler fails
 
-A timer, frame callback, event handler or task that raises an error (or hits an instruction or time limit) is a **handler failure**. By default (`report`) only what that one call did is undone; the handler keeps its place and the module stays active, so there is no need to wrap handlers in `pcall`. `{on_error = "remove"}` also removes the handler; `{on_error = "fault"}` faults the whole module as any other failure does. The sandbox or host sets the default (`handler_errors`). A memory stop always faults: the state's memory is shared.
+A timer, frame callback, event handler or task that raises an error (or hits an instruction or time limit) is a **handler failure**. By default (`report`) only what that one call did is undone; the handler keeps its place and the module stays active, so there is no need to wrap handlers in `pcall`. `{on_error = "remove"}` also removes the handler; `{on_error = "fault"}` faults the whole module as any other failure does. The sandbox or host sets the default (`handler_errors`). A memory stop always faults: the state's memory is shared. Tasks take that default (`rhp.spawn` has no options table). In the scratch module (exec), `fault` undoes only the failed call, as `report` does. `rhp.handler_failed` events count against `limits.event_queue` like any script event.
 
 ```lua
 rhp.every_frame(update, {on_error = "remove"})
