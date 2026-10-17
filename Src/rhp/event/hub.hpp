@@ -2,10 +2,13 @@
 
 #include <concepts>
 #include <cstddef>
+#include <algorithm>
 #include <cstdint>
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <string>
+#include <string_view>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -67,6 +70,56 @@ private:
     struct entry {
         std::uint64_t id = 0;
         std::size_t kind = 0;
+        std::shared_ptr<handler> fn;
+    };
+
+    mutable std::mutex mutex_;
+    std::vector<entry> entries_;
+    std::uint64_t last_ = 0;
+};
+
+// The script-event handlers of one host (host.on_script_event), by event name ("*": every name).
+// Thread-safe like hub; publish calls matching handlers outside the lock.
+class script_hub final : public Rhp::subscribable {
+public:
+    using handler = std::function<void(const script_event&)>;
+
+    std::uint64_t add(std::string name, handler fn) {
+        const std::scoped_lock lock{mutex_};
+        const std::uint64_t id = ++last_;
+        entries_.push_back({id, std::move(name), std::make_shared<handler>(std::move(fn))});
+        return id;
+    }
+
+    void unsubscribe(std::uint64_t id) noexcept override {
+        const std::scoped_lock lock{mutex_};
+        std::erase_if(entries_, [id](const entry& e) { return e.id == id; });
+    }
+
+    [[nodiscard]] bool wants(std::string_view name) const {
+        const std::scoped_lock lock{mutex_};
+        return std::ranges::any_of(entries_, [name](const entry& e) { return e.name == name || e.name == "*"; });
+    }
+
+    void publish(const script_event& e) const {
+        std::vector<std::shared_ptr<handler>> targets;
+        {
+            const std::scoped_lock lock{mutex_};
+            for (const entry& item : entries_) {
+                if (item.name == e.event || item.name == "*") {
+                    targets.push_back(item.fn);
+                }
+            }
+        }
+        for (const auto& fn : targets) {
+            (*fn)(e);
+        }
+    }
+
+private:
+    struct entry {
+        std::uint64_t id = 0;
+        std::string name;
         std::shared_ptr<handler> fn;
     };
 

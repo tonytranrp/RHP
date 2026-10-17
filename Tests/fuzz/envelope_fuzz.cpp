@@ -58,6 +58,8 @@ std::vector<std::string> rhp_fuzz_seeds() {
     exec.emplace_back("target", Rhp::value{std::int64_t{5}});
     exec.emplace_back("bytes", Rhp::value{Rhp::value::bytes(8, std::byte{1})});
     out.push_back(encoded(Rhp::value{exec}));
+    out.push_back(encoded(Rhp::to_value(w::subscribe_request{"game.round_over"})));
+    out.push_back(encoded(Rhp::to_value(w::event_message{"game.score", Rhp::module_id{2}, Rhp::value::array{Rhp::value{std::int64_t{3}}}, 1})));
     return out;
 }
 
@@ -69,6 +71,6 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
     namespace w = Rhp::wire;
     all<w::hello, w::challenge, w::response, w::welcome, w::resume, w::envelope, w::module_ref, w::exec_request, w::load_request, w::call_request, w::reload_request,
         w::rollback_request, w::unload_request, w::module_request, w::tag_request, w::cancel_request, w::blob_chunk, w::revert_summary, w::module_status,
-        w::emit_message, Rhp::error>(*v);
+        w::emit_message, w::subscribe_request, w::event_message, Rhp::error>(*v);
     return 0;
 }

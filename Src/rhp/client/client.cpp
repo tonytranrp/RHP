@@ -169,6 +169,57 @@ public:
         return std::move(*node.mapped().done);
     }
 
+    result<std::uint64_t> subscribe(std::string_view name, remote_event_fn fn) {
+        if (!fn) {
+            return fail(errc::kInvalidArgument, "client.on needs a callback", "client.on");
+        }
+        std::uint64_t id = 0;
+        bool first = false;
+        {
+            const std::scoped_lock lock{mutex_};
+            id = ++last_listener_;
+            listeners_.emplace(id, listener_entry{std::string{name}, std::make_shared<remote_event_fn>(std::move(fn))});
+            first = ++remote_names_[std::string{name}] == 1;
+        }
+        if (first) {
+            if (auto r = request(wire::op::kSubscribe, Rhp::to_value(wire::subscribe_request{std::string{name}})); !r) {
+                (void)forget_listener(id);
+                return std::unexpected{std::move(r).error()};
+            }
+        }
+        return id;
+    }
+
+    result<void> unsubscribe(std::uint64_t id) {
+        auto last = forget_listener(id);
+        if (!last) {
+            return std::unexpected{std::move(last).error()};
+        }
+        if (!last->empty()) {
+            if (auto r = request(wire::op::kUnsubscribe, Rhp::to_value(wire::subscribe_request{*last})); !r) {
+                return std::unexpected{std::move(r).error()};
+            }
+        }
+        return {};
+    }
+
+    // Removes a callback; the name when it was the last one for it (empty otherwise).
+    result<std::string> forget_listener(std::uint64_t id) {
+        const std::scoped_lock lock{mutex_};
+        const auto it = listeners_.find(id);
+        if (it == listeners_.end()) {
+            return fail(errc::kNotFound, std::format("no event callback {}", id), "client.off");
+        }
+        std::string name = std::move(it->second.name);
+        listeners_.erase(it);
+        const auto count = remote_names_.find(name);
+        if (count != remote_names_.end() && --count->second == 0) {
+            remote_names_.erase(count);
+            return name;
+        }
+        return std::string{};
+    }
+
     std::uint64_t submit(wire::op code, value body, completion done) {
         std::unique_lock lock{mutex_};
         if (closed_) {
@@ -645,6 +696,25 @@ private:
         for (const queued_request& q : queued) {
             send_or_queue(q.code, q.message, q.req);
         }
+        if (std::exchange(had_session_, true)) {
+            resubscribe(); // a new host session (reverse mode) knows nothing of this client's events
+        }
+    }
+
+    void resubscribe() {
+        std::vector<std::pair<std::uint64_t, std::string>> sends;
+        {
+            const std::scoped_lock lock{mutex_};
+            for (const auto& [name, count] : remote_names_) {
+                const std::uint64_t req = ++last_req_;
+                pending_[req].callback = [](result<value>) {};
+                sends.emplace_back(req, name);
+            }
+        }
+        for (const auto& [req, name] : sends) {
+            const wire::envelope env{req, random_key(), Rhp::to_value(wire::subscribe_request{name})};
+            send_or_queue(wire::op::kSubscribe, Rhp::to_value(env), req);
+        }
     }
 
     void on_message(session::session&, wire::op code, value body) override {
@@ -677,6 +747,26 @@ private:
                 }
             }
             return;
+        case wire::op::kEvent: {
+            auto m = Rhp::from_value<wire::event_message>(env->body);
+            if (!m) {
+                return;
+            }
+            std::vector<std::shared_ptr<remote_event_fn>> targets;
+            {
+                const std::scoped_lock lock{mutex_};
+                for (const auto& [id, l] : listeners_) {
+                    if (l.name == m->name || l.name == "*") {
+                        targets.push_back(l.fn);
+                    }
+                }
+            }
+            const remote_event e{m->name, m->module, m->args, m->dropped};
+            for (const auto& fn : targets) {
+                (*fn)(e);
+            }
+            return;
+        }
         default: return;
         }
     }
@@ -820,6 +910,15 @@ private:
     std::uint64_t last_req_ = 0;
     std::map<std::uint64_t, call> pending_;
     session_info info_;
+    // client.on: callbacks by id, and how many each subscribed name has.
+    struct listener_entry {
+        std::string name;
+        std::shared_ptr<remote_event_fn> fn;
+    };
+    std::map<std::uint64_t, listener_entry> listeners_;
+    std::map<std::string, std::size_t, std::less<>> remote_names_;
+    std::uint64_t last_listener_ = 0;
+    bool had_session_ = false; // network thread: a session was ready before (resubscribe on the next)
 };
 
 // ---- the C++ wall --------------------------------------------------------------------------------------
@@ -850,6 +949,14 @@ std::uint64_t submit(engine& e, wire::op code, value body, completion done) {
 
 result<void> blob(engine& e, std::string_view sink, std::string_view name, std::span<const std::byte> data) {
     return e.blob(sink, name, data);
+}
+
+result<std::uint64_t> subscribe(engine& e, std::string_view name, remote_event_fn fn) {
+    return e.subscribe(name, std::move(fn));
+}
+
+result<void> unsubscribe(engine& e, std::uint64_t id) {
+    return e.unsubscribe(id);
 }
 
 void cancel(engine& e, std::uint64_t req) noexcept {

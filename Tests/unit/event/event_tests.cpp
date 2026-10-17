@@ -147,3 +147,53 @@ TEST_CASE("to_json keeps valid UTF-8 and replaces invalid bytes", "[event][json]
     const std::string r = "\xEF\xBF\xBD"; // U+FFFD
     CHECK(line.find("\"module\":\"a" + r + "b" + r + "c" + r + r + r + "d" + r + r + "\"") != std::string::npos);
 }
+
+TEST_CASE("handler_failed is the last host event and writes one JSON line", "[event][stage7]") {
+    STATIC_REQUIRE(event::kind_of<event::handler_failed> == std::variant_size_v<event::any> - 1);
+    const event::handler_failed failed{std::chrono::system_clock::time_point{}, "dev", "combat", "timer", "timer", 12, "report",
+                                       Rhp::make_error(Rhp::errc::kRuntime, "boom", "combat:3")};
+    const std::string json = event::to_json(event::any{failed});
+    CHECK(json.starts_with(R"({"event":"handler_failed")"));
+    CHECK(json.find(R"("module":"combat")") != std::string::npos);
+    CHECK(json.find(R"("handler":12)") != std::string::npos);
+    CHECK(json.find(R"("action":"report")") != std::string::npos);
+    CHECK(json.find("boom") != std::string::npos);
+}
+
+TEST_CASE("the script hub filters by name and star", "[event][stage7]") {
+    auto hub = std::make_shared<event::script_hub>();
+    std::vector<std::string> named;
+    std::vector<std::string> all;
+    Rhp::subscription a{std::weak_ptr<Rhp::subscribable>{hub}, hub->add("game.score", [&](const event::script_event& e) { named.push_back(e.event); })};
+    Rhp::subscription b{std::weak_ptr<Rhp::subscribable>{hub}, hub->add("*", [&](const event::script_event& e) { all.push_back(e.event); })};
+    CHECK(hub->wants("game.score"));
+    CHECK(hub->wants("game.other")); // the star wants everything
+    event::script_event e;
+    e.event = "game.score";
+    hub->publish(e);
+    e.event = "game.other";
+    hub->publish(e);
+    CHECK(named == std::vector<std::string>{"game.score"});
+    CHECK(all == std::vector<std::string>{"game.score", "game.other"});
+    b.reset();
+    CHECK_FALSE(hub->wants("game.other"));
+}
+
+TEST_CASE("a core subscription unsubscribes and may outlive what it subscribed to", "[event][stage7]") {
+    Rhp::subscription sub;
+    {
+        auto hub = std::make_shared<event::hub>();
+        int calls = 0;
+        sub = event::subscribe<event::auth_failed>(hub, [&](const event::auth_failed&) { ++calls; });
+        CHECK(sub.active());
+        hub->publish(event::auth_failed{});
+        CHECK(calls == 1);
+        Rhp::subscription moved = std::move(sub);
+        CHECK_FALSE(sub.active());
+        moved.reset();
+        hub->publish(event::auth_failed{});
+        CHECK(calls == 1);
+        sub = event::subscribe<event::auth_failed>(hub, [](const event::auth_failed&) {});
+    }
+    CHECK_FALSE(sub.active());
+}

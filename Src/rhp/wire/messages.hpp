@@ -144,16 +144,22 @@ struct blob_chunk {
     value::bytes data;
 };
 
+// subscribe and unsubscribe: a C++ lua_event (program-wide) or an rhp.publish of this session's
+// identity ("*": every publish), by name.
+struct subscribe_request {
+    std::string name;
+};
+
 // Reply bodies (kResult):
 //   exec, call            array of returned values
 //   load                  module id
 //   reload, rollback      revision (0 = deferred)
 //   revert, unload, revert_to, revert_all   revert_summary
-//   checkpoint, pin, unpin, blob   nil
+//   checkpoint, pin, unpin, blob, subscribe, unsubscribe   nil
 //   list                  array of module_status
 //   status                module_status
 //   describe              string (LuaLS stubs)
-// kError carries an Rhp::error; kOutput a string; kEmit an emit_message.
+// kError carries an Rhp::error; kOutput a string; kEmit an emit_message; kEvent an event_message.
 
 struct revert_summary {
     std::uint64_t undone = 0;
@@ -188,6 +194,14 @@ struct emit_message {
     value data;
 };
 
+// One delivery of a subscribed event (host → client, envelope req 0).
+struct event_message {
+    std::string name;
+    module_id module;           // the publishing module (0: C++ or the sandbox itself)
+    value::array args;
+    std::uint64_t dropped = 0;  // deliveries to this session dropped since the previous one (host_options::remote_events_per_pump)
+};
+
 } // namespace Rhp::wire
 
 #define RHP_WIRE_MESSAGE_CONVERT(T)                            \
@@ -217,5 +231,7 @@ RHP_WIRE_MESSAGE_CONVERT(Rhp::wire::blob_chunk);
 RHP_WIRE_MESSAGE_CONVERT(Rhp::wire::revert_summary);
 RHP_WIRE_MESSAGE_CONVERT(Rhp::wire::module_status);
 RHP_WIRE_MESSAGE_CONVERT(Rhp::wire::emit_message);
+RHP_WIRE_MESSAGE_CONVERT(Rhp::wire::subscribe_request);
+RHP_WIRE_MESSAGE_CONVERT(Rhp::wire::event_message);
 
 #undef RHP_WIRE_MESSAGE_CONVERT

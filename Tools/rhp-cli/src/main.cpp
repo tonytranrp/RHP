@@ -435,6 +435,11 @@ int main(int argc, char** argv) {
     blob_cmd->add_option("--name", module, "name passed to the sink (default: the file name)");
     add_connection_options(*blob_cmd, conn, false);
 
+    std::vector<std::string> event_names;
+    auto* events_cmd = app.add_subcommand("events", "print host events (C++ events, or rhp.publish of your identity; * = all) until Ctrl+C");
+    events_cmd->add_option("event", event_names, "event names")->required();
+    add_connection_options(*events_cmd, conn, false);
+
     std::string folder;
     auto* watch_cmd = app.add_subcommand("watch", "reload <folder>/*.lua whenever one is saved (Ctrl+C stops)");
     watch_cmd->add_option("folder", folder, "folder to watch")->required();
@@ -551,6 +556,16 @@ int main(int argc, char** argv) {
             std::this_thread::sleep_for(std::chrono::milliseconds{100});
         }
         sh.unwatch();
+    } else if (events_cmd->parsed()) {
+        for (const std::string& event : event_names) {
+            if (!sh.subscribe(event)) {
+                return 1;
+            }
+        }
+        while (!g_interrupted.load() && !c->client->info().closed) {
+            std::this_thread::sleep_for(std::chrono::milliseconds{100});
+        }
+        sh.unsubscribe_all();
     }
     return ok ? 0 : 1;
 }

@@ -453,4 +453,38 @@ result<emit_message> Rhp::convert<emit_message>::from_value(const value& v) {
     return emit_message{*module, field_value(v, "value")};
 }
 
+value Rhp::convert<subscribe_request>::to_value(const subscribe_request& m) {
+    return map_builder{}.set("name", m.name).done();
+}
+
+result<subscribe_request> Rhp::convert<subscribe_request>::from_value(const value& v) {
+    if (!v.is_map()) {
+        return not_a_map("subscribe", v);
+    }
+    RHP_WIRE_READ(name, field<std::string>(v, "name", "subscribe"));
+    return subscribe_request{std::move(*name)};
+}
+
+value Rhp::convert<event_message>::to_value(const event_message& m) {
+    return map_builder{}.set("name", m.name).set("module", m.module).set("args", value{m.args}).set("dropped", m.dropped).done();
+}
+
+result<event_message> Rhp::convert<event_message>::from_value(const value& v) {
+    if (!v.is_map()) {
+        return not_a_map("event", v);
+    }
+    RHP_WIRE_READ(name, field<std::string>(v, "name", "event"));
+    RHP_WIRE_READ(module, field_or<Rhp::module_id>(v, "module", "event", {}));
+    RHP_WIRE_READ(dropped, field_or<std::uint64_t>(v, "dropped", "event", 0));
+    value::array args;
+    if (const value* a = v.find("args"); a != nullptr && !a->is_nil()) {
+        const auto* items = a->get_if<value::array>();
+        if (items == nullptr) {
+            return Rhp::fail(Rhp::errc::kProtocol, "event.args must be an array", "wire");
+        }
+        args = *items;
+    }
+    return event_message{std::move(*name), *module, std::move(args), *dropped};
+}
+
 #undef RHP_WIRE_READ

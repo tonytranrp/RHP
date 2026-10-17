@@ -171,3 +171,39 @@ TEST_CASE("messages: Stage 4 fields: signatures / pins / blob chunks", "[wire][m
     CHECK(wire::required_role(wire::op::kUnpin) == Rhp::role::kAdmin);
     CHECK(wire::kProtocolRevision >= 2);
 }
+
+TEST_CASE("messages: subscribe requests and events round trip", "[wire][messages][stage7]") {
+    CHECK(roundtrip(wire::subscribe_request{"game.round_over"}).name == "game.round_over");
+    const wire::event_message m{"game.score", Rhp::module_id{4}, value::array{value{"red"}, value{3}, value{}}, 7};
+    const auto back = roundtrip(m);
+    CHECK(back.name == m.name);
+    CHECK(back.module == m.module);
+    CHECK(back.args == m.args);
+    CHECK(back.dropped == 7);
+}
+
+TEST_CASE("messages: event fields default when missing", "[wire][messages][stage7]") {
+    value::map only_name;
+    only_name.emplace_back(value{"name"}, value{"game.x"});
+    const auto e = Rhp::from_value<wire::event_message>(value{only_name});
+    REQUIRE(e);
+    CHECK(e->module == Rhp::module_id{});
+    CHECK(e->args.empty());
+    CHECK(e->dropped == 0);
+    CHECK_FALSE(Rhp::from_value<wire::event_message>(value{value::map{}}));
+    CHECK_FALSE(Rhp::from_value<wire::subscribe_request>(value{value::map{}}));
+    value::map bad_args = only_name;
+    bad_args.emplace_back(value{"args"}, value{5});
+    CHECK(Rhp::from_value<wire::event_message>(value{bad_args}).error().code == errc::kProtocol);
+}
+
+TEST_CASE("messages: subscribe ops need observe and event is a reply", "[wire][messages][stage7]") {
+    CHECK(wire::kProtocolRevision == 4);
+    CHECK(wire::required_role(wire::op::kSubscribe) == Rhp::role::kObserve);
+    CHECK(wire::required_role(wire::op::kUnsubscribe) == Rhp::role::kObserve);
+    CHECK(wire::is_request(wire::op::kSubscribe));
+    CHECK(wire::is_reply(wire::op::kEvent));
+    CHECK(wire::is_sequenced(wire::op::kEvent));
+    CHECK(wire::to_string(wire::op::kEvent) == "event");
+    CHECK(wire::is_known(static_cast<std::uint16_t>(wire::op::kUnsubscribe)));
+}

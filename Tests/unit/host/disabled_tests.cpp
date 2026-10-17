@@ -69,3 +69,16 @@ TEST_CASE("disabled: fleet never discovers or executes remotely", "[client][disa
     group.clear();
     CHECK(group.size() == 0);
 }
+
+TEST_CASE("disabled: script events and remote subscriptions are inert", "[host][disabled]") {
+    Rhp::host<cfg> host{Rhp::endpoint::listen("127.0.0.1", 7777), Rhp::security::keyring{}};
+    int calls = 0;
+    auto sub = host.on_script_event("*", [&](const Rhp::event::script_event&) { ++calls; });
+    host.pump();
+    CHECK(calls == 0);
+    auto k = Rhp::security::key::generate();
+    REQUIRE(k);
+    Rhp::client<cfg> c{Rhp::endpoint::dial("127.0.0.1", 7777), Rhp::security::psk_identity{"dev", *k}};
+    CHECK(c.on("game.x", [](const Rhp::remote_event&) {}).error().code == Rhp::errc::kDisabled);
+    CHECK(c.off(1).error().code == Rhp::errc::kDisabled);
+}

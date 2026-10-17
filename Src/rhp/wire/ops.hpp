@@ -11,7 +11,9 @@ namespace Rhp::wire {
 
 // The protocol revision both ends must agree on in hello. A plain integer, bumped on any change to
 // the frame layout, the handshake or a message schema.
-inline constexpr std::uint8_t kProtocolRevision = 3; // 2: signatures, pin / unpin, blobs (Stage 4); 3: resume, CRC-less TLS frames (Stage 5)
+// 2: signatures, pin / unpin, blobs (Stage 4); 3: resume, CRC-less TLS frames (Stage 5);
+// 4: subscribe / unsubscribe / event (Stage 7).
+inline constexpr std::uint8_t kProtocolRevision = 4;
 
 // What a frame carries (the header's `op`, 16 bits on the wire).
 //
@@ -42,12 +44,15 @@ enum class op : std::uint16_t {
     kDescribe,
     kPin,   // keep a module when its identity's last session ends
     kUnpin, // stop keeping it
-    kBlob,  // one chunk of a blob for a host-registered sink
+    kBlob,        // one chunk of a blob for a host-registered sink
+    kSubscribe,   // deliver an event to this session (kEvent) until kUnsubscribe or the session ends
+    kUnsubscribe, // stop delivering it
 
     kOutput = 48, // print() line
     kEmit,        // rhp.emit(value)
     kResult,      // a request's final result
     kError,       // a request failed, or the session is being closed
+    kEvent,       // one delivery of a subscribed event (envelope req 0)
 
     kPing = 64,
     kPong,
@@ -79,10 +84,13 @@ enum class op : std::uint16_t {
     case op::kPin: return "pin";
     case op::kUnpin: return "unpin";
     case op::kBlob: return "blob";
+    case op::kSubscribe: return "subscribe";
+    case op::kUnsubscribe: return "unsubscribe";
     case op::kOutput: return "output";
     case op::kEmit: return "emit";
     case op::kResult: return "result";
     case op::kError: return "error";
+    case op::kEvent: return "event";
     case op::kPing: return "ping";
     case op::kPong: return "pong";
     case op::kAck: return "ack";
@@ -122,7 +130,9 @@ enum class op : std::uint16_t {
     case op::kCancel:
     case op::kList:
     case op::kStatus:
-    case op::kDescribe: return role::kObserve;
+    case op::kDescribe:
+    case op::kSubscribe:
+    case op::kUnsubscribe: return role::kObserve;
     case op::kLoad:
     case op::kReload:
     case op::kRollback:

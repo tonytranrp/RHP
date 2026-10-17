@@ -175,6 +175,31 @@ public:
 #endif
     }
 
+    // Calls `fn` for every delivery of `name` by the host: a C++ lua_event of that name, or an
+    // rhp.publish of this identity's scripts ("*": every publish, and every delivery this client
+    // gets). The first callback for a name subscribes on the host (a blocking call). `fn` runs on the
+    // network thread (inside the waits with io<zero_threads>): keep it short and never call the
+    // client from it. Returns the callback's id for off().
+    return_t<std::uint64_t> on(std::string_view name, remote_event_fn fn) {
+#if RHP_ENABLE
+        return finish(client_detail::subscribe(*engine_, name, std::move(fn)));
+#else
+        (void)name;
+        (void)fn;
+        return finish(result<std::uint64_t>{fail(errc::kDisabled, "RHP is compiled out (RHP_ENABLE=0)", "client")});
+#endif
+    }
+
+    // Removes one callback; the host stops sending its event once the name's last callback is gone.
+    return_t<void> off(std::uint64_t callback) {
+#if RHP_ENABLE
+        return finish(client_detail::unsubscribe(*engine_, callback));
+#else
+        (void)callback;
+        return finish(result<void>{fail(errc::kDisabled, "RHP is compiled out (RHP_ENABLE=0)", "client")});
+#endif
+    }
+
     // Stops every request this client has in flight (any thread; doesn't wait). The calls waiting
     // for them get kCancelled.
     void cancel() noexcept { cancel(0); }

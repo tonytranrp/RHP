@@ -197,6 +197,17 @@ std::string to_json(const any& e) {
                                   .number("pinned", x.pinned)
                                   .done();
                           },
+                          [](const handler_failed& x) {
+                              return json_object{x.name, x.time}
+                                  .string("identity", x.identity)
+                                  .string("module", x.module)
+                                  .string("kind", x.kind)
+                                  .string("source", x.source)
+                                  .number("handler", x.handler)
+                                  .string("action", x.action)
+                                  .err("outcome", x.outcome)
+                                  .done();
+                          },
                       },
                       e);
 }
