@@ -63,8 +63,10 @@ jobs:
         run: cmake --preset ${{ matrix.preset }}
       - name: Build
         run: cmake --build --preset ${{ matrix.preset }}
+      # Hosted Windows VMs have no working system DNS-SD resolution: real-multicast cases are left
+      # out here (Docs/TODO.md); they run on Linux runners and on developer machines.
       - name: Test
-        run: ctest --preset ${{ matrix.preset }} -j 4 --timeout 600
+        run: ctest --preset ${{ matrix.preset }} -j 4 --timeout 600 -LE multicast
 
   apple:
     runs-on: macos-15
