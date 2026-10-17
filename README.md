@@ -62,6 +62,28 @@ box.reload(*mod, new_source);                                // on_save() → on
 while (running) { box.pump(); game::update(); }
 ```
 
+Scripts keep working between requests, and talk through events (Stage 7):
+
+```lua
+rhp.every_frame(function() game.draw_text(10, 10, "fps " .. game.fps()) end)     -- every pump()
+local poll = rhp.every(250, check_server, {times = 40})                          -- timers with control
+local worker = rhp.spawn(function() while true do refresh() rhp.sleep(1000) end end)  -- background task
+
+rhp.on("game.round_over", function(winner) print(winner .. " wins") end)   -- a C++ lua_event, or a script event
+rhp.publish("ui.toast", "saved")                                           -- to this identity's handlers, next pump
+local fired, winner = rhp.wait_event("game.round_over", 30000)             -- true, ... or false, "timeout"
+-- A failing handler is reported and undoes only its own call; {on_error = "remove" | "fault"} changes that.
+```
+
+```cpp
+auto toasts = host.on_script_event("ui.toast", [](const Rhp::event::script_event& e) { ui::toast(e.args); });
+auto rounds = dev.on("game.round_over", [](const Rhp::remote_event& e) { /* a tool watching the game */ });
+```
+
+```bash
+rhp-cli events game.round_over ui.toast -c 127.0.0.1:7777 -i dev.rhpid    # print events until Ctrl+C
+```
+
 See [`Examples/hello_console`](Examples/hello_console), [`Examples/frame_loop`](Examples/frame_loop), [`Examples/remote_exec`](Examples/remote_exec), [`Examples/custom_transport`](Examples/custom_transport), [`Examples/headless_server`](Examples/headless_server) and [`Tools/rhp-cli`](Tools/rhp-cli).
 
 ## Targets
@@ -71,7 +93,21 @@ Compilers: MSVC (VS 2026), clang-cl, Clang 17+, AppleClang, Android NDK Clang.
 
 ## Documentation
 
-Start with the [user guide](Docs/guide/README.md): [getting started](Docs/guide/getting-started.md), [exposing C++ to Lua](Docs/guide/exposing-cpp.md), [writing scripts](Docs/guide/writing-scripts.md), [host and client API](Docs/guide/host-and-client.md), [connecting](Docs/guide/connecting.md) (endpoints, TLS, reverse mode, `rhp-cli`), [configuration](Docs/guide/configuration.md), [security](Docs/guide/security.md) and the [reference](Docs/guide/reference.md). What is built and what is next: [Docs/TODO.md](Docs/TODO.md).
+Start with the [user guide](Docs/guide/README.md):
+
+| Read | To |
+|---|---|
+| [Getting started](Docs/guide/getting-started.md) | add RHP to a project, build it, run a host and `rhp-cli` |
+| [Exposing C++ to Lua](Docs/guide/exposing-cpp.md) | declare the API scripts may use, with undo |
+| [Writing scripts](Docs/guide/writing-scripts.md) | the `rhp` Lua API: modules, reload, undo, timers, tasks, events |
+| [Scheduling and events](Docs/guide/scheduling-and-events.md) | per-frame work, background tasks, events between modules, C++ and tools |
+| [Host and client](Docs/guide/host-and-client.md) | the C++ API, async calls, blobs, audit, `client.on` |
+| [Connecting](Docs/guide/connecting.md) / [Networking](Docs/guide/networking.md) | endpoints, TLS, reverse mode, `rhp-cli`, other transports, discovery, fleet |
+| [Configuration](Docs/guide/configuration.md) / [Security](Docs/guide/security.md) | limits, options, keys, roles, signing |
+| [Reference](Docs/guide/reference.md) | error codes, events, wire protocol, sandbox contents |
+| [Limitations](Docs/guide/limitations.md) | what RHP doesn't do (yet) |
+
+Design and history: [`ARCHITECTURE.md`](Docs/ARCHITECTURE.md), [`decisions/`](Docs/decisions/), [status and TODO](Docs/TODO.md).
 
 ## Build
 
@@ -92,9 +128,23 @@ Other presets: `windows-clang-cl`, `windows-msvc-asan`, `linux-clang`, `linux-cl
 ## Use it
 
 ```cmake
-CPMAddPackage(NAME rhp GITHUB_REPOSITORY tonytranrp/RHP GIT_TAG <commit-sha>)
+CPMAddPackage(NAME rhp GITHUB_REPOSITORY tonytranrp/RHP GIT_TAG stage-7)   # or a commit sha
 target_link_libraries(my_app PRIVATE Rhp::rhp)
 ```
+
+Releases are tagged by stage (`stage-7`); there are no `v1`-style version numbers. Hosts, clients and `rhp-cli` must come from the same protocol revision (Stage 7: revision 4).
+
+## Limitations
+
+The short list; the full one is [Docs/guide/limitations.md](Docs/guide/limitations.md).
+
+- RHP runs remote code by design: keys, roles, signatures and TLS decide *who*, not *what*. Admin identities are fully trusted.
+- No execution budgets by default; set `limits.instructions` / `wall_ms` / `memory` / `slice_us` for untrusted keys. A long C++ call can't be interrupted.
+- Undo covers recorded effects (variables, patches, timers, subscriptions, tasks, functions with an inverse), not irreversible calls or admin standard-library side effects.
+- Runaway timers, frame callbacks, handlers and tasks run by `pump()` can only be stopped by limits, not from the network.
+- Script events stay inside one identity. Remote event delivery is rate-limited per session, and the HTTP gateway has no event stream.
+- Sessions survive dropped connections (`resume_ms`), not host restarts. Protocol revisions must match.
+- macOS / iOS run in hosted CI only, not on real hardware. Validation is Debug builds.
 
 ## Stages
 
