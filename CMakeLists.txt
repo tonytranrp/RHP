@@ -8,6 +8,11 @@ project(rhp
 
 set(RHP_IS_TOP_LEVEL ${PROJECT_IS_TOP_LEVEL})
 
+# RHP uses no C++20 modules: skip the per-source dependency scan CMake does for C++20 and up
+# (clang-scan-deps also failed to honour clang-cl's -imsvc system include paths on CI runners).
+# Directory-scoped: a parent project including RHP keeps its own setting.
+set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
+
 list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
 
 include(RhpOptions)
