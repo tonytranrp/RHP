@@ -346,6 +346,9 @@ TEST_CASE("schedule functions validate their arguments", "[script][schedule]") {
     CHECK(code_of(box.exec("rhp.after(10, function() end, {times = 2})")) == errc::kInvalidArgument);
     CHECK(code_of(box.exec("rhp.every(10, function() end, {on_error = 'ignore'})")) == errc::kInvalidArgument);
     CHECK(code_of(box.exec("rhp.pause('x')")) == errc::kTypeMismatch);
+    CHECK(code_of(box.exec("rhp.every_frames(2^62, function() end)")) == errc::kInvalidArgument);
+    CHECK(code_of(box.exec("rhp.reschedule(rhp.every_frames(1, function() end), math.huge)")) == errc::kInvalidArgument);
+    CHECK(code_of(box.exec("rhp.reschedule(rhp.every_frames(1, function() end), 2^64)")) == errc::kInvalidArgument);
     CHECK(box.effects().empty());
 }
 

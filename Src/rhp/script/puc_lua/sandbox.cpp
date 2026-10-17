@@ -443,6 +443,7 @@ sandbox_impl::~sandbox_impl() {
     } catch (...) { // a destructor must not throw; effects are still undone below
     }
     (void)ledger_.revert_all();
+    closing_lua_ = true; // from here (lua_close runs finalizers) no effect is recorded, no event attached
     for (const auto& [name, state] : attached_) {
         state->detach(this);
     }
@@ -744,6 +745,14 @@ error sandbox_impl::sticky_error(sticky_stop stop) const {
 // ---- context -------------------------------------------------------------------------------------
 
 std::uint64_t sandbox_impl::record_effect(std::string label, std::unique_ptr<effect> e) {
+    if (closing_lua_) {
+        // A finalizer run by lua_close: the ledger is already empty and must stay so; undo at once.
+        try {
+            e->undo();
+        } catch (...) { // an undo that fails while the sandbox closes has nobody to report to
+        }
+        return 0;
+    }
     effect_owner owner = current_;
     if (record(owner.module) == nullptr) {
         owner = effect_owner{scratch_};
@@ -1003,8 +1012,8 @@ void sandbox_impl::abandon_requests(Pred pred, std::string_view why) {
         }
         request_record& req = *node.mapped();
         const result<value_list> outcome = fail(errc::kCancelled, std::string{why}, req.label);
-        request_ended(req, &outcome, true);
         close_thread(req, true);
+        request_ended(req, &outcome, true);
         if (req.suspended_once) {
             finished_.emplace_back(id, outcome);
         }
@@ -1024,8 +1033,13 @@ request_record& sandbox_impl::start_request(request_kind kind, const effect_owne
     req->owner.request = req->id;
     req->label = std::move(label);
 
+    luaL_checkstack(L, 5, "rhp: request setup"); // every caller runs protected on the main state (spawn checked it)
     lua_State* co = lua_newthread(L);
     lua_sethook(co, &sandbox_impl::count_hook, LUA_MASKCOUNT, static_cast<int>(check_interval()));
+    // lua_xmove never grows the destination: a new coroutine has room for about 20 values.
+    if (lua_checkstack(co, nargs + 1) == 0) {
+        req->start_error = make_error(errc::kLimitExceeded, std::format("{} arguments don't fit a coroutine stack", nargs));
+    }
     lua_getfield(L, LUA_REGISTRYINDEX, kRequestThreadsKey);
     lua_pushvalue(L, -2);
     lua_pushboolean(L, 1);
@@ -1033,7 +1047,11 @@ request_record& sandbox_impl::start_request(request_kind kind, const effect_owne
     lua_pop(L, 1);
     req->thread = co;
     req->thread_ref = luaL_ref(L, LUA_REGISTRYINDEX);
-    lua_xmove(L, co, nargs + 1); // the function and its arguments
+    if (req->start_error) {
+        lua_pop(L, nargs + 1); // the request ends at its first step
+    } else {
+        lua_xmove(L, co, nargs + 1); // the function and its arguments
+    }
 
     if (from_operation) {
         last_request_ = req->id;
@@ -1046,6 +1064,9 @@ request_record& sandbox_impl::start_request(request_kind kind, const effect_owne
 std::optional<result<value_list>> sandbox_impl::step(request_record& req, int nargs) {
     if (take_cancel(req.id)) {
         return complete(req.id, std::unexpected{make_error(errc::kCancelled, "script cancelled")}); // never resumed again
+    }
+    if (req.start_error) {
+        return complete(req.id, std::unexpected{*req.start_error});
     }
     req.sliced = false;
     req.wake_frame = 0;
@@ -1119,16 +1140,9 @@ result<value_list> sandbox_impl::complete(request_id id, result<int> outcome) {
         if (task_record* t = task(req.task_key)) {
             const int n = *outcome;
             auto packed = protect(state_, [&] {
-                luaL_checkstack(state_, 2, "rhp: task results");
-                lua_createtable(state_, n, 1);
-                for (int i = 1; i <= n; ++i) {
-                    lua_pushvalue(req.thread, i);
-                    lua_xmove(req.thread, state_, 1);
-                    lua_rawseti(state_, -2, i);
-                }
-                lua_pushinteger(state_, n);
-                lua_setfield(state_, -2, "n");
-                t->results_ref = luaL_ref(state_, LUA_REGISTRYINDEX);
+                luaL_checkstack(state_, n + 3, "rhp: too many task results");
+                lua_xmove(req.thread, state_, n); // the finished coroutine holds exactly its results
+                t->results_ref = pack_top(state_, n);
             });
             if (!packed) {
                 out = std::unexpected{std::move(packed).error()};
@@ -1136,16 +1150,22 @@ result<value_list> sandbox_impl::complete(request_id id, result<int> outcome) {
         }
     }
 
+    if (!out && out.error().where.empty() && !req.label.empty()) {
+        out.error().where = req.label;
+    }
+    const task_record* t = req.kind == request_kind::kTask ? task(req.task_key) : nullptr;
+    const bool cancelled_task = t != nullptr && t->cancel_requested;
+    // The coroutine closes (its to-be-closed variables run) and the request ends (a task's record
+    // gets its outcome, joiners wake) before any policy undoes effects: undoing a task's own ledger
+    // entry must not turn its failure into a cancellation.
+    close_thread(req, !out.has_value());
+    request_ended(req, &out, false);
     if (!out) {
-        if (out.error().where.empty() && !req.label.empty()) {
-            out.error().where = req.label;
-        }
-        const task_record* t = req.kind == request_kind::kTask ? task(req.task_key) : nullptr;
         if (req.kind == request_kind::kExec) {
             (void)ledger_.revert_request(scratch_, req.id); // only this request's effects
         } else if (req.kind == request_kind::kLoad && mod != nullptr && mod->pending && mod->pending->revision == req.owner.revision) {
             abort_reload(*mod); // the old revision is untouched
-        } else if (t != nullptr && t->cancel_requested) {
+        } else if (cancelled_task) {
             // a cancelled task: not a failure
         } else if (is_handler(req.kind)) {
             handler_failed_or_defer(req, out.error());
@@ -1153,8 +1173,6 @@ result<value_list> sandbox_impl::complete(request_id id, result<int> outcome) {
             fault_or_defer(req.owner, out.error());
         }
     }
-    request_ended(req, &out, false);
-    close_thread(req, !out.has_value());
     if (req.suspended_once) {
         finished_.emplace_back(req.id, out);
     }
@@ -1306,7 +1324,7 @@ void sandbox_impl::handler_failed_or_defer(const request_record& req, error err)
     f.source = req.source;
     f.handler_seq = req.handler_seq;
     // The state's memory is shared: a module that exhausted it would keep failing every handler.
-    f.policy = err.code == errc::kMemoryExceeded ? handler_error_policy::kFault : req.policy;
+    f.policy = req.budget.sticky == sticky_stop::kMemory ? handler_error_policy::kFault : req.policy;
     f.err = std::move(err);
     if (running_.empty()) {
         apply_failure(std::move(f));
@@ -1982,6 +2000,7 @@ void sandbox_impl::pump() {
         for (const queued_script_event& e : published) {
             deliver_now(e.name, event_pusher{&e.args, [](stack& s, const void* data) {
                                                  const auto& values = *static_cast<const value_list*>(data);
+                                                 luaL_checkstack(s.state(), static_cast<int>(values.size()) + 2, "rhp: too many event values");
                                                  for (const value& v : values) {
                                                      s.push_value(v);
                                                  }
@@ -2130,7 +2149,7 @@ Rhp::subscription sandbox::on_script_event(std::string_view name, script_event_f
     return impl_->on_script_event(name, std::move(fn));
 }
 
-sandbox_stats sandbox::stats() const noexcept {
+sandbox_stats sandbox::stats() const {
     return impl_->stats();
 }
 

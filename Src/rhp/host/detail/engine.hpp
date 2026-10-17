@@ -48,7 +48,7 @@ struct host_options {
     // when the script sets no on_error (Rhp::script::handler_error_policy).
     script::handler_error_policy handler_errors = script::handler_error_policy::kReport;
     // Subscribed events (client.on) sent to one session per pump(); the rest are dropped and the
-    // next delivery says how many, so a slow client can't fall behind until the session ends.
+    // next delivery says how many. This bounds the rate, not the backlog of a detached session.
     std::size_t remote_events_per_pump = 256;
 };
 

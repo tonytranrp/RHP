@@ -47,7 +47,7 @@ pump() ─▶ queued C++ events ─▶ queued script events ─▶ frame callbac
 
 - A failing load or call faults its module; a scratch (exec) request reverts only its own effects.
 - A failing handler (timer, frame callback, event handler, task) follows its `handler_error_policy`: `report` undoes only that call's effects, `remove` also drops the handler, `fault` faults the module. A memory stop always faults. Patch handlers keep faulting.
-- Every request's end goes through `request_ended` (from `complete` and `abandon_requests`): it releases waits, wakes joiners, finishes task records and clears the overlap guard of its schedule entry. Containers are never iterated across a Lua call; firing loops snapshot keys and look each one up again.
+- Every request's end goes through `request_ended` (from `complete` and `abandon_requests`): it releases waits, wakes joiners, finishes task records and clears the overlap guard of its schedule entry. Firing loops snapshot keys and look each one up again; a record is never written through a reference held across a Lua allocation (a collection can run finalizers that remove it). Finalizers that `lua_close` runs can't schedule, subscribe or spawn, and their effects are undone at once.
 - A task never runs inside its spawner (it starts at the next pump) and its instruction and wall budgets reset on every resume. A suspended task is abandoned at once when cancelled; a running one is stopped through the cancel path.
 - Lifecycle operations from inside a run are deferred to the end of the outermost operation.
 - `sandbox_options::on_output` (print with its request and module) and `sandbox::pending(request)` exist for `Rhp::host`, which answers network requests that suspended once `on_result` reports them.

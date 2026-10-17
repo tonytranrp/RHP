@@ -298,7 +298,7 @@ TEST_CASE("stage7: handler failures are published as host events and output line
     REQUIRE(c.load("tests.s7.flaky", "rhp.after(0, function() error('flaky timer') end)"));
     REQUIRE(eventually([&] {
         const std::scoped_lock lock{mutex};
-        return !failures.empty();
+        return !failures.empty() && !json.empty(); // on<> handlers run before on_any ones
     }));
     {
         const std::scoped_lock lock{mutex};

@@ -148,6 +148,7 @@ struct request_record {
     std::uint64_t handler_seq = 0;
     std::string source{}; // the event name, or "timer" / "frame" / "task"
     handler_error_policy policy = handler_error_policy::kReport;
+    std::optional<error> start_error{}; // set up but can't start (its arguments didn't fit): fails at its first step
 };
 
 enum class schedule_kind : std::uint8_t {
@@ -315,7 +316,7 @@ public:
     [[nodiscard]] const ledger& effects() const noexcept { return ledger_; }
     [[nodiscard]] std::string stubs() const;
     [[nodiscard]] Rhp::subscription on_script_event(std::string_view name, script_event_fn fn);
-    [[nodiscard]] sandbox_stats stats() const noexcept;
+    [[nodiscard]] sandbox_stats stats() const;
 
     // ---- used by stack.cpp, the hook, the allocator and the Lua-side builtins -------------------
     struct raised_error {
@@ -370,6 +371,8 @@ public:
     void push_task_handle(lua_State* L, task_record& t);
     void handle_released(std::uint64_t key) noexcept; // a task handle was collected
     [[nodiscard]] bool closing() const noexcept { return closing_; }
+    // Raises (naming `where`) while lua_close runs finalizers: nothing may be scheduled, subscribed or spawned.
+    void refuse_while_closing(lua_State* L, std::string_view where) const;
 
     // Called by the effects behind the schedule and subscriptions when undone or destroyed.
     void remove_schedule(std::uint64_t key) noexcept;
@@ -502,6 +505,7 @@ private:
     std::uint64_t task_keys_ = 0;
     std::vector<std::uint64_t> collected_tasks_;     // handles collected (__gc only appends)
     bool closing_ = false;                           // the destructor runs: __gc does nothing
+    bool closing_lua_ = false;                       // lua_close runs: builtins refuse, effects are undone at once
     std::vector<queued_script_event> script_events_; // for the next pump()
     std::uint64_t handler_failures_ = 0;
     std::shared_ptr<script_listener_table> listeners_ = std::make_shared<script_listener_table>();

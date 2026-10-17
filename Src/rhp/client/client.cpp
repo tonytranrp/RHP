@@ -173,6 +173,10 @@ public:
         if (!fn) {
             return fail(errc::kInvalidArgument, "client.on needs a callback", "client.on");
         }
+        // One subscribe / unsubscribe at a time, across the blocking request: otherwise a second on()
+        // could return before the first one's subscribe failed and was rolled back, or an off() and an
+        // on() of one name could reach the host in the wrong order.
+        const std::scoped_lock serial{subscribe_mutex_};
         std::uint64_t id = 0;
         bool first = false;
         {
@@ -191,12 +195,16 @@ public:
     }
 
     result<void> unsubscribe(std::uint64_t id) {
+        const std::scoped_lock serial{subscribe_mutex_};
         auto last = forget_listener(id);
         if (!last) {
             return std::unexpected{std::move(last).error()};
         }
         if (!last->empty()) {
             if (auto r = request(wire::op::kUnsubscribe, Rhp::to_value(wire::subscribe_request{*last})); !r) {
+                if (info().closed) {
+                    return {}; // the session (and so the host's subscription) is gone anyway
+                }
                 return std::unexpected{std::move(r).error()};
             }
         }
@@ -918,6 +926,7 @@ private:
     std::map<std::uint64_t, listener_entry> listeners_;
     std::map<std::string, std::size_t, std::less<>> remote_names_;
     std::uint64_t last_listener_ = 0;
+    std::mutex subscribe_mutex_; // serializes on() / off() across their blocking requests (never taken on the network thread)
     bool had_session_ = false; // network thread: a session was ready before (resubscribe on the next)
 };
 

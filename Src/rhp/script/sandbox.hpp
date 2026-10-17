@@ -304,7 +304,8 @@ public:
     // re-enter the sandbox. With RHP_ENABLE=0 it is never called.
     [[nodiscard]] Rhp::subscription on_script_event(std::string_view name, script_event_fn fn);
 
-    [[nodiscard]] sandbox_stats stats() const noexcept;
+    // Pump thread.
+    [[nodiscard]] sandbox_stats stats() const;
 
     // LuaLS annotations for everything this identity can use: the rhp API and every installed lib,
     // filtered by caller_role().

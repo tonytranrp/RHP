@@ -34,7 +34,7 @@ The motivating use was a real embedding: a host inside a game process whose scri
 - **What:** `sandbox::on_script_event` and `host.on_script_event` (every identity) return a subscription. `client.on(name, fn)` subscribes through the protocol (`kSubscribe` / `kUnsubscribe` / `kEvent`, revision 4) to the host's C++ events or the client's identity's script events.
 - **Why:** applications react to scripts, and tools watch a running game, without loading a script that forwards events over `rhp.emit`.
 - **Alternatives:** putting script events in `event::any` (audit sinks would log every application event); a separate stream connection for events (a second authentication path).
-- **Consequences:** `Rhp::subscription` moved from `event` to `core` (with `Rhp::subscribable`), and `event::subscription` is an alias. The host engine implements `event_listener` itself, attaching only while a session wants a C++ event and detaching when the session closes or the engine stops. Because subscriptions belong to the host session, they survive a resume. A reverse-mode client subscribes again for a new host session. `host_options::remote_events_per_pump` keeps a slow client from falling behind until its session ends: extra deliveries are dropped and the next one reports how many. The HTTP gateway has no event stream. Revision-3 peers are refused at hello.
+- **Consequences:** `Rhp::subscription` moved from `event` to `core` (with `Rhp::subscribable`), and `event::subscription` is an alias. The host engine implements `event_listener` itself, attaching only while a session wants a C++ event and detaching when the session closes or the engine stops. Because subscriptions belong to the host session, they survive a resume. A reverse-mode client subscribes again for a new host session. `host_options::remote_events_per_pump` bounds what one pump sends a session: extra deliveries are dropped and the next one reports how many. Deliveries are sequenced frames, so this bounds the rate, not the backlog: a session that stays detached (or stops reading) while events keep flowing still reaches the session's unacknowledged-bytes limit and ends. Keep subscriptions to events of a modest rate. The HTTP gateway has no event stream. Revision-3 peers are refused at hello.
 
 ## Handler errors
 
@@ -46,3 +46,7 @@ The motivating use was a real embedding: a host inside a game process whose scri
   - A memory stop always faults, because the state's memory is shared.
   - Patch handlers keep faulting their module: they replace C++ behaviour, which then falls back to the default.
   - Tests that relied on handler faults now pin `handler_error_policy::kFault`.
+  - In the scratch module (exec) `fault` behaves like `report`: scratch failures only ever undo their own request.
+  - A task stopped by `sandbox::cancel(request)` (not `task:cancel()`) is a failure with code `cancelled`, and is reported.
+  - `rhp.handler_failed` events go through `limits.event_queue` like any script event and can be dropped with it; `on_handler_error` and the host event always fire.
+  - Tasks take the sandbox's policy: `rhp.spawn`'s varargs leave no room for an options table.

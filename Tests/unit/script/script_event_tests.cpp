@@ -314,7 +314,7 @@ TEST_CASE("wait_event works at the top level of exec and in timer handlers and t
     box.pump();
     REQUIRE(box.exec("rhp.publish('game.top', 21)"));
     box.pump();
-    CHECK(out.lines == lines({"timer 21", "task 21"}));
+    CHECK(std::ranges::is_permutation(out.lines, lines({"timer 21", "task 21"}))); // resume order is round robin
     const auto mine = std::ranges::find(results, top, &std::pair<Rhp::request_id, Rhp::result<value_list>>::first);
     REQUIRE(mine != results.end());
     REQUIRE(mine->second.has_value());
@@ -375,4 +375,34 @@ TEST_CASE("an event and a timeout in the same pump resolve as the event", "[scri
     REQUIRE(box.exec("rhp.publish('game.race', 'won')"));
     box.pump();
     CHECK(out.lines == lines({"true\twon"}));
+}
+
+TEST_CASE("an event carries many values to handlers and waiters", "[script][script_events]") {
+    capture out;
+    sandbox box = make_box(out);
+    REQUIRE(box.load("tests.sevents.many", "rhp.on('game.many', function(...) print('handler ' .. select('#', ...)) end)"));
+    REQUIRE(box.exec("rhp.spawn(function() print('waiter ' .. (select('#', rhp.wait_event('game.many')) - 1)) end)"));
+    box.pump();
+    REQUIRE(box.exec("local t = {} for i = 1, 100 do t[i] = i end rhp.publish('game.many', table.unpack(t))"));
+    box.pump();
+    box.pump();
+    CHECK(std::ranges::is_permutation(out.lines, lines({"handler 100", "waiter 100"})));
+}
+
+TEST_CASE("finalizers run by a closing sandbox schedule and subscribe nothing", "[script][script_events]") {
+    capture out;
+    {
+        sandbox box = make_box(out);
+        REQUIRE(box.exec(R"lua(
+            _G.keep = setmetatable({}, {__gc = function()
+                pcall(rhp.every, 1, print)
+                pcall(rhp.on, "tests.sevents.cpp", print)
+                pcall(rhp.spawn, print)
+                pcall(rhp.every_frame, print)
+            end})
+        )lua"));
+        fx::cpp_event.fire(0);
+    }
+    CHECK(fx::cpp_event.listeners() == 0);
+    fx::cpp_event.fire(1); // nothing listens to a destroyed sandbox
 }
