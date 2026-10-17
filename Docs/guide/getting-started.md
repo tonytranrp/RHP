@@ -3,7 +3,7 @@
 ## Requirements
 
 - CMake 3.28+, Ninja for the desktop/Android presets, and a C++23 compiler with the required standard-library support (`std::expected`, `std::format`, `std::print`). A compiler's language mode alone does not establish library support; see the [tested toolchains](../decisions/platforms-and-toolchains.md). GCC is not a target.
-- Target floors: Windows 10 1809+, Linux glibc 2.31+, macOS 13+, iOS 16+, Android API 26+. macOS/iOS verification remains open in [Status and TODO](../TODO.md).
+- Target floors: Windows 10 1809+, Linux glibc 2.31+, macOS 13.3+, iOS 16.3+, Android API 26+. macOS/iOS verification remains open in [Status and TODO](../TODO.md).
 - CMake fetches Lua, Asio, Monocypher and Mbed TLS. Desktop TLS uses system OpenSSL 3.0+ when found. Mbed TLS requires a C compiler; Lua and Monocypher are compiled as C++.
 
 ## Add RHP to your project

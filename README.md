@@ -66,7 +66,7 @@ See [`Examples/hello_console`](Examples/hello_console), [`Examples/frame_loop`](
 
 ## Targets
 
-Windows 10 1809+ · Linux (glibc 2.31+) · macOS 13+ · iOS 16+ · Android API 26+ — x86_64 and arm64.
+Windows 10 1809+ · Linux (glibc 2.31+) · macOS 13.3+ · iOS 16.3+ · Android API 26+ — x86_64 and arm64.
 Compilers: MSVC (VS 2026), clang-cl, Clang 17+, AppleClang, Android NDK Clang.
 
 ## Documentation
