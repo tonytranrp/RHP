@@ -62,7 +62,11 @@ constexpr std::size_t kChunkOverhead = 1024;
 
 class engine final : private session::handler {
 public:
-    explicit engine(setup s) : setup_(std::move(s)), reverse_(setup_.ep.direction == net::endpoint::mode::kListen) {
+    explicit engine(setup s)
+        : setup_(std::move(s)),
+          reverse_(setup_.ep.direction == net::endpoint::mode::kListen),
+          owned_io_(setup_.shared_io == nullptr ? std::make_unique<net::io_context>() : nullptr),
+          io_(setup_.shared_io != nullptr ? *setup_.shared_io : *owned_io_) {
         options_.limits = setup_.limits;
         options_.codec = setup_.codec;
         options_.platform = std::string{platform::kOsName};
@@ -82,7 +86,9 @@ public:
     }
 
     ~engine() {
-        // The network is stopped (or was never on another thread): plain teardown.
+        // The network is stopped, was never on another thread, or (a shared reactor) this runs on
+        // its thread: plain teardown. Work still queued on a shared reactor finds `alive_` false.
+        *alive_ = false;
         timers_.clear();
         redial_timer_.cancel();
         others_.clear();
@@ -149,7 +155,7 @@ public:
         const std::uint64_t req = ++last_req_;
         pending_[req];
         const wire::envelope env{req, random_key(), std::move(body)};
-        io_.post([this, code, message = Rhp::to_value(env), req] { send_or_queue(code, message, req); });
+        post([this, code, message = Rhp::to_value(env), req] { send_or_queue(code, message, req); });
         const bool timed = setup_.options.request_timeout.count() > 0;
         const auto deadline = timed ? clock::now() + setup_.options.request_timeout : clock::time_point::max();
         wait(lock, deadline, [this, req] { return pending_.at(req).done.has_value(); });
@@ -176,7 +182,7 @@ public:
         start(lock);
         lock.unlock();
         const wire::envelope env{req, random_key(), std::move(body)};
-        io_.post([this, code, message = Rhp::to_value(env), req] {
+        post([this, code, message = Rhp::to_value(env), req] {
             if (setup_.options.request_timeout.count() > 0) {
                 auto& t = timers_[req];
                 t = std::make_unique<net::io_context::timer>(io_);
@@ -285,7 +291,7 @@ public:
                     return;
                 }
             }
-            io_.post([this] {
+            post([this] {
                 listener_.reset();
                 if (session_ != nullptr) {
                     session_->close(make_error(errc::kCancelled, "the client closed", "client"));
@@ -299,7 +305,11 @@ public:
         }
     }
 
-    void run_io(std::stop_token stop) { io_.run(std::move(stop)); }
+    void run_io(std::stop_token stop) {
+        if (owned_io_ != nullptr) {
+            io_.run(std::move(stop)); // a shared reactor is run by its owner
+        }
+    }
 
     void poll() {
         if (!setup_.io_thread) {
@@ -334,9 +344,9 @@ private:
         }
         started_ = true;
         if (reverse_) {
-            io_.post([this] { listen(); });
+            post([this] { listen(); });
         } else {
-            io_.post([this] { dial(); });
+            post([this] { dial(); });
         }
     }
 
@@ -364,7 +374,23 @@ private:
     }
 
     void post_cancel(std::uint64_t target) {
-        io_.post([this, target] { send_cancel(target); });
+        post([this, target] { send_cancel(target); });
+    }
+
+    // Runs `fn` on the network thread, unless this engine is gone by then (a shared reactor
+    // outlives the engines on it, so work queued for one can run after it was destroyed).
+    template <class F>
+    void post(F fn) {
+        io_.post([alive = std::weak_ptr<bool>{alive_}, fn = std::move(fn)]() mutable {
+            if (const auto still = alive.lock(); still != nullptr && *still) {
+                fn();
+            }
+        });
+    }
+
+    [[nodiscard]] static bool gone(const std::weak_ptr<bool>& alive) noexcept {
+        const auto still = alive.lock();
+        return still == nullptr || !*still;
     }
 
     // ---- network thread ------------------------------------------------------------------------------
@@ -432,7 +458,10 @@ private:
             mark_closed(*policy_error_);
             return;
         }
-        setup_.transport.dial(io_, policy_.transport_endpoint(), [this](result<std::unique_ptr<net::link>> link) {
+        setup_.transport.dial(io_, policy_.transport_endpoint(), [this, alive = std::weak_ptr<bool>{alive_}](result<std::unique_ptr<net::link>> link) {
+            if (gone(alive)) {
+                return; // the engine was destroyed while dialing (shared reactor): the link is dropped
+            }
             if (link) {
                 if (auto wrapped = policy_.wrap(std::move(*link)); wrapped) {
                     link = std::move(*wrapped);
@@ -475,8 +504,8 @@ private:
             if (session_ == nullptr || session_->current() != session::state::kDetached) {
                 return;
             }
-            setup_.transport.dial(io_, policy_.transport_endpoint(), [this](result<std::unique_ptr<net::link>> link) {
-                if (session_ == nullptr || session_->current() != session::state::kDetached) {
+            setup_.transport.dial(io_, policy_.transport_endpoint(), [this, alive = std::weak_ptr<bool>{alive_}](result<std::unique_ptr<net::link>> link) {
+                if (gone(alive) || session_ == nullptr || session_->current() != session::state::kDetached) {
                     return; // closed meanwhile: the link is dropped
                 }
                 if (link) {
@@ -521,7 +550,11 @@ private:
             mark_closed(*policy_error_);
             return;
         }
-        auto l = setup_.transport.listen(io_, policy_.transport_endpoint(), [this](std::unique_ptr<net::link> link) { accept(std::move(link)); });
+        auto l = setup_.transport.listen(io_, policy_.transport_endpoint(), [this, alive = std::weak_ptr<bool>{alive_}](std::unique_ptr<net::link> link) {
+            if (!gone(alive)) {
+                accept(std::move(link));
+            }
+        });
         {
             const std::scoped_lock lock{mutex_};
             listen_done_ = true;
@@ -751,7 +784,9 @@ private:
     setup setup_;
     bool reverse_; // listens for the host instead of dialing it
     session::options options_;
-    net::io_context io_;
+    std::unique_ptr<net::io_context> owned_io_; // null on a shared reactor
+    net::io_context& io_;
+    std::shared_ptr<bool> alive_ = std::make_shared<bool>(true); // false once the engine is being destroyed
 
     // Network thread only.
     struct queued_request {
