@@ -515,32 +515,36 @@ TEST_CASE("stage6: the CLI discovers separate hosts and broadcasts a signed scri
                                   q(dir.path / (name + ".port")), q(dir.path / (name + ".stop")), q(dir.path / (name + ".log"))));
         }};
     };
-    auto first = start("stage6-first");
-    auto second = start("stage6-second");
+    // Instance names unique per run: another run on the same network must not conflict with these.
+    const auto stamp = app.substr(app.find('-') + 1);
+    const auto first_name = "stage6-first-" + stamp;
+    const auto second_name = "stage6-second-" + stamp;
+    auto first = start(first_name);
+    auto second = start(second_name);
     const Rhp::utils::scope_guard stop{[&] {
-        dir.write("stage6-first.stop", "");
-        dir.write("stage6-second.stop", "");
+        dir.write(first_name + ".stop", "");
+        dir.write(second_name + ".stop", "");
     }};
-    REQUIRE(eventually([&] { return !dir.read("stage6-first.port").empty() && !dir.read("stage6-second.port").empty(); }));
+    REQUIRE(eventually([&] { return !dir.read(first_name + ".port").empty() && !dir.read(second_name + ".port").empty(); }));
     bool found = false;
     for (int attempt = 0; attempt < 5 && !found; ++attempt) {
         REQUIRE(run(std::format("{} discover --app {} --wait 2000 > {} 2>&1", kCli, app, q(dir.path / "discover.txt"))) == 0);
         const auto text = dir.read("discover.txt");
-        found = text.find("stage6-first") != std::string::npos && text.find("stage6-second") != std::string::npos;
+        found = text.find(first_name) != std::string::npos && text.find(second_name) != std::string::npos;
     }
     INFO(dir.read("discover.txt"));
-    INFO(dir.read("stage6-first.log"));
-    INFO(dir.read("stage6-second.log"));
+    INFO(dir.read(first_name + ".log"));
+    INFO(dir.read(second_name + ".log"));
     REQUIRE(found);
     const auto exit = run(std::format("{} fleet {} -i {} --tls --timeout 10000 --app {} --wait 2000 > {} 2>&1", kCli, q(dir.path / "broadcast.lua"), q(id), app, q(dir.path / "fleet.txt")));
     INFO(dir.read("discover.txt"));
     INFO(dir.read("fleet.txt"));
-    INFO(dir.read("stage6-first.log"));
-    INFO(dir.read("stage6-second.log"));
+    INFO(dir.read(first_name + ".log"));
+    INFO(dir.read(second_name + ".log"));
     REQUIRE(exit == 0);
     const auto results = dir.read("fleet.txt");
-    CHECK(results.find("stage6-first: {42}") != std::string::npos);
-    CHECK(results.find("stage6-second: {42}") != std::string::npos);
+    CHECK(results.find(first_name + ": {42}") != std::string::npos);
+    CHECK(results.find(second_name + ": {42}") != std::string::npos);
 }
 
 #endif
