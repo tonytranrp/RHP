@@ -154,10 +154,10 @@ struct http_call {
     std::string identity = "patch";
     std::string_view content_type = "text/plain";
     std::string_view request_token = {}; // X-RHP-Request
-    std::string* reuse_proof = nullptr; // first call stores its Authorization, later calls resend it
-    bool tls = false;                   // TLS without checking the certificate
-    bool bind = false;                  // X-RHP-Channel: tls-exporter (needs tls)
-    std::chrono::seconds skew{0};       // signs as if the client's clock were this far ahead
+    std::string* reuse_proof = nullptr;  // first call stores its Authorization, later calls resend it
+    bool tls = false;                    // TLS without checking the certificate
+    bool bind = false;                   // X-RHP-Channel: tls-exporter (needs tls)
+    std::chrono::seconds skew{0};        // signs as if the client's clock were this far ahead
 };
 
 // One raw HTTP/1.1 exchange with the host's gateway.
@@ -177,8 +177,7 @@ public:
         }
         const auto signature = call.sign ? key.signature(call.body) : std::string{};
         const std::string_view channel = call.bind ? Rhp::security::kHttpChannelTlsExporter : std::string_view{};
-        const Rhp::security::http_proof proof{{}, call.method, call.target, signature, call.content_type, Rhp::utils::as_bytes(call.body), channel,
-                                              call.bind ? link_->channel_binding() : std::span<const std::byte>{}};
+        const Rhp::security::http_proof proof{{}, call.method, call.target, signature, call.content_type, Rhp::utils::as_bytes(call.body), channel, call.bind ? link_->channel_binding() : std::span<const std::byte>{}};
         auto authorization = Rhp::security::http_authorization(identity_, proof, std::chrono::system_clock::now() + call.skew);
         REQUIRE(authorization);
         if (call.reuse_proof != nullptr) {

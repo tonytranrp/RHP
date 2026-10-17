@@ -642,7 +642,7 @@ private:
         // Audit records of suspended requests, published with the final outcome (finished()), or
         // as cancelled when the identity is torn down first. Outlive the requesting session.
         std::map<request_id, event::script_executed> audits;
-        session_id current_session;                  // the network request inside a sandbox call
+        session_id current_session; // the network request inside a sandbox call
         std::uint64_t current_req = 0;
         std::set<module_id> pinned; // kept when the last session ends
     };
