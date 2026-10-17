@@ -106,7 +106,8 @@ target_link_libraries(my_app PRIVATE Rhp::rhp)
 | 3 | wire format, loopback + TCP, sessions, PSK roles, blocking client | ✅ |
 | 4 | async client, `rhp-cli`, signing, audit, blobs, reverse mode, pin | ✅ |
 | 5 | TLS 1.3, reconnect/resume, fuzzing, Android and iOS presets | ✅ |
-| 6 | WebSocket, UDP-reliable, local IPC, HTTP gateway (signed answers, optional channel binding), mDNS, fleet (`exec`/`load`/`call` on one shared reactor) | ✅; validation and platform limits in [Status](Docs/TODO.md) |
+| 6 | WebSocket, UDP-reliable, local IPC, HTTP gateway (signed answers, optional channel binding), mDNS, fleet (`exec`/`load`/`call` on one shared reactor) | ✅ |
+| 7 | frame callbacks and timer control, background tasks, script events (`rhp.publish` / `rhp.wait_event`), C++ and remote event listeners (`client.on`, `rhp-cli events`), handler error policy | ✅; validation and platform limits in [Status](Docs/TODO.md) |
 
 ## Layout
 

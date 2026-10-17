@@ -1,6 +1,23 @@
 # Status and TODO
 
-Last updated 2026-10-16. Stages 0–6 are implemented, the Stage 6 acceptance workflow passes, and the Stage 6 review follow-ups and the four reproduced runtime defects are fixed (ARCHITECTURE §32). Progress is tracked as "Stage N" only (no `v1` / `v2` naming anywhere). What remains is platform verification (macOS/iOS, hosted CI) and the optional items below.
+Last updated 2026-10-17. Stages 0–7 are implemented. Stage 7 (scheduling and events, ARCHITECTURE §33) passes its tests on every local preset; the Stage 6 review follow-ups and the four reproduced runtime defects are fixed (§32). Progress is tracked as "Stage N" only (no `v1` / `v2` naming anywhere). What remains is platform verification (macOS/iOS on real hardware) and the optional items below.
+
+## Stage 7 — complete
+
+Done when: *scripts schedule work and talk through events without a client request held open.* Per [Stage 7 decisions](decisions/stage7-scheduling-events.md) and ARCHITECTURE §33 (AF1–AF12):
+
+- [x] Frame callbacks: `rhp.every_frame(fn)`, `rhp.every_frames(n, fn)`
+- [x] Timer control: `rhp.after` / `rhp.every` (`times`), `rhp.pause` / `rhp.resume` / `rhp.reschedule`, `rhp.timers()`; no overlapping calls of one entry
+- [x] Background tasks: `rhp.spawn` with `status` / `cancel` / `join` / `id`, `rhp.tasks()`; per-resume budgets
+- [x] Script events: `rhp.publish`, delivered at the next pump to `rhp.on` / `rhp.once` handlers of the same identity
+- [x] C++ listeners: `sandbox::on_script_event`, `host.on_script_event`
+- [x] `rhp.wait_event(name, timeout)` → `true, ...` / `false, "timeout"`
+- [x] Subscription options: `rhp.once`, `priority`, `limits.event_queue` with counted drops, `sandbox::stats()` / `rhp.stats()`
+- [x] Remote subscription: `client.on` / `client.off`, wire revision 4 (`kSubscribe` / `kUnsubscribe` / `kEvent`), per-session cap with drop counts, reverse-mode resubscription; `rhp-cli` `subscribe` / `unsubscribe` and `events`
+- [x] Handler error policy: `report` (default) / `remove` / `fault`, `on_handler_error`, `event::handler_failed`, `rhp.on_error`
+- [x] Decisions, guide, module READMEs and ARCHITECTURE updated
+
+Possible follow-ups: a per-task `on_error` (tasks take the sandbox default because `rhp.spawn`'s varargs leave no room for an options table); `task:join(timeout)`; remote `stats`; an HTTP event stream; `sandbox.publish(name, values)` from C++ into script events.
 
 ## Stage 6 — complete
 
@@ -72,6 +89,9 @@ GitHub Actions runs again. Fixed for it: Apple deployment targets 13.3 / 16.3 (f
 - A `zero_threads` host with a script stuck in `pump()` also stops its network (cancel cannot reach it).
 - Handles are limited to trivially copyable, equality-comparable, non-arithmetic value types; there is no class or inheritance binding (`Rhp::lib` covers functions, variables and handles).
 - Builds that must not accept remote code should use `RHP_ENABLE=OFF`; enabled builds need their own deployment/distribution review.
+- A runaway timer, frame callback, event handler or task run by `pump()` (not by a network request) can't be cancelled from the network, and ending the identity's last session doesn't stop it either: set `instructions` / `wall_ms` or `slice_us` for untrusted scripts.
+- `rhp.on` with a name no C++ `lua_event` registered subscribes to script events, so a mistyped C++ event name is not an error.
+- Remote event deliveries carry `Rhp::value`s: a C++ event argument whose type has no `Rhp::convert` (a handle-only type) arrives as nil. The HTTP gateway has no event stream.
 
 ## Documentation
 
@@ -132,7 +152,7 @@ Not rerun after the review: clang-cl, MSVC ASan, Android, libFuzzer long runs (t
 
 The Android run found and fixed a libc++ portability defect: moving a `std::function` did not guarantee an empty source, allowing UDP's consumed dial callback to fire again on close. Callback consumption now clears it explicitly. The device's pathname-socket permission denial is handled through the standard abstract AF_UNIX mode with kernel peer-UID checks.
 
-Apple DNS-SD backend syntax/warning checks pass against the official C API header. Actual macOS/iOS builds and runtime tests were not available on this Windows/WSL host; those platform checks remain open above. Debug results do not establish Release validation. The four earlier reproduced runtime defects remain open.
+Apple DNS-SD backend syntax/warning checks pass against the official C API header. Actual macOS/iOS builds and runtime tests were not available on this Windows/WSL host; those platform checks remain open above. Debug results do not establish Release validation. (The four runtime defects reproduced in the 2026-10-09 review were open at this point; they were fixed in §32.)
 
 ## Recorded validation (Stage 5)
 

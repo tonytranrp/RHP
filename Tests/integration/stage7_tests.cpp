@@ -36,10 +36,10 @@ using Rhp::value;
 namespace stage7_fixtures {
 
 inline int g_ticks = 0;
-inline constexpr Rhp::lua_event<"itest.s7.alarm", int, std::string_view> alarm{};
+inline constexpr Rhp::lua_event<"itest.s7.alarm", int, std::string_view> alarm_event{};
 
 inline void raise_alarm(int level) {
-    alarm.fire(level, "from a script");
+    alarm_event.fire(level, "from a script");
 }
 
 using test_lib = Rhp::lib<"s7">::var<"ticks", &g_ticks>::fn<"alarm", &raise_alarm>;
@@ -176,9 +176,9 @@ TEST_CASE("stage7: a client receives C++ events from the pump thread and other t
     Rhp::client<cfg> c{at.reversed(), k.as("observe"), k.signer()}; // observe may subscribe
     received got;
     REQUIRE(c.on("itest.s7.alarm", got.fn()));
-    CHECK(alarm.listeners() == 1);
+    CHECK(alarm_event.listeners() == 1);
     REQUIRE(c.exec("s7.alarm(2)"));
-    std::thread game{[] { alarm.fire(9, "from a game thread"); }};
+    std::thread game{[] { alarm_event.fire(9, "from a game thread"); }};
     game.join();
     REQUIRE(eventually([&] { return got.size() == 2; }));
     const auto items = got.copy();
@@ -217,15 +217,15 @@ TEST_CASE("stage7: unsubscribe and a closed session detach the host from C++ eve
         const auto b = c.on("itest.s7.alarm", got.fn());
         REQUIRE(a);
         REQUIRE(b);
-        CHECK(alarm.listeners() == 1);
+        CHECK(alarm_event.listeners() == 1);
         REQUIRE(c.off(*a));
-        CHECK(alarm.listeners() == 1); // b still wants it
+        CHECK(alarm_event.listeners() == 1); // b still wants it
         REQUIRE(c.off(*b));
-        CHECK(eventually([] { return alarm.listeners() == 0; }));
+        CHECK(eventually([] { return alarm_event.listeners() == 0; }));
         REQUIRE(c.on("itest.s7.alarm", got.fn()));
-        CHECK(alarm.listeners() == 1);
+        CHECK(alarm_event.listeners() == 1);
     }
-    CHECK(eventually([] { return alarm.listeners() == 0; }));
+    CHECK(eventually([] { return alarm_event.listeners() == 0; }));
 }
 
 TEST_CASE("stage7: subscribing to a conflicting or invalid name fails", "[stage7][events]") {

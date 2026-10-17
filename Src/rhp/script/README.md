@@ -5,15 +5,15 @@ The script engine: PUC Lua 5.5 (built as C++), the `Rhp::lib<>` binding DSL, pat
 | Header | What |
 |---|---|
 | `lib.hpp` | `Rhp::lib<"name">::fn<>::var<>::ro<>::handle<>::sub<>` and the binding tags; names checked where written |
-| `lua_event.hpp` | `Rhp::lua_event<"dotted.name", Args...>`: C++ fires, scripts `rhp.on`; sync on the sandbox thread, queued otherwise |
+| `lua_event.hpp` | `Rhp::lua_event<"dotted.name", Args...>`: C++ fires, scripts `rhp.on` / `rhp.once` / `rhp.wait_event`; sync on the sandbox thread, queued otherwise; listeners outside Lua get the arguments as `Rhp::value`s |
 | `patch_point.hpp` | `Rhp::patch_point<"dotted.id", &default_fn>`: overridable call site, a direct call when `RHP_ENABLE=0` |
-| `sandbox.hpp` | `Rhp::script::sandbox`: one identity's `lua_State`, modules (`_ENV` per revision), requests (coroutines), exec / load / reload / rollback / call / revert / unload / checkpoint, pump |
+| `sandbox.hpp` | `Rhp::script::sandbox`: one identity's `lua_State`, modules (`_ENV` per revision), requests (coroutines), exec / load / reload / rollback / call / revert / unload / checkpoint, pump; `handler_error_policy`, `on_script_event`, `stats` |
 | `ledger.hpp` | `effect`, `ledger` (owner-keyed undo log), `revert_report` |
 | `marshal.hpp` | `push` / `pull` between C++ and the Lua stack; `pushable`, `pullable`, `Rhp::convertible` |
 | `stack.hpp` | `Rhp::script::stack`: the only wall between templates and the Lua C API (all out of line) |
 | `stubs.hpp` | `stubs::generate<L>(role)` / `write<L>` / `rhp_api(role)`: LuaLS annotations from a lib type, filtered by role; no Lua needed |
 | `detail/` | trampolines and lib builder, patch layers, variable layers, patch point registry, sandbox context |
-| `puc_lua/` | the `.cpp` files that include `lua.h`, plus the private `sandbox_impl.hpp` |
+| `puc_lua/` | the `.cpp` files that include `lua.h`, plus the private `sandbox_impl.hpp` / `builtins.hpp`: `sandbox.cpp` (requests, faults, the frame), `schedule.cpp` (timers, frame callbacks), `script_events.cpp` (subscriptions, `rhp.publish`, `rhp.wait_event`, C++ listeners), `tasks.cpp` (`rhp.spawn`) |
 
 ## How a binding call flows
 
@@ -39,10 +39,15 @@ Lua: game.spawn("crate", 1)
 ```text
 exec / load / call ─▶ request (coroutine) ─▶ runs until done, error, rhp.wait/sleep, or slice end
                                               │ suspended: the operation returns early
-pump() ─▶ queued events ─▶ due timers ─▶ ready requests (round robin, within slice_us)
-       ─▶ faults · cancels · deferred lifecycle operations · on_result callbacks
+pump() ─▶ queued C++ events ─▶ queued script events ─▶ frame callbacks ─▶ due timers
+       ─▶ ready requests: woken waiters, tasks, waits that ended (round robin, within slice_us)
+       ─▶ faults · handler failures · cancels · deferred lifecycle operations · collected task handles
+       ─▶ handler failure reports · script-event listeners · on_result callbacks
 ```
 
-- A failing request faults its module; a scratch (exec) request reverts only its own effects.
+- A failing load or call faults its module; a scratch (exec) request reverts only its own effects.
+- A failing handler (timer, frame callback, event handler, task) follows its `handler_error_policy`: `report` undoes only that call's effects, `remove` also drops the handler, `fault` faults the module. A memory stop always faults. Patch handlers keep faulting.
+- Every request's end goes through `request_ended` (from `complete` and `abandon_requests`): it releases waits, wakes joiners, finishes task records and clears the overlap guard of its schedule entry. Containers are never iterated across a Lua call; firing loops snapshot keys and look each one up again.
+- A task never runs inside its spawner (it starts at the next pump) and its instruction and wall budgets reset on every resume. A suspended task is abandoned at once when cancelled; a running one is stopped through the cancel path.
 - Lifecycle operations from inside a run are deferred to the end of the outermost operation.
 - `sandbox_options::on_output` (print with its request and module) and `sandbox::pending(request)` exist for `Rhp::host`, which answers network requests that suspended once `on_result` reports them.

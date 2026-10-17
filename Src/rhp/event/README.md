@@ -4,8 +4,8 @@ What a host reports. Namespace `Rhp::event`. Depends on `core` only; built with 
 
 | Header | What |
 |---|---|
-| `events.hpp` | the event types (`session_opened` (with `tls`), `session_closed`, `auth_failed`, `script_executed`, `blob_received`, `identity_reverted`, `session_resumed`), `any` (a variant of all of them), the `host_event` concept, `kind_of<E>`, `to_json` |
-| `hub.hpp` | `hub` (a host's handlers, thread-safe), `subscription` (RAII, move-only), `subscribe<E>` / `subscribe_any` |
+| `events.hpp` | the event types (`session_opened` (with `tls`), `session_closed`, `auth_failed`, `script_executed`, `blob_received`, `identity_reverted`, `session_resumed`, `handler_failed`), `any` (a variant of all of them), the `host_event` concept, `kind_of<E>`, `to_json`; `script_event` (an `rhp.publish`, not in `any`) |
+| `hub.hpp` | `hub` (a host's handlers, thread-safe), `script_hub` (`host.on_script_event` handlers by name or `*`), `subscription` (= `Rhp::subscription`, RAII, move-only), `subscribe<E>` / `subscribe_any` |
 
 ```cpp
 auto scripts = host.on<Rhp::event::script_executed>([](const Rhp::event::script_executed& e) {
@@ -21,3 +21,4 @@ auto everything = host.on_any(Rhp::audit::file_sink{"rhp_audit.log"});
 - A `subscription` may outlive its host (it then does nothing); dropping it unsubscribes.
 - `to_json` writes one line with no newline; strings are escaped (control characters as `\uXXXX`; bytes that aren't valid UTF-8 become U+FFFD, since names come from clients), errors as `{"code", "message", "where"}`.
 - New event kinds go at the end of `any` (their index is `kind_of<E>`).
+- Script events stay out of `any`: they are application traffic, and audit sinks take `any`.

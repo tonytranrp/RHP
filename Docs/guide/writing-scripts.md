@@ -7,8 +7,16 @@ Lua 5.5, text only (no binary chunks). Each identity (key) has its own Lua state
 | Function | Role | What |
 |---|---|---|
 | `rhp.patch(id, fn)` | patch | override a C++ patch point; `fn(original, ...)`; undone with the module |
-| `rhp.on(event, fn)` / `rhp.off(id)` | any | `on` returns a subscription id; `off` removes this module's timer/subscription by id |
+| `rhp.on(event, fn [, opts])` / `rhp.once(...)` | any | subscribe to a C++ event of that name, else to an `rhp.publish` of this identity; returns an id. `once` is removed after one delivery; `opts.priority` orders handlers (higher first) |
+| `rhp.off(id)` | any | remove this module's timer, frame callback or subscription, or cancel its task |
+| `rhp.publish(event, ...)` | any | deliver copies of the values to this identity's handlers and waiters at the next `pump()`; false if the queue is full |
+| `rhp.wait_event(event [, ms])` | any | suspend until the event fires: `true, ...`, or `false, "timeout"` |
 | `rhp.timer(ms, fn, repeating)` | any | return a timer id; call `fn` after `ms` (repeat when the third argument is true); undone with its module |
+| `rhp.after(ms, fn [, opts])` / `rhp.every(ms, fn [, opts])` | any | one call after `ms` / a call every `ms` (`opts.times` limits them) |
+| `rhp.every_frame(fn [, opts])` / `rhp.every_frames(n, fn [, opts])` | any | a call every `pump()` / every `n` pumps |
+| `rhp.pause(id)` / `rhp.resume(id)` / `rhp.reschedule(id, interval)` / `rhp.timers()` | any | control and list this module's timers and frame callbacks (`pause` / `resume` work on subscriptions too) |
+| `rhp.spawn(fn, ...)` / `rhp.tasks()` | any | start a background task (handle: `status()`, `cancel()`, `join()`, `id`) / this module's unfinished tasks |
+| `rhp.on_error(fn)` / `rhp.stats()` | any | hear about failed handlers / queue and handler counters |
 | `rhp.wait(frames)` / `rhp.next_frame()` | any | suspend for N `pump()` calls |
 | `rhp.sleep(ms)` | any | suspend for at least `ms` ms (clock is injectable) |
 | `rhp.emit(value)` | any | stream a value to the client while the script keeps running |
@@ -55,11 +63,11 @@ return M                                                    -- the export table 
 
 The host must expose `game.gravity` and the `combat.damage` point for this example. `on_load` runs after the incoming top level; it may suspend. `on_save`, `on_restore`, `on_unload` and patch handlers run synchronously and cannot use the wait/sleep functions. Keep `on_save` free of application mutations: effects it records belong to the old revision and are not undone as incoming-revision effects if a reload fails. `on_unload` is called for an active module; its errors do not prevent cleanup, and it is not called again after a prior revert/fault.
 
-A runtime error in a named module auto-reverts its recorded effects and leaves it `faulted`. Inspect the fault with `status`, then reload or unload it. A scratch exec failure reverts only that request's recorded effects; earlier scratch effects and ordinary Lua assignments are not a transactional snapshot.
+A runtime error in a named module's load or call auto-reverts its recorded effects and leaves it `faulted` (a failing handler is reported instead: see [when a handler fails](#when-a-handler-fails)). Inspect the fault with `status`, then reload or unload it. A scratch exec failure reverts only that request's recorded effects; earlier scratch effects and ordinary Lua assignments are not a transactional snapshot.
 
 ## The undo model
 
-Every mutation (variable write, `undo` binding, patch, timer, subscription) is recorded in an owner-keyed ledger. Reverting walks it newest first.
+Every mutation (variable write, `undo` binding, patch, timer, frame callback, subscription, task) is recorded in an owner-keyed ledger. Reverting walks it newest first.
 
 | Operation | Effect |
 |---|---|
@@ -113,6 +121,71 @@ if (started) {
 ```
 
 This fragment needs `<cstdio>`, `<print>` and `<rhp/rhp.hpp>`. The callback runs on the sandbox's thread. In a game, perform one pump per frame rather than draining a long-running request in a tight loop. Timers that repeat fire at most once per pump; `rhp.off(timer_id)` removes a pending timer or subscription owned by the current module.
+
+## Frame callbacks and timer control
+
+```lua
+local hud = rhp.every_frame(function() draw_overlay() end)          -- every pump()
+local slow = rhp.every_frames(30, function() refresh_list() end)    -- every 30 pumps
+rhp.after(500, function() print("half a second later") end)
+local poll = rhp.every(100, check_server, {times = 10})            -- ten calls, then gone
+
+rhp.pause(hud)          -- stops calling; rhp.resume(hud) continues with the time / frames left
+rhp.reschedule(poll, 250)
+for _, t in ipairs(rhp.timers()) do print(t.id, t.kind, t.interval, t.remaining, t.runs) end
+```
+
+- Frame callbacks fire before timers in a `pump()`, in the order they were made; due timers fire in due order. An entry made during a pump fires at the next one at the earliest.
+- A repeating entry never starts a call while its previous call is still suspended (in `rhp.wait`, say): the frames or intervals in between are skipped, not queued.
+- Every call is a request of its own with its own instruction and time budget. Each entry is a ledger effect: revert, unload or a reload removes it. Only the module that made an entry can pause, resume, reschedule or remove it.
+
+## Background tasks
+
+```lua
+local t = rhp.spawn(function(name)
+    while true do
+        update_menu(name)
+        rhp.wait(1)
+    end
+end, "main")
+print(t.id, t:status())   -- "suspended" until the next pump() starts it
+t:cancel()                -- or rhp.off(t.id); revert / unload / reload do it too
+
+local worker = rhp.spawn(function() return heavy_lookup() end)
+local result = worker:join()  -- from a request: suspends until it finishes; raises its error
+```
+
+A task is a request of its own that starts at the next `pump()`: the code that spawned it (an exec over the network, say) returns at once. It belongs to the spawning module and is cancelled with it, and with the request that spawned it when that request fails. Its instruction and wall limits apply to each resume, so a well-behaved loop runs for as long as its module lives. A loop that never waits still holds `pump()` unless `limits.slice_us` is set. `join` works inside `pcall`; joining yourself or a task that waits for you is refused. A task that fails is a handler failure (below).
+
+## Script events
+
+```lua
+-- module A
+rhp.publish("game.round_over", winner, score)   -- copies, delivered at the next pump()
+
+-- module B
+rhp.on("game.round_over", function(winner, score) print(winner, score) end, {priority = 10})
+rhp.once("game.round_over", function() print("first round done") end)
+
+-- anywhere a script can suspend (exec, a call, a timer, a task)
+local fired, winner = rhp.wait_event("game.round_over", 5000)
+if not fired then print("no round ended within 5 s") end
+```
+
+- Events stay inside one identity's sandbox. A name a C++ `lua_event` uses always means that event: scripts can't publish it, nor names starting with `rhp.`. Values must convert like `rhp.emit`'s (no functions or userdata).
+- Delivery is queued: events published while handlers run arrive one pump later, so handlers can't recurse. `limits.event_queue` caps what one sandbox queues; `rhp.stats().dropped_events` counts the rest.
+- C++ can listen with `sandbox::on_script_event` / `host.on_script_event`, and clients with `client.on` or `rhp-cli events` ([host and client](host-and-client.md)).
+
+## When a handler fails
+
+A timer, frame callback, event handler or task that raises an error (or hits an instruction or time limit) is a **handler failure**. By default (`report`) only what that one call did is undone; the handler keeps its place and the module stays active, so there is no need to wrap handlers in `pcall`. `{on_error = "remove"}` also removes the handler; `{on_error = "fault"}` faults the whole module as any other failure does. The sandbox or host sets the default (`handler_errors`). A memory stop always faults: the state's memory is shared.
+
+```lua
+rhp.every_frame(update, {on_error = "remove"})
+rhp.on_error(function(f) print(f.module, f.kind, f.source, f.action, f.code, f.message) end)
+```
+
+Failures also reach C++ (`sandbox_options::on_handler_error`, or one `[handler failed] ...` output line) and a host's `event::handler_failed`. Patch handlers are different: an error falls back to the C++ default and faults their module.
 
 ## Errors seen from Lua
 

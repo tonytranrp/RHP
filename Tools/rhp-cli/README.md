@@ -37,6 +37,7 @@ rhp> watch scripts
 | `stubs [> file]` | LuaLS annotations for your role |
 | `blob <sink> <file> [name]` | push a file to a host blob sink |
 | `watch <folder>` / `unwatch` | reload `<folder>/*.lua` whenever one is saved |
+| `subscribe <event>` / `unsubscribe <event>` | print each delivery of a host C++ event, or of an `rhp.publish` of your identity (`*`: every publish) |
 
 Tab completes commands, lib names and functions (from the host's stubs) and loaded modules. Ctrl+C cancels the running script on the host; at a `...>` prompt it drops the unfinished Lua. History lives in `~/.rhp/history`. When stdin is not a terminal, `connect` reads one command per line (scripted sessions); unfinished Lua at the end of the input is an error. `call` arguments in double quotes stay strings (`"42"`), bare ones are parsed (`42`).
 
@@ -47,6 +48,7 @@ Tab completes commands, lib names and functions (from the host's stubs) and load
 | `stubs -c … -i … [-o file]` | fetch LuaLS annotations |
 | `blob <sink> <file> -c … -i …` | push a file |
 | `watch <folder> -c … -i …` | reload on save until Ctrl+C |
+| `events <name>... -c … -i …` | print host events (as `subscribe`) until Ctrl+C or the session ends |
 | `sign <file> -i …` | print `signer base64-signature` for other tools |
 | `discover [--app a] [--build b] [--platform p] [--wait ms]` | browse DNS-SD and print RHP endpoints |
 | `fleet <file> -i … [discovery filters]` | discover TCP hosts and run one signed script on all; print a result or error per host |

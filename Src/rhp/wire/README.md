@@ -8,7 +8,7 @@ What travels between a host and a client. Namespace `Rhp::wire`. No dependencies
 | `frame.hpp` | the 28-byte header, `encode_frame`, the incremental `frame_decoder`, `frame_sealer` (the MAC interface the authenticator implements) |
 | `codec.hpp` | the `codec` concept (`Rhp::value` ⇄ bytes), `decode_limits`, `codec_ops` |
 | `codec/msgpack.hpp` | `msgpack`: RHP's own MessagePack codec for `Rhp::value` |
-| `messages.hpp` | payload schemas (`hello` … `welcome`, `envelope`, every request, `module_status`, `revert_summary`, `emit_message`) with `Rhp::convert` specializations |
+| `messages.hpp` | payload schemas (`hello` … `welcome`, `envelope`, every request, `module_status`, `revert_summary`, `emit_message`, `subscribe_request`, `event_message`) with `Rhp::convert` specializations |
 
 ## Frame
 

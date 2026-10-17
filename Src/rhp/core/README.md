@@ -13,6 +13,7 @@ Types every other module speaks. Namespace `Rhp` (logger concept and loggers in 
 | `log.hpp` | `log_level`, `Rhp::core::logger` concept, `null_logger`, `stderr_logger`, `Rhp::log(...)` |
 | `role.hpp` | `Rhp::role` (`kObserve` < `kPatch` < `kAdmin`), `Rhp::allows(have, need)` |
 | `limits.hpp` | `Rhp::limits` — structural, usable as `config<>::limits<Rhp::limits{...}>` |
+| `subscription.hpp` | `Rhp::subscribable` (something callbacks subscribe to) and `Rhp::subscription` (RAII, move-only, may outlive its source) |
 
 ## Rules
 
