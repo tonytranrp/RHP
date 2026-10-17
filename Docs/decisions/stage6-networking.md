@@ -7,7 +7,7 @@ Usage: [networking and fleet](../guide/networking.md). Stage 6 reuses the wire p
 - **Transports are policies.** `websocket`, `udp_reliable` and `local_ipc` satisfy `Rhp::net::transport` like `tcp`. Each keeps its protocol in a sans-IO codec under `net/<transport>/detail/` (`ws::decode_header`/`encode_frame`, `rudp::decode_packet`/`encode_packet`) so it is unit-tested and fuzzed without sockets; the `.cpp` holds only the link state machine.
 - **Discovery is a slot.** `config<>::discovery<D>` takes a `Rhp::net::discovery` policy (`mdns` default, `mdns_wire`, `no_discovery`), type-erased into `net::discovery_ops`. Publishing is a runtime opt-in (`host.advertise()`); library names are a second opt-in.
 - **HTTP is a frontend, not a transport.** It feeds the existing dispatcher through a private `gateway_sink` interface the engine implements (as it implements `session::handler`), so no gateway type appears in `host.hpp`. Proof checking is the authenticator's job (`security::http_authenticator`).
-- **Fleet is a template over ordinary clients.** `Rhp::fleet<Cfg>` starts every exec before waiting and collects one outcome per host; `Rhp::discover<Cfg>()` is the shared browse.
+- **Fleet is a thin template over one compiled engine.** `Rhp::fleet<Cfg>` (`fleet.cpp`) starts every `exec` / `load` / `call` before waiting and collects one outcome per host; `Rhp::discover<Cfg>()` is the shared browse. Its members are client engines on one shared `net::io_context`, so a fleet runs one I/O thread (none with `io<zero_threads>`) however many hosts it has. (The first cut held one full `client<Cfg>`, and so one I/O thread, per member.)
 
 ## WebSocket
 

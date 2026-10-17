@@ -86,11 +86,25 @@ int broadcast(const Rhp::security::identity_file& id) {
 }
 ```
 
-- `exec` starts the script on every member, then collects one outcome per host. A slow or failed host never hides the others: it gets its own error, or `kTimeout` after the shared deadline (`fleet_options::timeout`, ten seconds by default, zero waits forever).
+`load` and `call` broadcast the same way. A module is called by name, because its id differs from host to host:
+
+```cpp
+for (const auto& entry : group.load("low_grav", source)) {   // host_result<Rhp::module_id>
+    if (!entry.outcome) {
+        std::println(stderr, "{}: {}", entry.host.name, entry.outcome.error());
+    }
+}
+for (const auto& entry : group.call<double>("low_grav", "set", 1.6)) { /* host_result<double> */ }
+```
+
+- `exec`, `load` and `call` start the request on every member, then collect one outcome per host, in member order. A slow or failed host never hides the others: it gets its own error, or `kTimeout` after the shared deadline (`fleet_options::timeout`, ten seconds by default, zero waits forever); its request is then cancelled. `exec<T>` / `call<T>` convert the first returned value; without `T` they return every value (`value_list`). `load` returns each host's module id.
+- Scripts (`exec`, `load`) are signed once with the fleet's signing key; without one, hosts refuse them (`kBadSignature`) except for observe identities. Calling already-loaded code needs no signature.
 - `discover` adds every host a `client<Cfg>` can talk to (this transport, this wire revision) and skips malformed or foreign records. `add(record)` adds one by hand.
 - Members keep their sessions, and so their effects, between broadcasts; `clear()` or destroying the fleet ends them. A member whose client closed for good is replaced on the next broadcast or discovery.
 - TLS and `insecure_lan` come from `fleet_options`, never from a record.
-- Under `io<zero_threads>` the fleet drives every member while it waits and browses; call `poll()` while idle.
+- Every member runs on the fleet's one network reactor: a single I/O thread for the whole fleet with the default `io<owned_io_thread>`, however many hosts it has. Under `io<zero_threads>` there is none: the fleet drives every member while it waits and browses; call `poll()` while idle.
+- `fleet_options::client` applies to every member. Its `on_output` / `on_emit` run on the fleet's network thread (inside the waits and `poll()` with `io<zero_threads>`); never call the fleet from them.
+- One thread uses a fleet at a time.
 - `Rhp::discover<Cfg>(options)` is the same browse without a fleet.
 
 The tools run the whole flow:

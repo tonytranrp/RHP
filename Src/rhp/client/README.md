@@ -6,8 +6,9 @@
 |---|---|
 | `client.hpp` | `Rhp::client<Cfg>`: blocking calls for every op, `async()`, `exec_async` / `exec_future`, `blob`, `pin` / `unpin`, `cancel`, `port` (reverse mode), `poll` |
 | `pending.hpp` | `Rhp::pending<T, Errors>`: one async result — `then`, `get`, `future`, `co_await`, `request()` |
-| `fleet.hpp` | `Rhp::fleet<Cfg>` (start every exec, then collect one `host_result<T>` per host within a shared deadline), `Rhp::discover<Cfg>()`, the `broadcastable` concept |
+| `fleet.hpp` | `Rhp::fleet<Cfg>` (`exec` / `load` / `call` start on every member, then collect one `host_result<T>` per host within a shared deadline), `Rhp::discover<Cfg>()`, the `broadcastable` concept |
 | `detail/engine.hpp` | `client_options`, the type-erased `setup`, the engine's free functions |
+| `detail/fleet_engine.hpp` | `fleet_options`, the fleet engine's `setup` and free functions (`fleet.cpp`) |
 
 ```cpp
 auto id = *Rhp::security::identity_file::load("dev.rhpid");
@@ -28,4 +29,5 @@ c.blob("configs", bytes, "game.ini");
 - Resume: a dialing client whose link drops redials (backoff) and resumes the same session within `limits.resume_ms`; calls in flight are resent and run exactly once (`info().resumes` counts). A listening client waits for its host to dial back.
 - Blobs go in chunks (`client_options::blob_chunk`, `blob_window` in flight); the last chunk's answer is the sink's verdict.
 - `RHP_ENABLE=0`: every call reports `kDisabled`.
-- `info().closed` distinguishes terminal failure from a resumable detach. Fleet replaces terminal clients and retains live sessions between broadcasts.
+- `info().closed` distinguishes terminal failure from a resumable detach. Fleet replaces terminal members and retains live sessions between broadcasts.
+- Fleet: a thin template over one engine compiled in `fleet.cpp`. Its members are client engines on one shared `net::io_context` (`setup::shared_io`) run by one I/O thread for the whole fleet (none with `io<zero_threads>`). An engine on a shared reactor never runs or owns it, drops work queued for it once destroyed (a liveness token checked by its posts and dial completions), and is destroyed on the reactor's thread (or after it stopped). The public `client<Cfg>` never uses `shared_io`.
