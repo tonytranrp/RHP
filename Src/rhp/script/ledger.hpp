@@ -73,8 +73,9 @@ public:
     ledger() = default;
     ledger(const ledger&) = delete;
     ledger& operator=(const ledger&) = delete;
-    ledger(ledger&&) noexcept = default;
-    ledger& operator=(ledger&&) noexcept = default;
+    ledger(ledger&& other) noexcept;
+    // Undoes everything this ledger still records, then takes `other`'s effects (left empty).
+    ledger& operator=(ledger&& other) noexcept;
     ~ledger(); // undoes everything still recorded
 
     // Appends an effect; returns its sequence number.

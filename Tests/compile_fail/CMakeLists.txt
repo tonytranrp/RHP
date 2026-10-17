@@ -14,4 +14,5 @@ rhp_add_compile_fail(lib_duplicate_name SOURCE lib_duplicate_name.cpp LINKS Rhp:
 rhp_add_compile_fail(lib_not_installable SOURCE lib_not_installable.cpp LINKS Rhp::script)
 rhp_add_compile_fail(lib_undo_not_invocable SOURCE lib_undo_not_invocable.cpp LINKS Rhp::script)
 rhp_add_compile_fail(patch_point_bad_id SOURCE patch_point_bad_id.cpp LINKS Rhp::script)
+rhp_add_compile_fail(patch_point_borrowed_result SOURCE patch_point_borrowed_result.cpp LINKS Rhp::script)
 rhp_add_compile_fail(var_const SOURCE var_const.cpp LINKS Rhp::script)
