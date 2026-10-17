@@ -50,8 +50,7 @@ rhp_add_module(net
         ${rhp_net_private_deps}
 )
 
+# Apple's DNS-SD API (dns_sd.h) is part of libSystem: there is no separate library to link.
 if(RHP_ENABLE AND RHP_PLATFORM STREQUAL "WINDOWS")
     target_link_libraries(rhp_net PRIVATE dnsapi advapi32 iphlpapi)
-elseif(RHP_ENABLE AND (RHP_PLATFORM STREQUAL "MACOS" OR RHP_PLATFORM STREQUAL "IOS"))
-    target_link_libraries(rhp_net PRIVATE dns_sd)
 endif()
