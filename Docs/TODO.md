@@ -102,6 +102,22 @@ GitHub Actions runs again. Fixed for it: Apple deployment targets 13.3 / 16.3 (f
 - [x] Add the [networking guide](guide/networking.md) and transport-local READMEs for Stage 6.
 - [x] Update the guide's available API table through Stage 6.
 
+## Recorded validation (Stage 7, 2026-10-17)
+
+Debug builds on this Windows/WSL host, after the review fixes (`29f6018`):
+
+| Check | Result |
+|---|---|
+| MSVC x64 | 560/560 |
+| clang-cl x64 | 560/560 |
+| MSVC x64 + ASan | 560/560 |
+| `RHP_ENABLE=OFF`, MSVC | 169/169 |
+| Linux Clang 21 (`-Wconversion -Wsign-conversion -Wshadow -Werror`) | 560/560 (one `[multicast]` mDNS case failed once under `-j 8` on the real LAN and passed three reruns) |
+| Linux Clang ASan + UBSan | 560/560 |
+| Linux Clang TSan (Mbed TLS) | 560/560; the Stage 7 integration cases also repeated 5 times |
+
+A read-only review of the branch found two crash-class defects (coroutine stacks overflowed by many arguments, effects recorded by finalizers during `lua_close`) and six edge-case bugs; all are fixed with regression tests. Not run: Android, macOS/iOS (hosted CI covers them), long libFuzzer runs, Release builds.
+
 ## Recorded validation (Stage 6 completion, 2026-10-16)
 
 Debug builds on this Windows/WSL host and an Android phone. Desktop results are at `7cbcf88`; the one later commit only changes the expiry assertion of one HTTP unit test (a timing flake the phone found), and the phone was rerun after it:
