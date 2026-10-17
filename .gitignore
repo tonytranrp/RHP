@@ -14,3 +14,6 @@ CMakeUserPresets.json
 *.key
 rhp_signers.pub
 rhp_audit.log
+
+# agent worktrees (Claude Code)
+/.claude/worktrees/
