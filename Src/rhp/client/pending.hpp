@@ -230,10 +230,13 @@ public:
 
         [[nodiscard]] bool await_ready() const { return state_->ready(); }
         bool await_suspend(std::coroutine_handle<> h) {
+            // Recorded before the handle is published: once suspend() returns true the network
+            // thread may already have resumed (or destroyed) this frame, so `this` is off limits.
+            suspended_ = h;
             if (!state_->suspend(h)) {
+                suspended_ = {};
                 return false;
             }
-            suspended_ = h;
             return true;
         }
         return_type await_resume() {
