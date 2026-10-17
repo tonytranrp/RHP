@@ -29,7 +29,7 @@ A code review of the Stage 6 working tree rewrote the transports' protocol code 
 - [ ] **Apple DNS-SD backend** (`mdns/native.cpp`) has been checked against the header only: build and run it on macOS/iOS.
 - [ ] `[multicast]` tests use the real LAN (and on Windows the system DNS-SD service); they are serialized under ctest and now carry the ctest label `multicast`, so `ctest -LE multicast` leaves them out on machines without usable multicast. They still depend on the machine's network when run.
 
-Possible follow-ups (not required for Stage 6): close fleet members in parallel at teardown (now one after another, each with the existing 1 s close wait); `rhp-cli fleet` `load`/`call` modes; carry `http_grant::bound` into audit events.
+Possible follow-ups (not required for Stage 6): close fleet members in parallel at teardown (now one after another, each with the existing 1 s close wait); with a custom `config<>::clock`, re-arm the gateway's idle timer when `pump()` samples a new offset instead of re-checking every 25 ms; share one TLS-relay test fixture between `stage5_tests.cpp` and `stage6_tests.cpp`; `rhp-cli fleet` `load`/`call` modes; carry `http_grant::bound` into audit events.
 
 Process for the stage: one branch + PR per stage, conventional commits (`feat:`, `fix:`, `test:`, `docs:`, `ci:`), rebase-merge only when told to.
 
