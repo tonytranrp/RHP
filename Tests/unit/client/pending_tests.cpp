@@ -37,6 +37,33 @@ struct task {
     };
 };
 
+// A coroutine its caller owns: starts eagerly and can be destroyed while suspended.
+struct owned_task {
+    struct promise_type {
+        owned_task get_return_object() noexcept { return owned_task{std::coroutine_handle<promise_type>::from_promise(*this)}; }
+        std::suspend_never initial_suspend() noexcept { return {}; }
+        std::suspend_always final_suspend() noexcept { return {}; }
+        void return_void() noexcept {}
+        void unhandled_exception() { std::terminate(); }
+    };
+
+    explicit owned_task(std::coroutine_handle<promise_type> h) noexcept : handle(h) {}
+    owned_task(const owned_task&) = delete;
+    owned_task& operator=(const owned_task&) = delete;
+    ~owned_task() {
+        if (handle) {
+            handle.destroy();
+        }
+    }
+
+    std::coroutine_handle<promise_type> handle;
+};
+
+owned_task await_owned(Rhp::pending<int> p, bool& resumed) {
+    auto r = co_await std::move(p);
+    resumed = r.has_value();
+}
+
 task await_into(Rhp::pending<int> p, std::optional<Rhp::result<int>>& out) {
     out = co_await std::move(p);
 }
@@ -128,6 +155,27 @@ TEST_CASE("pending: co_await resumes when the result arrives", "[client][pending
     thrower.state->complete(Rhp::fail(errc::kForbidden, "no"));
     CHECK_FALSE(value);
     CHECK(failed == errc::kForbidden);
+}
+
+TEST_CASE("pending: destroying a suspended coroutine unregisters it", "[client][pending]") {
+    call<int> c;
+    bool resumed = false;
+    {
+        owned_task t = await_owned(std::move(c.handle), resumed);
+        REQUIRE_FALSE(t.handle.done()); // suspended on the call
+    } // the frame (and its awaiter) is destroyed before the result arrives
+    c.state->complete(5); // must not resume the destroyed frame
+    CHECK_FALSE(resumed);
+    CHECK(c.state->ready()); // the result is kept, unconsumed
+
+    call<int> finished;
+    bool done = false;
+    {
+        owned_task t = await_owned(std::move(finished.handle), done);
+        finished.state->complete(6);
+        CHECK(t.handle.done());
+    }
+    CHECK(done);
 }
 
 TEST_CASE("pending: with a pump / waiting runs it", "[client][pending]") {

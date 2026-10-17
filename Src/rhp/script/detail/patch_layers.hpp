@@ -41,8 +41,16 @@ using signature_of_t = typename make_signature<utils::return_type_t<F>, utils::a
 template <class T>
 concept patch_param = convertible<T> && (!std::is_reference_v<T> || std::is_const_v<std::remove_reference_t<T>>);
 
+// A result that only views memory it doesn't own. A Lua override's result is pulled from a Lua
+// string that is unrooted once the handler returns, so a view of it would dangle at the next GC:
+// patch points return owning values (std::string, not std::string_view).
 template <class T>
-concept patch_return = std::is_void_v<T> || (convertible<T> && !std::is_reference_v<T>);
+concept borrowed_result = std::same_as<std::remove_cv_t<T>, std::string_view> || std::same_as<std::remove_cv_t<T>, const char*> ||
+                          std::same_as<std::remove_cv_t<T>, char*> ||
+                          (std::is_array_v<T> && std::same_as<std::remove_cv_t<std::remove_extent_t<T>>, char>);
+
+template <class T>
+concept patch_return = std::is_void_v<T> || (convertible<T> && !std::is_reference_v<T> && !borrowed_result<T>);
 
 template <class List>
 inline constexpr bool patch_params_v = false;

@@ -42,7 +42,7 @@ Rules of the road:
 - The lib proxy is locked: writing an unknown, function or `ro` member raises `kInvalidArgument`; reading an unknown member gives `nil`.
 - A C++ exception thrown by a binding becomes a Lua error; the original `Rhp::error` comes back to C++ callers.
 - A bound function must return. Lua's instruction hook cannot interrupt a long C++ call. Application-owned variables, handle storage and function dependencies must outlive every sandbox that uses them; RHP does not synchronize application access to those variables.
-- Arguments may be values or const references; mutable reference parameters and reference results are rejected by `installable`. `std::string_view` arguments borrow Lua storage for the binding call only: copy them if retained. Return owning strings from patch handlers; see the [current lifetime defects](../TODO.md#confirmed-issues-at-the-current-commit).
+- Arguments may be values or const references; mutable reference parameters and reference results are rejected by `installable`. `std::string_view` arguments borrow Lua storage for the binding call only: copy them if retained. A patch point's default must return an owning value (`std::string`, not `std::string_view` or `const char*`): a Lua override's result lives in a Lua string that is unrooted once the handler returns, so borrowed results are rejected at compile time.
 
 An inverse must undo exactly the recorded operation. For a void-returning binding, the inverse can receive the original arguments:
 

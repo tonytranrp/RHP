@@ -130,6 +130,15 @@ public:
         return true;
     }
 
+    // The awaiting coroutine is being destroyed while suspended: forget its handle so a later
+    // completion keeps the result instead of resuming freed memory.
+    void abandon(std::coroutine_handle<> h) noexcept {
+        const std::scoped_lock lock{mutex_};
+        if (waiter_ == h) {
+            waiter_ = {};
+        }
+    }
+
     [[nodiscard]] std::uint64_t request() const noexcept {
         const std::scoped_lock lock{mutex_};
         return request_;
@@ -204,12 +213,37 @@ public:
         return f;
     }
 
-    struct awaiter {
-        std::shared_ptr<client_detail::pending_state<T>> state;
+    // Lives in the awaiting coroutine's frame. Destroying a suspended coroutine destroys it too,
+    // which unregisters the handle: completion can't resume a frame that is gone. Destroying the
+    // coroutine must not race with its completion on the network thread (destroy it there, or
+    // before the call can complete, e.g. after client.cancel() has finished).
+    class awaiter {
+    public:
+        explicit awaiter(std::shared_ptr<client_detail::pending_state<T>> state) noexcept : state_(std::move(state)) {}
+        awaiter(const awaiter&) = delete;
+        awaiter& operator=(const awaiter&) = delete;
+        ~awaiter() {
+            if (state_ && suspended_) {
+                state_->abandon(suspended_);
+            }
+        }
 
-        [[nodiscard]] bool await_ready() const { return state->ready(); }
-        bool await_suspend(std::coroutine_handle<> h) { return state->suspend(h); }
-        return_type await_resume() { return Errors::finish(state->take()); }
+        [[nodiscard]] bool await_ready() const { return state_->ready(); }
+        bool await_suspend(std::coroutine_handle<> h) {
+            if (!state_->suspend(h)) {
+                return false;
+            }
+            suspended_ = h;
+            return true;
+        }
+        return_type await_resume() {
+            suspended_ = {};
+            return Errors::finish(state_->take());
+        }
+
+    private:
+        std::shared_ptr<client_detail::pending_state<T>> state_;
+        std::coroutine_handle<> suspended_;
     };
 
     [[nodiscard]] awaiter operator co_await() && { return awaiter{std::move(state_)}; }

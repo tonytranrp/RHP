@@ -267,6 +267,25 @@ TEST_CASE("ledger move transfers ownership of effects", "[script][ledger]") {
     REQUIRE(log == std::vector<int>{1});
 }
 
+TEST_CASE("ledger move assignment undoes the destination's own effects first", "[script][ledger]") {
+    std::vector<int> log;
+    {
+        ledger source;
+        source.record(kModA, "a1", logged(log, 1));
+        ledger destination;
+        destination.record(kModB, "b1", logged(log, 2));
+        destination.record(kModB, "b2", logged(log, 3));
+
+        destination = std::move(source);
+        // The replaced effects were undone newest first, not silently dropped.
+        REQUIRE(log == std::vector<int>{3, 2});
+        REQUIRE(destination.count(kModA) == 1);
+        REQUIRE(destination.count(kModB) == 0);
+        REQUIRE(source.empty()); // NOLINT(bugprone-use-after-move): moved-from ledgers are empty
+    }
+    REQUIRE(log == std::vector<int>{3, 2, 1});
+}
+
 TEST_CASE("effect sequence is process-wide and monotonic", "[script][ledger]") {
     const std::uint64_t a = Rhp::script::next_effect_sequence();
     const std::uint64_t b = Rhp::script::next_effect_sequence();

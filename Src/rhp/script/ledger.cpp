@@ -35,6 +35,16 @@ revert_report& revert_report::operator+=(revert_report&& other) {
     return *this;
 }
 
+ledger::ledger(ledger&& other) noexcept : entries_(std::exchange(other.entries_, {})) {}
+
+ledger& ledger::operator=(ledger&& other) noexcept {
+    if (this != &other) {
+        (void)revert_all();
+        entries_ = std::exchange(other.entries_, {});
+    }
+    return *this;
+}
+
 ledger::~ledger() {
     (void)revert_all();
 }

@@ -316,6 +316,50 @@ TEST_CASE("stage4: the host reports every script / session and revert", "[stage4
     CHECK(text.find(R"("signer":"dev")") != std::string::npos);
 }
 
+TEST_CASE("stage4: a suspended request is audited with its final outcome", "[stage4][audit]") {
+    keys k;
+    const auto at = Rhp::endpoint::listen("s4.audit_late", 1);
+    pumped_host<loop_cfg> host{at, k.ring(), k.trusted()};
+    recorder<Rhp::event::script_executed> scripts;
+    auto sub = host->on<Rhp::event::script_executed>(scripts.handler());
+    host.start();
+    {
+        Rhp::client<loop_cfg> c{host.dial_at(at), k.as("patch"), k.dev()};
+        // Suspends first (reported "ok" so far), then fails in a later pump.
+        const auto late = c.exec("rhp.next_frame() error('late failure')");
+        REQUIRE_FALSE(late);
+        CHECK(late.error().message.find("late failure") != std::string::npos);
+        REQUIRE(c.exec("rhp.next_frame() return 1"));
+        REQUIRE(eventually([&] { return scripts.size() == 2; }));
+    }
+    std::this_thread::sleep_for(20ms);
+    const auto s = scripts.snapshot();
+    REQUIRE(s.size() == 2); // one record per request, none early
+    CHECK(s[0].op == "exec");
+    CHECK(s[0].outcome.code != errc::kOk);
+    CHECK(s[0].outcome.message.find("late failure") != std::string::npos);
+    CHECK(s[1].outcome.code == errc::kOk);
+    host.stop();
+}
+
+TEST_CASE("stage4: a request still suspended at revert is audited as cancelled", "[stage4][audit]") {
+    keys k;
+    const auto at = Rhp::endpoint::listen("s4.audit_cut", 1);
+    pumped_host<loop_cfg> host{at, k.ring(), k.trusted()};
+    recorder<Rhp::event::script_executed> scripts;
+    auto sub = host->on<Rhp::event::script_executed>(scripts.handler());
+    host.start();
+    {
+        Rhp::client<loop_cfg> c{host.dial_at(at), k.as("patch"), k.dev()};
+        auto forever = c.async().exec("while true do rhp.next_frame() end");
+        std::this_thread::sleep_for(50ms); // it has started and suspended
+        CHECK(scripts.size() == 0);
+    } // the last session closes: the identity is reverted with the request still suspended
+    REQUIRE(eventually([&] { return scripts.size() == 1; }));
+    CHECK(scripts.snapshot()[0].outcome.code == errc::kCancelled);
+    host.stop();
+}
+
 // ---- blobs --------------------------------------------------------------------------------------------------
 
 TEST_CASE("stage4: blobs arrive whole at their sink / in chunks / role-checked", "[stage4][blob]") {

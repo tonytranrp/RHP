@@ -624,6 +624,9 @@ private:
         std::shared_ptr<cancel_relay> relay;
         std::set<session_id> sessions;
         std::map<request_id, pending_reply> waiting; // suspended network requests
+        // Audit records of suspended requests, published with the final outcome (finished()), or
+        // as cancelled when the identity is torn down first. Outlive the requesting session.
+        std::map<request_id, event::script_executed> audits;
         session_id current_session;                  // the network request inside a sandbox call
         std::uint64_t current_req = 0;
         std::set<module_id> pinned; // kept when the last session ends
@@ -1194,6 +1197,10 @@ private:
         const script::revert_report report = rt.box->revert_all();
         rt.box.reset();
         rt.pinned.clear();
+        for (auto& [r, record] : std::exchange(rt.audits, {})) {
+            record.outcome = make_error(errc::kCancelled, "the identity was reverted before the request finished", record.op);
+            publish(std::move(record));
+        }
         log(log_level::kInfo, std::format("identity {} reverted: {} effects undone, {} irreversible, {} failures", rt.name, report.undone, report.irreversible,
                                           report.failures.size()));
         if (wants<event::identity_reverted>()) {
@@ -1285,6 +1292,14 @@ private:
             return;
         }
         identity_runtime& rt = it->second;
+        if (const auto a = rt.audits.find(r); a != rt.audits.end()) {
+            event::script_executed record = std::move(a->second);
+            rt.audits.erase(a);
+            if (!res) {
+                record.outcome = res.error();
+            }
+            publish(std::move(record));
+        }
         const auto w = rt.waiting.find(r);
         if (w == rt.waiting.end()) {
             return; // a timer or event request, or its session is gone
@@ -1390,6 +1405,11 @@ private:
         }
         if (suspended) {
             rt.waiting[after] = pending_reply{in.session, in.req, in.code, module};
+            if (audit_ != nullptr) {
+                // Reported when it really finishes: a later failure must not leave an `ok` record.
+                rt.audits[after] = *audit_;
+                audit_deferred_ = true;
+            }
             return;
         }
         if (!outcome) {
@@ -1444,9 +1464,10 @@ private:
         audit_ = audit ? &*audit : nullptr;
         audit_session_ = in.session;
         audit_req_ = in.req;
+        audit_deferred_ = false;
         const utils::scope_guard report{[&] {
             audit_ = nullptr;
-            if (audit) {
+            if (audit && !std::exchange(audit_deferred_, false)) {
                 publish(std::move(*audit));
             }
         }};
@@ -1902,6 +1923,8 @@ private:
     event::script_executed* audit_ = nullptr;
     session_id audit_session_;
     std::uint64_t audit_req_ = 0;
+    bool audit_deferred_ = false; // the request suspended: identity_runtime::audits reports it
+
 };
 
 // ---- the C++ wall --------------------------------------------------------------------------------------
