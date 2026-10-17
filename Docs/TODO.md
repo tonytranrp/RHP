@@ -97,7 +97,7 @@ Debug builds on this Windows/WSL host and an Android phone. Desktop results are 
 | Android arm64, NDK 29, SM-S948U1, API 36 | all 17 executables pass: 12 Catch2 suites and 5 fuzz replay drivers |
 | Guide snippets (`networking.md` HTTP proofs) | compile under MSVC `/W4 /WX` |
 
-Not run: macOS/iOS (no Apple host), hosted CI (billing block), long libFuzzer runs (the replay drivers ran), Release builds.
+Not run locally: macOS/iOS (no Apple host), long libFuzzer runs (the replay drivers ran), Release builds. Hosted CI (GitHub Actions, run 39022109410 at `2312b3e`) then passed all seven jobs: Windows MSVC and clang-cl, Linux Clang / ASan+UBSan / TSan, Android, and Apple (macOS without the `multicast` and `process` labels, the iOS simulator 445/445 without `multicast`, the iOS device build).
 
 ## Recorded validation (Stage 6)
 
