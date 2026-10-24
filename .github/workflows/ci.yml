@@ -1,5 +1,7 @@
-# Builds and tests every preset family: Linux (Clang, ASan+UBSan, TSan), Windows (MSVC, clang-cl),
-# macOS, the iOS simulator, and Android (x86_64 tests on an emulator, arm64 build only).
+# Builds and tests every preset family: Linux (Clang, ASan+UBSan, TSan), Windows (MSVC, clang-cl,
+# MSVC ASan), macOS, the iOS simulator, and Android (x86_64 tests on an emulator, arm64 build only);
+# RHP_ENABLE=OFF on Linux and Windows; a libFuzzer smoke run; the installed package, consumed with
+# find_package and as a subdirectory.
 name: ci
 
 on:
@@ -50,7 +52,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        preset: [windows-msvc, windows-clang-cl]
+        preset: [windows-msvc, windows-clang-cl, windows-msvc-asan]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/cache@v4
@@ -68,6 +70,140 @@ jobs:
       # and run on Linux runners and on developer machines.
       - name: Test
         run: ctest --preset ${{ matrix.preset }} -j 4 --timeout 600 -LE multicast
+
+  # RHP_ENABLE=OFF: hosts are inert stubs, patch points direct calls; Lua, Asio, Monocypher and
+  # Mbed TLS are not fetched. The suites that remain (and the package) must still pass.
+  disabled:
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2025]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: .cpm-cache
+          key: cpm-off-${{ runner.os }}-${{ hashFiles('cmake/Dependencies.cmake') }}
+      - if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+      - if: runner.os == 'Windows'
+        uses: lukka/get-cmake@latest
+      - if: runner.os == 'Linux'
+        name: Toolchain (Clang 21)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build g++-14
+          wget -q https://apt.llvm.org/llvm.sh
+          sudo bash llvm.sh 21
+      - name: Configure, build, test
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then preset=windows-msvc; extra=""; else preset=linux-clang; extra="-DCMAKE_C_COMPILER=clang-21 -DCMAKE_CXX_COMPILER=clang++-21"; fi
+          cmake --preset $preset -B build/off -DRHP_ENABLE=OFF $extra
+          cmake --build build/off --config Debug
+          ctest --test-dir build/off -C Debug -j 4 --timeout 600 --output-on-failure
+
+  # libFuzzer smoke run: every target for a minute from the replay drivers' seed corpus.
+  fuzz:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: .cpm-cache
+          key: cpm-${{ runner.os }}-${{ hashFiles('cmake/Dependencies.cmake') }}
+      - name: Toolchain (Clang 21)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build g++-14 libssl-dev
+          wget -q https://apt.llvm.org/llvm.sh
+          sudo bash llvm.sh 21
+      - name: Build
+        run: |
+          cmake --preset linux-clang-fuzz -DCMAKE_C_COMPILER=clang-21 -DCMAKE_CXX_COMPILER=clang++-21
+          cmake --build --preset linux-clang-fuzz
+      - name: Fuzz (60 s per target)
+        run: |
+          dir=build/linux-clang-fuzz/Tests/fuzz/RelWithDebInfo
+          for target in frame msgpack envelope sandbox_escape network; do
+            mkdir -p corpus/$target
+            $dir/rhp_fuzz_${target}_replay --write-corpus corpus/$target
+            $dir/rhp_fuzz_$target -max_total_time=60 -timeout=10 -rss_limit_mb=2048 corpus/$target
+          done
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: fuzz-crashes
+          path: |
+            crash-*
+            leak-*
+            timeout-*
+
+  # The installed package: Debug and Release side by side in one prefix, then a separate project
+  # (Tests/package) built against it with find_package, and with RHP as a subdirectory.
+  package:
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2025]
+        enable: [ON, OFF]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: .cpm-cache
+          key: cpm-package-${{ runner.os }}-${{ hashFiles('cmake/Dependencies.cmake') }}
+      - if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+      - if: runner.os == 'Windows'
+        uses: lukka/get-cmake@latest
+      - if: runner.os == 'Linux'
+        name: Toolchain (Clang 21)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build g++-14 libssl-dev
+          wget -q https://apt.llvm.org/llvm.sh
+          sudo bash llvm.sh 21
+      - name: Build and install Debug + Release
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then preset=windows-msvc; cc="-DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl"; else preset=linux-clang; cc="-DCMAKE_C_COMPILER=clang-21 -DCMAKE_CXX_COMPILER=clang++-21"; fi
+          echo "RHP_CC=$cc" >> "$GITHUB_ENV"
+          cmake --preset $preset -B build/pkg -DRHP_ENABLE=${{ matrix.enable }} -DRHP_BUILD_TESTS=OFF -DRHP_BUILD_EXAMPLES=OFF -DRHP_BUILD_TOOLS=OFF -DRHP_INSTALL=ON $cc
+          for config in Debug Release; do
+            cmake --build build/pkg --config $config
+            cmake --install build/pkg --config $config --prefix "$PWD/prefix"
+          done
+      - name: Check the installed tree
+        shell: bash
+        run: |
+          find prefix -type f | sort
+          test -f prefix/lib/cmake/rhp/rhp-config.cmake
+          test -f prefix/include/rhp/rhp.hpp
+          test -f prefix/include/rhp/build_config.hpp
+          test -f prefix/share/doc/rhp/THIRD_PARTY_LICENSES.md
+          # Third-party headers stay private; nothing points back into the build or the CPM cache.
+          ! find prefix -name lua.h -o -name asio.hpp -o -name monocypher.h -o -name ssl.h | grep .
+          ! grep -rl -e "$PWD/build" -e ".cpm-cache" prefix/lib/cmake
+      - name: Consume with find_package (Debug and Release)
+        shell: bash
+        run: |
+          for config in Debug Release; do
+            cmake -S Tests/package -B build/consumer-$config -G Ninja -DCMAKE_BUILD_TYPE=$config -DCMAKE_PREFIX_PATH="$PWD/prefix" $RHP_CC
+            cmake --build build/consumer-$config
+            ctest --test-dir build/consumer-$config --output-on-failure
+          done
+      - name: Consume as a subdirectory
+        shell: bash
+        run: |
+          cmake -S Tests/package -B build/consumer-subdir -G Ninja -DCMAKE_BUILD_TYPE=Release -DRHP_PACKAGE_CONSUME=subdirectory -DRHP_ENABLE=${{ matrix.enable }} $RHP_CC
+          cmake --build build/consumer-subdir
+          ctest --test-dir build/consumer-subdir --output-on-failure
 
   apple:
     runs-on: macos-15
