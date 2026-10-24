@@ -144,7 +144,8 @@ struct sandbox_options {
     // Role of the identity this sandbox runs for. Local C++ callers default to kPatch.
     role caller_role = role::kPatch;
     Rhp::limits limits{};
-    // Every Lua allocation of this sandbox; nullptr = std::pmr::get_default_resource().
+    // Every Lua allocation of this sandbox; nullptr = the C heap (malloc / realloc / free, as Lua's own
+    // allocator: blocks grow in place). Either way limits.memory is enforced.
     std::pmr::memory_resource* memory = nullptr;
     // Receives each print() line (without the newline); empty = standard output.
     std::function<void(std::string_view)> output{};

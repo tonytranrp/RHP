@@ -8,6 +8,7 @@
 #include <exception>
 #include <format>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <memory_resource>
 #include <mutex>
@@ -17,6 +18,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -64,6 +66,9 @@ namespace {
 
 constexpr std::size_t kAlignment = alignof(std::max_align_t);
 constexpr std::uint32_t kDefaultCheckInterval = 1'000;
+// Finished requests whose map node, record and coroutine wait for reuse: enough for a frame's worth
+// of handler calls without holding on to a burst.
+constexpr std::size_t kSpareRequests = 64;
 constexpr const char* kModuleProxyKey = "rhp.module";             // metatable of require() proxies
 constexpr const char* kModuleProxiesKey = "rhp.module_proxies";   // registry: module id → its proxy
 constexpr const char* kRequestThreadsKey = "rhp.request_threads"; // registry: weak set of request coroutines
@@ -345,7 +350,7 @@ struct sandbox_impl::active_scope {
         if (self.running_.empty()) {
             self.cancel_running_.store(false, std::memory_order_release);
         }
-        self.running_.push_back(active_run{budget, thread, request, steady::now()});
+        self.running_.push_back(active_run{budget, thread, request, self.timed_ ? steady::now() : steady::time_point{}});
         self.current_ = owner;
     }
 
@@ -354,7 +359,7 @@ struct sandbox_impl::active_scope {
 
     ~active_scope() {
         const active_run& top = self.running_.back();
-        if (top.budget != nullptr) {
+        if (top.budget != nullptr && self.timed_) {
             top.budget->active += steady::now() - top.started;
         }
         self.running_.pop_back();
@@ -388,11 +393,34 @@ struct sandbox_impl::slice_scope {
     }
 };
 
+// An operation (exec, load, call, reload, unload, revert_all): while it runs, the main thread checks
+// for cancel() too (on_save / on_restore / on_unload, and patch handlers its code hits), like its
+// request coroutine does. Outside operations the main thread runs handlers, unchecked by default.
+struct sandbox_impl::operation_scope {
+    sandbox_impl& self;
+
+    explicit operation_scope(sandbox_impl& s) : self(s) {
+        if (self.operations_++ == 0 && self.checks_requests() && !self.hook_everywhere()) {
+            self.arm_hook(self.state_, true);
+        }
+    }
+
+    operation_scope(const operation_scope&) = delete;
+    operation_scope& operator=(const operation_scope&) = delete;
+
+    ~operation_scope() {
+        if (--self.operations_ == 0 && self.checks_requests() && !self.hook_everywhere()) {
+            self.arm_hook(self.state_, false);
+        }
+    }
+};
+
 // ---- construction --------------------------------------------------------------------------------
 
 sandbox_impl::sandbox_impl(sandbox_options options)
     : options_(std::move(options)),
-      memory_(options_.memory != nullptr ? options_.memory : std::pmr::get_default_resource()),
+      memory_(options_.memory),
+      timed_(options_.limits.wall_ms != 0),
       thread_(std::this_thread::get_id()) {
     state_ = lua_newstate(&sandbox_impl::allocate, this, luaL_makeseed(nullptr));
     if (state_ == nullptr) {
@@ -597,8 +625,25 @@ std::uint32_t sandbox_impl::check_interval() const noexcept {
     return options_.limits.cancel_check_instructions != 0 ? options_.limits.cancel_check_instructions : kDefaultCheckInterval;
 }
 
+bool sandbox_impl::hook_everywhere() const noexcept {
+    const Rhp::limits& l = options_.limits;
+    return l.instructions != 0 || l.wall_ms != 0 || l.slice_us != 0 || l.cancel_checks == cancel_scope::kEverything;
+}
+
+void sandbox_impl::arm_hook(lua_State* L, bool armed) noexcept {
+    if (armed) {
+        lua_sethook(L, &sandbox_impl::count_hook, LUA_MASKCOUNT, static_cast<int>(check_interval()));
+    } else {
+        lua_sethook(L, nullptr, 0, 0);
+    }
+}
+
+bool sandbox_impl::checks_requests() const noexcept {
+    return options_.limits.cancel_checks != cancel_scope::kNone;
+}
+
 void sandbox_impl::reset_hook() noexcept {
-    lua_sethook(state_, &sandbox_impl::count_hook, LUA_MASKCOUNT, static_cast<int>(check_interval()));
+    arm_hook(state_, hook_everywhere() || (operations_ != 0 && checks_requests()));
 }
 
 void* sandbox_impl::allocate(void* ud, void* ptr, std::size_t old_size, std::size_t new_size) noexcept {
@@ -608,7 +653,11 @@ void* sandbox_impl::allocate(void* ud, void* ptr, std::size_t old_size, std::siz
     }
     if (new_size == 0) {
         if (ptr != nullptr) {
-            self.memory_->deallocate(ptr, old_size, kAlignment);
+            if (self.memory_ == nullptr) {
+                std::free(ptr);
+            } else {
+                self.memory_->deallocate(ptr, old_size, kAlignment);
+            }
             self.memory_used_ -= old_size;
         }
         return nullptr;
@@ -630,14 +679,22 @@ void* sandbox_impl::allocate(void* ud, void* ptr, std::size_t old_size, std::siz
         }
     }
     void* block = nullptr;
-    try {
-        block = self.memory_->allocate(new_size, kAlignment);
-    } catch (...) {
-        return nullptr;
-    }
-    if (ptr != nullptr) {
-        std::memcpy(block, ptr, std::min(old_size, new_size));
-        self.memory_->deallocate(ptr, old_size, kAlignment);
+    if (self.memory_ == nullptr) {
+        // The C heap, like Lua's own allocator: a block grows or shrinks in place when it can.
+        block = std::realloc(ptr, new_size);
+        if (block == nullptr) {
+            return nullptr; // `ptr` is untouched
+        }
+    } else {
+        try {
+            block = self.memory_->allocate(new_size, kAlignment);
+        } catch (...) {
+            return nullptr;
+        }
+        if (ptr != nullptr) {
+            std::memcpy(block, ptr, std::min(old_size, new_size));
+            self.memory_->deallocate(ptr, old_size, kAlignment);
+        }
     }
     self.memory_used_ = self.memory_used_ - old_size + new_size;
     return block;
@@ -1011,11 +1068,14 @@ void sandbox_impl::abandon_requests(Pred pred, std::string_view why) {
             continue;
         }
         request_record& req = *node.mapped();
-        const result<value_list> outcome = fail(errc::kCancelled, std::string{why}, req.label);
+        const result<value_list> outcome = fail(errc::kCancelled, std::string{why}, where_of(req));
         close_thread(req, true);
         request_ended(req, &outcome, true);
         if (req.suspended_once) {
             finished_.emplace_back(id, outcome);
+        }
+        if (spare_requests_.size() < kSpareRequests) {
+            spare_requests_.push_back(std::move(node)); // node handles move without throwing: on failure it's just freed
         }
     }
 }
@@ -1024,29 +1084,49 @@ void sandbox_impl::abandon_request(request_id id, std::string_view why) {
     abandon_requests([id](const request_record& r) { return r.id == id; }, why);
 }
 
-request_record& sandbox_impl::start_request(request_kind kind, const effect_owner& owner, std::string label, int nargs, bool from_operation) {
+request_record& sandbox_impl::start_request(request_kind kind, const effect_owner& owner, std::string_view label, int nargs, bool from_operation) {
     lua_State* L = state_;
-    auto req = std::make_unique<request_record>();
+    // A finished request's map node and record when one is spare, else new ones.
+    decltype(requests_)::node_type node;
+    std::unique_ptr<request_record> fresh;
+    request_record* req = nullptr;
+    if (!spare_requests_.empty()) {
+        node = std::move(spare_requests_.back());
+        spare_requests_.pop_back();
+        req = node.mapped().get();
+        req->reset();
+    } else {
+        fresh = std::make_unique<request_record>();
+        req = fresh.get();
+    }
     req->id = request_ids_.next();
     req->kind = kind;
     req->owner = owner;
     req->owner.request = req->id;
-    req->label = std::move(label);
+    req->label.assign(label);
 
     luaL_checkstack(L, 5, "rhp: request setup"); // every caller runs protected on the main state (spawn checked it)
-    lua_State* co = lua_newthread(L);
-    lua_sethook(co, &sandbox_impl::count_hook, LUA_MASKCOUNT, static_cast<int>(check_interval()));
+    lua_State* co = nullptr;
+    if (!spare_threads_.empty()) {
+        std::tie(co, req->thread_ref) = spare_threads_.back();
+        spare_threads_.pop_back();
+    } else {
+        co = lua_newthread(L);
+        lua_getfield(L, LUA_REGISTRYINDEX, kRequestThreadsKey);
+        lua_pushvalue(L, -2);
+        lua_pushboolean(L, 1);
+        lua_rawset(L, -3);
+        lua_pop(L, 1);
+        req->thread_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+    }
+    // Requests check for cancel() (handlers only when a limit or cancel_scope::kEverything asks).
+    const bool request = kind == request_kind::kExec || kind == request_kind::kLoad || kind == request_kind::kCall || kind == request_kind::kTask;
+    arm_hook(co, (request && checks_requests()) || hook_everywhere());
     // lua_xmove never grows the destination: a new coroutine has room for about 20 values.
     if (lua_checkstack(co, nargs + 1) == 0) {
         req->start_error = make_error(errc::kLimitExceeded, std::format("{} arguments don't fit a coroutine stack", nargs));
     }
-    lua_getfield(L, LUA_REGISTRYINDEX, kRequestThreadsKey);
-    lua_pushvalue(L, -2);
-    lua_pushboolean(L, 1);
-    lua_rawset(L, -3);
-    lua_pop(L, 1);
     req->thread = co;
-    req->thread_ref = luaL_ref(L, LUA_REGISTRYINDEX);
     if (req->start_error) {
         lua_pop(L, nargs + 1); // the request ends at its first step
     } else {
@@ -1056,9 +1136,32 @@ request_record& sandbox_impl::start_request(request_kind kind, const effect_owne
     if (from_operation) {
         last_request_ = req->id;
     }
-    request_record& out = *req;
-    requests_.emplace(out.id, std::move(req));
-    return out;
+    requests_dirty_ = true;
+    if (node) {
+        node.key() = req->id;
+        requests_.insert(std::move(node));
+    } else {
+        requests_.emplace(req->id, std::move(fresh));
+    }
+    return *req;
+}
+
+std::string sandbox_impl::where_of(const request_record& req) const {
+    if (!req.label.empty()) {
+        return req.label;
+    }
+    const module_record* mod = record(req.owner.module);
+    const std::string_view name = mod != nullptr ? std::string_view{mod->name} : std::string_view{"?"};
+    switch (req.kind) {
+    case request_kind::kFrame: return std::format("{} (frame callback)", name);
+    case request_kind::kTimer: return std::format("{} (timer)", name);
+    case request_kind::kEvent: return std::format("{} (event {})", name, req.source);
+    case request_kind::kTask: return std::format("{} (task)", mod != nullptr && !mod->scratch ? name : std::string_view{"exec"});
+    case request_kind::kExec:
+    case request_kind::kLoad:
+    case request_kind::kCall: break;
+    }
+    return {};
 }
 
 std::optional<result<value_list>> sandbox_impl::step(request_record& req, int nargs) {
@@ -1085,6 +1188,7 @@ std::optional<result<value_list>> sandbox_impl::step(request_record& req, int na
         status = lua_resume(req.thread, from, nargs, &nresults);
     }
     req.running = false;
+    requests_dirty_ = true; // suspended with a new wake, or done
     const sticky_stop stop = req.budget.sticky;
 
     if (status == LUA_YIELD) {
@@ -1150,8 +1254,8 @@ result<value_list> sandbox_impl::complete(request_id id, result<int> outcome) {
         }
     }
 
-    if (!out && out.error().where.empty() && !req.label.empty()) {
-        out.error().where = req.label;
+    if (!out && out.error().where.empty()) {
+        out.error().where = where_of(req);
     }
     const task_record* t = req.kind == request_kind::kTask ? task(req.task_key) : nullptr;
     const bool cancelled_task = t != nullptr && t->cancel_requested;
@@ -1175,6 +1279,9 @@ result<value_list> sandbox_impl::complete(request_id id, result<int> outcome) {
     }
     if (req.suspended_once) {
         finished_.emplace_back(req.id, out);
+    }
+    if (spare_requests_.size() < kSpareRequests) {
+        spare_requests_.push_back(std::move(node)); // node handles move without throwing: on failure it's just freed
     }
     return out;
 }
@@ -1257,7 +1364,19 @@ void sandbox_impl::close_thread(request_record& req, bool failed) noexcept {
             (void)lua_closethread(req.thread, state_);
         });
     }
-    luaL_unref(state_, LUA_REGISTRYINDEX, req.thread_ref);
+    // A coroutine that returned normally is reusable: empty it and keep it for the next request.
+    bool kept = false;
+    if (!failed && !closing_lua_ && lua_status(req.thread) == LUA_OK && spare_threads_.size() < kSpareRequests) {
+        lua_settop(req.thread, 0);
+        try {
+            spare_threads_.emplace_back(req.thread, req.thread_ref);
+            kept = true;
+        } catch (...) { // out of memory: it's released instead
+        }
+    }
+    if (!kept) {
+        luaL_unref(state_, LUA_REGISTRYINDEX, req.thread_ref);
+    }
     req.thread_ref = kNoRef;
     req.thread = nullptr;
 }
@@ -1528,6 +1647,9 @@ void sandbox_impl::drain() {
 
 void sandbox_impl::resume_ready() {
     const steady::time_point now = script_now();
+    if (!requests_dirty_ && frame_ < requests_next_frame_ && now < requests_next_wake_) {
+        return; // every suspended request sleeps on: no walk over them
+    }
     std::vector<request_id> ready;
     for (const auto& [id, req] : requests_) {
         if (!req->running && (req->woken || (req->wake_frame != 0 && frame_ >= req->wake_frame) || (req->wake_time && now >= *req->wake_time))) {
@@ -1539,6 +1661,7 @@ void sandbox_impl::resume_ready() {
     std::ranges::rotate(ready, std::ranges::upper_bound(ready, last_resumed_));
     for (const request_id id : ready) {
         if (slice_deadline_ && steady::now() >= *slice_deadline_) {
+            requests_dirty_ = true;
             return; // the rest stay ready for the next pump()
         }
         if (const auto it = requests_.find(id); it != requests_.end() && !it->second->running) {
@@ -1546,6 +1669,23 @@ void sandbox_impl::resume_ready() {
             request_record& req = *it->second;
             const int nargs = req.start_args >= 0 ? std::exchange(req.start_args, -1) : 0; // a task's first resume
             (void)step(req, nargs);
+        }
+    }
+    requests_dirty_ = false;
+    requests_next_frame_ = std::numeric_limits<std::uint64_t>::max();
+    requests_next_wake_ = steady::time_point::max();
+    for (const auto& [id, req] : requests_) {
+        if (req->running) {
+            continue;
+        }
+        if (req->woken) {
+            requests_next_frame_ = 0; // woken during this pass: resumes at the next one
+        }
+        if (req->wake_frame != 0) {
+            requests_next_frame_ = std::min(requests_next_frame_, req->wake_frame);
+        }
+        if (req->wake_time) {
+            requests_next_wake_ = std::min(requests_next_wake_, *req->wake_time);
         }
     }
 }
@@ -1580,6 +1720,7 @@ result<void> sandbox_impl::install_lib(std::string_view name, c_function build, 
 }
 
 result<value_list> sandbox_impl::exec(std::string_view source, std::string_view chunk_name) {
+    const operation_scope operation{*this};
     drain();
     const std::string chunk = std::format("={}", chunk_name);
     result<value_list> out = value_list{};
@@ -1589,7 +1730,7 @@ result<value_list> sandbox_impl::exec(std::string_view source, std::string_view 
             out = std::unexpected{std::move(compiled).error()};
             return;
         }
-        request_record& req = start_request(request_kind::kExec, effect_owner{scratch_}, std::string{}, 0, true);
+        request_record& req = start_request(request_kind::kExec, effect_owner{scratch_}, {}, 0, true);
         if (auto done = step(req, 0)) {
             out = std::move(*done);
         }
@@ -1602,6 +1743,7 @@ result<value_list> sandbox_impl::exec(std::string_view source, std::string_view 
 }
 
 result<module_id> sandbox_impl::load(std::string_view name, std::string_view source) {
+    const operation_scope operation{*this};
     drain();
     if (!utils::is_dotted_name(name)) {
         return fail(errc::kInvalidArgument, std::format("'{}' is not a module name (dotted lowercase, e.g. combat.low_grav)", name));
@@ -1669,6 +1811,7 @@ result<module_id> sandbox_impl::load(std::string_view name, std::string_view sou
 }
 
 result<revision_id> sandbox_impl::reload(module_id id, std::string_view source) {
+    const operation_scope operation{*this};
     const module_record* found = record(id);
     if (found == nullptr || found->scratch) {
         return fail(errc::kNotFound, std::format("no module with id {}", id));
@@ -1741,6 +1884,7 @@ result<revision_id> sandbox_impl::rollback(module_id id, std::size_t steps) {
 }
 
 result<value_list> sandbox_impl::call(module_id id, std::string_view function, std::span<const value> args) {
+    const operation_scope operation{*this};
     drain();
     module_record* mod = record(id);
     if (mod == nullptr || mod->scratch) {
@@ -1843,6 +1987,7 @@ revert_report sandbox_impl::unload_module(module_record& mod) {
 }
 
 result<revert_report> sandbox_impl::unload(module_id id, bool forced) {
+    const operation_scope operation{*this};
     const module_record* found = record(id);
     if (found == nullptr) {
         return fail(errc::kNotFound, std::format("no module with id {}", id));
@@ -1907,6 +2052,7 @@ result<revert_report> sandbox_impl::revert_to(std::string_view tag) {
 }
 
 revert_report sandbox_impl::revert_all() {
+    const operation_scope operation{*this};
     const auto apply = [this] {
         revert_report report;
         std::vector<module_id> ids;

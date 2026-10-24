@@ -185,15 +185,13 @@ void sandbox_impl::spawn(lua_State* L) {
     refuse_while_closing(L, "rhp.spawn");
     const int nargs = lua_gettop(L) - 1;
     const std::uint64_t key = ++task_keys_;
-    const module_record* mod = record(current_.module);
-    std::string label = std::format("{} (task)", mod != nullptr && !mod->scratch ? mod->name : std::string{"exec"});
     // The function and its arguments go to the main stack, where start_request takes them from.
     // Checked here, so nothing raises on the main state while this coroutine runs.
     if (lua_checkstack(state_, nargs + 8) == 0) {
         stack{L}.raise(make_error(errc::kLimitExceeded, std::format("{} arguments are too many", nargs), "rhp.spawn"));
     }
     lua_xmove(L, state_, nargs + 1);
-    request_record& req = start_request(request_kind::kTask, effect_owner{current_.module, current_.revision}, label, nargs, false);
+    request_record& req = start_request(request_kind::kTask, effect_owner{current_.module, current_.revision}, {}, nargs, false);
     req.start_args = nargs;
     req.wake_frame = frame_ + 1; // never inside the spawner: at the next pump()
     req.task_key = key;
@@ -206,7 +204,7 @@ void sandbox_impl::spawn(lua_State* L) {
     tasks_.emplace(key, std::move(t));
     // Owned by the spawning request too, so a failed exec (or a failed handler under "report") takes
     // back what it spawned.
-    const std::uint64_t seq = record_effect(std::move(label), std::make_unique<task_effect>(*this, key));
+    const std::uint64_t seq = record_effect(where_of(req), std::make_unique<task_effect>(*this, key));
     task_record& rec = tasks_.at(key);
     rec.seq = seq;
     req.handler_seq = seq;
@@ -314,6 +312,7 @@ void sandbox_impl::finish_task(request_record& req, const result<value_list>* ou
     for (const request_id id : std::exchange(t->joiners, {})) {
         if (const auto it = requests_.find(id); it != requests_.end()) {
             it->second->woken = true;
+            requests_dirty_ = true;
         }
     }
     const std::uint64_t seq = t->seq;

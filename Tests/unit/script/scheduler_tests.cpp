@@ -982,7 +982,11 @@ TEST_CASE("a stopped patch handler falls back and faults its module at the next 
     }
 
     SECTION("cancel from another thread") {
-        sandbox box = make_box(out);
+        // Handler calls only check for cancel() under cancel_scope::kEverything (a patch handler
+        // hit from game code isn't a request).
+        Rhp::limits limits;
+        limits.cancel_checks = Rhp::cancel_scope::kEverything;
+        sandbox box = make_box(out, limits);
         const auto mod = box.load("tests.sched.spin_patch", kSpin);
         REQUIRE(mod.has_value());
         const float hit = with_canceller(box, std::nullopt, [] { return fx::damage(2.0f, 3); });
@@ -992,6 +996,48 @@ TEST_CASE("a stopped patch handler falls back and faults its module at the next 
         CHECK(box.status(*mod)->fault->code == errc::kCancelled);
     }
     CHECK(fx::damage.depth() == 0);
+}
+
+TEST_CASE("cancel_scope kEverything lets cancel() stop a frame callback stuck in a loop", "[script][scheduler]") {
+    capture out;
+    Rhp::limits limits;
+    limits.cancel_checks = Rhp::cancel_scope::kEverything;
+    sandbox box = make_box(out, limits);
+    const auto mod = box.load("tests.sched.spin_frame", "rhp.every_frame(function() while true do end end)");
+    REQUIRE(mod.has_value());
+    with_canceller(box, std::nullopt, [&] {
+        box.pump();
+        return 0;
+    });
+    CHECK(box.stats().handler_failures == 1);
+    // The default policy (report) undid that call only: the module and its callback stay.
+    CHECK(box.status(*mod)->state == module_state::kActive);
+    REQUIRE(box.unload(*mod));
+}
+
+TEST_CASE("by default requests check for cancel and handlers run unchecked", "[script][scheduler]") {
+    capture out;
+    sandbox box = make_box(out);
+    // A request (exec) stops; so does a task, which is a request of its own.
+    const auto spin = with_canceller(box, std::nullopt, [&] { return box.exec("while true do end"); });
+    REQUIRE_FALSE(spin.has_value());
+    CHECK(spin.error().code == errc::kCancelled);
+    const auto mod = box.load("tests.sched.spin_task", "t = rhp.spawn(function() while true do end end)");
+    REQUIRE(mod.has_value());
+    with_canceller(box, std::nullopt, [&] {
+        box.pump();
+        return 0;
+    });
+    CHECK(box.stats().tasks == 0); // the task ended, cancelled
+    CHECK(box.stats().handler_failures == 1);
+    REQUIRE(box.unload(*mod));
+    // A handler that finishes is unaffected: it ran without the hook.
+    const auto frames = box.load("tests.sched.count_frames", "rhp.every_frame(function() counter.value = counter.value + 1 end)");
+    REQUIRE(frames.has_value());
+    box.pump();
+    box.pump();
+    CHECK(fx::g_counter == 2);
+    REQUIRE(box.unload(*frames));
 }
 
 // ---- timers ---------------------------------------------------------------------------------------------------------

@@ -93,7 +93,10 @@ private:
     static decltype(auto) dispatch(Args&&... args) {
 #if RHP_ENABLE
         (void)registered_; // odr-use: instantiates the registration below
-        return state_.call(std::forward<Args>(args)...);
+        if (!state_.patched()) [[likely]] {
+            return Default(std::forward<Args>(args)...); // known here, so the compiler may inline it
+        }
+        return state_.call_below(nullptr, std::forward<Args>(args)...);
 #else
         return default_function(std::forward<Args>(args)...);
 #endif
@@ -107,7 +110,7 @@ private:
         auto& ctx = s.context();
         s.push_copy(fn_index);
         const int fn_ref = s.ref();
-        auto layer = std::make_unique<script::detail::lua_patch_layer<signature>>(ctx, ctx.current_owner(), fn_ref, state_, id);
+        auto layer = std::make_unique<script::detail::lua_patch_layer<signature>>(s, ctx.current_owner(), fn_ref, state_, id);
         return std::make_unique<script::detail::patch_effect<signature>>(state_, std::move(layer));
     }
 

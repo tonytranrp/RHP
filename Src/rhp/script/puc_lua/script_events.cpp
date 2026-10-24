@@ -102,7 +102,9 @@ int lua_rhp_publish(lua_State* L) {
 
 // rhp.wait_event(event [, timeout_ms]) → true, ... | false, "timeout".
 int lua_rhp_wait_event(lua_State* L) {
-    const std::string event{checked_name(L, 1, "rhp.wait_event")};
+    // A view of argument 1 (it stays on the stack): this function yields, and a yield may skip its
+    // frame without destructors (cmake/lua/lua_cxx.cpp), so nothing here may own memory.
+    const std::string_view event = checked_name(L, 1, "rhp.wait_event");
     std::optional<double> timeout;
     if (!lua_isnoneornil(L, 2)) {
         timeout = checked_ms(L, 2, "rhp.wait_event");
@@ -244,27 +246,32 @@ void sandbox_impl::enqueue(std::string_view event, const event_args& args) noexc
 }
 
 void sandbox_impl::deliver_now(std::string_view event, event_pusher args, module_id publisher, const value_list* values) {
-    // 1. Handlers, each as its own request. A snapshot: handlers may (un)subscribe.
+    // 1. Handlers, each as its own request. A snapshot of their keys: handlers may (un)subscribe, so
+    // each is looked up again before its call (where it was, unless the list changed).
     if (const auto it = subscriptions_.find(event); it != subscriptions_.end()) {
-        const std::vector<subscription> snapshot = it->second;
-        for (const subscription& sub : snapshot) {
+        std::vector<std::uint64_t> keys;
+        keys.reserve(it->second.size());
+        for (const subscription& sub : it->second) {
+            keys.push_back(sub.key);
+        }
+        for (std::size_t i = 0; i < keys.size(); ++i) {
             const auto now = subscriptions_.find(event);
             if (now == subscriptions_.end()) {
                 break;
             }
-            const auto live = std::ranges::find(now->second, sub.key, &subscription::key);
-            if (live == now->second.end() || live->paused) {
+            std::vector<subscription>& subs = now->second;
+            const auto live = i < subs.size() && subs[i].key == keys[i] ? subs.begin() + static_cast<std::ptrdiff_t>(i) : std::ranges::find(subs, keys[i], &subscription::key);
+            if (live == subs.end() || live->paused) {
                 continue;
             }
-            const module_record* mod = record(sub.owner.module);
-            std::string label = std::format("{} (event {})", mod != nullptr ? mod->name : "?", event);
+            const subscription sub = *live; // the list may change during the call
             lua_rawgeti(state_, LUA_REGISTRYINDEX, sub.fn_ref);
             stack s{state_};
             const int nargs = args(s);
-            request_record& req = start_request(request_kind::kEvent, sub.owner, std::move(label), nargs, false);
+            request_record& req = start_request(request_kind::kEvent, sub.owner, {}, nargs, false);
             req.handler_seq = sub.once ? 0 : sub.seq;
             req.policy = sub.policy;
-            req.source = std::string{event};
+            req.source.assign(event);
             if (sub.once) {
                 (void)ledger_.revert_entry(sub.seq); // spent once its call starts (the function is on the coroutine)
             }
@@ -292,6 +299,7 @@ void sandbox_impl::deliver_now(std::string_view event, event_pusher args, module
             luaL_unref(state_, LUA_REGISTRYINDEX, req->second->resume_ref);
             req->second->resume_ref = packed;
             req->second->woken = true;
+            requests_dirty_ = true;
         }
         release_interest(name);
     }

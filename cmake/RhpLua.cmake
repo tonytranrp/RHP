@@ -27,6 +27,12 @@ elseif(RHP_PLATFORM STREQUAL "WINDOWS")
     target_compile_definitions(rhp_lua PRIVATE _CRT_SECURE_NO_WARNINGS)
 endif()
 
+# Coroutine yields jump instead of throwing (cmake/lua/lua_cxx.cpp), except with the MSVC ABI,
+# whose longjmp unwinds like an exception.
+if(RHP_LUA_JUMP_YIELDS AND NOT MSVC)
+    target_compile_definitions(rhp_lua PRIVATE RHP_LUA_JUMP_YIELDS)
+endif()
+
 # API misuse asserts in Debug: a broken trampoline aborts loudly instead of corrupting the VM.
 target_compile_definitions(rhp_lua PUBLIC $<$<CONFIG:Debug>:LUA_USE_APICHECK>)
 

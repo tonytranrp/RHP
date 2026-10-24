@@ -12,10 +12,11 @@ option(RHP_WITH_TLS "TLS 1.3 for network endpoints (OpenSSL on desktop, Mbed TLS
 set(RHP_TLS_OPENSSL "AUTO" CACHE STRING "Use the system's OpenSSL (>= 3.0): AUTO (if found, desktop only), ON (required) or OFF")
 set_property(CACHE RHP_TLS_OPENSSL PROPERTY STRINGS AUTO ON OFF)
 option(RHP_TLS_MBEDTLS "Build the Mbed TLS backend (fetched; the mobile backend and the fallback without OpenSSL)" ON)
+option(RHP_LUA_JUMP_YIELDS "Coroutine yields jump (_longjmp) instead of throwing; errors still throw. Ignored with the MSVC ABI" ON)
 option(RHP_FUZZ "Build Tests/fuzz as libFuzzer executables (Clang only); without it they are ctest replay drivers" OFF)
 set(RHP_SANITIZE "" CACHE STRING "Sanitizers to enable: 'address;undefined', 'address' (MSVC) or 'thread'")
 
-# The stage this tree implements, recorded in the installed package (Rhp_STAGE). RHP has no
+# The stage this tree implements, recorded in the installed package (rhp_STAGE). RHP has no
 # release numbers; the wire protocol has its own revision (wire/ops.hpp).
 set(RHP_STAGE "stage-8")
 

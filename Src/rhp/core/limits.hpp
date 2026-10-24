@@ -4,6 +4,22 @@
 
 namespace Rhp {
 
+// Which script runs check, every limits::cancel_check_instructions Lua instructions, for cancel().
+// The check is a hook that traps every Lua instruction while it is armed (a tight loop runs about
+// half as fast), so by default only requests pay for it. The instruction, wall-time and time-slice
+// limits arm it for every run whatever this says.
+enum class cancel_scope : std::uint8_t {
+    // Nothing checks: cancel() and a client's cancel stop a request only before it starts or
+    // resumes (a suspended one), never while its code runs. The fastest; for trusted scripts.
+    kNone,
+    // exec / load / call / reload / rollback and rhp.spawn tasks, the coroutines they create and
+    // the C++ they call: what a client's cancel and sandbox::cancel(request) stop. Handler calls
+    // (timers, frame callbacks, events, patch handlers hit from game code) run unchecked.
+    kRequests,
+    // Every run, handlers included: sandbox::cancel() also stops a handler stuck in a loop.
+    kEverything,
+};
+
 // Structural, so it can be a template argument: Rhp::config<>::limits<Rhp::limits{ .memory = 64_MiB }>.
 // 0 usually means unlimited / off (some fields differ: see each). Defaults follow the decided policy:
 // unlimited, run to completion.
@@ -24,6 +40,7 @@ struct limits {
     std::uint32_t backoff_max_ms = 30'000;
     std::uint32_t gateway_idle_ms = 5u * 60u * 1000u;
     std::uint32_t cancel_check_instructions = 1'000;
+    cancel_scope cancel_checks = cancel_scope::kRequests; // which runs check for cancel() (see cancel_scope)
     std::uint32_t event_queue = 65'536; // events queued per sandbox for its next pump() (other threads' fires, rhp.publish); 0 = unlimited
 
     [[nodiscard]] constexpr bool operator==(const limits&) const = default;

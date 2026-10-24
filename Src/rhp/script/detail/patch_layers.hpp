@@ -217,7 +217,9 @@ private:
 // ---- Lua-backed layer --------------------------------------------------------------------------
 
 // Userdata behind the `original` function handed to a patch handler. Valid only while the
-// handler runs; afterwards `frame` is null and calling `original` raises an error.
+// handler runs; afterwards `frame` is null and calling `original` raises an error. One per layer,
+// made with it: a call points it at its frame and restores what it held (a re-entrant call of the
+// same layer) when it ends.
 struct original_token {
     void* frame = nullptr;
 };
@@ -232,10 +234,20 @@ class lua_patch_layer<R(Args...)> final : public patch_layer<R(Args...)> {
 public:
     using state_type = point_state<R(Args...)>;
 
-    lua_patch_layer(context& ctx, const effect_owner& owner, int fn_ref, state_type& state, std::string_view id)
-        : patch_layer<R(Args...)>(std::this_thread::get_id()), ctx_(ctx), owner_(owner), fn_ref_(fn_ref), state_(state), id_(id) {}
+    // Made while rhp.patch runs on `s`: builds the layer's `original` (a closure over its token).
+    lua_patch_layer(stack& s, const effect_owner& owner, int fn_ref, state_type& state, std::string_view id)
+        : patch_layer<R(Args...)>(std::this_thread::get_id()), ctx_(s.context()), owner_(owner), fn_ref_(fn_ref), state_(state), id_(id) {
+        token_ = static_cast<original_token*>(s.push_userdata(sizeof(original_token), kOriginalTokenKey));
+        token_->frame = nullptr;
+        s.push_function(&original, 1); // original, holding the token as its upvalue
+        original_ref_ = s.ref();
+    }
 
-    ~lua_patch_layer() override { stack{ctx_.main_state()}.unref(fn_ref_); }
+    ~lua_patch_layer() override {
+        const stack s{ctx_.main_state()};
+        s.unref(original_ref_);
+        s.unref(fn_ref_);
+    }
 
     R invoke(Args... args) override {
         frame f{this, std::tuple<std::remove_reference_t<Args>&...>{args...}, {}};
@@ -269,12 +281,13 @@ private:
         stack s{L};
         auto* f = static_cast<frame*>(s.to_light_userdata(1));
         lua_patch_layer& self = *f->self;
-        s.push_ref(self.fn_ref_); // the handler
-        auto* token = static_cast<original_token*>(s.push_userdata(sizeof(original_token), kOriginalTokenKey));
+        s.push_ref(self.fn_ref_);       // the handler
+        s.push_ref(self.original_ref_); // original
+        original_token* token = self.token_;
+        void* const outer = token->frame; // set when the handler re-entered its own patch point
         token->frame = f;
         // Runs on success and while a Lua error unwinds through this frame alike.
-        const utils::scope_guard expire{[token]() noexcept { token->frame = nullptr; }};
-        s.push_function(&original, 1); // original, holding the token as its upvalue
+        const utils::scope_guard expire{[token, outer]() noexcept { token->frame = outer; }};
         std::apply([&](auto&... a) { (push(s, a), ...); }, f->args);
         s.call_unprotected(1 + static_cast<int>(sizeof...(Args)), std::is_void_v<R> ? 0 : 1);
         if constexpr (!std::is_void_v<R>) {
@@ -293,7 +306,9 @@ private:
     // `original(...)` inside a handler: calls the layer below this one, or the C++ default.
     static int original(lua_State* L) {
         stack s{L};
-        auto* token = static_cast<original_token*>(s.to_userdata(stack::upvalue_index(1), kOriginalTokenKey));
+        // The upvalue is always this layer's token: the closure is built in the constructor and
+        // scripts can't reach upvalues (no debug library).
+        auto* token = static_cast<original_token*>(s.to_light_userdata(stack::upvalue_index(1)));
         if (token == nullptr || token->frame == nullptr) {
             s.raise(make_error(errc::kInvalidArgument, "original() is only valid while its patch handler runs"));
         }
@@ -342,6 +357,8 @@ private:
     context& ctx_;
     effect_owner owner_;
     int fn_ref_;
+    int original_ref_ = -2; // LUA_NOREF until built
+    original_token* token_ = nullptr;
     state_type& state_;
     std::string_view id_;
 };

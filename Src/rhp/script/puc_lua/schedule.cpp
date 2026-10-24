@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cstdint>
 #include <format>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -224,6 +225,7 @@ std::uint64_t sandbox_impl::add_timer(lua_State* L, double ms, int fn_index, boo
     entry.times = repeating ? opts.times : std::optional<std::uint32_t>{1};
     entry.policy = opts.on_error.value_or(options_.handler_errors);
     schedule_.emplace(key, std::move(entry));
+    schedule_dirty_ = true;
     const std::uint64_t seq = record_effect(std::move(label), std::make_unique<schedule_effect>(*this, key));
     if (const auto it = schedule_.find(key); it != schedule_.end()) {
         it->second.seq = seq;
@@ -246,6 +248,7 @@ std::uint64_t sandbox_impl::add_frames(lua_State* L, std::uint64_t every, int fn
     entry.times = opts.times;
     entry.policy = opts.on_error.value_or(options_.handler_errors);
     schedule_.emplace(key, std::move(entry));
+    schedule_dirty_ = true;
     const std::uint64_t seq =
         record_effect(every == 1 ? std::string{"rhp.every_frame"} : std::format("rhp.every_frames {}", every), std::make_unique<schedule_effect>(*this, key));
     if (const auto it = schedule_.find(key); it != schedule_.end()) {
@@ -280,6 +283,7 @@ void sandbox_impl::set_paused(lua_State* L, std::uint64_t seq, bool paused) {
                 return;
             }
             e->paused = paused;
+            schedule_dirty_ = true;
             if (e->kind == schedule_kind::kTimer) {
                 const steady::time_point now = script_now();
                 if (paused) {
@@ -310,6 +314,7 @@ void sandbox_impl::reschedule(lua_State* L, std::uint64_t seq, double interval) 
         }
         stack{L}.raise(make_error(errc::kNotFound, std::format("no timer or frame callback {} of this module", seq), "rhp.reschedule"));
     }
+    schedule_dirty_ = true;
     if (e->kind == schedule_kind::kTimer) {
         e->interval = milliseconds(interval);
         e->due = script_now() + e->interval;
@@ -373,6 +378,9 @@ void sandbox_impl::push_timers(lua_State* L) {
 // runs wait for the next pump(); an entry an earlier call paused or rescheduled is checked again.
 void sandbox_impl::fire_schedule() {
     const steady::time_point now = script_now();
+    if (!schedule_dirty_ && frame_ < schedule_next_frame_ && now < schedule_next_due_) {
+        return; // nothing is due: no walk over idle timers
+    }
     std::vector<std::uint64_t> frames;
     std::vector<std::pair<steady::time_point, std::uint64_t>> timers;
     for (const auto& [key, e] : schedule_) {
@@ -393,6 +401,20 @@ void sandbox_impl::fire_schedule() {
     }
     for (const auto& [when, key] : timers) {
         fire_entry(key, now);
+    }
+    // The calls above moved their entries on (and may have added, paused or rescheduled others).
+    schedule_dirty_ = false;
+    schedule_next_frame_ = std::numeric_limits<std::uint64_t>::max();
+    schedule_next_due_ = steady::time_point::max();
+    for (const auto& [key, e] : schedule_) {
+        if (e.paused) {
+            continue;
+        }
+        if (e.kind == schedule_kind::kFrames) {
+            schedule_next_frame_ = std::min(schedule_next_frame_, e.next_frame);
+        } else {
+            schedule_next_due_ = std::min(schedule_next_due_, e.due);
+        }
     }
 }
 
@@ -422,14 +444,12 @@ void sandbox_impl::fire_entry(std::uint64_t key, steady::time_point now) {
     const std::uint64_t seq = e.seq;
     const handler_error_policy policy = e.policy;
     const bool frames = e.kind == schedule_kind::kFrames;
-    const module_record* mod = record(owner.module);
-    std::string label = std::format("{} ({})", mod != nullptr ? mod->name : "?", frames ? "frame callback" : "timer");
     lua_rawgeti(state_, LUA_REGISTRYINDEX, e.fn_ref);
-    request_record& req = start_request(frames ? request_kind::kFrame : request_kind::kTimer, owner, std::move(label), 0, false);
+    request_record& req = start_request(frames ? request_kind::kFrame : request_kind::kTimer, owner, {}, 0, false);
     req.schedule_key = key;
     req.handler_seq = seq;
     req.policy = policy;
-    req.source = frames ? "frame" : "timer";
+    req.source.assign(frames ? "frame" : "timer");
     // Looked up again: start_request allocates, and a finalizer it triggers may have removed the entry.
     if (const auto again = schedule_.find(key); again != schedule_.end()) {
         again->second.active = req.id;

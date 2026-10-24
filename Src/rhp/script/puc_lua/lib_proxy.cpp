@@ -14,15 +14,10 @@ namespace Rhp::script::detail {
 
 namespace {
 
-// Upvalues: 1 members, 2 getters. Args: proxy, key.
-int lib_index(lua_State* L) {
+// __index of the members table, for keys it doesn't hold: variables. Upvalue: 1 getters. Args: members, key.
+int lib_var_index(lua_State* L) {
     lua_pushvalue(L, 2);
-    if (lua_rawget(L, lua_upvalueindex(1)) != LUA_TNIL) {
-        return 1;
-    }
-    lua_pop(L, 1);
-    lua_pushvalue(L, 2);
-    if (lua_rawget(L, lua_upvalueindex(2)) == LUA_TFUNCTION) {
+    if (lua_rawget(L, lua_upvalueindex(1)) == LUA_TFUNCTION) {
         lua_call(L, 0, 1);
         return 1;
     }
@@ -59,12 +54,21 @@ void make_lib_proxy(stack& s, std::string_view label) {
     const int getters = setters - 1;
     const int members = setters - 2;
 
+    // Reads resolve functions and sub-libs straight from the members table (Lua's own table lookup, no
+    // C call); a key it lacks falls through to the getters. The table stays unreachable from scripts:
+    // only the proxy's locked metatable holds it.
+    lua_createtable(L, 0, 1);
+    lua_pushvalue(L, getters);
+    lua_pushcclosure(L, &lib_var_index, 1);
+    lua_setfield(L, -2, "__index");
+    lua_pushliteral(L, "locked");
+    lua_setfield(L, -2, "__metatable");
+    lua_setmetatable(L, members);
+
     lua_newuserdatauv(L, 0, 0); // the proxy: userdata, so rawset/rawget/pairs can't bypass the metatable
     const int proxy = lua_gettop(L);
     lua_createtable(L, 0, 6);
     lua_pushvalue(L, members);
-    lua_pushvalue(L, getters);
-    lua_pushcclosure(L, &lib_index, 2);
     lua_setfield(L, -2, "__index");
     lua_pushvalue(L, setters);
     s.push_string(label);

@@ -370,8 +370,16 @@ bool stack::push_handle(const void* type_tag, const void* data, std::size_t size
 
 void* stack::push_userdata(std::size_t size, std::string_view key) const {
     void* memory = lua_newuserdatauv(state_, size, 0);
-    const std::string k{key};
-    luaL_setmetatable(state_, k.c_str());
+    // luaL_setmetatable needs a C string; keys are short literals, so a small buffer avoids allocation.
+    char buffer[96];
+    if (key.size() < sizeof(buffer)) {
+        std::memcpy(buffer, key.data(), key.size());
+        buffer[key.size()] = '\0';
+        luaL_setmetatable(state_, buffer);
+    } else {
+        const std::string k{key};
+        luaL_setmetatable(state_, k.c_str());
+    }
     return memory;
 }
 

@@ -150,6 +150,21 @@ struct request_record {
     std::string source{}; // the event name, or "timer" / "frame" / "task"
     handler_error_policy policy = handler_error_policy::kReport;
     std::optional<error> start_error{}; // set up but can't start (its arguments didn't fit): fails at its first step
+
+    // Back to a new record for the next request (records are pooled): every field to its default,
+    // the strings keeping their buffers.
+    void reset() noexcept {
+        std::string l = std::move(label);
+        std::string s = std::move(source);
+        std::string w = std::move(wait_event);
+        *this = request_record{};
+        l.clear();
+        s.clear();
+        w.clear();
+        label = std::move(l);
+        source = std::move(s);
+        wait_event = std::move(w);
+    }
 };
 
 enum class schedule_kind : std::uint8_t {
@@ -390,8 +405,14 @@ private:
 
     void open_libraries();
     void open_stage7_libraries(); // the task metatable (tasks.cpp)
+    // The hook: armed on every run when hook_everywhere() (a limit needs it, or cancel_checks is
+    // kEverything), else on request coroutines and, while an operation runs, the main thread.
     void reset_hook() noexcept;
+    void arm_hook(lua_State* L, bool armed) noexcept;
+    [[nodiscard]] bool hook_everywhere() const noexcept;
+    [[nodiscard]] bool checks_requests() const noexcept; // cancel_checks isn't kNone
     [[nodiscard]] std::uint32_t check_interval() const noexcept;
+    struct operation_scope;
     void check_cancels() noexcept;
     // Consumes a pending cancel(request) for `id`; a request with one is ended instead of resumed.
     [[nodiscard]] bool take_cancel(request_id id);
@@ -401,7 +422,11 @@ private:
 
     // Requests. start_request moves the function and `nargs` arguments on top of the main stack
     // into a new coroutine; step runs it until it finishes (the result), fails, or suspends (nullopt).
-    request_record& start_request(request_kind kind, const effect_owner& owner, std::string label, int nargs, bool from_operation);
+    // `label` names the request in errors; handlers (timers, frame callbacks, events, tasks) pass none
+    // and get one from where_of() when they fail.
+    request_record& start_request(request_kind kind, const effect_owner& owner, std::string_view label, int nargs, bool from_operation);
+    // Where a failure of `req` happened when the script gives no location.
+    [[nodiscard]] std::string where_of(const request_record& req) const;
     std::optional<result<value_list>> step(request_record& req, int nargs);
     result<value_list> complete(request_id id, result<int> outcome);
     result<value_list> complete_load(module_record& mod, revision_id revision, lua_State* thread);
@@ -471,8 +496,9 @@ private:
     revert_report unload_module(module_record& mod);
 
     sandbox_options options_;
-    std::pmr::memory_resource* memory_;
+    std::pmr::memory_resource* memory_; // nullptr: the C heap (realloc)
     std::size_t memory_used_ = 0;
+    bool timed_ = false; // limits.wall_ms: runs read the clock
     lua_State* state_ = nullptr;
     int loader_ref_ = kNoRef;
 
@@ -487,11 +513,25 @@ private:
     // Scheduler.
     id_generator<request_id> request_ids_;
     std::map<request_id, std::unique_ptr<request_record>> requests_;
+    // Finished requests' map nodes (record included) and coroutines, reused by start_request.
+    std::vector<decltype(requests_)::node_type> spare_requests_;
+    std::vector<std::pair<lua_State*, int>> spare_threads_; // (thread, registry ref)
+    std::uint32_t operations_ = 0;                          // operations running (operation_scope)
+    // The earliest frame / script time a suspended request wakes at, so an idle pump() doesn't walk
+    // them all. Anything that may wake one sooner (a request starting or suspending, a delivery)
+    // sets requests_dirty_ and the next resume pass walks them anyway.
+    bool requests_dirty_ = true;
+    std::uint64_t requests_next_frame_ = 0;
+    steady::time_point requests_next_wake_{};
     request_id last_request_;
     request_id last_resumed_; // round robin in resume_ready()
     std::uint64_t frame_ = 0;
     std::map<std::uint64_t, schedule_entry> schedule_;
     std::uint64_t schedule_keys_ = 0;
+    // Likewise for timers and frame callbacks: added, resumed or rescheduled entries set schedule_dirty_.
+    bool schedule_dirty_ = true;
+    std::uint64_t schedule_next_frame_ = 0;
+    steady::time_point schedule_next_due_{};
     std::map<std::string, std::vector<subscription>, std::less<>> subscriptions_;
     std::map<std::string, std::vector<request_id>, std::less<>> waiters_; // rhp.wait_event
     std::map<std::string, event_state*, std::less<>> attached_;
