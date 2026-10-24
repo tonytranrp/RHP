@@ -4,6 +4,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <format>
 #include <span>
 #include <string>
@@ -32,15 +33,12 @@ namespace {
     return reinterpret_cast<std::uint8_t*>(p);
 }
 
-// kScriptSignatureDomain ‖ source.
+// kScriptSignatureDomain || source.
 [[nodiscard]] std::vector<std::byte> script_message(std::string_view source) {
-    std::vector<std::byte> message;
-    message.reserve(kScriptSignatureDomain.size() + source.size());
-    for (const char c : kScriptSignatureDomain) {
-        message.push_back(static_cast<std::byte>(c));
-    }
-    for (const char c : source) {
-        message.push_back(static_cast<std::byte>(c));
+    std::vector<std::byte> message(kScriptSignatureDomain.size() + source.size());
+    std::memcpy(message.data(), kScriptSignatureDomain.data(), kScriptSignatureDomain.size());
+    if (!source.empty()) {
+        std::memcpy(message.data() + kScriptSignatureDomain.size(), source.data(), source.size());
     }
     return message;
 }
@@ -49,35 +47,42 @@ namespace {
     return make_error(errc::kBadSignature, std::move(message), "security.signature");
 }
 
-// The 64-byte Monocypher secret key (seed ‖ public key) for `seed`, and the public key. The seed
-// is copied first: crypto_ed25519_key_pair wipes the one it is given.
-struct expanded_key {
-    std::array<std::byte, 64> secret{};
-    std::array<std::byte, ed25519_public_key::kSize> pub{};
+// Monocypher's 64-byte secret key: seed || public key. Wiped when it goes.
+struct monocypher_secret {
+    std::array<std::byte, 64> bytes{};
 
-    explicit expanded_key(std::span<const std::byte, ed25519_secret_key::kSize> seed) noexcept {
-        std::array<std::byte, ed25519_secret_key::kSize> copy{};
-        std::copy(seed.begin(), seed.end(), copy.begin());
-        crypto_ed25519_key_pair(u8(secret.data()), u8(pub.data()), u8(copy.data()));
+    monocypher_secret(std::span<const std::byte, ed25519_secret_key::kSize> seed, std::span<const std::byte, ed25519_public_key::kSize> pub) noexcept {
+        std::copy(seed.begin(), seed.end(), bytes.begin());
+        std::copy(pub.begin(), pub.end(), bytes.begin() + ed25519_secret_key::kSize);
     }
 
-    ~expanded_key() { crypto_wipe(u8(secret.data()), secret.size()); }
+    ~monocypher_secret() { crypto_wipe(u8(bytes.data()), bytes.size()); }
 
-    expanded_key(const expanded_key&) = delete;
-    expanded_key& operator=(const expanded_key&) = delete;
+    monocypher_secret(const monocypher_secret&) = delete;
+    monocypher_secret& operator=(const monocypher_secret&) = delete;
 };
 
 } // namespace
 
+std::array<std::byte, ed25519_public_key::kSize> ed25519_secret_key::derive_public(std::span<const std::byte, kSize> seed) noexcept {
+    // crypto_ed25519_key_pair wipes the seed it is given: it gets a copy.
+    std::array<std::byte, kSize> copy{};
+    std::copy(seed.begin(), seed.end(), copy.begin());
+    std::array<std::byte, 64> secret{};
+    std::array<std::byte, ed25519_public_key::kSize> pub{};
+    crypto_ed25519_key_pair(u8(secret.data()), u8(pub.data()), u8(copy.data()));
+    crypto_wipe(u8(secret.data()), secret.size());
+    return pub;
+}
+
 ed25519_public_key ed25519_secret_key::public_key() const {
-    const expanded_key k{seed_};
-    return *ed25519_public_key::from_bytes(k.pub);
+    return *ed25519_public_key::from_bytes(public_);
 }
 
 std::array<std::byte, ed25519_secret_key::kSignatureSize> ed25519_secret_key::sign(std::span<const std::byte> message) const {
-    const expanded_key k{seed_};
+    const monocypher_secret secret{seed_, public_};
     std::array<std::byte, kSignatureSize> signature{};
-    crypto_ed25519_sign(u8(signature.data()), u8(k.secret.data()), u8(message.data()), message.size());
+    crypto_ed25519_sign(u8(signature.data()), u8(secret.bytes.data()), u8(message.data()), message.size());
     return signature;
 }
 

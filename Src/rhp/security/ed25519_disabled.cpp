@@ -14,6 +14,10 @@
 
 namespace Rhp::security {
 
+std::array<std::byte, ed25519_public_key::kSize> ed25519_secret_key::derive_public(std::span<const std::byte, kSize>) noexcept {
+    return {};
+}
+
 ed25519_public_key ed25519_secret_key::public_key() const {
     return {};
 }

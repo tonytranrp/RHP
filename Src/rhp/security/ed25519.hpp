@@ -57,7 +57,11 @@ public:
     [[nodiscard]] bool empty() const noexcept { return !set_; }
 
 private:
+    // The public half, derived once from the seed (deriving it costs as much as a signature).
+    [[nodiscard]] static std::array<std::byte, ed25519_public_key::kSize> derive_public(std::span<const std::byte, kSize> seed) noexcept;
+
     std::array<std::byte, kSize> seed_{};
+    std::array<std::byte, ed25519_public_key::kSize> public_{};
     bool set_ = false;
 };
 

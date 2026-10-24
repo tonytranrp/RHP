@@ -63,6 +63,7 @@ result<void> encode_frame(frame_header header, utils::bytes_view payload, utils:
     header.flags = sealer != nullptr ? static_cast<std::uint8_t>(header.flags | mac_bit) : static_cast<std::uint8_t>(header.flags & ~mac_bit);
 
     const std::size_t start = out.size();
+    out.reserve(start + kHeaderSize + payload.size() + kCrcSize + (sealer != nullptr ? kMacSize : 0)); // one allocation at most
     out.resize(start + kHeaderSize);
     write_header(std::span<std::byte, kHeaderSize>{out.mutable_view().data() + start, kHeaderSize}, header);
     out.append(payload);

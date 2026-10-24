@@ -53,3 +53,19 @@ TEST_CASE("crc32c incremental equals one-shot for every split", "[utils][crc32c]
         REQUIRE(hasher.value() == whole);
     }
 }
+
+TEST_CASE("crc32c matches the portable tables for every length and alignment", "[utils][crc32c]") {
+    // Whichever implementation crc32c picked (CPU instruction or tables), the tails and odd
+    // alignments must agree with the table version byte for byte.
+    std::array<std::byte, 300> data{};
+    for (std::size_t i = 0; i < data.size(); ++i) {
+        data[i] = static_cast<std::byte>((i * 131u + 17u) & 0xFFu);
+    }
+    for (std::size_t offset = 0; offset < 8; ++offset) {
+        for (std::size_t length = 0; length + offset <= data.size(); length += 7) {
+            const std::span<const std::byte> view{data.data() + offset, length};
+            REQUIRE(crc32c(view) == Rhp::utils::crc32c_portable(view));
+            REQUIRE(crc32c(view, 0x12345678u) == Rhp::utils::crc32c_portable(view, 0x12345678u));
+        }
+    }
+}

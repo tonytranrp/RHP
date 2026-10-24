@@ -55,6 +55,7 @@ result<ed25519_secret_key> ed25519_secret_key::from_bytes(std::span<const std::b
     }
     ed25519_secret_key k;
     std::ranges::copy(bytes, k.seed_.begin());
+    k.public_ = derive_public(k.seed_);
     k.set_ = true;
     return k;
 }

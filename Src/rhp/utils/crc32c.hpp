@@ -7,8 +7,11 @@
 namespace Rhp::utils {
 
 // CRC-32C (Castagnoli, reflected polynomial 0x82F63B78) - per-frame integrity on non-TLS links.
-// Software slicing-by-8; hardware (SSE4.2 / ARMv8 CRC) dispatch can slot in behind the same API.
+// The CPU's CRC32C instruction where it has one (SSE4.2 on x86-64, the ARMv8 CRC extension when the
+// compiler targets it), else slicing-by-8 tables; both give the same result.
 [[nodiscard]] std::uint32_t crc32c(bytes_view data, std::uint32_t crc = 0) noexcept;
+// Always the tables (what crc32c falls back to): for tests and comparisons.
+[[nodiscard]] std::uint32_t crc32c_portable(bytes_view data, std::uint32_t crc = 0) noexcept;
 
 // Incremental form: feed chunks, then read value().
 class crc32c_hasher {

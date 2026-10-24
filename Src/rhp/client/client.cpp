@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
@@ -57,6 +58,14 @@ constexpr std::size_t kChunkOverhead = 1024;
         return k != 0 ? k : 1;
     }
     return (static_cast<std::uint64_t>(clock::now().time_since_epoch().count()) & kMask) | 1u;
+}
+
+// splitmix64's finalizer: a bijection, so a counter run through it never repeats a key.
+[[nodiscard]] constexpr std::uint64_t mix64(std::uint64_t x) noexcept {
+    x += 0x9e37'79b9'7f4a'7c15u;
+    x = (x ^ (x >> 30)) * 0xbf58'476d'1ce4'e5b9u;
+    x = (x ^ (x >> 27)) * 0x94d0'49bb'1331'11ebu;
+    return x ^ (x >> 31);
 }
 
 } // namespace
@@ -170,7 +179,7 @@ public:
         std::unique_lock lock{mutex_};
         const std::uint64_t req = ++last_req_;
         pending_[req];
-        const wire::envelope env{req, random_key(), std::move(body)};
+        const wire::envelope env{req, next_key(), std::move(body)};
         post([this, code, message = Rhp::to_value(env), req] { send_or_queue(code, message, req); });
         const bool timed = setup_.options.request_timeout.count() > 0;
         const auto deadline = timed ? clock::now() + setup_.options.request_timeout : clock::time_point::max();
@@ -261,7 +270,7 @@ public:
         pending_[req].callback = std::move(done);
         start(lock);
         lock.unlock();
-        const wire::envelope env{req, random_key(), std::move(body)};
+        const wire::envelope env{req, next_key(), std::move(body)};
         post([this, code, message = Rhp::to_value(env), req] {
             if (setup_.options.request_timeout.count() > 0) {
                 auto& t = timers_[req];
@@ -285,7 +294,7 @@ public:
         const std::size_t frame_room = setup_.limits.max_frame > kChunkOverhead * 2 ? setup_.limits.max_frame - kChunkOverhead : kChunkOverhead;
         const std::size_t chunk = std::clamp<std::size_t>(setup_.options.blob_chunk, 1, frame_room);
         const std::size_t window = std::max<std::size_t>(setup_.options.blob_window, 1);
-        const std::uint64_t transfer = random_key();
+        const std::uint64_t transfer = next_key();
 
         // Chunks go out while fewer than `window` are unanswered; the first error stops the rest.
         struct progress {
@@ -746,7 +755,7 @@ private:
             }
         }
         for (const auto& [req, name] : sends) {
-            const wire::envelope env{req, random_key(), Rhp::to_value(wire::subscribe_request{name})};
+            const wire::envelope env{req, next_key(), Rhp::to_value(wire::subscribe_request{name})};
             send_or_queue(wire::op::kSubscribe, Rhp::to_value(env), req);
         }
     }
@@ -930,6 +939,16 @@ private:
     net::io_context::timer redial_timer_{io_};
     std::uint32_t attempts_ = 0;
     std::mt19937_64 rng_;
+
+    // Idempotency keys and blob transfer ids: a random seed once, then a counter through mix64 (no
+    // system call per request). Unique within this client, which is all the host compares them in.
+    const std::uint64_t key_seed_ = random_key();
+    std::atomic<std::uint64_t> key_count_{0};
+    [[nodiscard]] std::uint64_t next_key() noexcept {
+        constexpr std::uint64_t kMask = 0x7fff'ffff'ffff'ffffu; // wire integers are signed 64-bit
+        const std::uint64_t k = mix64(key_seed_ + key_count_.fetch_add(1, std::memory_order_relaxed)) & kMask;
+        return k != 0 ? k : 1;
+    }
 
     mutable std::mutex mutex_;
     std::condition_variable cv_;

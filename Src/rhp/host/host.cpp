@@ -156,6 +156,9 @@ struct inbound {
     std::string platform; // kOpened
     error reason;         // kClosed, kAuthFailed
     bool tls = false;     // kOpened, kResumed
+    // kExec / kLoad / kReload: the signature check, made on the network thread (an Ed25519 check
+    // takes about a tenth of a millisecond: not on the game's frame). Empty when it wasn't made.
+    std::optional<result<std::string>> signer;
 };
 
 // Pump thread → network thread.
@@ -975,6 +978,14 @@ private:
         in.req = env->req;
         in.arrival = arrival;
         in.body = std::move(env->body);
+        if (setup_.verify && (code == wire::op::kExec || code == wire::op::kLoad || code == wire::op::kReload)) {
+            // The pump decodes the same body: same source, same signature.
+            const value* source = in.body.find("source");
+            if (const std::string* text = source != nullptr ? source->get_if<std::string>() : nullptr) {
+                const value* signature = in.body.find("signature");
+                in.signer = setup_.verify(*text, signature != nullptr ? *signature : value{});
+            }
+        }
         if (!to_pump(std::move(in))) {
             s.close(make_error(errc::kLimitExceeded, "the host is not keeping up with this session's requests", "host"));
         }
@@ -1592,12 +1603,13 @@ private:
 
     // Who signed `source`: the signer's name, "" for unsigned code an observe session may run, or
     // kBadSignature. Records the source's hash and signer in the audit record.
-    [[nodiscard]] result<std::string> check_signature(const pump_session& sess, std::string_view module, std::string_view source, const value& signature) {
+    [[nodiscard]] result<std::string> check_signature(const pump_session& sess, const inbound& in, std::string_view module, std::string_view source,
+                                                      const value& signature) {
         if (audit_ != nullptr) {
             audit_->module = module;
             audit_->hash = security::to_hex(security::blake2b_256(source));
         }
-        auto who = setup_.verify ? setup_.verify(source, signature) : result<std::string>{std::string{}};
+        auto who = in.signer ? *in.signer : setup_.verify ? setup_.verify(source, signature) : result<std::string>{std::string{}};
         if (!who && signature.is_nil() && sess.granted == role::kObserve) {
             who = std::string{}; // observe can't mutate anything: unsigned code is allowed
         }
@@ -1756,7 +1768,7 @@ private:
             if (!m) {
                 return bad_request(m.error());
             }
-            if (auto who = check_signature(sess, "", m->source, m->signature); !who) {
+            if (auto who = check_signature(sess, in, "", m->source, m->signature); !who) {
                 return bad_request(who.error());
             }
             run_tracked(rt, in, {}, [&]() -> result<value> {
@@ -1773,7 +1785,7 @@ private:
             if (!m) {
                 return bad_request(m.error());
             }
-            if (auto who = check_signature(sess, m->name, m->source, m->signature); !who) {
+            if (auto who = check_signature(sess, in, m->name, m->source, m->signature); !who) {
                 return bad_request(who.error());
             }
             // The module id is only known once load() returns: track it through `loaded` (a load of a
@@ -1828,7 +1840,7 @@ private:
                     return bad_request(m.error());
                 }
                 reload = std::move(*m);
-                if (auto who = check_signature(sess, ref_text(reload->module), reload->source, reload->signature); !who) {
+                if (auto who = check_signature(sess, in, ref_text(reload->module), reload->source, reload->signature); !who) {
                     return bad_request(who.error());
                 }
             } else {
