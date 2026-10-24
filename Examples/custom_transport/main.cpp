@@ -18,27 +18,25 @@ namespace metered {
 std::atomic<std::size_t> g_bytes_sent{0};
 std::atomic<std::size_t> g_links{0};
 
-// A link that forwards to another link and counts what goes out.
-class counting_link final : public Rhp::net::link {
+// A link that forwards to another link and counts what goes out. link_decorator forwards the rest,
+// including what the session's security depends on (loopback, encrypted, channel_binding).
+class counting_link final : public Rhp::net::link_decorator {
 public:
-    explicit counting_link(std::unique_ptr<Rhp::net::link> inner) : inner_(std::move(inner)) { ++g_links; }
+    explicit counting_link(std::unique_ptr<Rhp::net::link> inner) : link_decorator(std::move(inner)) { ++g_links; }
 
-    void start(Rhp::net::link_handler& handler) override { inner_->start(handler); }
     void send(Rhp::utils::byte_buffer bytes) override {
         g_bytes_sent += bytes.size();
-        inner_->send(std::move(bytes));
+        link_decorator::send(std::move(bytes));
     }
-    void close() noexcept override { inner_->close(); }
-    [[nodiscard]] std::string peer() const override { return "metered:" + inner_->peer(); }
-
-private:
-    std::unique_ptr<Rhp::net::link> inner_;
+    [[nodiscard]] std::string peer() const override { return "metered:" + inner().peer(); }
 };
 
-// The transport policy: a name, listen() and dial(). Checked by Rhp::net::transport where the
-// config names it.
+// The transport policy: a name, whether it crosses a network, listen() and dial(). Checked by
+// Rhp::net::transport where the config names it. `network` decides the TLS rules: true for anything
+// another machine can reach (a game network's sockets, a relay), false for in-process, IPC or a cable.
 struct transport {
     static constexpr std::string_view name = "metered";
+    static constexpr bool network = false; // it wraps the in-process loopback transport
 
     static Rhp::result<std::unique_ptr<Rhp::net::listener>> listen(Rhp::net::io_context& io, const Rhp::endpoint& ep, Rhp::net::accept_fn on_accept) {
         return Rhp::net::loopback::listen(io, ep, [on_accept = std::move(on_accept)](std::unique_ptr<Rhp::net::link> link) {

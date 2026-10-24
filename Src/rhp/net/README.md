@@ -21,13 +21,14 @@ Transports: ordered, reliable byte streams between a host and a client. Namespac
 ```cpp
 struct my_transport {
     static constexpr std::string_view name = "my";
+    static constexpr bool network = true; // reaches other machines: TLS rules apply (false: in-process, IPC, cable)
     static Rhp::result<std::unique_ptr<Rhp::net::listener>> listen(Rhp::net::io_context&, const Rhp::endpoint&, Rhp::net::accept_fn);
     static void dial(Rhp::net::io_context&, const Rhp::endpoint&, Rhp::net::connect_fn);
 };
 using cfg = Rhp::config<>::transport<my_transport>;   // checked by Rhp::net::transport here
 ```
 
-Links you hand out implement `Rhp::net::link`; use `io_context::post` to get back onto the context's thread.
+`network` is required: a transport without it doesn't compile, so none is silently treated as local. Links you hand out implement `Rhp::net::link`; a link that wraps another derives from `Rhp::net::link_decorator`, which forwards `loopback()`, `encrypted()` and `channel_binding()` (the session's security depends on them). Use `io_context::post` to get back onto the context's thread.
 
 ## Rules
 

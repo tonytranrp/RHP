@@ -27,6 +27,7 @@ namespace config_tests_fixtures {
 // The smallest user transport the concept accepts.
 struct my_transport {
     static constexpr std::string_view name = "mine";
+    static constexpr bool network = false;
     static Rhp::result<std::unique_ptr<Rhp::net::listener>> listen(Rhp::net::io_context&, const Rhp::endpoint&, Rhp::net::accept_fn) {
         return Rhp::fail(Rhp::errc::kDisabled);
     }

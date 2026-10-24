@@ -16,6 +16,7 @@ namespace Rhp::net {
 // listens on fails with kNotFound. Both ends may run on different io_contexts and threads.
 struct loopback {
     static constexpr std::string_view name = "loopback";
+    static constexpr bool network = false; // in-process
 
     static result<std::unique_ptr<listener>> listen(io_context& io, const endpoint& ep, accept_fn on_accept);
     static void dial(io_context& io, const endpoint& ep, connect_fn on_connect);

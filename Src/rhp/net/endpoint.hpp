@@ -7,6 +7,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <type_traits>
 
 #include <rhp/core/result.hpp>
 #include <rhp/net/io_context.hpp>
@@ -109,24 +110,29 @@ struct endpoint {
 using accept_fn = std::function<void(std::unique_ptr<link> accepted)>;
 using connect_fn = std::function<void(result<std::unique_ptr<link>> connected)>;
 
+// A transport says whether it reaches other machines: `static constexpr bool network = ...;`.
+// true (TCP, WebSocket, reliable UDP, a game network's sockets): the TLS address rules of
+// tls_mode::kAuto apply — TLS to and from non-loopback addresses unless the endpoint says
+// insecure_lan. false (in-process, IPC, a cable): plaintext is accepted. Required, because a
+// transport that forgot it would otherwise speak plaintext over the network.
+template <class T>
+concept declares_network = requires {
+    requires std::same_as<std::remove_cv_t<decltype(T::network)>, bool>;
+    typename std::bool_constant<T::network>; // a constant expression
+};
+
 // Transport policy for Rhp::config<>::transport<...>. All of it runs on the io_context's thread:
 //   listen() binds now (errors return at once) and calls on_accept for every new link;
 //   dial() connects asynchronously and calls on_connect exactly once (unless the context dies).
 template <class T>
-concept transport = requires(io_context& io, const endpoint& ep, accept_fn on_accept, connect_fn on_connect) {
+concept transport = declares_network<T> && requires(io_context& io, const endpoint& ep, accept_fn on_accept, connect_fn on_connect) {
     { T::name } -> std::convertible_to<std::string_view>;
     { T::listen(io, ep, std::move(on_accept)) } -> std::same_as<result<std::unique_ptr<listener>>>;
     { T::dial(io, ep, std::move(on_connect)) } -> std::same_as<void>;
 };
 
-// A transport that reaches other machines (`static constexpr bool network = true;`, like TCP): the
-// TLS address rules of tls_mode::kAuto apply to it. Transports without the member are local.
-template <class T>
-inline constexpr bool is_network_v = false;
-
-template <class T>
-    requires requires { T::network; }
-inline constexpr bool is_network_v<T> = static_cast<bool>(T::network);
+template <transport T>
+inline constexpr bool is_network_v = T::network;
 
 // A transport as function pointers, so sessions, hosts and clients stay out of templates.
 struct transport_ops {
@@ -137,7 +143,7 @@ struct transport_ops {
 };
 
 template <transport T>
-inline constexpr transport_ops transport_ops_for{T::name, &T::listen, &T::dial, is_network_v<T>};
+inline constexpr transport_ops transport_ops_for{T::name, &T::listen, &T::dial, T::network};
 
 } // namespace Rhp::net
 

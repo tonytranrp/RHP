@@ -161,6 +161,7 @@ private:
 
 struct cuttable {
     static constexpr std::string_view name = "cuttable";
+    static constexpr bool network = false; // wraps loopback
 
     static Rhp::result<std::unique_ptr<Rhp::net::listener>> listen(Rhp::net::io_context& io, const Rhp::endpoint& ep, Rhp::net::accept_fn on_accept) {
         return Rhp::net::loopback::listen(io, ep, [&io, on_accept = std::move(on_accept)](std::unique_ptr<Rhp::net::link> l) {

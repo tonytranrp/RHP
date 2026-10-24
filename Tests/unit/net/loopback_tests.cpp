@@ -1,4 +1,6 @@
+#include <array>
 #include <memory>
+#include <span>
 #include <string>
 #include <thread>
 #include <utility>
@@ -144,4 +146,49 @@ TEST_CASE("loopback: ends on two threads", "[net][loopback]") {
     host_thread.request_stop();
     host_thread.join();
     REQUIRE(poll_until({&p.client_io}, [&] { return at_client.closed; }));
+}
+
+namespace link_decorator_fixtures {
+
+// A link with every security property set, as an encrypted local stream would report them.
+class fake_link final : public net_link {
+public:
+    void start(Rhp::net::link_handler&) override {}
+    void send(Rhp::utils::byte_buffer) override { ++sent; }
+    void close() noexcept override {}
+    [[nodiscard]] std::string peer() const override { return "fake:1"; }
+    [[nodiscard]] bool loopback() const noexcept override { return true; }
+    [[nodiscard]] bool encrypted() const noexcept override { return true; }
+    [[nodiscard]] std::span<const std::byte> channel_binding() const noexcept override { return binding; }
+
+    int sent = 0;
+    std::array<std::byte, 3> binding{std::byte{1}, std::byte{2}, std::byte{3}};
+};
+
+// Counts what it sends and changes nothing else.
+class metering final : public Rhp::net::link_decorator {
+public:
+    using link_decorator::link_decorator;
+    void send(Rhp::utils::byte_buffer bytes) override {
+        ++metered;
+        link_decorator::send(std::move(bytes));
+    }
+
+    int metered = 0;
+};
+
+} // namespace link_decorator_fixtures
+
+TEST_CASE("link_decorator forwards the security properties of the link it wraps", "[net][link]") {
+    auto inner = std::make_unique<link_decorator_fixtures::fake_link>();
+    auto* raw = inner.get();
+    link_decorator_fixtures::metering wrapped{std::move(inner)};
+    wrapped.send(buffer_of("abc"));
+    CHECK(wrapped.metered == 1);
+    CHECK(raw->sent == 1);
+    CHECK(wrapped.peer() == "fake:1");
+    CHECK(wrapped.loopback());
+    CHECK(wrapped.encrypted());
+    REQUIRE(wrapped.channel_binding().size() == 3);
+    CHECK(wrapped.channel_binding().data() == raw->binding.data());
 }

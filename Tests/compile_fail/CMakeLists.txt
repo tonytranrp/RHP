@@ -17,3 +17,5 @@ rhp_add_compile_fail(patch_point_bad_id SOURCE patch_point_bad_id.cpp LINKS Rhp:
 rhp_add_compile_fail(patch_point_borrowed_result SOURCE patch_point_borrowed_result.cpp LINKS Rhp::script)
 rhp_add_compile_fail(patch_point_borrowed_optional SOURCE patch_point_borrowed_optional.cpp LINKS Rhp::script)
 rhp_add_compile_fail(var_const SOURCE var_const.cpp LINKS Rhp::script)
+rhp_add_compile_fail(transport_without_network SOURCE transport_without_network.cpp LINKS Rhp::config)
+rhp_add_compile_fail(transport_network_not_constant SOURCE transport_network_not_constant.cpp LINKS Rhp::config)
