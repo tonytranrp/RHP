@@ -49,7 +49,7 @@ struct welcome {
 
 // The payload of kResume (dialing side, on a new connection) and of the kWelcome that answers it:
 // which session continues, and `proof` = the sender's frame MAC over a label and the NEW
-// connection's channel binding — so a relay that terminates TLS on the new connection can't carry
+// connection's channel binding - so a relay that terminates TLS on the new connection can't carry
 // a resume through. Both frames are sealed with the session's keys and carry the control counter in
 // `seq`, so a replayed one is refused.
 struct resume {
@@ -194,7 +194,7 @@ struct emit_message {
     value data;
 };
 
-// One delivery of a subscribed event (host → client, envelope req 0).
+// One delivery of a subscribed event (host -> client, envelope req 0).
 struct event_message {
     std::string name;
     module_id module;           // the publishing module (0: C++ or the sandbox itself)

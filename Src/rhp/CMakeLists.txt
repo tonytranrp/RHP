@@ -26,3 +26,5 @@ target_sources(rhp INTERFACE
     FILES rhp.hpp
 )
 target_link_libraries(rhp INTERFACE Rhp::utils Rhp::core Rhp::script Rhp::audit Rhp::host Rhp::client)
+set_target_properties(rhp PROPERTIES EXPORT_NAME rhp FOLDER "rhp")
+set_property(GLOBAL APPEND PROPERTY RHP_INSTALL_TARGETS rhp)

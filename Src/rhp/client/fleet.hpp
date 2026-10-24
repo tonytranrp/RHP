@@ -12,6 +12,7 @@
 #include <utility>
 #include <vector>
 
+#include <rhp/build_config.hpp>
 #include <rhp/client/client.hpp>
 #include <rhp/client/detail/fleet_engine.hpp>
 #include <rhp/core/convert.hpp>

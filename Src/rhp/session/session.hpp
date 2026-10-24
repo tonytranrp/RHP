@@ -43,8 +43,8 @@ struct options {
     // it. The side that dialed brings a new link (resume()); the other side waits for it to arrive
     // (handler::resume_target).
     bool resumable = false;
-    // Host side that dialed (reverse mode): open with an unsealed ping, so the side that accepted —
-    // which speaks first in the handshake — learns from the first byte that this link is plaintext
+    // Host side that dialed (reverse mode): open with an unsealed ping, so the side that accepted -
+    // which speaks first in the handshake - learns from the first byte that this link is plaintext
     // (a TLS dialer opens with its ClientHello). Handshaking sessions ignore pings.
     bool speaks_first = false;
 };

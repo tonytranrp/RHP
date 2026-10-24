@@ -15,3 +15,7 @@ add_executable(rhp-cli src/main.cpp)
 target_link_libraries(rhp-cli PRIVATE rhp_cli_core Rhp::cli11 Rhp::replxx)
 rhp_set_warnings(rhp-cli)
 set_target_properties(rhp-cli PROPERTIES FOLDER "tools")
+
+if(RHP_INSTALL)
+    install(TARGETS rhp-cli RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}" COMPONENT tools)
+endif()

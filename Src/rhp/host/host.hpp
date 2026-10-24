@@ -10,6 +10,7 @@
 #include <type_traits>
 #include <utility>
 
+#include <rhp/build_config.hpp>
 #include <rhp/config/config.hpp>
 #include <rhp/core/error.hpp>
 #include <rhp/core/log.hpp>
@@ -23,18 +24,14 @@
 #include <rhp/script/lib.hpp>
 #include <rhp/script/sandbox.hpp>
 
-#if !defined(RHP_ENABLE)
-#define RHP_ENABLE 1
-#endif
-
 namespace Rhp {
 
 // A program that accepts remote Lua: it listens on an endpoint (or, in reverse mode, dials one),
-// authenticates every connection against its authenticator (keys → identities → roles), checks
+// authenticates every connection against its authenticator (keys -> identities -> roles), checks
 // every script's signature against its trusted signers, runs each identity's scripts in that
 // identity's own sandbox on the thread that calls pump(), and streams print / rhp.emit / results
 // back. When an identity's last session ends, everything it did is reverted and its sandbox closed
-// — except modules an admin pinned.
+// - except modules an admin pinned.
 //
 //   Rhp::host<> host{Rhp::endpoint::listen("127.0.0.1", 7777),
 //                    Rhp::security::keyring{{"dev", *Rhp::security::key::from_env("RHP_KEY_DEV"), Rhp::role::kAdmin}},

@@ -10,7 +10,7 @@
 
 namespace Rhp::utils {
 
-// Standard base64 (RFC 4648 §4, `+/`, `=` padding): key files, the WebSocket handshake and HTTP
+// Standard base64 (RFC 4648 section 4, `+/`, `=` padding): key files, the WebSocket handshake and HTTP
 // Authorization fields all use this one alphabet.
 inline constexpr std::string_view kBase64Alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 

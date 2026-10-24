@@ -11,6 +11,8 @@ rhp_add_module(core
         role.hpp
         subscription.hpp
         value.hpp
+    GENERATED_HEADERS
+        rhp/build_config.hpp
     SOURCES
         log.cpp
         value.cpp

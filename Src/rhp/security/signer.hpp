@@ -15,8 +15,8 @@ namespace Rhp::security {
 // chooses its own format.
 //
 //   S::name                                  "ed25519"
-//   S::key::sign(source)       → result<value>        the signature to attach (nil = none)
-//   S::trust::verify(source, signature) → result<std::string>   the signer's name, or kBadSignature
+//   S::key::sign(source)       -> result<value>        the signature to attach (nil = none)
+//   S::trust::verify(source, signature) -> result<std::string>   the signer's name, or kBadSignature
 //
 // The host runs unsigned code only for observe sessions (they can't mutate anything); a signature
 // that is present must verify, whatever the role.
@@ -33,7 +33,7 @@ concept signer = std::copy_constructible<typename S::key> && std::copy_construct
 inline constexpr std::string_view kScriptSignatureDomain{"rhp/script\0", 11};
 
 // The explicit opt-out: no signatures, every authenticated role runs any code (Stage 3 behaviour).
-// Typed on purpose — `Rhp::config<>::signer<Rhp::security::unsigned_scripts>` — so a host never
+// Typed on purpose - `Rhp::config<>::signer<Rhp::security::unsigned_scripts>` - so a host never
 // runs unsigned code by accident.
 struct unsigned_scripts {
     static constexpr std::string_view name = "unsigned";

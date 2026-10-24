@@ -99,7 +99,7 @@ struct convert<T> {
     static value to_value(T i) {
         if constexpr (std::is_unsigned_v<T> && sizeof(T) >= sizeof(std::int64_t)) {
             // Values above INT64_MAX don't fit Lua integers; send them as numbers.
-            if (i > static_cast<T>(std::numeric_limits<std::int64_t>::max())) {
+            if (i > static_cast<T>((std::numeric_limits<std::int64_t>::max)())) {
                 return static_cast<double>(i);
             }
         }

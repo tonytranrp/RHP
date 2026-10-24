@@ -29,7 +29,7 @@ struct point_descriptor {
     std::uint64_t (*off_thread_misses)() = nullptr;
 };
 
-// Process-wide id → point table. Returns false if another point type already uses the id; that
+// Process-wide id -> point table. Returns false if another point type already uses the id; that
 // id then refuses patches (kAlreadyLoaded) because it can't know which point was meant.
 bool register_point(const point_descriptor* point) noexcept;
 

@@ -9,9 +9,11 @@ endif()
 
 add_library(rhp_lua STATIC "${PROJECT_SOURCE_DIR}/cmake/lua/lua_cxx.cpp")
 add_library(Rhp::lua ALIAS rhp_lua)
-target_include_directories(rhp_lua SYSTEM PUBLIC "${lua_SOURCE_DIR}")
+# Build tree only: an installed RHP ships the archive (Rhp::script needs it at link time), not lua.h.
+target_include_directories(rhp_lua SYSTEM PUBLIC "$<BUILD_INTERFACE:${lua_SOURCE_DIR}>")
 target_compile_features(rhp_lua PUBLIC cxx_std_23)
-set_target_properties(rhp_lua PROPERTIES FOLDER "third_party")
+set_target_properties(rhp_lua PROPERTIES FOLDER "third_party" EXPORT_NAME lua)
+set_property(GLOBAL APPEND PROPERTY RHP_INSTALL_THIRD_PARTY_TARGETS rhp_lua)
 
 # Platform feature switches understood by upstream luaconf.h (CMake-level, not C++ #ifdefs).
 if(RHP_PLATFORM STREQUAL "LINUX" OR RHP_PLATFORM STREQUAL "ANDROID")

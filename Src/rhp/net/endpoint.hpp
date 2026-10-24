@@ -112,7 +112,7 @@ using connect_fn = std::function<void(result<std::unique_ptr<link>> connected)>;
 
 // A transport says whether it reaches other machines: `static constexpr bool network = ...;`.
 // true (TCP, WebSocket, reliable UDP, a game network's sockets): the TLS address rules of
-// tls_mode::kAuto apply — TLS to and from non-loopback addresses unless the endpoint says
+// tls_mode::kAuto apply - TLS to and from non-loopback addresses unless the endpoint says
 // insecure_lan. false (in-process, IPC, a cable): plaintext is accepted. Required, because a
 // transport that forgot it would otherwise speak plaintext over the network.
 template <class T>

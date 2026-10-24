@@ -99,7 +99,7 @@ class point_state;
 //
 // Threading: layers are pushed, removed and invoked only on their owner thread. A call walks the
 // stack under the mutex, picks the highest layer owned by the calling thread and invokes it
-// unlocked — safe because only that same thread could free it. Layers owned by other threads
+// unlocked - safe because only that same thread could free it. Layers owned by other threads
 // are skipped and counted as off-thread misses; with none left, the C++ default runs.
 template <class R, class... Args>
 class point_state<R(Args...)> {

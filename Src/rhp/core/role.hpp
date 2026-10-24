@@ -9,9 +9,9 @@
 namespace Rhp {
 
 // What a caller may do. Ordered: every role includes everything the roles below it can do.
-//   kObserve — run code, read state, call pure bindings
-//   kPatch   — mutate: var writes, reversible/irreversible bindings, patch points, load/revert
-//   kAdmin   — revert_all, blobs, admin-tagged bindings, the full Lua standard library
+//   kObserve - run code, read state, call pure bindings
+//   kPatch   - mutate: var writes, reversible/irreversible bindings, patch points, load/revert
+//   kAdmin   - revert_all, blobs, admin-tagged bindings, the full Lua standard library
 enum class role : std::uint8_t {
     kObserve,
     kPatch,

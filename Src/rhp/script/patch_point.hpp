@@ -6,6 +6,7 @@
 #include <string_view>
 #include <utility>
 
+#include <rhp/build_config.hpp>
 #include <rhp/core/result.hpp>
 #include <rhp/script/detail/context.hpp>
 #include <rhp/script/detail/patch_layers.hpp>
@@ -14,10 +15,6 @@
 #include <rhp/script/stack.hpp>
 #include <rhp/utils/fixed_string.hpp>
 #include <rhp/utils/function_traits.hpp>
-
-#if !defined(RHP_ENABLE)
-#define RHP_ENABLE 1
-#endif
 
 namespace Rhp {
 

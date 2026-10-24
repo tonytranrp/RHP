@@ -47,6 +47,11 @@ rhp_add_test_suite(rhp_config_tests
     LINKS
         Rhp::config
 )
+# What CMake decided, to compare with what a config user sees (the macros arrive through Rhp::config).
+target_compile_definitions(rhp_config_tests PRIVATE
+    RHP_TEST_EXPECT_TLS_OPENSSL=${RHP_BUILD_CONFIG_TLS_HAS_OPENSSL}
+    RHP_TEST_EXPECT_TLS_MBEDTLS=${RHP_BUILD_CONFIG_TLS_HAS_MBEDTLS}
+)
 
 rhp_add_test_suite(rhp_event_tests
     SOURCES

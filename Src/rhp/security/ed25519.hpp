@@ -69,7 +69,7 @@ struct signing_key {
     std::string name;
     ed25519_secret_key secret;
 
-    // {signer = name, sig = 64 bytes} over kScriptSignatureDomain ‖ source.
+    // {signer = name, sig = 64 bytes} over kScriptSignatureDomain || source.
     [[nodiscard]] result<value> sign(std::string_view source) const;
 };
 

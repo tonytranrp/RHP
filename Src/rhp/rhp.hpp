@@ -1,6 +1,6 @@
 #pragma once
 
-// RHP — Remote Hot Patch. One include for everything the library offers: every public header of
+// RHP - Remote Hot Patch. One include for everything the library offers: every public header of
 // every module.
 
 #include <rhp/audit/sinks.hpp>

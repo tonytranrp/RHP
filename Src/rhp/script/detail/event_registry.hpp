@@ -102,7 +102,7 @@ struct event_descriptor {
     event_state* state = nullptr;
 };
 
-// Process-wide name → event table. Returns false if another event type already uses the name; that
+// Process-wide name -> event table. Returns false if another event type already uses the name; that
 // name then refuses subscriptions (kAlreadyLoaded) because it can't know which event was meant.
 bool register_event(const event_descriptor* event) noexcept;
 

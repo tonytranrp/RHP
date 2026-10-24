@@ -111,7 +111,7 @@ void push(stack& s, const T& v) {
         s.push_bool(v);
     } else if constexpr (detail::lua_integer<U>) {
         if constexpr (std::is_unsigned_v<U> && sizeof(U) >= sizeof(std::int64_t)) {
-            if (v > static_cast<U>(std::numeric_limits<std::int64_t>::max())) {
+            if (v > static_cast<U>((std::numeric_limits<std::int64_t>::max)())) {
                 s.push_number(static_cast<double>(v));
                 return;
             }

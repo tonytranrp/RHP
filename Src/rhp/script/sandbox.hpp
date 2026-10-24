@@ -13,6 +13,7 @@
 #include <string_view>
 #include <vector>
 
+#include <rhp/build_config.hpp>
 #include <rhp/core/convert.hpp>
 #include <rhp/core/error.hpp>
 #include <rhp/core/ids.hpp>
@@ -26,10 +27,6 @@
 #include <rhp/script/lib.hpp>
 #include <rhp/script/stack.hpp>
 #include <rhp/script/stubs.hpp>
-
-#if !defined(RHP_ENABLE)
-#define RHP_ENABLE 1
-#endif
 
 namespace Rhp::script {
 

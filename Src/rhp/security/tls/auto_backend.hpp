@@ -1,5 +1,6 @@
 #pragma once
 
+#include <rhp/build_config.hpp>
 #include <rhp/security/tls/mbedtls.hpp>
 #include <rhp/security/tls/openssl.hpp>
 #include <rhp/security/tls/tls.hpp>

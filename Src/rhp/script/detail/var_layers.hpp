@@ -16,7 +16,7 @@ namespace Rhp::script::detail {
 //
 // Each write remembers the value it replaced. Undoing the newest write restores that value;
 // undoing an older write hands its remembered value to the next newer write instead, so the
-// variable always ends up exactly as if the undone write had never happened — whatever order
+// variable always ends up exactly as if the undone write had never happened - whatever order
 // modules (or sandboxes) are reverted in.
 //
 // Threading: RHP's own reads (read), writes (assign) and undos of the variable are serialized by one

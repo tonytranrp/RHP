@@ -8,7 +8,7 @@ namespace Rhp::literals {
 namespace detail {
 
 consteval std::size_t scale(unsigned long long value, unsigned long long factor) {
-    if (value > std::numeric_limits<std::size_t>::max() / factor) {
+    if (value > (std::numeric_limits<std::size_t>::max)() / factor) {
         throw "Rhp size literal overflows std::size_t";
     }
     return static_cast<std::size_t>(value * factor);

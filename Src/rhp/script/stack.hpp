@@ -84,7 +84,7 @@ public:
     [[nodiscard]] std::optional<std::int64_t> to_integer(int index) const noexcept;    // integers and integral floats
     [[nodiscard]] std::optional<double> to_number(int index) const noexcept;           // numbers only
     [[nodiscard]] std::optional<std::string_view> to_string(int index) const noexcept; // strings only, no coercion
-    // nil, booleans, numbers, strings and (acyclic, ≤ 64 deep) tables. Functions etc. fail.
+    // nil, booleans, numbers, strings and (acyclic, <= 64 deep) tables. Functions etc. fail.
     [[nodiscard]] result<value> to_value(int index) const;
 
     // ---- upvalues of the running C closure ---------------------------------------------------
@@ -118,7 +118,7 @@ public:
     // (a binding trampoline, or a function run by run_protected).
     void call_unprotected(int nargs, int nresults) const;
     // Runs fn(L) in protected mode with `data` as its only argument (a light userdata, read with
-    // to_light_userdata(1)). Any Lua error — including out-of-memory while pushing — comes back as
+    // to_light_userdata(1)). Any Lua error - including out-of-memory while pushing - comes back as
     // an Rhp::error with a traceback instead of reaching Lua's panic handler. The stack is restored.
     [[nodiscard]] result<void> run_protected(c_function fn, void* data) const;
     [[nodiscard]] void* to_light_userdata(int index) const noexcept;

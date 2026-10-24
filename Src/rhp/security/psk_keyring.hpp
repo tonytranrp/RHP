@@ -26,10 +26,10 @@ struct psk_identity {
 
 // PSK mutual challenge-response with keyed BLAKE2b (Monocypher):
 //
-//   client → hello     {key = name, nonce = Nc}
-//   host   → challenge {nonce = Nh, proof = MAC(psk, "rhp/host"   ‖ T)}     T = name ‖ Nc ‖ Nh
-//   client → response  {proof = MAC(psk, "rhp/client" ‖ T)}                  (after checking the host's proof)
-//   frame keys: MAC(psk, "rhp/c2h" ‖ T) and MAC(psk, "rhp/h2c" ‖ T), 32 bytes each
+//   client -> hello     {key = name, nonce = Nc}
+//   host   -> challenge {nonce = Nh, proof = MAC(psk, "rhp/host"   || T)}     T = name || Nc || Nh
+//   client -> response  {proof = MAC(psk, "rhp/client" || T)}                  (after checking the host's proof)
+//   frame keys: MAC(psk, "rhp/c2h" || T) and MAC(psk, "rhp/h2c" || T), 32 bytes each
 //
 // Under TLS, T also ends with the connection's channel binding (tls-exporter): both ends of one
 // TLS connection share it, a relay with two TLS connections has two, so its proofs never match.

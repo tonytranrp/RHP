@@ -10,7 +10,7 @@ namespace Rhp::exec {
 
 // I/O threading policy for Rhp::config<>::io<...>: who runs the network.
 //   start(body) runs `body` (the network loop, which returns once its stop_token is signalled) on
-//   the runner's thread, or not at all when kOwnsThread is false — then host.pump() and the
+//   the runner's thread, or not at all when kOwnsThread is false - then host.pump() and the
 //   client's blocking calls poll the network themselves. stop() signals and joins.
 template <class R>
 concept io_runner = std::default_initializable<R> && requires(R& r, std::function<void(std::stop_token)> body) {
@@ -20,7 +20,7 @@ concept io_runner = std::default_initializable<R> && requires(R& r, std::functio
 };
 
 // The default: RHP owns one std::jthread running the network. Requests are read, acknowledged and
-// cancelled even while pump() is stuck in a script — the only way a cancel can stop a runaway
+// cancelled even while pump() is stuck in a script - the only way a cancel can stop a runaway
 // loop on the pump thread.
 class owned_io_thread {
 public:
@@ -56,7 +56,7 @@ private:
 };
 
 // No threads at all: host.pump() polls the network, a client's blocking call runs it while it
-// waits. Single-threaded and deterministic (tests, engines that own every thread) — but a script
+// waits. Single-threaded and deterministic (tests, engines that own every thread) - but a script
 // stuck in pump() also stops the network, so a cancel can't reach it and heartbeats lapse.
 struct zero_threads {
     static constexpr bool kOwnsThread = false;

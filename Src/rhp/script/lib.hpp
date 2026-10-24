@@ -103,7 +103,7 @@ inline constexpr bool invocable_with_args_v = false;
 template <class G, class... Args>
 inline constexpr bool invocable_with_args_v<G, utils::type_list<Args...>> = std::invocable<G, std::remove_cvref_t<Args>&...>;
 
-// How undo<G> is fed: kResult → G(result), kArgs → G(args...), kInvalid → compile error.
+// How undo<G> is fed: kResult -> G(result), kArgs -> G(args...), kInvalid -> compile error.
 enum class undo_feed : std::uint8_t {
     kNone,
     kResult,
@@ -233,7 +233,7 @@ consteval bool name_free(std::string_view name) {
 //       ::handle<"entity", game::entity_id, &game::is_alive>           // opaque userdata + validity check
 //       ::sub<Rhp::lib<"debug">::fn<"dump", &game::dump_state>>;
 //
-// Names are Lua identifiers and unique within a lib — both checked where you write them.
+// Names are Lua identifiers and unique within a lib - both checked where you write them.
 // Whether every parameter/return type crosses the Lua boundary is checked at
 // sandbox::install<L>() (handles may be declared after the functions that use them).
 template <utils::fixed_string Name, class... Entries>

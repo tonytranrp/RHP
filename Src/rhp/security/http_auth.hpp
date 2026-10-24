@@ -23,9 +23,9 @@
 // carries its own proof instead:
 //
 //   Authorization: RHP <key-name>,<unix-seconds>,<base64 16-byte nonce>,<base64 MAC>
-//   MAC = keyed-BLAKE2b-256(psk, "rhp/http\0" ‖ le64 seconds ‖ for each of key name, nonce,
-//         method, target, X-RHP-Signature, Content-Type: le64 length ‖ bytes ‖ le64 body length ‖ body
-//         [‖ X-RHP-Channel and the channel binding, each as le64 length ‖ bytes, when the header is set])
+//   MAC = keyed-BLAKE2b-256(psk, "rhp/http\0" || le64 seconds || for each of key name, nonce,
+//         method, target, X-RHP-Signature, Content-Type: le64 length || bytes || le64 body length || body
+//         [|| X-RHP-Channel and the channel binding, each as le64 length || bytes, when the header is set])
 //
 // The host accepts a proof within kHttpSkew of its clock, once (http_replay_guard). The PSK never
 // leaves either end.
@@ -37,9 +37,9 @@
 //
 // Answers: every answer to an authenticated request carries
 //
-//   X-RHP-Proof: base64 keyed-BLAKE2b-256(answer key, "rhp/http-answer\0" ‖ le64 status ‖
-//                le64 length ‖ Content-Type ‖ le64 length ‖ body)
-//   answer key = keyed-BLAKE2b-256(psk, "rhp/http-answer-key\0" ‖ the request's MAC)
+//   X-RHP-Proof: base64 keyed-BLAKE2b-256(answer key, "rhp/http-answer\0" || le64 status ||
+//                le64 length || Content-Type || le64 length || body)
+//   answer key = keyed-BLAKE2b-256(psk, "rhp/http-answer-key\0" || the request's MAC)
 //
 // so a client (verify_http_answer) knows the answer came unmodified from a holder of the key, for
 // this very request. Without binding or a checked certificate, a relay can still read the traffic.

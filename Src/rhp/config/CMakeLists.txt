@@ -5,6 +5,7 @@ rhp_add_module(config
     DEPS
         Rhp::net
         Rhp::security
+        Rhp::tls
         Rhp::exec
         Rhp::wire
 )

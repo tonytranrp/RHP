@@ -20,7 +20,12 @@ if(RHP_ENABLE)
         udp_reliable/detail/packet.cpp
         udp_reliable/udp_reliable.cpp
     )
-    set(rhp_net_private_deps Rhp::asio)
+    # Asio is header-only and stays in the build tree: an installed RHP links no Asio target. What
+    # Asio itself needs at link time is listed here instead.
+    set(rhp_net_private_deps "$<BUILD_INTERFACE:Rhp::asio>" Threads::Threads)
+    if(RHP_PLATFORM STREQUAL "WINDOWS")
+        list(APPEND rhp_net_private_deps ws2_32 mswsock)
+    endif()
 endif()
 
 rhp_add_module(net

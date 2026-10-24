@@ -14,6 +14,7 @@
 #include <utility>
 #include <vector>
 
+#include <rhp/build_config.hpp>
 #include <rhp/client/detail/engine.hpp>
 #include <rhp/client/pending.hpp>
 #include <rhp/config/config.hpp>
@@ -27,10 +28,6 @@
 #include <rhp/wire/messages.hpp>
 #include <rhp/wire/ops.hpp>
 
-#if !defined(RHP_ENABLE)
-#define RHP_ENABLE 1
-#endif
-
 namespace Rhp {
 
 using wire::module_ref;
@@ -39,7 +36,7 @@ using wire::revert_summary;
 
 // Talks to an Rhp::host: authenticates with a credential (a key name + secret for psk_keyring),
 // signs every script it sends with its signing key (Ed25519 by default), then sends requests and
-// blocks for their results — or, through async(), returns Rhp::pending results to await, chain or
+// blocks for their results - or, through async(), returns Rhp::pending results to await, chain or
 // turn into std::futures. Script output arrives through client_options::on_output / on_emit.
 //
 //   auto id = *Rhp::security::identity_file::load("dev.rhpid");
@@ -59,7 +56,7 @@ using wire::revert_summary;
 //
 // Calls may come from any thread (with the default io<owned_io_thread>); cancel() may be called
 // while another thread waits. With io<zero_threads> the calling thread runs the network itself,
-// so use the client from one thread — and call poll() at least once per heartbeat (2 s by default)
+// so use the client from one thread - and call poll() at least once per heartbeat (2 s by default)
 // while idle, or the host drops the session (and reverts what it did) after heartbeat_misses.
 // Destroying the client ends its session: if it was its identity's last one, the host reverts
 // everything that identity did (except modules an admin pinned).

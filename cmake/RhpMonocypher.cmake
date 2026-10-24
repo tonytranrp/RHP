@@ -12,9 +12,14 @@ add_library(rhp_monocypher STATIC
     "${PROJECT_SOURCE_DIR}/cmake/monocypher/monocypher_ed25519_cxx.cpp"
 )
 add_library(Rhp::monocypher ALIAS rhp_monocypher)
-target_include_directories(rhp_monocypher SYSTEM PUBLIC "${monocypher_SOURCE_DIR}/src" "${monocypher_SOURCE_DIR}/src/optional")
+# Build tree only: an installed RHP ships the archive (Rhp::security needs it at link time), not the headers.
+target_include_directories(rhp_monocypher SYSTEM PUBLIC
+    "$<BUILD_INTERFACE:${monocypher_SOURCE_DIR}/src>"
+    "$<BUILD_INTERFACE:${monocypher_SOURCE_DIR}/src/optional>"
+)
 target_compile_features(rhp_monocypher PUBLIC cxx_std_23)
-set_target_properties(rhp_monocypher PROPERTIES FOLDER "third_party")
+set_target_properties(rhp_monocypher PROPERTIES FOLDER "third_party" EXPORT_NAME monocypher)
+set_property(GLOBAL APPEND PROPERTY RHP_INSTALL_THIRD_PARTY_TARGETS rhp_monocypher)
 if(MSVC)
     target_compile_options(rhp_monocypher PRIVATE /W0)
 else()

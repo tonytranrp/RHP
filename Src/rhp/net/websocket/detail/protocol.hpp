@@ -29,7 +29,7 @@ enum class opcode : std::uint8_t {
     return (static_cast<std::uint8_t>(op) & 0x8) != 0;
 }
 
-// Close status codes RHP sends (RFC 6455 §7.4.1).
+// Close status codes RHP sends (RFC 6455 section 7.4.1).
 enum class close_code : std::uint16_t {
     kNormal = 1000,
     kProtocolError = 1002,
@@ -51,7 +51,7 @@ using masking_key = std::array<std::byte, 4>;
 
 inline constexpr std::string_view kPath = "/rhp";
 inline constexpr std::size_t kMaxHeaderBytes = 14;     // 2 + 8-byte length + 4-byte mask
-inline constexpr std::size_t kMaxControlPayload = 125; // RFC 6455 §5.5
+inline constexpr std::size_t kMaxControlPayload = 125; // RFC 6455 section 5.5
 inline constexpr std::size_t kMaxMessage = 16u << 20;  // per message and pre-upgrade queue
 
 struct frame_header {
@@ -81,7 +81,7 @@ constexpr void apply_mask(std::span<std::byte> payload, const masking_key& mask,
 [[nodiscard]] bool valid_close_payload(utils::bytes_view payload) noexcept;
 [[nodiscard]] std::array<std::byte, 2> close_payload(close_code code) noexcept;
 
-// The server's Sec-WebSocket-Accept for a client key (base64 SHA-1, RFC 6455 §4.2.2).
+// The server's Sec-WebSocket-Accept for a client key (base64 SHA-1, RFC 6455 section 4.2.2).
 [[nodiscard]] std::string accept_key(std::string_view client_key);
 
 [[nodiscard]] std::string upgrade_request(std::string_view host, std::string_view key);

@@ -20,11 +20,11 @@ namespace Rhp::session {
 // that is held until it is known.
 [[nodiscard]] std::unique_ptr<net::link> tls_server(std::unique_ptr<net::link> inner, std::shared_ptr<security::tls::context> tls, bool plaintext_ok);
 
-// How one endpoint's connections are secured — the rules of net::tls_mode, shared by hosts and
+// How one endpoint's connections are secured - the rules of net::tls_mode, shared by hosts and
 // clients. Dialing: TLS when the endpoint requires it, or when the transport is a network one, the
 // address isn't loopback and the endpoint doesn't say insecure_lan. Listening: TLS is accepted from
 // anyone who starts it (when a backend exists); plaintext only from loopback peers, over local
-// transports, or with insecure_lan — never with require_tls.
+// transports, or with insecure_lan - never with require_tls.
 class channel_policy {
 public:
     // kForbidden when the endpoint needs TLS and the backend can't provide it.

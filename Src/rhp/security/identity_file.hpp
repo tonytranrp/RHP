@@ -16,8 +16,8 @@ namespace Rhp::security {
 // shares with the host's keyring, and the Ed25519 key that signs scripts. Small TOML-like text:
 //
 //   name        = "dev"
-//   psk         = "base64…"     # shared with the host's keyring
-//   signing_key = "base64…"     # Ed25519 private key; the host trusts the public half
+//   psk         = "base64..."     # shared with the host's keyring
+//   signing_key = "base64..."     # Ed25519 private key; the host trusts the public half
 //   signer      = "dev"         # optional: the name the host's trusted signers use (default: name)
 //
 // Treat the file like an SSH private key. Secrets are wiped when the object dies.

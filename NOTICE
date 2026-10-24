@@ -1,4 +1,26 @@
-RHP — Remote Hot Patch
+RHP - Remote Hot Patch
 Copyright 2026 tonytranrp
 
 This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+A build of RHP includes third-party code, compiled into its static libraries:
+
+  Lua 5.5           Copyright (C) 1994-2026 Lua.org, PUC-Rio. MIT license.
+  Monocypher 4.0    Copyright (c) 2017-2023 Loup Vaillant, (c) 2017-2019 Michael Savage,
+                    (c) 2017-2023 Fabio Scotoni. Used under CC0-1.0 (dual-licensed with BSD-2-Clause).
+  Asio 1.38         Copyright (c) 2003-2026 Christopher M. Kohlhoff. Boost Software License 1.0.
+  Mbed TLS 4.2      Copyright The Mbed TLS Contributors. Used under Apache-2.0 (dual-licensed with
+  (+ TF-PSA-Crypto) GPL-2.0-or-later). Only when the Mbed TLS backend is built.
+
+The OpenSSL backend links the system's OpenSSL (Apache-2.0); it is not shipped with RHP.
+
+rhp-cli (Tools/rhp-cli) additionally includes:
+
+  CLI11 2.7         Copyright (c) 2017-2026 University of Cincinnati, developed by Henry Schreiner
+                    under NSF AWARD 1414736. BSD-3-Clause.
+  replxx 0.0.4      Copyright (c) 2017-2018 Marcin Konarski, (c) 2010 Salvatore Sanfilippo,
+                    (c) 2010 Pieter Noordhuis. BSD-3-Clause; includes ConvertUTF (Unicode, Inc.)
+                    and wcwidth (Markus Kuhn).
+
+THIRD_PARTY_LICENSES.md lists them with their full terms; an installed RHP carries the license
+texts in share/doc/rhp/licenses.

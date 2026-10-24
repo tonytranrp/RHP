@@ -78,7 +78,7 @@ private:
 
 } // namespace core
 
-// Rhp::log(logger, log_level::kInfo, "loaded {}", name) — formats only when enabled.
+// Rhp::log(logger, log_level::kInfo, "loaded {}", name) - formats only when enabled.
 template <core::logger L, class... Args>
 void log(L& logger, log_level level, std::format_string<Args...> fmt, Args&&... args) {
     if (logger.enabled(level)) {

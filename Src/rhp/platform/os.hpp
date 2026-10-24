@@ -2,6 +2,8 @@
 
 #include <string_view>
 
+#include <rhp/build_config.hpp>
+
 namespace Rhp::platform {
 
 enum class os_kind : unsigned char {
@@ -38,7 +40,7 @@ inline constexpr os_kind kOs = os_kind::kAndroid;
     return "unknown";
 }
 
-// "windows", "linux", "macos", "ios", "android" — sent in the handshake, shown in status.
+// "windows", "linux", "macos", "ios", "android" - sent in the handshake, shown in status.
 inline constexpr std::string_view kOsName = to_string(kOs);
 
 } // namespace Rhp::platform

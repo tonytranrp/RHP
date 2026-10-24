@@ -1,10 +1,7 @@
 #pragma once
 
+#include <rhp/build_config.hpp>
 #include <rhp/net/discovery.hpp>
-
-#if !defined(RHP_ENABLE)
-#define RHP_ENABLE 1
-#endif
 
 namespace Rhp::net {
 

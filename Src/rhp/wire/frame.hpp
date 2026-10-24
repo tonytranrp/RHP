@@ -18,7 +18,7 @@ namespace Rhp::wire {
 //   | "RHP\0" | rev | flags | op | seq    | ack    | length | payload (length bytes) | [crc32c 4B unless kCrcOmitted] | [mac 32B]
 //
 // The CRC covers header + payload. The MAC (flag kMac) covers header + payload as well, so a
-// corrupted frame fails the CRC first (→ nack, resend) and only a forged one fails the MAC.
+// corrupted frame fails the CRC first (-> nack, resend) and only a forged one fails the MAC.
 inline constexpr std::array<std::byte, 4> kMagic{std::byte{'R'}, std::byte{'H'}, std::byte{'P'}, std::byte{0}};
 inline constexpr std::size_t kHeaderSize = 28;
 inline constexpr std::size_t kCrcSize = 4;

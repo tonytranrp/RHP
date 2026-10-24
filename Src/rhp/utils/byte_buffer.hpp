@@ -18,7 +18,7 @@ using bytes_view = std::span<const std::byte>;
     return std::as_bytes(std::span{text.data(), text.size()});
 }
 
-// Little-endian encode/decode of unsigned integers — the wire byte order.
+// Little-endian encode/decode of unsigned integers - the wire byte order.
 template <std::unsigned_integral T>
 constexpr void store_le(std::span<std::byte, sizeof(T)> out, T value) noexcept {
     for (std::size_t i = 0; i < sizeof(T); ++i) {

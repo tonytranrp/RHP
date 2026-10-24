@@ -21,7 +21,7 @@ struct auth_grant {
     std::unique_ptr<wire::frame_sealer> incoming; // verifies frames this side receives
 };
 
-// Host side of one connection's handshake: hello → challenge, response → grant.
+// Host side of one connection's handshake: hello -> challenge, response -> grant.
 class host_handshake {
 public:
     virtual ~host_handshake() = default;

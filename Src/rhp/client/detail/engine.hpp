@@ -24,7 +24,7 @@
 namespace Rhp {
 
 struct client_options {
-    // How long connect() (or the first call) waits for the handshake — in reverse mode, for a host
+    // How long connect() (or the first call) waits for the handshake - in reverse mode, for a host
     // to dial in and finish it.
     std::chrono::milliseconds connect_timeout{10'000};
     // How long a call waits for its reply; 0 = until the reply or the session ends (the
@@ -91,7 +91,7 @@ using engine_ptr = std::unique_ptr<engine, engine_deleter>;
 using completion = std::function<void(result<value>)>;
 
 [[nodiscard]] engine_ptr make_engine(setup s);
-// Dials (once) — or, in reverse mode, listens and waits for a host to dial in — and waits for the
+// Dials (once) - or, in reverse mode, listens and waits for a host to dial in - and waits for the
 // handshake.
 [[nodiscard]] result<void> connect(engine& e);
 // Reverse mode: starts listening (once) and returns the bound port. kInvalidArgument when dialing.

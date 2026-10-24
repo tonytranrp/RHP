@@ -1,0 +1,52 @@
+# rhp CMake package: find_package(rhp CONFIG REQUIRED), then link Rhp::rhp (everything) or single
+# modules (Rhp::host, Rhp::client, Rhp::script, ...).
+#
+#   rhp_STAGE               the stage this RHP implements (RHP has no release numbers)
+#   rhp_PROTOCOL_REVISION   the wire protocol revision its hosts and clients speak
+#   rhp_ENABLE              1 for a live build, 0 for one compiled out (RHP_ENABLE=OFF)
+#   rhp_TLS_HAS_OPENSSL     1 if the OpenSSL backend is built (the system's OpenSSL is then required)
+#   rhp_TLS_HAS_MBEDTLS     1 if the Mbed TLS backend is built (shipped inside the package)
+#   rhp_PLATFORM            WINDOWS, LINUX, MACOS, IOS or ANDROID
+
+@PACKAGE_INIT@
+
+if(CMAKE_VERSION VERSION_LESS 3.28)
+    set(rhp_FOUND FALSE)
+    set(rhp_NOT_FOUND_MESSAGE "rhp needs CMake 3.28 or newer (this is ${CMAKE_VERSION})")
+    return()
+endif()
+
+set(rhp_STAGE "@RHP_STAGE@")
+set(rhp_PROTOCOL_REVISION @RHP_PROTOCOL_REVISION@)
+set(rhp_ENABLE @RHP_BUILD_CONFIG_ENABLE@)
+set(rhp_TLS_HAS_OPENSSL @RHP_BUILD_CONFIG_TLS_HAS_OPENSSL@)
+set(rhp_TLS_HAS_MBEDTLS @RHP_BUILD_CONFIG_TLS_HAS_MBEDTLS@)
+set(rhp_PLATFORM "@RHP_PLATFORM@")
+
+include(CMakeFindDependencyMacro)
+find_dependency(Threads)
+if(rhp_TLS_HAS_OPENSSL)
+    find_dependency(OpenSSL 3.0)
+endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/RhpTargets.cmake")
+
+# MSVC: a debug and a release runtime don't link together, so a configuration only ever maps to an
+# installed configuration with the same runtime (a Debug consumer needs a Debug RHP installed).
+if(@RHP_PACKAGE_MSVC_ABI@)
+    get_property(rhp_imported DIRECTORY PROPERTY IMPORTED_TARGETS)
+    foreach(rhp_target IN LISTS rhp_imported)
+        if(rhp_target MATCHES "^Rhp::")
+            set_target_properties(${rhp_target} PROPERTIES
+                MAP_IMPORTED_CONFIG_DEBUG "Debug"
+                MAP_IMPORTED_CONFIG_RELEASE "Release;RelWithDebInfo"
+                MAP_IMPORTED_CONFIG_RELWITHDEBINFO "RelWithDebInfo;Release"
+                MAP_IMPORTED_CONFIG_MINSIZEREL "Release;RelWithDebInfo"
+            )
+        endif()
+    endforeach()
+    unset(rhp_imported)
+    unset(rhp_target)
+endif()
+
+check_required_components(rhp)

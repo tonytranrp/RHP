@@ -16,7 +16,7 @@ namespace Rhp::security::tls {
 //
 // Host: `cert_pem` + `key_pem` are its certificate chain and private key; without them the host
 // makes an ephemeral self-signed P-256 certificate when it starts.
-// Client: without `ca_pem` the host's certificate is not checked — the PSK handshake is bound to
+// Client: without `ca_pem` the host's certificate is not checked - the PSK handshake is bound to
 // the TLS channel (RFC 9266 tls-exporter), so a relay that terminates TLS on both sides fails
 // authentication. With `ca_pem` the chain must verify against it, and against `server_name` if set.
 struct settings {

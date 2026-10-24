@@ -13,7 +13,8 @@ set(RHP_IS_TOP_LEVEL ${PROJECT_IS_TOP_LEVEL})
 # Directory-scoped: a parent project including RHP keeps its own setting.
 set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
 
-list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
+# Prepended: RHP's own modules win over same-named ones a parent project put on the path.
+list(PREPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
 
 include(RhpOptions)
 include(RhpPlatform)
@@ -21,8 +22,13 @@ include(RhpWarnings)
 include(RhpSanitizers)
 include(CPM)
 include(Dependencies)
+include(RhpBuildConfig)
 
 add_subdirectory(Src)
+
+if(RHP_INSTALL)
+    include(RhpInstall)
+endif()
 
 if(RHP_BUILD_TESTS)
     enable_testing()

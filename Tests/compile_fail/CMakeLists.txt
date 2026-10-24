@@ -19,3 +19,5 @@ rhp_add_compile_fail(patch_point_borrowed_optional SOURCE patch_point_borrowed_o
 rhp_add_compile_fail(var_const SOURCE var_const.cpp LINKS Rhp::script)
 rhp_add_compile_fail(transport_without_network SOURCE transport_without_network.cpp LINKS Rhp::config)
 rhp_add_compile_fail(transport_network_not_constant SOURCE transport_network_not_constant.cpp LINKS Rhp::config)
+rhp_add_compile_fail(build_config_enable_mismatch SOURCE build_config_enable_mismatch.cpp LINKS Rhp::core)
+rhp_add_compile_fail(build_config_platform_mismatch SOURCE build_config_platform_mismatch.cpp LINKS Rhp::core)

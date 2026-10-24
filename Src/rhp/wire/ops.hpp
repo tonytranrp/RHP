@@ -18,8 +18,8 @@ inline constexpr std::uint8_t kProtocolRevision = 4;
 // What a frame carries (the header's `op`, 16 bits on the wire).
 //
 //   handshake  1..15   unsequenced; hello / challenge / response unsealed, welcome and resume sealed
-//   requests  16..47   client → host, sequenced
-//   replies   48..63   host → client, sequenced
+//   requests  16..47   client -> host, sequenced
+//   replies   48..63   host -> client, sequenced
 //   control   64..     unsequenced (seq = a per-direction control counter), MAC'd once the handshake is done
 enum class op : std::uint16_t {
     kHello = 1, // client: protocol revision, platform, authenticator hello

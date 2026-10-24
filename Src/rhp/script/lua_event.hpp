@@ -9,6 +9,7 @@
 #include <type_traits>
 #include <vector>
 
+#include <rhp/build_config.hpp>
 #include <rhp/core/convert.hpp>
 #include <rhp/core/value.hpp>
 #include <rhp/script/detail/event_registry.hpp>
@@ -17,10 +18,6 @@
 #include <rhp/script/marshal.hpp>
 #include <rhp/script/stack.hpp>
 #include <rhp/utils/fixed_string.hpp>
-
-#if !defined(RHP_ENABLE)
-#define RHP_ENABLE 1
-#endif
 
 namespace Rhp {
 

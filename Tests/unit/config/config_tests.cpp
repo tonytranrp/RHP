@@ -122,3 +122,18 @@ TEST_CASE("config: the tls slot defaults to auto_backend and takes none", "[conf
 #endif
     CHECK_FALSE(Rhp::security::tls::backend_ops_for<Rhp::security::tls::none>.available());
 }
+
+TEST_CASE("config: a config user sees the TLS backends RHP was built with", "[config][tls]") {
+    // Rhp::config links Rhp::tls, and <rhp/build_config.hpp> backs the macros up: a target that only
+    // names Rhp::config must agree with the compiled library about auto_backend.
+    STATIC_REQUIRE(RHP_TLS_HAS_OPENSSL == RHP_TEST_EXPECT_TLS_OPENSSL);
+    STATIC_REQUIRE(RHP_TLS_HAS_MBEDTLS == RHP_TEST_EXPECT_TLS_MBEDTLS);
+#if RHP_TEST_EXPECT_TLS_OPENSSL
+    STATIC_REQUIRE(std::is_same_v<Rhp::config<>::tls_t, Rhp::security::tls::openssl>);
+#elif RHP_TEST_EXPECT_TLS_MBEDTLS
+    STATIC_REQUIRE(std::is_same_v<Rhp::config<>::tls_t, Rhp::security::tls::mbedtls>);
+#else
+    STATIC_REQUIRE(std::is_same_v<Rhp::config<>::tls_t, Rhp::security::tls::none>);
+#endif
+    CHECK(Rhp::security::tls::backend_ops_for<Rhp::config<>::tls_t>.available() == (RHP_TEST_EXPECT_TLS_OPENSSL || RHP_TEST_EXPECT_TLS_MBEDTLS));
+}
