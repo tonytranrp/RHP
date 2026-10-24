@@ -24,6 +24,7 @@
 
 #include <rhp/core/error.hpp>
 #include <rhp/core/ids.hpp>
+#include <rhp/core/listener_table.hpp>
 #include <rhp/core/result.hpp>
 #include <rhp/core/role.hpp>
 #include <rhp/core/subscription.hpp>
@@ -238,27 +239,21 @@ struct pending_failure {
     error err{};
 };
 
-// C++ callbacks for script events (sandbox::on_script_event). Shared so subscriptions may outlive
-// the sandbox; subscribe and unsubscribe from any thread.
+// C++ callbacks for script events (sandbox::on_script_event), by name ("*": every name). Shared so
+// subscriptions may outlive the sandbox; subscribe and unsubscribe from any thread (an unsubscribe
+// waits for a call of that callback on the sandbox's thread to finish).
 class script_listener_table final : public subscribable {
 public:
-    std::uint64_t add(std::string name, script_event_fn fn);
-    void unsubscribe(std::uint64_t id) noexcept override;
-    [[nodiscard]] bool empty() const noexcept { return count_.load(std::memory_order_acquire) == 0; }
-    // The callbacks for `name` ("*" entries included), copied out under the lock.
-    [[nodiscard]] std::vector<std::shared_ptr<script_event_fn>> matching(std::string_view name) const;
+    std::uint64_t add(std::string name, script_event_fn fn) { return table_.add(std::move(name), std::move(fn)); }
+    void unsubscribe(std::uint64_t id) noexcept override { (void)table_.remove(id); }
+    [[nodiscard]] bool empty() const noexcept { return table_.empty(); }
+    // Calls the callbacks for `name` ("*" entries included).
+    void dispatch(std::string_view name, const script_event& e) const {
+        table_.dispatch([name](const std::string& n) { return n == name || n == "*"; }, e);
+    }
 
 private:
-    struct entry {
-        std::uint64_t id = 0;
-        std::string name; // "*" = every name
-        std::shared_ptr<script_event_fn> fn;
-    };
-
-    mutable std::mutex mutex_;
-    std::vector<entry> entries_;
-    std::uint64_t last_ = 0;
-    std::atomic<std::size_t> count_{0};
+    core::listener_table<std::string, script_event_fn> table_;
 };
 
 // Options from the table a script passes last (rhp.every(ms, fn, {times = 3})).

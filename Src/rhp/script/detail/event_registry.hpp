@@ -1,12 +1,14 @@
 #pragma once
 
 #include <atomic>
+#include <condition_variable>
 #include <cstddef>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <string_view>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include <rhp/core/result.hpp>
@@ -61,6 +63,9 @@ protected:
 //
 // fire() delivers synchronously to listeners owned by the calling thread and queues a copy of the
 // arguments for every other listener. While nobody listens, fire() is one acquire load.
+//
+// detach() is a barrier: once it returns, no other thread is delivering to that listener (a listener
+// may detach itself while it is being delivered to; that delivery then finishes).
 class event_state {
 public:
     constexpr event_state() noexcept = default;
@@ -73,12 +78,21 @@ public:
     [[nodiscard]] std::size_t listeners();
 
 private:
-    [[nodiscard]] bool attached(const event_listener* listener);
+    struct shared {
+        std::vector<event_listener*> listeners;
+        // Deliveries in progress: which listener, on which thread.
+        std::vector<std::pair<const event_listener*, std::thread::id>> delivering;
+        std::condition_variable idle;
+    };
+
+    // Marks `listener` as being delivered to on this thread, if it is still attached.
+    [[nodiscard]] bool begin_delivery(const event_listener* listener, std::thread::id me);
+    void end_delivery(const event_listener* listener, std::thread::id me) noexcept;
 
     std::atomic<bool> active_{false};
     std::mutex mutex_;
     // Created on the first attach: keeps the state constant-initialized (constinit).
-    std::unique_ptr<std::vector<event_listener*>> listeners_;
+    std::unique_ptr<shared> shared_;
 };
 
 // Type-erased view of one Rhp::lua_event type, so Lua can subscribe by name at runtime.

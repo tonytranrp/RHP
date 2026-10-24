@@ -13,69 +13,38 @@
 #include <variant>
 #include <vector>
 
+#include <rhp/core/listener_table.hpp>
 #include <rhp/core/subscription.hpp>
 #include <rhp/event/events.hpp>
 
 namespace Rhp::event {
 
-// The handlers of one host. Thread-safe: subscribe and unsubscribe from any thread; publish calls
-// matching handlers on the publishing thread, outside the lock (a handler may unsubscribe itself).
-// A handler that is running when it is unsubscribed may finish that one call.
+// The handlers of one host. Thread-safe (core::listener_table): subscribe and unsubscribe from any
+// thread; publish calls matching handlers on the publishing thread, outside the lock (a handler may
+// unsubscribe itself). Once an unsubscribe returns, that handler neither runs nor starts again on
+// another thread.
 class hub final : public Rhp::subscribable {
 public:
     using handler = std::function<void(const any&)>;
     static constexpr std::size_t kAnyKind = std::variant_size_v<any>;
 
     // `kind`: one event's index in `any`, or kAnyKind for every event.
-    std::uint64_t add(std::size_t kind, handler fn) {
-        const std::scoped_lock lock{mutex_};
-        const std::uint64_t id = ++last_;
-        entries_.push_back({id, kind, std::make_shared<handler>(std::move(fn))});
-        return id;
-    }
+    std::uint64_t add(std::size_t kind, handler fn) { return handlers_.add(kind, std::move(fn)); }
 
-    void unsubscribe(std::uint64_t id) noexcept override {
-        const std::scoped_lock lock{mutex_};
-        std::erase_if(entries_, [id](const entry& e) { return e.id == id; });
-    }
+    void unsubscribe(std::uint64_t id) noexcept override { (void)handlers_.remove(id); }
     void remove(std::uint64_t id) noexcept { unsubscribe(id); }
 
     // True if anyone listens to `kind` (lets the host skip building events nobody wants).
     [[nodiscard]] bool wants(std::size_t kind) const {
-        const std::scoped_lock lock{mutex_};
-        for (const entry& e : entries_) {
-            if (e.kind == kind || e.kind == kAnyKind) {
-                return true;
-            }
-        }
-        return false;
+        return handlers_.any([kind](std::size_t k) { return k == kind || k == kAnyKind; });
     }
 
     void publish(const any& e) const {
-        std::vector<std::shared_ptr<handler>> targets;
-        {
-            const std::scoped_lock lock{mutex_};
-            for (const entry& item : entries_) {
-                if (item.kind == e.index() || item.kind == kAnyKind) {
-                    targets.push_back(item.fn);
-                }
-            }
-        }
-        for (const auto& fn : targets) {
-            (*fn)(e);
-        }
+        handlers_.dispatch([index = e.index()](std::size_t k) { return k == index || k == kAnyKind; }, e);
     }
 
 private:
-    struct entry {
-        std::uint64_t id = 0;
-        std::size_t kind = 0;
-        std::shared_ptr<handler> fn;
-    };
-
-    mutable std::mutex mutex_;
-    std::vector<entry> entries_;
-    std::uint64_t last_ = 0;
+    core::listener_table<std::size_t, handler> handlers_;
 };
 
 // The script-event handlers of one host (host.on_script_event), by event name ("*": every name).
@@ -84,48 +53,20 @@ class script_hub final : public Rhp::subscribable {
 public:
     using handler = std::function<void(const script_event&)>;
 
-    std::uint64_t add(std::string name, handler fn) {
-        const std::scoped_lock lock{mutex_};
-        const std::uint64_t id = ++last_;
-        entries_.push_back({id, std::move(name), std::make_shared<handler>(std::move(fn))});
-        return id;
-    }
+    std::uint64_t add(std::string name, handler fn) { return handlers_.add(std::move(name), std::move(fn)); }
 
-    void unsubscribe(std::uint64_t id) noexcept override {
-        const std::scoped_lock lock{mutex_};
-        std::erase_if(entries_, [id](const entry& e) { return e.id == id; });
-    }
+    void unsubscribe(std::uint64_t id) noexcept override { (void)handlers_.remove(id); }
 
     [[nodiscard]] bool wants(std::string_view name) const {
-        const std::scoped_lock lock{mutex_};
-        return std::ranges::any_of(entries_, [name](const entry& e) { return e.name == name || e.name == "*"; });
+        return handlers_.any([name](const std::string& n) { return n == name || n == "*"; });
     }
 
     void publish(const script_event& e) const {
-        std::vector<std::shared_ptr<handler>> targets;
-        {
-            const std::scoped_lock lock{mutex_};
-            for (const entry& item : entries_) {
-                if (item.name == e.event || item.name == "*") {
-                    targets.push_back(item.fn);
-                }
-            }
-        }
-        for (const auto& fn : targets) {
-            (*fn)(e);
-        }
+        handlers_.dispatch([&e](const std::string& n) { return n == e.event || n == "*"; }, e);
     }
 
 private:
-    struct entry {
-        std::uint64_t id = 0;
-        std::string name;
-        std::shared_ptr<handler> fn;
-    };
-
-    mutable std::mutex mutex_;
-    std::vector<entry> entries_;
-    std::uint64_t last_ = 0;
+    core::listener_table<std::string, handler> handlers_;
 };
 
 // Keeps a handler subscribed for as long as it lives (move-only); see Rhp::subscription.

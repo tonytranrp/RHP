@@ -117,31 +117,6 @@ int lua_rhp_stats(lua_State* L) {
 
 // ---- script_listener_table -----------------------------------------------------------------------
 
-std::uint64_t script_listener_table::add(std::string name, script_event_fn fn) {
-    const std::scoped_lock lock{mutex_};
-    const std::uint64_t id = ++last_;
-    entries_.push_back(entry{id, std::move(name), std::make_shared<script_event_fn>(std::move(fn))});
-    count_.store(entries_.size(), std::memory_order_release);
-    return id;
-}
-
-void script_listener_table::unsubscribe(std::uint64_t id) noexcept {
-    const std::scoped_lock lock{mutex_};
-    std::erase_if(entries_, [id](const entry& e) { return e.id == id; });
-    count_.store(entries_.size(), std::memory_order_release);
-}
-
-std::vector<std::shared_ptr<script_event_fn>> script_listener_table::matching(std::string_view name) const {
-    std::vector<std::shared_ptr<script_event_fn>> out;
-    const std::scoped_lock lock{mutex_};
-    for (const entry& e : entries_) {
-        if (e.name == name || e.name == "*") {
-            out.push_back(e.fn);
-        }
-    }
-    return out;
-}
-
 Rhp::subscription sandbox_impl::on_script_event(std::string_view name, script_event_fn fn) {
     const std::uint64_t id = listeners_->add(std::string{name}, std::move(fn));
     return Rhp::subscription{std::weak_ptr<subscribable>{listeners_}, id};
@@ -447,15 +422,9 @@ int sandbox_impl::unpack_ref(lua_State* L, int ref) {
 
 void sandbox_impl::call_listeners() {
     for (auto& e : std::exchange(listener_calls_, {})) {
-        const auto fns = listeners_->matching(e.name);
-        if (fns.empty()) {
-            continue;
-        }
         const module_record* mod = e.publisher ? record(e.publisher) : nullptr;
         const script_event view{e.name, e.publisher, mod != nullptr ? std::string_view{mod->name} : std::string_view{}, e.args};
-        for (const auto& fn : fns) {
-            (*fn)(view);
-        }
+        listeners_->dispatch(e.name, view);
     }
 }
 

@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <array>
 #include <exception>
 #include <format>
 #include <map>
@@ -9,6 +10,7 @@
 #include <vector>
 
 #include <rhp/script/detail/event_registry.hpp>
+#include <rhp/utils/scope_guard.hpp>
 
 namespace Rhp::script::detail {
 
@@ -16,59 +18,94 @@ namespace Rhp::script::detail {
 
 void event_state::fire(std::string_view name, const event_args& args) {
     const auto me = std::this_thread::get_id();
-    std::vector<event_listener*> local;
+    // Listeners owned by this thread: a handful in practice, so no allocation per fire below 8.
+    std::array<event_listener*, 8> few{};
+    std::size_t local_count = 0;
+    std::vector<event_listener*> more;
     {
         const std::scoped_lock lock{mutex_};
-        if (!listeners_) {
+        if (!shared_) {
             return;
         }
-        for (event_listener* listener : *listeners_) {
+        for (event_listener* listener : shared_->listeners) {
             if (listener->listener_thread() == me) {
-                local.push_back(listener);
+                if (local_count < few.size()) {
+                    few[local_count++] = listener;
+                } else {
+                    more.push_back(listener);
+                }
                 continue;
             }
             listener->enqueue(name, args); // noexcept: a listener that can't copy misses the event
         }
     }
     // Delivered unlocked: handlers may subscribe, unsubscribe or fire other events. A listener that
-    // detached meanwhile (a handler reverted its sandbox's subscription) is skipped.
-    for (event_listener* listener : local) {
-        if (attached(listener)) {
-            listener->deliver(name, args);
+    // detached meanwhile (a handler reverted its sandbox's subscription) is skipped; one detaching from
+    // another thread waits for its delivery here to end.
+    const auto deliver_to = [&](event_listener* listener) {
+        if (!begin_delivery(listener, me)) {
+            return;
         }
+        const utils::scope_guard done{[&] { end_delivery(listener, me); }};
+        listener->deliver(name, args);
+    };
+    for (std::size_t i = 0; i < local_count; ++i) {
+        deliver_to(few[i]);
     }
+    for (event_listener* listener : more) {
+        deliver_to(listener);
+    }
+}
+
+bool event_state::begin_delivery(const event_listener* listener, std::thread::id me) {
+    const std::scoped_lock lock{mutex_};
+    if (!shared_ || std::ranges::find(shared_->listeners, listener) == shared_->listeners.end()) {
+        return false;
+    }
+    shared_->delivering.emplace_back(listener, me);
+    return true;
+}
+
+void event_state::end_delivery(const event_listener* listener, std::thread::id me) noexcept {
+    const std::scoped_lock lock{mutex_};
+    auto& d = shared_->delivering;
+    if (const auto it = std::ranges::find(d, std::pair<const event_listener*, std::thread::id>{listener, me}); it != d.end()) {
+        d.erase(it);
+    }
+    shared_->idle.notify_all();
 }
 
 void event_state::attach(event_listener* listener) {
     const std::scoped_lock lock{mutex_};
-    if (!listeners_) {
-        listeners_ = std::make_unique<std::vector<event_listener*>>();
+    if (!shared_) {
+        shared_ = std::make_unique<shared>();
     }
-    if (std::ranges::find(*listeners_, listener) == listeners_->end()) {
-        listeners_->push_back(listener);
+    if (std::ranges::find(shared_->listeners, listener) == shared_->listeners.end()) {
+        shared_->listeners.push_back(listener);
     }
     active_.store(true, std::memory_order_release);
 }
 
 void event_state::detach(const event_listener* listener) noexcept {
-    const std::scoped_lock lock{mutex_};
-    if (!listeners_) {
+    std::unique_lock lock{mutex_};
+    if (!shared_) {
         return;
     }
-    if (const auto it = std::ranges::find(*listeners_, listener); it != listeners_->end()) {
-        listeners_->erase(it);
+    auto& l = shared_->listeners;
+    if (const auto it = std::ranges::find(l, listener); it != l.end()) {
+        l.erase(it);
     }
-    active_.store(!listeners_->empty(), std::memory_order_release);
+    active_.store(!l.empty(), std::memory_order_release);
+    // Wait for deliveries to it on other threads (its own thread may be inside one: that finishes).
+    const auto me = std::this_thread::get_id();
+    shared_->idle.wait(lock, [&] {
+        return std::ranges::none_of(shared_->delivering, [&](const auto& d) { return d.first == listener && d.second != me; });
+    });
 }
 
 std::size_t event_state::listeners() {
     const std::scoped_lock lock{mutex_};
-    return listeners_ ? listeners_->size() : 0;
-}
-
-bool event_state::attached(const event_listener* listener) {
-    const std::scoped_lock lock{mutex_};
-    return listeners_ && std::ranges::find(*listeners_, listener) != listeners_->end();
+    return shared_ ? shared_->listeners.size() : 0;
 }
 
 // ---- registry ----------------------------------------------------------------------------------------

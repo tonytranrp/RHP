@@ -5,6 +5,7 @@ rhp_add_module(core
         errors_mode.hpp
         ids.hpp
         limits.hpp
+        listener_table.hpp
         log.hpp
         result.hpp
         role.hpp

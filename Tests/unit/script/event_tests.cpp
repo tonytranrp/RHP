@@ -1,4 +1,7 @@
+#include <atomic>
+#include <chrono>
 #include <cstdint>
+#include <latch>
 #include <span>
 #include <string>
 #include <string_view>
@@ -14,6 +17,7 @@
 #include <rhp/core/limits.hpp>
 #include <rhp/core/result.hpp>
 #include <rhp/core/value.hpp>
+#include <rhp/script/detail/event_registry.hpp>
 #include <rhp/script/lib.hpp>
 #include <rhp/script/lua_event.hpp>
 #include <rhp/script/sandbox.hpp>
@@ -458,4 +462,47 @@ TEST_CASE("events queued for a sandbox that is destroyed are dropped", "[script]
     }
     CHECK(fx::ping.listeners() == 0);
     fx::ping.fire(1, "nobody listens"); // a no-op
+}
+
+namespace event_detach_fixtures {
+
+// A listener whose delivery blocks until released, to catch detach() returning while it still runs.
+class slow_listener final : public Rhp::script::detail::event_listener {
+public:
+    [[nodiscard]] std::thread::id listener_thread() const noexcept override { return owner.load(); }
+    void deliver(std::string_view, const Rhp::script::detail::event_args&) override {
+        delivering = true;
+        entered.count_down();
+        while (!release.load()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds{1});
+        }
+        delivering = false;
+    }
+    void enqueue(std::string_view, const Rhp::script::detail::event_args&) noexcept override {}
+
+    std::atomic<std::thread::id> owner{};
+    std::atomic<bool> delivering{false};
+    std::atomic<bool> release{false};
+    std::latch entered{1};
+};
+
+} // namespace event_detach_fixtures
+
+TEST_CASE("detaching a listener waits for its delivery on another thread", "[script][events][threads]") {
+    Rhp::script::detail::event_state state;
+    event_detach_fixtures::slow_listener l;
+    std::jthread firer{[&] {
+        l.owner = std::this_thread::get_id(); // delivered synchronously on this thread
+        state.attach(&l);
+        state.fire("fx.detach", Rhp::script::detail::event_args{});
+    }};
+    l.entered.wait();
+    std::jthread releaser{[&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds{50});
+        l.release = true;
+    }};
+    state.detach(&l);
+    const bool still_delivering = l.delivering.load();
+    CHECK_FALSE(still_delivering);
+    CHECK(state.listeners() == 0);
 }
