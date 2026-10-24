@@ -7,6 +7,7 @@
 #include <stop_token>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 
 #include <rhp/config/config.hpp>
@@ -75,8 +76,10 @@ public:
         s.script_events = script_events_;
         s.limits = Cfg::limits_v;
         s.io_thread = Cfg::io_t::kOwnsThread;
-        s.log_enabled = [this](log_level level) { return logger_.enabled(level); };
-        s.log = [this](log_level level, std::string_view message) { logger_.write(level, message); };
+        if constexpr (!std::is_same_v<typename Cfg::logger_t, core::null_logger>) { // null_logger: no calls at all
+            s.log_enabled = [this](log_level level) { return logger_.enabled(level); };
+            s.log = [this](log_level level, std::string_view message) { logger_.write(level, message); };
+        }
         s.clock = [this] { return clock_.now(); };
         s.custom_clock = !std::is_same_v<typename Cfg::clock_t, exec::steady_clock>;
         s.options = options;
@@ -111,7 +114,8 @@ public:
     host& operator=(host&&) = delete;
 
     // Makes a lib visible to every identity's sandbox (those running now and those to come).
-    // Call from the pump thread. kAlreadyLoaded if the name is taken.
+    // Call from the pump thread (any one thread before the first pump(); from another thread after it:
+    // kInvalidArgument). kAlreadyLoaded if the name is taken.
     template <script::installable L>
     return_t<void> install() {
 #if RHP_ENABLE
@@ -124,7 +128,8 @@ public:
     // Registers a blob sink: clients push files to it (client.blob("configs", bytes)). The whole
     // blob (at most limits.max_blob) is handed over once it arrived, on the pump thread; the
     // sink's result is the client's answer. `need` is the least role that may send to it.
-    // Call from the pump thread. kAlreadyLoaded if the name is taken.
+    // Call from the pump thread (any one thread before the first pump(); from another thread after it:
+    // kInvalidArgument). kAlreadyLoaded if the name is taken.
     return_t<void> on_blob(std::string_view sink, blob_fn fn, role need = role::kAdmin) {
 #if RHP_ENABLE
         return Cfg::errors_t::finish(host_detail::add_blob_sink(*engine_, sink, std::move(fn), need));
@@ -207,8 +212,9 @@ public:
     }
 
     // Publishes this host through Cfg::discovery_t (DNS-SD by default). Nothing is published until
-    // this is called; calling it again updates the record. Pump thread, after installing libraries
-    // (options.include_libs publishes their names). Later provider errors: discovery_status().
+    // this is called; calling it again updates the record. Pump thread (kInvalidArgument from another
+    // thread once pump() ran), after installing libraries (options.include_libs publishes their
+    // names). Later provider errors: discovery_status().
     return_t<void> advertise(net::advertise_options options = {}) {
 #if RHP_ENABLE
         return Cfg::errors_t::finish(host_detail::advertise(*engine_, std::move(options)));
@@ -219,7 +225,7 @@ public:
     }
 
     // The advertisement's state: kAlreadyLoaded after a name conflict, kDisabled when not advertising.
-    // Pump thread.
+    // Any thread with the default owned I/O thread; the pump thread with io<zero_threads>.
     [[nodiscard]] return_t<void> discovery_status() {
 #if RHP_ENABLE
         return Cfg::errors_t::finish(host_detail::discovery_status(*engine_));

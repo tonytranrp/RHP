@@ -267,7 +267,7 @@ public:
         auto policy = session::channel_policy::make(setup_.ep, setup_.transport.network, setup_.tls, setup_.options.tls);
         if (!policy) {
             listen_error_ = std::move(policy).error();
-            log(log_level::kError, std::format("host can't use {}: {}", setup_.ep, *listen_error_));
+            log(log_level::kError, "host can't use {}: {}", setup_.ep, *listen_error_);
             return;
         }
         policy_ = std::move(*policy);
@@ -277,20 +277,20 @@ public:
             // Reverse mode: the host dials a listening client, and keeps dialing.
             reverse_ = true;
             enforce_cancels();
-            log(log_level::kInfo, std::format("host dialing {} over {} (reverse mode{})", setup_.ep, setup_.transport.name, tls_note));
+            log(log_level::kInfo, "host dialing {} over {} (reverse mode{})", setup_.ep, setup_.transport.name, tls_note);
             dial_out();
             return;
         }
         auto listener = setup_.transport.listen(io_, policy_.transport_endpoint(), [this](std::unique_ptr<net::link> link) { accept(std::move(link)); });
         if (!listener) {
             listen_error_ = std::move(listener).error();
-            log(log_level::kError, std::format("host can't listen ({}): {}", setup_.ep, *listen_error_));
+            log(log_level::kError, "host can't listen ({}): {}", setup_.ep, *listen_error_);
             return;
         }
         listener_ = std::move(*listener);
         listen_port_ = static_cast<std::uint16_t>(listener_->port());
         enforce_cancels();
-        log(log_level::kInfo, std::format("host listening on {} over {} (port {}{})", setup_.ep, setup_.transport.name, listener_->port(), tls_note));
+        log(log_level::kInfo, "host listening on {} over {} (port {}{})", setup_.ep, setup_.transport.name, listener_->port(), tls_note);
     }
 
     // The network is stopped (or never ran on another thread) when this runs.
@@ -321,7 +321,8 @@ public:
         return {};
     }
 
-    [[nodiscard]] std::uint16_t port() const noexcept { return listener_ != nullptr ? static_cast<std::uint16_t>(listener_->port()) : std::uint16_t{0}; }
+    // listener_ belongs to the network thread; the port it bound is fixed once the constructor returns.
+    [[nodiscard]] std::uint16_t port() const noexcept { return listen_port_; }
     [[nodiscard]] result<std::uint16_t> gateway_port() const {
         if (gateway_error_) {
             return fail(*gateway_error_);
@@ -336,12 +337,26 @@ public:
 
     void set_enabled(bool on) noexcept {
         enabled_.store(on, std::memory_order_release);
-        log(log_level::kWarn, on ? "host enabled" : "host disabled: new connections are closed, requests answered kDisabled");
+        log_text(log_level::kWarn, on ? "host enabled" : "host disabled: new connections are closed, requests answered kDisabled");
     }
 
     [[nodiscard]] bool is_enabled() const noexcept { return enabled_.load(std::memory_order_acquire); }
 
+    // Setup calls touch pump-thread state: before the first pump() any one thread may make them,
+    // after it only the thread that pumps. (A call racing the very first pump() on another thread is
+    // not detected.)
+    [[nodiscard]] result<void> on_pump_thread(std::string_view where) const {
+        const std::thread::id owner = pump_thread_.load(std::memory_order_acquire);
+        if (owner != std::thread::id{} && owner != std::this_thread::get_id()) {
+            return fail(errc::kInvalidArgument, "call this from the thread that calls pump() (or before the first pump())", std::string{where});
+        }
+        return {};
+    }
+
     result<void> install(std::string_view name, installer fn) {
+        if (auto here = on_pump_thread("host.install"); !here) {
+            return here;
+        }
         for (const auto& [n, f] : installers_) {
             if (n == name) {
                 return fail(errc::kAlreadyLoaded, std::format("a lib named '{}' is already installed", name), "host.install");
@@ -350,7 +365,7 @@ public:
         installers_.emplace_back(std::string{name}, fn);
         for (auto& [identity, id] : identities_) {
             if (auto ok = fn(*id.box); !ok) {
-                log(log_level::kWarn, std::format("install {} into identity {}: {}", name, identity, ok.error()));
+                log(log_level::kWarn, "install {} into identity {}: {}", name, identity, ok.error());
             }
         }
         if (advertise_options_ && advertise_options_->include_libs) {
@@ -360,6 +375,9 @@ public:
     }
 
     result<void> add_blob_sink(std::string_view name, blob_fn fn, role need) {
+        if (auto here = on_pump_thread("host.on_blob"); !here) {
+            return here;
+        }
         if (name.empty() || !fn) {
             return fail(errc::kInvalidArgument, "a blob sink needs a name and a function", "host.on_blob");
         }
@@ -375,6 +393,9 @@ public:
     // Pump thread: builds the record (it reads the installed libs), then registers it on the I/O
     // thread, which owns the provider.
     result<void> advertise(net::advertise_options options) {
+        if (auto here = on_pump_thread("host.advertise"); !here) {
+            return here;
+        }
         if (listen_port_ == 0 || !setup_.transport.network) {
             return fail(errc::kInvalidArgument, "only a listening host on a network transport can advertise", "host.advertise");
         }
@@ -421,7 +442,13 @@ public:
     }
 
     // The provider's state (name conflicts and network errors arrive after advertise() returned).
+    // Any thread with an owned I/O thread; with io<zero_threads> it runs the network, so pump thread.
     result<void> discovery_status() {
+        if (!setup_.io_thread) {
+            if (auto here = on_pump_thread("host.discovery_status"); !here) {
+                return here;
+            }
+        }
         return on_io<void>([this]() -> result<void> {
             return advertisement_ ? advertisement_->status() : result<void>{fail(errc::kDisabled, "the host is not advertising", "host.discovery")};
         });
@@ -723,13 +750,13 @@ private:
             return;
         }
         if (!is_enabled()) {
-            log(log_level::kInfo, std::format("refusing {}: the host is disabled", link->peer()));
+            log(log_level::kInfo, "refusing {}: the host is disabled", link->peer());
             refused(link->peer(), make_error(errc::kDisabled, "the host is disabled", "host"));
             park(std::move(link));
             return;
         }
         if (pending_handshakes_ >= setup_.limits.pending_handshakes) {
-            log(log_level::kWarn, std::format("refusing {}: {} handshakes already pending", link->peer(), pending_handshakes_));
+            log(log_level::kWarn, "refusing {}: {} handshakes already pending", link->peer(), pending_handshakes_);
             refused(link->peer(), make_error(errc::kLimitExceeded, std::format("{} handshakes already pending", pending_handshakes_), "host"));
             park(std::move(link));
             return;
@@ -737,7 +764,7 @@ private:
         std::string peer = link->peer();
         auto wrapped = policy_.wrap(std::move(link));
         if (!wrapped) {
-            log(log_level::kWarn, std::format("refusing {}: {}", peer, wrapped.error()));
+            log(log_level::kWarn, "refusing {}: {}", peer, wrapped.error());
             refused(std::move(peer), std::move(wrapped).error());
             return;
         }
@@ -798,7 +825,7 @@ private:
                     return; // resumed or gone meanwhile; a link we got is dropped
                 }
                 if (!link) {
-                    log(log_level::kDebug, std::format("dialing {} to resume session {} failed: {}", setup_.ep, resume_id, link.error()));
+                    log(log_level::kDebug, "dialing {} to resume session {} failed: {}", setup_.ep, resume_id, link.error());
                     redial(resume_id);
                     return;
                 }
@@ -806,7 +833,7 @@ private:
                 return;
             }
             if (!link) {
-                log(log_level::kDebug, std::format("dialing {} failed: {}", setup_.ep, link.error()));
+                log(log_level::kDebug, "dialing {} failed: {}", setup_.ep, link.error());
                 redial();
                 return;
             }
@@ -832,7 +859,7 @@ private:
     // ---- network thread: resume -------------------------------------------------------------------
 
     void on_detached(session::session& s, const error& why) override {
-        log(log_level::kInfo, std::format("session {} ({}) lost its link ({}); it may resume within {} ms", s.id(), s.identity(), why, setup_.limits.resume_ms));
+        log(log_level::kInfo, "session {} ({}) lost its link ({}); it may resume within {} ms", s.id(), s.identity(), why, setup_.limits.resume_ms);
         if (reverse_ && s.id() == outgoing_ && !stopping_) {
             attempts_ = 0;
             redial(s.id());
@@ -843,7 +870,7 @@ private:
         if (s.id() == outgoing_) {
             attempts_ = 0;
         }
-        log(log_level::kInfo, std::format("session {} ({}) resumed from {}{}", s.id(), s.identity(), s.peer(), s.encrypted() ? " over TLS" : ""));
+        log(log_level::kInfo, "session {} ({}) resumed from {}{}", s.id(), s.identity(), s.peer(), s.encrypted() ? " over TLS" : "");
         if (setup_.events != nullptr && setup_.events->wants(event::kind_of<event::session_resumed>)) {
             inbound in;
             in.what = inbound::kind::kResumed;
@@ -883,7 +910,7 @@ private:
         }
         ++ident.sessions;
         ready_sessions_.fetch_add(1, std::memory_order_acq_rel);
-        log(log_level::kInfo, std::format("session {} from {} ({}) authenticated as {} ({})", s.id(), s.peer(), s.peer_platform(), s.identity(), s.granted()));
+        log(log_level::kInfo, "session {} from {} ({}) authenticated as {} ({})", s.id(), s.peer(), s.peer_platform(), s.identity(), s.granted());
         inbound in;
         in.what = inbound::kind::kOpened;
         in.session = s.id();
@@ -962,7 +989,7 @@ private:
         const bool was_ready = it->second.ready;
         const std::string identity = it->second.identity;
         if (was_ready) {
-            log(log_level::kInfo, std::format("session {} ({}) ended: {}", id, identity, why));
+            log(log_level::kInfo, "session {} ({}) ended: {}", id, identity, why);
             ready_sessions_.fetch_sub(1, std::memory_order_acq_rel);
             if (auto ident = io_identities_.find(identity); ident != io_identities_.end()) {
                 // Nobody is left to answer: stop what this session runs, has suspended or queued.
@@ -988,7 +1015,7 @@ private:
             --pending_handshakes_; // it only carried a resume: its link went to that session
         } else {
             --pending_handshakes_;
-            log(log_level::kInfo, std::format("connection from {} closed before authenticating: {}", s.peer(), why));
+            log(log_level::kInfo, "connection from {} closed before authenticating: {}", s.peer(), why);
             refused(s.peer(), why);
         }
         sessions_.erase(it); // allowed inside on_closed
@@ -1126,9 +1153,9 @@ private:
         try {
             setup_.events->publish(e);
         } catch (const std::exception& ex) {
-            log(log_level::kError, std::format("an event handler threw: {}", ex.what()));
+            log(log_level::kError, "an event handler threw: {}", ex.what());
         } catch (...) {
-            log(log_level::kError, "an event handler threw");
+            log_text(log_level::kError, "an event handler threw");
         }
     }
 
@@ -1169,7 +1196,7 @@ private:
             rt.box = std::make_unique<script::sandbox>(sandbox_options_for(in.identity, in.granted));
             for (const auto& [name, fn] : installers_) {
                 if (auto ok = fn(*rt.box); !ok) {
-                    log(log_level::kWarn, std::format("install {} into identity {}: {}", name, in.identity, ok.error()));
+                    log(log_level::kWarn, "install {} into identity {}: {}", name, in.identity, ok.error());
                 }
             }
             {
@@ -1180,7 +1207,7 @@ private:
                 rt.box->on_script_event("*", [this, identity = in.identity](const script::script_event& e) { forward_script_event(identity, e); });
             it = identities_.emplace(in.identity, std::move(rt)).first;
             identity_count_.store(identities_.size(), std::memory_order_release);
-            log(log_level::kInfo, std::format("identity {} ({}) has a sandbox", in.identity, in.granted));
+            log(log_level::kInfo, "identity {} ({}) has a sandbox", in.identity, in.granted);
         } else if (it->second.relay != in.relay) {
             // The identity outlived its sessions (pinned modules) and the network made a new relay
             // for the one that just arrived: hand it the sandbox.
@@ -1249,8 +1276,8 @@ private:
             record.outcome = make_error(errc::kCancelled, "the identity was reverted before the request finished", record.op);
             publish(std::move(record));
         }
-        log(log_level::kInfo, std::format("identity {} reverted: {} effects undone, {} irreversible, {} failures", rt.name, report.undone, report.irreversible,
-                                          report.failures.size()));
+        log(log_level::kInfo, "identity {} reverted: {} effects undone, {} irreversible, {} failures", rt.name, report.undone, report.irreversible,
+                                          report.failures.size());
         if (wants<event::identity_reverted>()) {
             publish(event::identity_reverted{now(), rt.name, report.undone, report.irreversible, report.failures.size(), 0});
         }
@@ -1289,7 +1316,7 @@ private:
         if (auto r = rt.box->revert(rt.box->scratch_module())) {
             report += std::move(*r);
         }
-        log(log_level::kInfo, std::format("identity {} released: {} effects undone, {} pinned modules kept", rt.name, report.undone, rt.pinned.size()));
+        log(log_level::kInfo, "identity {} released: {} effects undone, {} pinned modules kept", rt.name, report.undone, rt.pinned.size());
         if (wants<event::identity_reverted>()) {
             publish(event::identity_reverted{now(), rt.name, report.undone, report.irreversible, report.failures.size(), rt.pinned.size()});
         }
@@ -1302,7 +1329,7 @@ private:
         o.identity = identity;
         o.clock = setup_.clock;
         o.on_output = [this, identity](request_id r, module_id, std::string_view line) {
-            log(log_level::kDebug, std::format("[{}] {}", identity, line));
+            log(log_level::kDebug, "[{}] {}", identity, line);
             route(identity, r, wire::op::kOutput, value{line});
         };
         o.on_emit = [this, identity](request_id r, module_id mod, const value& v) {
@@ -1318,7 +1345,7 @@ private:
     void handler_failed(const std::string& identity, const script::handler_failure& f) {
         const std::string line =
             std::format("[handler failed] {} ({} {}): {} ({})", f.module_name.empty() ? "?" : f.module_name, f.kind, f.source, f.err, f.action);
-        log(log_level::kWarn, std::format("[{}] {}", identity, line));
+        log(log_level::kWarn, "[{}] {}", identity, line);
         route(identity, f.request, wire::op::kOutput, value{line});
         if (wants<event::handler_failed>()) {
             publish(event::handler_failed{now(), identity, f.module_name, std::string{script::to_string(f.kind)}, f.source, f.handler,
@@ -1335,9 +1362,9 @@ private:
             try {
                 setup_.script_events->publish(copy);
             } catch (const std::exception& ex) {
-                log(log_level::kError, std::format("a script event handler threw: {}", ex.what()));
+                log(log_level::kError, "a script event handler threw: {}", ex.what());
             } catch (...) {
-                log(log_level::kError, "a script event handler threw");
+                log_text(log_level::kError, "a script event handler threw");
             }
         }
         const auto it = identities_.find(identity);
@@ -1886,7 +1913,7 @@ private:
                         }
                     }
                 }
-                log(log_level::kInfo, std::format("{} {} module {} ({})", sess.identity, in.code == wire::op::kPin ? "pinned" : "unpinned", info->name, *mod));
+                log(log_level::kInfo, "{} {} module {} ({})", sess.identity, in.code == wire::op::kPin ? "pinned" : "unpinned", info->name, *mod);
                 return reply(in.session, in.req, value{});
             }
             if (rt.pinned.contains(*mod)) {
@@ -1944,7 +1971,7 @@ private:
                 }
             }
             identity_count_.store(identities_.size(), std::memory_order_release);
-            log(log_level::kWarn, std::format("revert_all by {}: {} effects undone", sess.identity, total.undone));
+            log(log_level::kWarn, "revert_all by {}: {} effects undone", sess.identity, total.undone);
             return reply(in.session, in.req, Rhp::to_value(summarize(total)));
         }
         case wire::op::kList: {
@@ -2017,7 +2044,7 @@ private:
             if (sess.blob) {
                 // A new transfer replaces one the client gave up on (a chunk timed out or was
                 // cancelled): its later chunks are refused.
-                log(log_level::kInfo, std::format("blob '{}' from {} abandoned at {} of {} bytes", sess.blob->name, sess.identity, sess.blob->data.size(), sess.blob->total));
+                log(log_level::kInfo, "blob '{}' from {} abandoned at {} of {} bytes", sess.blob->name, sess.identity, sess.blob->data.size(), sess.blob->total);
                 sess.failed_transfer = sess.blob->id;
                 sess.blob.reset();
             }
@@ -2057,7 +2084,7 @@ private:
             publish(event::blob_received{now(), in.session, sess.identity, t.sink, t.name, t.total, security::to_hex(security::blake2b_256(t.data)),
                                          verdict ? error{} : verdict.error()});
         }
-        log(log_level::kInfo, std::format("blob '{}' ({} bytes) from {} for sink {}: {}", t.name, t.total, sess.identity, t.sink, verdict ? "taken" : verdict.error().message));
+        log(log_level::kInfo, "blob '{}' ({} bytes) from {} for sink {}: {}", t.name, t.total, sess.identity, t.sink, verdict ? "taken" : verdict.error().message);
         const std::uint64_t id = t.id;
         sess.blob.reset();
         if (!verdict) {
@@ -2068,15 +2095,26 @@ private:
         reply(in.session, in.req, value{});
     }
 
-    // Thread-safe: both threads log.
-    void log(log_level level, std::string_view message) {
-        if (!setup_.log || !setup_.log_enabled) {
-            return;
+    // Thread-safe: both threads log. The level check takes no lock (core::logger::enabled is
+    // thread-safe) and comes before formatting; writes are serialized.
+    [[nodiscard]] bool log_on(log_level level) const { return setup_.log && setup_.log_enabled && setup_.log_enabled(level); }
+
+    template <class... Args>
+    void log(log_level level, std::format_string<Args...> fmt, Args&&... args) {
+        if (log_on(level)) {
+            write_log(level, std::format(fmt, std::forward<Args>(args)...));
         }
+    }
+
+    void log_text(log_level level, std::string_view message) {
+        if (log_on(level)) {
+            write_log(level, message);
+        }
+    }
+
+    void write_log(log_level level, std::string_view message) {
         const std::scoped_lock lock{log_mutex_};
-        if (setup_.log_enabled(level)) {
-            setup_.log(level, message);
-        }
+        setup_.log(level, message);
     }
 
     setup setup_;
@@ -2136,7 +2174,7 @@ private:
     // Remote subscriptions to C++ events: who wants each name, and the event states listened to.
     std::map<std::string, std::set<session_id>, std::less<>> program_subs_;
     std::map<std::string, script::detail::event_state*, std::less<>> program_attached_;
-    std::atomic<std::thread::id> pump_thread_{std::this_thread::get_id()};
+    std::atomic<std::thread::id> pump_thread_{}; // unclaimed until the first pump()
     std::mutex program_mutex_; // guards program_inbox_ (fires from other threads)
     std::vector<std::pair<std::string, std::vector<value>>> program_inbox_;
 

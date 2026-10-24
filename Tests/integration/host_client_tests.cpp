@@ -60,6 +60,21 @@ using test_lib = Rhp::lib<"itest">           //
 using loopback_cfg = Rhp::config<>::transport<Rhp::net::loopback>::logger<Rhp::core::null_logger>;
 using tcp_cfg = Rhp::config<>::logger<Rhp::core::null_logger>;
 
+int one() {
+    return 1;
+}
+
+// Libraries installed late, to test which thread may install them.
+using late_lib_a = Rhp::lib<"hclatea">::fn<"one", &one>;
+using late_lib_b = Rhp::lib<"hclateb">::fn<"one", &one>;
+using late_lib_c = Rhp::lib<"hclatec">::fn<"one", &one>;
+
+// A stderr_logger that starts silent; a test changes its level while the host runs.
+struct quiet_stderr_logger : Rhp::core::stderr_logger {
+    quiet_stderr_logger() noexcept : stderr_logger{Rhp::log_level::kOff} {}
+};
+using logged_cfg = Rhp::config<>::transport<Rhp::net::loopback>::logger<quiet_stderr_logger>;
+
 struct keys {
     Rhp::security::key admin = *Rhp::security::key::generate();
     Rhp::security::key patch = *Rhp::security::key::generate();
@@ -710,4 +725,57 @@ TEST_CASE("host+client: an idle zero_threads client stays connected while it pol
     }
     CHECK(c.exec<int>("return x") == 42);
     CHECK(c.connected());
+}
+
+TEST_CASE("host: setup calls from another thread are refused once pump has run", "[integration][host][threads]") {
+    using namespace host_client_fixtures;
+    keys k;
+    Rhp::host<loopback_cfg> host{Rhp::endpoint::listen("hc.pump_rule", 1), k.ring(), k.trusted()};
+    REQUIRE(host.install<late_lib_a>());           // before the first pump: from this thread is fine
+    std::jthread{[&host] { host.pump(); }}.join(); // pump has now run on another thread
+    auto late = host.install<late_lib_b>();
+    REQUIRE_FALSE(late);
+    CHECK(late.error().code == errc::kInvalidArgument);
+    auto sink = host.on_blob("hclate", [](const Rhp::blob_view&) -> Rhp::result<void> { return {}; });
+    REQUIRE_FALSE(sink);
+    CHECK(sink.error().code == errc::kInvalidArgument);
+    Rhp::result<void> from_pump = Rhp::fail(errc::kRuntime);
+    std::jthread{[&] {
+        host.pump();
+        from_pump = host.install<late_lib_b>(); // the thread that pumps may still install
+    }}.join();
+    CHECK(from_pump);
+}
+
+TEST_CASE("host: setup calls before the first pump may come from any thread", "[integration][host][threads]") {
+    using namespace host_client_fixtures;
+    keys k;
+    Rhp::host<loopback_cfg> host{Rhp::endpoint::listen("hc.pump_rule_early", 1), k.ring(), k.trusted()};
+    Rhp::result<void> installed = Rhp::fail(errc::kRuntime);
+    Rhp::result<void> sink = Rhp::fail(errc::kRuntime);
+    std::jthread{[&] {
+        installed = host.install<late_lib_c>();
+        sink = host.on_blob("hcearly", [](const Rhp::blob_view&) -> Rhp::result<void> { return {}; });
+    }}.join();
+    CHECK(installed);
+    CHECK(sink);
+    std::jthread{[&host] { host.pump(); }}.join();
+}
+
+TEST_CASE("host: the logger level may change while the network thread logs", "[integration][host][log]") {
+    using namespace host_client_fixtures;
+    keys k;
+    const auto at = Rhp::endpoint::listen("hc.log_level", 1);
+    Rhp::host<logged_cfg> host{at, k.ring(), k.trusted()};
+    std::atomic<bool> done{false};
+    std::jthread flipper{[&] {
+        for (int i = 0; !done.load(); ++i) { // critical: nothing logs at that level, so the test stays quiet
+            host.logger().set_min_level(i % 2 == 0 ? Rhp::log_level::kCritical : Rhp::log_level::kOff);
+        }
+    }};
+    for (int i = 0; i < 20; ++i) {
+        Rhp::client<loopback_cfg> c{at.reversed(), k.as_observe()};
+        REQUIRE(c.connect()); // the network thread logs "authenticated" (info), then "ended" when c closes
+    }
+    done = true;
 }

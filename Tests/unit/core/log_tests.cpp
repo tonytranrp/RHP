@@ -1,4 +1,7 @@
+#include <atomic>
+#include <concepts>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -60,4 +63,27 @@ TEST_CASE("stderr_logger filtering", "[core][log]") {
     logger.set_min_level(log_level::kTrace);
     REQUIRE(logger.enabled(log_level::kTrace));
     REQUIRE(Rhp::to_string(log_level::kCritical) == "critical");
+}
+
+TEST_CASE("stderr_logger level may change while another thread checks it", "[core][log]") {
+    Rhp::core::stderr_logger logger{log_level::kOff};
+    std::atomic<int> seen{0};
+    std::jthread reader{[&] {
+        for (int i = 0; i < 20'000; ++i) {
+            if (logger.enabled(log_level::kCritical)) { // use the result: a dead load would be optimized away
+                seen.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+    }};
+    for (int i = 0; i < 20'000; ++i) {
+        logger.set_min_level(i % 2 == 0 ? log_level::kCritical : log_level::kOff);
+    }
+    reader.join();
+    logger.set_min_level(log_level::kWarn);
+    CHECK(logger.min_level() == log_level::kWarn);
+    CHECK(logger.enabled(log_level::kError));
+    CHECK_FALSE(logger.enabled(log_level::kInfo));
+    STATIC_REQUIRE(std::copyable<Rhp::core::stderr_logger>);
+    Rhp::core::stderr_logger copy = logger;
+    CHECK(copy.min_level() == log_level::kWarn);
 }
