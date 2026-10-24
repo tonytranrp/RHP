@@ -48,6 +48,10 @@ void io_context::post(std::function<void()> fn) {
     asio::post(impl_->ctx, std::move(fn));
 }
 
+bool io_context::running_in_this_thread() const noexcept {
+    return impl_->ctx.get_executor().running_in_this_thread();
+}
+
 bool io_context::poster::post(std::function<void()> fn) {
     const std::scoped_lock lock{mutex_};
     if (io_ == nullptr) {

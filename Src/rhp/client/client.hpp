@@ -346,7 +346,9 @@ private:
         s.options = std::move(options);
         engine_ = client_detail::make_engine(std::move(s));
         if constexpr (Cfg::io_t::kOwnsThread) {
-            runner_.start([engine = engine_.get()](std::stop_token stop) { client_detail::run_io(*engine, std::move(stop)); });
+            // The I/O thread shares the engine: a client destroyed from one of its own callbacks
+            // leaves the engine to that thread, which destroys it once the network has stopped.
+            runner_.start([engine = engine_](std::stop_token stop) { client_detail::run_io(*engine, std::move(stop)); });
         }
 #else
         (void)ep;
@@ -482,7 +484,7 @@ private:
     std::optional<signing_key_t> signer_;
 #if RHP_ENABLE
     typename Cfg::io_t runner_{};
-    client_detail::engine_ptr engine_;
+    std::shared_ptr<client_detail::engine> engine_;
 #endif
 };
 

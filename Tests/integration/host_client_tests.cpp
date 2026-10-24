@@ -2,9 +2,11 @@
 #include <chrono>
 #include <cstdint>
 #include <functional>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -778,4 +780,61 @@ TEST_CASE("host: the logger level may change while the network thread logs", "[i
         REQUIRE(c.connect()); // the network thread logs "authenticated" (info), then "ended" when c closes
     }
     done = true;
+}
+
+TEST_CASE("host+client: a blocking call from the client network thread fails instead of deadlocking", "[integration][client][threads]") {
+    keys k;
+    const auto at = Rhp::endpoint::listen("hc.block_on_io", 1);
+    running_host<loopback_cfg> host{at, k};
+    Rhp::client<loopback_cfg> c{host.dial_at(at), k.as_patch(), k.signer(), Rhp::client_options{.request_timeout = 2s}};
+    REQUIRE(c.connect());
+    std::promise<Rhp::result<std::vector<value>>> inner;
+    auto outer = inner.get_future();
+    c.async().exec("rhp.sleep(20) return 1").then([&](Rhp::result<std::vector<value>>) {
+        inner.set_value(c.exec("return 2")); // on the network thread: refused, not a 2 s timeout
+    });
+    REQUIRE(outer.wait_for(5s) == std::future_status::ready);
+    const auto r = outer.get();
+    REQUIRE_FALSE(r);
+    CHECK(r.error().code == errc::kInvalidArgument);
+    CHECK(c.exec("return 3")); // and the client still works from other threads
+}
+
+TEST_CASE("host+client: a throwing completion callback does not end the session", "[integration][client]") {
+    keys k;
+    const auto at = Rhp::endpoint::listen("hc.throwing_then", 1);
+    running_host<loopback_cfg> host{at, k};
+    Rhp::client<loopback_cfg> c{host.dial_at(at), k.as_patch(), k.signer()};
+    REQUIRE(c.connect());
+    std::atomic<bool> ran{false};
+    c.async().exec("return 1").then([&](Rhp::result<std::vector<value>>) {
+        ran = true;
+        throw std::runtime_error{"an application bug"};
+    });
+    REQUIRE(eventually([&] { return ran.load(); }));
+    auto after = c.exec("return 3");
+    REQUIRE(after);
+    CHECK((*after)[0] == value{3});
+    CHECK_FALSE(c.info().closed);
+}
+
+TEST_CASE("host+client: a client destroyed in its own completion callback shuts down cleanly", "[integration][client][lifetime]") {
+    keys k;
+    const auto at = Rhp::endpoint::listen("hc.self_destroy", 1);
+    running_host<loopback_cfg> host{at, k};
+    auto* c = new Rhp::client<loopback_cfg>{host.dial_at(at), k.as_patch(), k.signer()};
+    REQUIRE(c->connect());
+    const auto main_id = std::this_thread::get_id();
+    std::atomic<bool> destroyed{false};
+    std::atomic<std::thread::id> on{};
+    const auto started = std::chrono::steady_clock::now();
+    c->async().exec("rhp.sleep(30) return 1").then([c, &destroyed, &on](Rhp::result<std::vector<value>>) {
+        on = std::this_thread::get_id();
+        delete c; // the network thread: no self-join, no 1 s close wait
+        destroyed = true;
+    });
+    REQUIRE(eventually([&] { return destroyed.load(); }, 5s));
+    CHECK(on.load() != main_id);
+    CHECK(std::chrono::steady_clock::now() - started < 900ms);
+    CHECK(eventually([&] { return host->sessions() == 0; }));
 }

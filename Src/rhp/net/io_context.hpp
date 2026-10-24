@@ -44,6 +44,10 @@ public:
     // Runs until `stop` is requested (an RHP-owned I/O thread's body).
     void run(std::stop_token stop);
 
+    // True on the thread that is running this context right now (inside run(), poll() or
+    // run_one_for(), e.g. in a link callback). Any thread.
+    [[nodiscard]] bool running_in_this_thread() const noexcept;
+
     // asio::io_context*, for transports implemented on Asio inside Rhp::net.
     [[nodiscard]] void* native_handle() noexcept;
 

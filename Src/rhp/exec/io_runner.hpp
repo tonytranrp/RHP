@@ -37,11 +37,18 @@ public:
         thread_ = std::jthread{[body = std::move(body)](std::stop_token token) mutable { body(std::move(token)); }};
     }
 
+    // From the I/O thread itself (a callback destroying what owns it): the thread can't join itself,
+    // so it is detached and ends once its body returns. The body must then keep alive what it uses.
     void stop() {
-        if (thread_.joinable()) {
-            thread_.request_stop();
-            thread_.join();
+        if (!thread_.joinable()) {
+            return;
         }
+        thread_.request_stop();
+        if (thread_.get_id() == std::this_thread::get_id()) {
+            thread_.detach();
+            return;
+        }
+        thread_.join();
     }
 
 private:

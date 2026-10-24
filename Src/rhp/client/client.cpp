@@ -21,6 +21,7 @@
 #include <rhp/core/convert.hpp>
 #include <rhp/core/error.hpp>
 #include <rhp/core/ids.hpp>
+#include <rhp/core/listener_table.hpp>
 #include <rhp/core/result.hpp>
 #include <rhp/core/value.hpp>
 #include <rhp/net/io_context.hpp>
@@ -99,7 +100,19 @@ public:
     engine(const engine&) = delete;
     engine& operator=(const engine&) = delete;
 
+    // A blocking call made on the client's own network thread (a then / on_output / client.on
+    // callback, or a co_await continuation) would wait for the thread it is blocking.
+    [[nodiscard]] result<void> may_block(std::string_view where) const {
+        if (setup_.io_thread && io_.running_in_this_thread()) {
+            return fail(errc::kInvalidArgument, "a blocking call on the client's own network thread (a callback or a co_await continuation) would wait for itself; use client.async()", std::string{where});
+        }
+        return {};
+    }
+
     result<void> connect() {
+        if (auto ok = may_block("client"); !ok) {
+            return ok;
+        }
         std::unique_lock lock{mutex_};
         if (ready_) {
             return {};
@@ -131,6 +144,9 @@ public:
     result<std::uint16_t> port() {
         if (!reverse_) {
             return fail(errc::kInvalidArgument, "only a client that listens (reverse mode) has a port", "client.port");
+        }
+        if (auto ok = may_block("client.port"); !ok) {
+            return std::unexpected{std::move(ok).error()};
         }
         std::unique_lock lock{mutex_};
         if (closed_) {
@@ -177,12 +193,11 @@ public:
         // could return before the first one's subscribe failed and was rolled back, or an off() and an
         // on() of one name could reach the host in the wrong order.
         const std::scoped_lock serial{subscribe_mutex_};
-        std::uint64_t id = 0;
+        const std::uint64_t id = listeners_.add(std::string{name}, std::move(fn));
         bool first = false;
         {
             const std::scoped_lock lock{mutex_};
-            id = ++last_listener_;
-            listeners_.emplace(id, listener_entry{std::string{name}, std::make_shared<remote_event_fn>(std::move(fn))});
+            listener_names_.emplace(id, std::string{name});
             first = ++remote_names_[std::string{name}] == 1;
         }
         if (first) {
@@ -211,21 +226,27 @@ public:
         return {};
     }
 
-    // Removes a callback; the name when it was the last one for it (empty otherwise).
+    // Removes a callback (waiting for a call of it on the network thread to finish); the name when it
+    // was the last one for it (empty otherwise).
     result<std::string> forget_listener(std::uint64_t id) {
-        const std::scoped_lock lock{mutex_};
-        const auto it = listeners_.find(id);
-        if (it == listeners_.end()) {
-            return fail(errc::kNotFound, std::format("no event callback {}", id), "client.off");
+        std::string last;
+        {
+            const std::scoped_lock lock{mutex_};
+            const auto it = listener_names_.find(id);
+            if (it == listener_names_.end()) {
+                return fail(errc::kNotFound, std::format("no event callback {}", id), "client.off");
+            }
+            std::string name = std::move(it->second);
+            listener_names_.erase(it);
+            const auto count = remote_names_.find(name);
+            if (count != remote_names_.end() && --count->second == 0) {
+                remote_names_.erase(count);
+                last = std::move(name);
+            }
         }
-        std::string name = std::move(it->second.name);
-        listeners_.erase(it);
-        const auto count = remote_names_.find(name);
-        if (count != remote_names_.end() && --count->second == 0) {
-            remote_names_.erase(count);
-            return name;
-        }
-        return std::string{};
+        // Outside mutex_: the callback being waited for may itself need the client.
+        (void)listeners_.remove(id);
+        return last;
     }
 
     std::uint64_t submit(wire::op code, value body, completion done) {
@@ -350,14 +371,19 @@ public:
                     return;
                 }
             }
-            post([this] {
+            const auto close_now = [this] {
                 listener_.reset();
                 if (session_ != nullptr) {
                     session_->close(make_error(errc::kCancelled, "the client closed", "client"));
                 } else {
                     mark_closed(make_error(errc::kCancelled, "the client closed", "client"));
                 }
-            });
+            };
+            if (io_.running_in_this_thread()) {
+                close_now(); // a callback closing (or destroying) its own client: nothing to wait for
+                return;
+            }
+            post(close_now);
             std::unique_lock lock{mutex_};
             wait(lock, clock::now() + kCloseWait, [this] { return closed_; });
         } catch (...) { // the destructor tears everything down regardless
@@ -744,14 +770,14 @@ private:
         case wire::op::kOutput:
             if (setup_.options.on_output) {
                 if (const auto* line = env->body.get_if<std::string>()) {
-                    setup_.options.on_output(env->req, *line);
+                    guarded([&] { setup_.options.on_output(env->req, *line); });
                 }
             }
             return;
         case wire::op::kEmit:
             if (setup_.options.on_emit) {
                 if (auto m = Rhp::from_value<wire::emit_message>(env->body)) {
-                    setup_.options.on_emit(env->req, m->module, m->data);
+                    guarded([&] { setup_.options.on_emit(env->req, m->module, m->data); });
                 }
             }
             return;
@@ -760,19 +786,8 @@ private:
             if (!m) {
                 return;
             }
-            std::vector<std::shared_ptr<remote_event_fn>> targets;
-            {
-                const std::scoped_lock lock{mutex_};
-                for (const auto& [id, l] : listeners_) {
-                    if (l.name == m->name || l.name == "*") {
-                        targets.push_back(l.fn);
-                    }
-                }
-            }
             const remote_event e{m->name, m->module, m->args, m->dropped};
-            for (const auto& fn : targets) {
-                (*fn)(e);
-            }
+            guarded([&] { listeners_.dispatch([&name = m->name](const std::string& n) { return n == name || n == "*"; }, e); });
             return;
         }
         default: return;
@@ -829,11 +844,22 @@ private:
             }
         }
         if (callback) {
-            callback(std::move(r));
+            guarded([&] { callback(std::move(r)); });
         } else {
             cv_.notify_all();
         }
         return true;
+    }
+
+    // Runs an application callback on the network thread. One that throws is the application's
+    // bug; the client has no logger to report it to, and letting it escape would end the session
+    // (and fail every other call), so it is dropped.
+    template <class F>
+    static void guarded(F&& fn) noexcept {
+        try {
+            std::forward<F>(fn)();
+        } catch (...) { // NOLINT(bugprone-empty-catch): see above
+        }
     }
 
     void drop_timer(std::uint64_t req) { timers_.erase(req); }
@@ -859,7 +885,7 @@ private:
         timers_.clear();
         cv_.notify_all();
         for (completion& fn : callbacks) {
-            fn(std::unexpected{why});
+            guarded([&] { fn(std::unexpected{why}); });
         }
     }
 
@@ -918,14 +944,11 @@ private:
     std::uint64_t last_req_ = 0;
     std::map<std::uint64_t, call> pending_;
     session_info info_;
-    // client.on: callbacks by id, and how many each subscribed name has.
-    struct listener_entry {
-        std::string name;
-        std::shared_ptr<remote_event_fn> fn;
-    };
-    std::map<std::uint64_t, listener_entry> listeners_;
+    // client.on: each callback's name, and how many each subscribed name has (the callbacks themselves
+    // are in listeners_).
+    std::map<std::uint64_t, std::string> listener_names_;
     std::map<std::string, std::size_t, std::less<>> remote_names_;
-    std::uint64_t last_listener_ = 0;
+    core::listener_table<std::string, remote_event_fn> listeners_; // any thread; dispatched on the network thread
     std::mutex subscribe_mutex_; // serializes on() / off() across their blocking requests (never taken on the network thread)
     bool had_session_ = false; // network thread: a session was ready before (resubscribe on the next)
 };
