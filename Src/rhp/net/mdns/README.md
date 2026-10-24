@@ -13,4 +13,4 @@ Discovery policies for `Rhp::config<>::discovery<D>`. Nothing is published until
 - Records are untrusted hints: clients authenticate every host they dial. Keys never enter a record; library names only with `include_libs`.
 - Native callbacks copy their results and post to the I/O thread (`io_context::shared_poster`); everything else runs on the I/O thread. A DLL must let native callbacks finish before it unloads.
 - Android apps on Wi-Fi need the multicast lock for the wire responder; iOS apps need their Bonjour and local-network declarations.
-- The Apple backend is checked against the `dns_sd` header only: it hasn't been built or run (see `Docs/TODO.md`).
+- The Apple backend is built by hosted CI (macOS, iOS simulator, iOS device) but hasn't run against real multicast yet (see `Docs/TODO.md`).

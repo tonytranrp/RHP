@@ -1,7 +1,7 @@
 include_guard(GLOBAL)
 
 # rhp_add_module(<name>
-#     HEADERS <files...>      relative to the module folder, installed under <rhp/<name>/...>
+#     HEADERS <files...>      relative to the module folder, included (and installed) as <rhp/<name>/...>
 #     SOURCES <files...>      optional; without sources the module is an INTERFACE library
 #     DEPS    <targets...>    public dependencies on lower layers (Rhp::utils, Rhp::core, ...)
 #     PRIVATE_DEPS <targets...>)

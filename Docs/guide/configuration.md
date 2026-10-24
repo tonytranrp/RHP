@@ -36,7 +36,7 @@ Inside your own templates (a dependent context) write `Cfg::template transport<X
 | `limits` | `Rhp::limits{}` | see below |
 | `errors` | `errors::expected` | `errors::throwing` |
 | `clock` | `exec::steady_clock` | your game clock or a manual clock, for `rhp.sleep` / `rhp.timer` and deterministic tests |
-| `logger` | `core::stderr_logger` | `core::null_logger`, or any type with `enabled(level)` and `write(level, msg)` (spdlog, logcat, os_log, your engine log) |
+| `logger` | `core::stderr_logger` (`set_min_level()`, through `host.logger()`) | `core::null_logger`, or any type with `enabled(level)` and `write(level, msg)` (spdlog, logcat, os_log, your engine log); `log_level::kOff` silences it |
 | `discovery` | `net::mdns` | `net::no_discovery`, explicit `net::mdns_wire`, or a type satisfying `net::discovery`; advertisement remains an explicit runtime opt-in |
 
 ### Which `io` policy?
@@ -80,7 +80,7 @@ using cfg = Rhp::config<>::limits<Rhp::limits{.instructions = 50'000'000, .memor
 
 Instruction, memory and execution-time limits default to unlimited; slicing defaults to off. Set budgets on the **host** that executes code. Instruction/time checks run at hook boundaries and cannot preempt C++ bindings. A host pump can dispatch several operations and pump several identity sandboxes, so `slice_us` is not a hard bound on the whole application frame.
 
-`executor<pumped>` is the only implemented script execution model; accepting a custom marker does not install a scheduler. `clock` affects script sleep/timer time on a host or local sandbox, and the HTTP listener's idle expiry (`pump()` samples the clock's offset from `steady_clock` for the network thread, so the clock is only ever called on the pump thread); not protocol deadlines, heartbeats or HTTP proof freshness. The client logger/clock slots do not currently supply engine callbacks. `engine<>` and `discovery<>` are not available slots.
+`executor<pumped>` is the only implemented script execution model; accepting a custom marker does not install a scheduler. `clock` affects script sleep/timer time on a host or local sandbox, and the HTTP listener's idle expiry (`pump()` samples the clock's offset from `steady_clock` for the network thread, so the clock is only ever called on the pump thread); not protocol deadlines, heartbeats or HTTP proof freshness. The client logger/clock slots do not currently supply engine callbacks. `engine<>` is not a slot (Lua 5.5 is the only engine).
 
 ## Option structs
 
@@ -98,6 +98,8 @@ Passed to the constructors at run time: [`Rhp::host_options`](host-and-client.md
 | `identity` | caller-supplied label for this local identity |
 | `handler_errors` | what a failing timer, frame callback, event handler or task does when it sets no `on_error`: `report` (default), `remove` or `fault` |
 | `on_handler_error` | receives each failed handler call (`handler_failure`); empty = one `[handler failed] ...` output line |
+
+Fleets take `Rhp::fleet_options` (`client` options for every member, `timeout` 10 s shared per broadcast, `tls`, `insecure_lan`); see [networking](networking.md#fleets).
 
 `sandbox::on_script_event(name, fn)` and `sandbox::stats()` complete the standalone sandbox's Stage 7 API (see [script events](writing-scripts.md#script-events)).
 

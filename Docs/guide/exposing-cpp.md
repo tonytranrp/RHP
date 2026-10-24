@@ -9,7 +9,8 @@ using game_lib = Rhp::lib<"game">                                               
     ::fn<"spawn", &game::spawn, Rhp::undo<&game::despawn>>                                             // reversible, needs patch role
     ::fn<"find", &game::find>                                                                          // pure, observe role
     ::fn<"explode", &game::explode, Rhp::irreversible>                                                 // allowed, but counted in revert reports
-    ::fn<"wipe", &game::wipe, Rhp::requires_role<Rhp::role::kAdmin>>::var<"gravity", &game::g_gravity> // read: observe, write: patch (journaled)
+    ::fn<"wipe", &game::wipe, Rhp::requires_role<Rhp::role::kAdmin>>                                  // admin only
+    ::var<"gravity", &game::g_gravity>                                                                // read: observe, write: patch (journaled)
     ::ro<"tick", &game::g_tick>                                                                        // read only
     ::handle<"entity", game::entity_id, &game::is_alive>                                               // opaque userdata + validity check
     ::sub<Rhp::lib<"debug">::fn<"dump", &game::dump_state>>;                                           // game.debug.dump()
@@ -82,7 +83,7 @@ end)
 - Needs patch role. Ids are dotted lowercase; one point type per id; the default is a function pointer or captureless lambda.
 - Overrides stack (newest on top) and can be reverted in any order.
 - Cost while nothing is patched: one atomic load. With `RHP_ENABLE=OFF` it is a direct call.
-- A call selects the newest layer owned by the calling thread; layers installed by other threads are skipped and counted by `off_thread_misses()`. Keep installation, Lua use and teardown on the same application thread. The point/event registries and variable-layer metadata are process-wide, so hosts are not isolated from shared application targets.
+- A call selects the newest layer owned by the calling thread; layers installed by other threads are skipped and counted by `off_thread_misses()` (`depth()` and `patched()` tell how many overrides are installed). Keep installation, Lua use and teardown on the same application thread. The point/event registries and variable-layer metadata are process-wide, so hosts are not isolated from shared application targets.
 - If a handler errors, the call falls back to the next layer (or the default); the fault is processed by the sandbox, normally on the next `pump()`.
 - `original(...)` calls the next applicable layer or default. Do not save it for later: its call token expires when the handler returns. A patch handler cannot suspend with `rhp.wait`, `rhp.sleep` or `rhp.next_frame`.
 
@@ -98,7 +99,7 @@ player_died.fire(id, "lava"); // no-op with RHP_ENABLE=OFF, one atomic load when
 rhp.on("player.died", function(id, cause) print(id, cause) end)   -- removed with its module
 ```
 
-Delivery is fire-and-forget (no return values; use patch points to change behavior). It is synchronous when fired on the thread that owns the subscribed sandbox, queued to the next `pump()` otherwise. String views and C strings are copied for queued delivery; application-defined argument types must also own anything the queued copy needs. Each handler runs as its own request and may `rhp.wait`. Arguments must be `Rhp::convertible` or a handle type that some installed lib declares.
+Delivery is fire-and-forget (no return values; use patch points to change behavior). It is synchronous when fired on the thread that owns the subscribed sandbox, queued to the next `pump()` otherwise. String views and C strings are copied for queued delivery; application-defined argument types must also own anything the queued copy needs. Each handler runs as its own request and may `rhp.wait`. Arguments must be `Rhp::convertible` or a handle type that some installed lib declares (a handle type no lib in a receiving sandbox declares arrives as its `convert` form, else nil; remote clients always get the `convert` form).
 
 ## Custom types: `Rhp::convert<T>`
 

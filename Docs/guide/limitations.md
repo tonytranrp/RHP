@@ -5,7 +5,7 @@ What RHP does not do, or does only partly, as of Stage 7. Most of these are deli
 ## Safety and trust
 
 - **RHP runs remote code on purpose.** Authentication, roles, script signing and TLS decide *who* may run code. They don't make the code harmless. An `admin` identity has Lua's full standard library (files, `os.execute`, native libraries) and is fully trusted.
-- **No execution budgets by default.** Scripts run to completion unless the host sets `limits.instructions`, `wall_ms`, `memory` and optionally `slice_us`. Set them for any key that isn't fully trusted ([configuration](configuration.md#limits)).
+- **No execution budgets by default.** Scripts run to completion unless the host sets `limits.instructions`, `wall_ms`, `memory` and optionally `slice_us`. Set them on any host that accepts keys that aren't fully trusted; they apply to every identity of the host ([configuration](configuration.md#limits)).
 - **Long C++ calls can't be interrupted.** The instruction count hook only runs between Lua instructions. A bound function that blocks blocks the pump.
 - **Undo covers recorded effects only.** RHP undoes variable writes, patches, timers, subscriptions, tasks and functions you gave an inverse (`Rhp::undo<>`). Functions marked `Rhp::irreversible` are reported, untagged functions are assumed pure, and admin standard-library side effects (files written, processes started) are not undone.
 - **`RHP_ENABLE=OFF` for builds that must not accept code.** Enabled builds need their own deployment and distribution review.
@@ -39,6 +39,9 @@ What RHP does not do, or does only partly, as of Stage 7. Most of these are deli
 - **Protocol revisions must match exactly.** Stage 7 speaks revision 4. Older hosts, clients and `rhp-cli` builds are refused at connect time.
 - **`io<zero_threads>` stops the network inside a stuck script.** A zero-thread host whose script is stuck in `pump()` also stops serving the network, so cancel can't reach it.
 - **Mbed TLS is serialized.** Its calls go through one process-wide lock, because its PSA core isn't thread-safe in the default build.
+- **Fleet broadcasts cover `exec`, `load` and `call`.** `rhp-cli fleet` runs `exec` only.
+- **The HTTP gateway routes a subset of operations.** No rollback, checkpoint / revert_to, revert_all, pin / unpin, blob or subscriptions over HTTP.
+- **No FEC on reliable UDP.** Loss is recovered by retransmission.
 - **WebSocket isn't a browser endpoint.** It's a binary tunnel with RHP's own session (and TLS) inside, meant for proxies, not `wss://` browser clients.
 
 ## Platforms and validation

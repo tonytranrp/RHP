@@ -19,4 +19,4 @@ ctest --preset windows-msvc -R example.hello_console --output-on-failure
 
 Or run the executable directly, e.g. `build/windows-msvc/Examples/hello_console/Debug/hello_console.exe`. The script directory is compiled in (`RHP_HELLO_SCRIPTS_DIR`), so it works from any working directory.
 
-Over TCP (a remote console patching this process) arrives in Stage 3.
+Over a network: see `Examples/remote_exec` (and `Examples/headless_server` with `rhp-cli`).

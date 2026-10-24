@@ -18,7 +18,7 @@ while (game::running()) { host.pump(); game::update(); }    // Lua runs only her
 ```
 
 ```bash
-rhp-cli keygen dev                                   # dev.rhpid + the lines for keys.txt and signers.pub
+rhp-cli keygen dev --role patch                      # dev.rhpid; prints the keyring and signers lines (text after the colon)
 rhp-cli connect 127.0.0.1:7777 -i dev.rhpid          # REPL; every script is signed
 ```
 
@@ -31,7 +31,7 @@ auto t   = co_await dev.async().exec<int>("return game.tick");
 dev.unload(*mod);                                              // or close the last session: its recorded effects are reverted
 ```
 
-Every connection authenticates with a pre-shared key (mutual BLAKE2b challenge-response); each key is an identity with its own Lua state and a role (`observe`, `patch`, `admin`). Scripts from patch and admin must be Ed25519-signed by a developer key the host trusts. Frames carry CRC32C and a per-session MAC, are acked, nacked and resent, and a heartbeat ends dead sessions. Hosts can also dial out to a listening client (reverse mode, for phones and NAT), accept blobs into registered sinks, and keep admin-pinned modules after a disconnect. Non-loopback connections use TLS 1.3 (the system's OpenSSL, or Mbed TLS on mobile), with the key handshake bound to the TLS channel; a dropped connection is redialed and the session resumed, with resent frames delivered once in the surviving session (`limits.resume_ms`); this state does not survive a host restart.
+Every connection authenticates with a pre-shared key (mutual BLAKE2b challenge-response); each key is an identity with its own Lua state and a role (`observe`, `patch`, `admin`). Scripts from patch and admin must be Ed25519-signed by a developer key the host trusts. Frames carry CRC32C (omitted under TLS) and a per-session MAC, are acked, nacked and resent, and a heartbeat ends dead sessions. Hosts can also dial out to a listening client (reverse mode, for phones and NAT), accept blobs into registered sinks, and keep admin-pinned modules after a disconnect. Non-loopback connections use TLS 1.3 (the system's OpenSSL, or Mbed TLS on mobile), with the key handshake bound to the TLS channel; a dropped connection is redialed and the session resumed, with resent frames delivered once in the surviving session (`limits.resume_ms`); this state does not survive a host restart.
 
 ```cpp
 Rhp::host<> lan{Rhp::endpoint::listen("0.0.0.0", 7777), keys, signers};      // TLS for every non-loopback peer
@@ -84,7 +84,7 @@ auto rounds = dev.on("game.round_over", [](const Rhp::remote_event& e) { /* a to
 rhp-cli events game.round_over ui.toast -c 127.0.0.1:7777 -i dev.rhpid    # print events until Ctrl+C
 ```
 
-See [`Examples/hello_console`](Examples/hello_console), [`Examples/frame_loop`](Examples/frame_loop), [`Examples/remote_exec`](Examples/remote_exec), [`Examples/custom_transport`](Examples/custom_transport), [`Examples/headless_server`](Examples/headless_server) and [`Tools/rhp-cli`](Tools/rhp-cli).
+See [`Examples/hello_console`](Examples/hello_console), [`Examples/frame_loop`](Examples/frame_loop), [`Examples/remote_exec`](Examples/remote_exec), [`Examples/custom_transport`](Examples/custom_transport), [`Examples/headless_server`](Examples/headless_server) and [`Tools/rhp-cli`](Tools/rhp-cli); Stage 7 usage is in [scheduling and events](Docs/guide/scheduling-and-events.md).
 
 ## Targets
 
@@ -123,7 +123,7 @@ cmake --build --preset windows-msvc
 ctest --preset windows-msvc
 ```
 
-Other presets: `windows-clang-cl`, `windows-msvc-asan`, `linux-clang`, `linux-clang-asan`, `linux-clang-tsan`, `macos`, `ios-sim`, `ios-device`, `android-x64`, `android-arm64`. On Windows, run from a Developer PowerShell / prompt, or open the folder in Visual Studio.
+Other presets: `windows-clang-cl`, `windows-msvc-asan`, `linux-clang`, `linux-clang-asan`, `linux-clang-tsan`, `linux-clang-fuzz` (libFuzzer, no test preset), `macos`, `ios-sim`, `ios-device`, `android-x64`, `android-arm64` (Android runs its tests through `Tools/android/run_tests.py`). On Windows, run from a Developer PowerShell / prompt, or open the folder in Visual Studio.
 
 ## Use it
 
@@ -139,7 +139,7 @@ Releases are tagged by stage (`stage-7`); there are no `v1`-style version number
 The short list; the full one is [Docs/guide/limitations.md](Docs/guide/limitations.md).
 
 - RHP runs remote code by design: keys, roles, signatures and TLS decide *who*, not *what*. Admin identities are fully trusted.
-- No execution budgets by default; set `limits.instructions` / `wall_ms` / `memory` / `slice_us` for untrusted keys. A long C++ call can't be interrupted.
+- No execution budgets by default; set `limits.instructions` / `wall_ms` / `memory` / `slice_us` on any host that accepts keys you don't fully trust (limits apply to every identity of a host). A long C++ call can't be interrupted.
 - Undo covers recorded effects (variables, patches, timers, subscriptions, tasks, functions with an inverse), not irreversible calls or admin standard-library side effects.
 - Runaway timers, frame callbacks, handlers and tasks run by `pump()` can only be stopped by limits, not from the network.
 - Script events stay inside one identity. Remote event delivery is rate-limited per session, and the HTTP gateway has no event stream.

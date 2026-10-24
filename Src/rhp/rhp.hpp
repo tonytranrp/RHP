@@ -1,7 +1,7 @@
 #pragma once
 
-// RHP — Remote Hot Patch. One include for everything the library offers.
-// Modules arrive stage by stage; this header grows with them.
+// RHP — Remote Hot Patch. One include for everything the library offers: every public header of
+// every module.
 
 #include <rhp/audit/sinks.hpp>
 #include <rhp/client/client.hpp>
@@ -16,6 +16,7 @@
 #include <rhp/core/log.hpp>
 #include <rhp/core/result.hpp>
 #include <rhp/core/role.hpp>
+#include <rhp/core/subscription.hpp>
 #include <rhp/core/value.hpp>
 #include <rhp/event/events.hpp>
 #include <rhp/event/hub.hpp>
@@ -57,6 +58,7 @@
 #include <rhp/security/tls/tls.hpp>
 #include <rhp/session/secure_link.hpp>
 #include <rhp/session/session.hpp>
+#include <rhp/utils/base64.hpp>
 #include <rhp/utils/byte_buffer.hpp>
 #include <rhp/utils/crc32c.hpp>
 #include <rhp/utils/fixed_string.hpp>

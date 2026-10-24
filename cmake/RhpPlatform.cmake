@@ -1,7 +1,8 @@
 include_guard(GLOBAL)
 
 # Maps the CMake target system to one RHP_PLATFORM_* definition.
-# Only Src/rhp/platform may branch on these; everything else uses Rhp::platform traits.
+# Src/rhp/platform and backend .cpp files (net/local, net/mdns) may branch on these; everything else
+# uses Rhp::platform traits.
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
     set(RHP_PLATFORM "WINDOWS")
 elseif(CMAKE_SYSTEM_NAME STREQUAL "iOS")

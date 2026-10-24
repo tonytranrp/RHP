@@ -21,3 +21,5 @@
 - `puc_lua` is the only engine. `Rhp::script::stack` is the engine boundary; a formal `engine` concept for `config<>::engine<>` arrives with a second engine.
 
 **Stage 2 (as built):** `require` is the host loader for every role (admin included; `package` stays admin-only but never loads files through `require`). The `rhp` global gains `wait`, `next_frame`, `sleep`, `frame`, `timer`, `on`, `off` and `emit`. `coroutine.resume` / `coroutine.close` refuse the scheduler's request coroutines.
+
+**Stage 7 (as built):** the `rhp` table gains `after`, `every`, `every_frame`, `every_frames`, `pause`, `resume`, `reschedule`, `timers`, `once`, `on_error`, `publish`, `wait_event`, `stats`, `spawn` and `tasks` ([Stage 7 decisions](stage7-scheduling-events.md)).

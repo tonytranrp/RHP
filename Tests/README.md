@@ -16,10 +16,11 @@ ctest --preset windows-msvc
 | `integration/stage6_tests.cpp` | signed scripts over WebSocket/UDP/IPC, TLS tunneling, HTTP identity/role/signature/cancel/expiry, discovery and collect-all fleet outcomes | real transport backends; real multicast DNS-SD |
 | `unit/net/websocket_tests.cpp`, `udp_reliable_tests.cpp`, `local_ipc_tests.cpp`, `http_tests.cpp`, `mdns_tests.cpp` | the sans-IO codecs (frames, packets, HTTP heads, DNS), stream contract and close/drain per transport, loss/corruption/duplication/reorder, DNS conflicts/updates/goodbyes, native discovery | `datagram_relay.cpp` injects UDP faults; `support/rhp_test/stream_roundtrip.hpp` is the shared transport contract |
 | `unit/security/tls_tests.cpp` | every backend pair (OpenSSL ↔ Mbed TLS where both exist): handshake, data, channel binding, close_notify, CA and name checks, bad PEM | certificates in `support/rhp_test/tls_fixtures.hpp` (test-only) |
-| `tools/` | `rhp-cli` (`rhp_cli_tests`, needs `RHP_BUILD_TOOLS`) | the shell in-process over loopback; then the real `rhp-cli` and `headless_server` binaries as processes over TCP |
+| `integration/stage7_tests.cpp` | client events from the pump and other threads, identity isolation, unsubscribe / detach, `host.on_script_event`, `handler_failed`, tasks across sessions, flood caps with `dropped`, reverse-mode resubscription | loopback |
+| `tools/` | `rhp-cli` (`rhp_cli_tests`, needs `RHP_BUILD_TOOLS`; the `[process]` cases also need `RHP_BUILD_EXAMPLES` and carry the label `process`) | the shell in-process over loopback; then the real `rhp-cli` and `headless_server` binaries as processes over TCP |
 | `support/rhp_test/` | header-only helpers shared by suites (`poll_until`, a recording `link_handler`, `stream_roundtrip`) | on every suite's include path |
 | `fuzz/` | frame, envelope, msgpack, sandbox_escape, network: replay drivers in ctest (`fuzz.*`), libFuzzer with `RHP_FUZZ=ON` | see [fuzz/README.md](fuzz/README.md) |
-| `bench/` | Google Benchmark | when there's a hot path to measure |
+| `bench/` | (planned, Stage 8) | the hot paths: patch points, bindings, scheduler, wire, round trips |
 
 ## Rules
 

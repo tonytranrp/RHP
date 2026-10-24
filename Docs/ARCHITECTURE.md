@@ -4,7 +4,7 @@
 > **Targets:** Windows 10 1809+ · Linux (glibc 2.31+) · macOS 13.3+ · iOS 16.3+ · Android API 26+ — x86_64 + arm64
 > **Compilers:** MSVC (VS 2026) · clang-cl · Clang 17+ · AppleClang · Android NDK Clang
 > **Root namespace:** `Rhp::` · **Include root:** `<rhp/...>`
-> **Current usage:** [user guide](guide/README.md) · **Open issues / verification:** [Status and TODO](TODO.md). The current implementation includes Stages 0–6. The historical decision logs below retain the decisions made at each stage; current Stage 6 choices are recorded in [networking decisions](decisions/stage6-networking.md).
+> **Current usage:** [user guide](guide/README.md) · **Open issues / verification:** [Status and TODO](TODO.md). The current implementation includes Stages 0–7; §0–§16 describe it as built. The historical decision logs (§17–§33) keep the decisions made at each stage; per-topic reasoning lives in [`decisions/`](decisions/README.md), the latest in [networking](decisions/stage6-networking.md) and [scheduling and events](decisions/stage7-scheduling-events.md).
 > **Progress model:** work advances in **stages** (Stage 0, Stage 1, …). Nothing in code, files, tags, or APIs is ever named `v1`/`v2`/`V*`. The only numbers on the wire are a plain `protocol_revision` integer and per-module `revision` counters.
 
 ---
@@ -19,7 +19,7 @@
 | Heavy `<>::` chaining | configuration and bindings are type-level DSLs: `Rhp::config<>::transport<..>::auth<..>`, `Rhp::lib<"game">::fn<..>::var<..>` |
 | C++ is the executor, Lua is glue | Lua only reaches what C++ exposed via `Rhp::lib<>` and `Rhp::patch_point<>` |
 | Loaded / unload / revert / reload | managed **modules** + an **undo ledger** + per-module revision history + global checkpoints |
-| Portable to 5 OSes | no OS headers in public API; OS code only in `Src/rhp/platform/detail/*` and backend `.cpp`s |
+| Portable to 5 OSes | no OS headers in public API; OS code only in `Src/rhp/platform/` and backend `.cpp`s (`net/local`, `net/mdns`) |
 | Network + error correction handled by RHP | framing, CRC32C, seq/ack, idempotency, heartbeat, reconnect, resume |
 | Easy to use | `Rhp::config<>` supplies implemented defaults; applications choose execution budgets and check setup results |
 
@@ -71,28 +71,30 @@ Each layer may only depend on layers below it. Maintained through each module's 
 ```mermaid
 flowchart TB
     subgraph L5["Layer 5 — Front-end"]
+        CONFIG["Rhp::config&lt;&gt;"]:::fe
         HOST["Rhp::host"]:::fe
-        CLIENT["Rhp::client"]:::fe
-        FLEET["Rhp::fleet"]:::fe
+        CLIENT["Rhp::client · Rhp::fleet"]:::fe
     end
-    subgraph L4["Layer 4 — Session"]
-        SESS["Rhp::session<br/>handshake · roles · seq/ack · resume · heartbeat · reconnect"]
+    subgraph L4["Layer 4 — Session & audit"]
+        SESS["Rhp::session<br/>handshake · seq/ack · MAC · resume · heartbeat · TLS over any link"]
+        AUD["Rhp::audit<br/>file / stream sinks"]
     end
     subgraph L3["Layer 3 — Backends (policies)"]
         NETL["Rhp::net<br/>transports + discovery"]
-        SEC["Rhp::security<br/>psk · signing · roles · tls"]
-        EXEC["Rhp::exec<br/>executors + io thread"]
-        SCRIPT["Rhp::script<br/>engine · sandbox · lib DSL · patch points · ledger · scheduler · stubs"]
+        SEC["Rhp::security (+ ::tls)<br/>psk · signing · HTTP proofs · TLS engines"]
+        EXEC["Rhp::exec<br/>executor · io thread · clock"]
+        SCRIPT["Rhp::script<br/>sandbox · lib DSL · patch points · ledger · scheduler · events · stubs"]
+        EVT["Rhp::event<br/>host events · hub"]
     end
     subgraph L2["Layer 2 — Wire & Platform"]
         WIRE["Rhp::wire<br/>frame · envelope · msgpack codec"]
-        PLAT["Rhp::platform<br/>OS traits · endian · time"]
+        PLAT["Rhp::platform<br/>OS name · secure random"]
     end
     subgraph L1["Layer 1 — Core"]
-        CORE["Rhp::core<br/>error · result · value · convert · ids · log · limits · concepts"]
+        CORE["Rhp::core<br/>error · result · value · convert · ids · log · limits · role · subscription"]
     end
     subgraph L0["Layer 0 — Utils (zero deps)"]
-        UT["Rhp::utils<br/>fixed_string · type_list · scope_guard · spsc_ring · crc32c · units"]
+        UT["Rhp::utils<br/>fixed_string · type_list · function_traits · scope_guard · spsc_ring · byte_buffer · crc32c · base64 · units"]
     end
     L5 --> L4 --> L3 --> L2 --> L1 --> L0
     classDef fe fill:#2b6cb0,color:#fff,stroke:#1a365d
@@ -103,9 +105,11 @@ flowchart TB
 | 0 | `Rhp::utils` | standard library | RHP, OS, Lua, sockets |
 | 1 | `Rhp::core` | utils | Lua, sockets, threads |
 | 2 | `Rhp::wire`, `Rhp::platform` | core | Lua, sessions |
-| 3 | `Rhp::net`, `Rhp::security`, `Rhp::exec`, `Rhp::script` | layers 0–2 | each other |
-| 4 | `Rhp::session` | backends **through concepts only** | concrete backend types |
-| 5 | `Rhp::host`, `Rhp::client`, `Rhp::fleet` | everything, via `Rhp::config<>` | — |
+| 3 | `Rhp::net`, `Rhp::security` (+ `Rhp::security::tls`), `Rhp::exec`, `Rhp::script`, `Rhp::event` | layers 0–2 | each other |
+| 4 | `Rhp::session`, `Rhp::audit` | backends **through concepts only** | concrete backend types |
+| 5 | `Rhp::config<>`, `Rhp::host`, `Rhp::client` / `Rhp::fleet` | everything, via `Rhp::config<>` | — |
+
+The order is kept by `Src/rhp/CMakeLists.txt` and each module's `DEPS` / `PRIVATE_DEPS`; declaration order alone doesn't enforce it.
 
 Naming: everything is **snake_case** (std-like) under the `Rhp::` root — `Rhp::host`, `Rhp::script::patch_point`, `Rhp::errc::kBudgetExceeded`.
 
@@ -121,78 +125,83 @@ classDiagram
     class config {
         <<type-level builder>>
         transport~T~
-        tls~S~
+        tls~B~
         codec~C~
         auth~A~
-        signer~G~
-        engine~E~
+        signer~S~
         executor~X~
         io~I~
-        discovery~D~
         limits~L~
-        logger~O~
-        errors~R~
+        errors~M~
         clock~K~
+        logger~O~
+        discovery~D~
     }
     class Transport {
-        <<concept>>
-        listen()
-        dial()
-        send()
-        poll()
-        close()
+        <<concept net::transport>>
+        T::name
+        T::listen(io, endpoint, on_accept)
+        T::dial(io, endpoint, on_connect)
+        T::network
+    }
+    class TlsBackend {
+        <<concept security::tls::backend>>
+        server(settings) / client(settings)
+        → context → one sans-IO engine per link
+    }
+    class Codec {
+        <<concept wire::codec>>
+        name · encode(value) · decode(bytes)
     }
     class Authenticator {
-        <<concept>>
-        challenge()
-        respond()
-        verify()
-        role_of()
+        <<concept security::authenticator>>
+        begin() → host_handshake
+        A::credential::begin() → client_handshake
     }
     class Signer {
-        <<concept>>
-        sign()
-        verify()
+        <<concept security::signer>>
+        S::key::sign(source)
+        S::trust::verify(source, signature)
     }
-    class ScriptEngine {
-        <<concept>>
-        compile()
-        resume()
-        call()
-        reset()
-    }
-    class Executor {
-        <<concept>>
-        post()
-        drain()
+    class IoRunner {
+        <<concept exec::io_runner>>
+        kOwnsThread · start · stop
     }
     class Discovery {
-        <<concept>>
-        advertise()
-        browse()
+        <<concept net::discovery>>
+        D::advertise(io, record)
+        D::start_browse(io, options)
     }
     config ..> Transport
+    config ..> TlsBackend
+    config ..> Codec
     config ..> Authenticator
     config ..> Signer
-    config ..> ScriptEngine
-    config ..> Executor
+    config ..> IoRunner
     config ..> Discovery
     Transport <|.. tcp
     Transport <|.. websocket
     Transport <|.. udp_reliable
     Transport <|.. local_ipc
     Transport <|.. loopback
-    host --> http_listener : optional frontend
     Transport <|.. your_transport
+    TlsBackend <|.. auto_backend
+    TlsBackend <|.. openssl
+    TlsBackend <|.. mbedtls
+    TlsBackend <|.. none
+    Codec <|.. msgpack
     Authenticator <|.. psk_keyring
     Signer <|.. ed25519
-    ScriptEngine <|.. puc_lua
-    Executor <|.. pumped
-    Executor <|.. threaded
-    Executor <|.. inline_exec
+    Signer <|.. unsigned_scripts
+    IoRunner <|.. owned_io_thread
+    IoRunner <|.. zero_threads
     Discovery <|.. mdns
+    Discovery <|.. mdns_wire
     Discovery <|.. no_discovery
+    host --> http_gateway : optional frontend
 ```
+
+The other slots are simpler: `executor` is a marker (`exec::pumped`, the only one), `errors` picks `errors::expected` or `errors::throwing`, `clock` takes any `exec::clock_source` (`now()`), `logger` any `core::logger` (`enabled` / `write`), and `limits` a `Rhp::limits` value. There is no script-engine concept: Lua 5.5 (`puc_lua`) is the only engine.
 
 ### 3.1 Customization points
 
@@ -212,9 +221,10 @@ classDiagram
 | Type marshaling | trait specialization | specialize `Rhp::convert<T>` | `vec3`, `entity`, `color` |
 | Bindings | type-level DSL | `Rhp::lib<"name">::fn<...>` | expose functions + handles |
 | Hot-patch sites | object | `Rhp::patch_point<"id", &default_fn>` | overridable behavior |
-| Native hooking | planned integration | no shipped `hook_backend` concept/slot | application-supplied effects can use the ledger |
+| Native hooking | application code | none shipped: bind your own hook engine through `Rhp::lib` (functions with `Rhp::undo<>`) | an application can also keep its own `Rhp::script::ledger` of `effect`s |
 | Blob sinks | runtime registration | `host.on_blob("name", fn)` | receive textures, configs |
-| Events | callbacks | `host.on<Rhp::event::X>(fn)` | audit, UI notification |
+| Host events | callbacks | `host.on<Rhp::event::X>(fn)`, `host.on_any(fn)` | audit, UI notification |
+| Script / remote events | callbacks | `host.on_script_event`, `sandbox::on_script_event`, `client.on` | tools watching a game |
 
 ---
 
@@ -237,10 +247,11 @@ using my_cfg = Rhp::config<>
     ::errors   <Rhp::errors::expected>                        // or Rhp::errors::throwing
     ::clock    <Rhp::exec::steady_clock>                      // injectable (game time, deterministic tests)
     ::logger   <Rhp::core::stderr_logger>
-    ::limits   <Rhp::limits{}>;                               // everything unlimited, scripts run to completion
+    ::limits   <Rhp::limits{}>                                // everything unlimited, scripts run to completion
+    ::discovery<Rhp::net::mdns>;                              // advertisement stays an explicit host.advertise() opt-in
 ```
 
-`Rhp::config<>` with no links equals exactly this. TLS activates automatically for non-loopback network endpoints. `engine<>` and `discovery<>` are not shipped slots; see AA2–AA5 and the guide's [configuration table](guide/configuration.md#rhpconfig). There is **no default port** — every endpoint names one.
+`Rhp::config<>` with no links behaves exactly like this chain (the types differ: a written link is a setting of its own). TLS activates automatically for non-loopback network endpoints. `engine<>` is not a slot (Lua 5.5 is the only engine); see AA2–AA5 and the guide's [configuration table](guide/configuration.md#rhpconfig). There is **no default port** — every endpoint names one.
 
 The implementation uses `config_detail::setting<slot, T>` to identify each policy, `rebind_t` to replace a prior setting, and `get_or_t` to select defaults. Host/client facades turn the resulting types into function pointers and callbacks for engines compiled once. See [`config.hpp`](../Src/rhp/config/config.hpp).
 
@@ -354,7 +365,7 @@ game = {}
 function game.spawn(kind, x, y, z) end
 ```
 
-Stubs are filtered by role: functions the role can't call are left out and variables it can't write are marked `read-only`. Parameters are named `arg1..argN` (C++ has no parameter names without reflection); a `Rhp::convert<T>` names its Lua type with `static constexpr std::string_view lua_type`. `rhp-cli stubs > rhp_api.lua` fetches them from a running host (`op::describe`).
+`stubs::rhp_api(role)` starts with `---@meta` and describes the `rhp` table; `stubs::generate<L>(role)` (default role admin) describes one lib, without the header: concatenate them. Stubs are filtered by role: functions the role can't call are left out and variables it can't write are marked `read-only`. Parameters are named `arg1..argN` (C++ has no parameter names without reflection); a `Rhp::convert<T>` names its Lua type with `static constexpr std::string_view lua_type`. `rhp-cli stubs > rhp_api.lua` fetches them from a running host (`op::describe`).
 
 ---
 
@@ -374,9 +385,10 @@ Stubs are filtered by role: functions the role can't call are left out and varia
 | `revert(mod)` | undo every effect of `mod`; module stays loaded, inert | patch |
 | `unload(mod)` | `on_unload()` → revert → drop `_ENV` → forget | patch |
 | `revert_all()` | panic button: every module of every identity unloaded | admin |
-| `cancel(req)` | stop a running script/coroutine | same identity or admin |
+| `cancel(req)` | stop one, or all, of this session's requests (running, suspended or queued) | observe (own session only) |
 | `list` / `status` / `describe` | introspection, stubs | observe |
 | `blob(sink, bytes)` | push a file to a host-registered sink (chunked) | admin (per-sink overridable) |
+| `subscribe(name)` / `unsubscribe(name)` | deliver host C++ events or this identity's script events to the session | observe |
 
 ¹ observe sessions can run code, but any binding that mutates host state fails with `errc::kForbidden`.
 
@@ -391,6 +403,8 @@ stateDiagram-v2
     Compiling --> Running: text chunk OK
     Running --> Suspended: slice used up / rhp.wait()
     Suspended --> Running: next pump()
+    Running --> Loading: first load suspended (status: loading)
+    Loading --> Active: top level done + on_load() OK
     Running --> Active: top level done + on_load() OK
     Running --> Faulted: runtime error
     Active --> Active: call() / rollback(n)
@@ -398,6 +412,7 @@ stateDiagram-v2
     Reloading --> Active: new revision OK or FAILED (old untouched)
     Active --> Reverted: revert()
     Reverted --> Active: reload()
+    Faulted --> Active: reload()
     Active --> Unloaded: unload()
     Reverted --> Unloaded: unload()
     Faulted --> Unloaded: unload()
@@ -416,7 +431,7 @@ flowchart LR
     P["host.pump()"] --> Q{"ready coroutines?"}
     Q -- no --> R["return"]
     Q -- yes --> RUN["resume next coroutine"]
-    RUN --> H{"count hook (every 1000 instr):<br/>cancel flag set? · optional slice/limit hit?"}
+    RUN --> H{"count hook (every cancel_check_instructions, 1000):<br/>cancel flag set? · optional slice/limit hit?"}
     H -- "cancel" --> C["raise kCancelled (sticky)<br/>auto-revert per fault policy"]
     H -- "slice hit (opt-in)" --> Y["lua_yield → continues next pump"]
     H -- no --> RUN
@@ -429,7 +444,7 @@ flowchart LR
 | Knob | Default | Effect |
 |---|---|---|
 | `limits.slice_us` | `0` = run to completion | opt-in time slicing per `pump()` |
-| `limits.instructions` / `memory` / `wall_ms` | `0` = unlimited | opt-in totals, per config or per role; **sticky** when hit (re-raise every tick, allocator keeps refusing) so `pcall` can't swallow them; a background task's instruction and wall budgets bound each resume |
+| `limits.instructions` / `memory` / `wall_ms` | `0` = unlimited | opt-in totals, per host config (the same for every identity and role); `wall_ms` counts time spent running, not suspended; **sticky** when hit (re-raise every tick, allocator keeps refusing) so `pcall` can't swallow them; a background task's instruction and wall budgets bound each resume |
 | `limits.event_queue` | `65536` | events queued per sandbox for its next `pump()` (other threads' fires, `rhp.publish`); more are dropped and counted (`stats().dropped_events`) |
 | `sandbox_options::handler_errors` | `report` | what a failing timer, frame callback, event handler or task does: `report` (undo that call only), `remove` (also drop the handler) or `fault` (the module, as before Stage 7); a memory stop always faults |
 | cancel flag | always on | set by the **I/O thread** (atomic) when `cancel` / `revert_all` / disconnect arrives; the count hook checks it, so a runaway loop can always be stopped **even while `pump()` is stuck inside it** |
@@ -465,7 +480,6 @@ flowchart LR
 | `rhp.on` / `rhp.once` / `rhp.on_error` | unsubscribe |
 | `rhp.timer` / `rhp.after` / `rhp.every` / `rhp.every_frame(s)` | remove |
 | `rhp.spawn` | cancel the task (its own effects are undone as its module's) |
-| `hook_backend` install | uninstall |
 | `::fn<..., Rhp::irreversible>` | none — reported as `irreversible_effects: N` |
 | plain `::fn` | none (treated as pure) |
 
@@ -483,8 +497,8 @@ Module names are dotted lowercase (`combat.low_grav`), same rule as patch ids. C
 
 ```mermaid
 flowchart LR
-    A["link drops"] --> B{"resumed with token<br/>before heartbeat death?<br/>(≈ 3 × 2 s)"}
-    B -- yes --> C["same session continues<br/>nothing reverted"]
+    A["link lost (or heartbeat dead)"] --> B{"resumed by the dialing side<br/>within limits.resume_ms (6 s)?"}
+    B -- yes --> C["same session continues<br/>nothing reverted, nothing run twice"]
     B -- no --> D["session dead"]
     E["client close()"] --> D
     D --> F{"other live sessions<br/>for this identity?"}
@@ -492,7 +506,7 @@ flowchart LR
     F -- no --> H["revert all modules + scratch · unload · lua_close"]
 ```
 
-A Wi-Fi blip shorter than the heartbeat window does **not** revert; a real disconnect does.
+A Wi-Fi blip shorter than the resume window does **not** revert; a real disconnect does.
 
 *As built (Stage 5):* a lost link (or a heartbeat that died: a half-open link) detaches the session for `limits.resume_ms` (6 s); the side that dialed redials and resumes it, both ends resend what wasn't acknowledged, and nothing is reverted or run twice (AA7). Only a session that doesn't come back in time — or one closed on purpose — ends and reverts.
 
@@ -512,6 +526,11 @@ The [user guide](guide/README.md) contains the current API and runnable examples
 | Async consumption, callback/thread lifetimes, blobs and audit | [Host and client](guide/host-and-client.md) |
 | TLS, reverse mode, resume, CLI and custom transports | [Connecting](guide/connecting.md) |
 | Policies, execution budgets, build switches and disabled builds | [Configuration](guide/configuration.md) |
+| Frame callbacks, timers, tasks, script events, remote subscriptions | [Scheduling and events](guide/scheduling-and-events.md) |
+| Other transports, HTTP gateway, discovery, fleet | [Networking](guide/networking.md) |
+| Keys, roles, signing, TLS | [Security](guide/security.md) |
+| Error codes, events, wire summary, threads | [Reference](guide/reference.md) |
+| What RHP doesn't do | [Limitations](guide/limitations.md) |
 
 Local use is `Rhp::script::sandbox`, not a `host.local()` accessor. Script source arguments are strings/string views; there is no `Rhp::source::file` loader. Client credentials and signing keys are separate constructor inputs. Output callbacks are constructor options, not client setters.
 
@@ -563,19 +582,19 @@ sequenceDiagram
  +---------------+-----------------+-------+-------+----------------+----------------+-----------+
  |                         payload (MessagePack, `length` bytes, ≤ 4 MiB)                         |
  +-----------------------------------------------------------------------------------------------+
- | crc32c 4B (omitted under TLS) | [ keyed-BLAKE2b MAC 32B on loopback/IPC ]                      |
+ | crc32c 4B (omitted under TLS) | [ keyed-BLAKE2b MAC 32B on every frame after the handshake ]   |
  +-----------------------------------------------------------------------------------------------+
 ```
 
 | Field | Purpose |
 |---|---|
 | `magic`, `protocol_rev` | reject garbage; `protocol_rev` is a plain integer agreed in `hello` |
-| `flags` | `MAC`, `ACK_REQ`, `MORE` (fragment of a blob/large payload), `CRC_OMITTED` |
-| `op` | 16 bits: `hello, challenge, response, welcome, resume` (handshake) · `exec, load, call, reload, rollback, unload, revert, revert_to, checkpoint, revert_all, cancel, list, status, describe, pin, unpin, blob` (requests) · `output, emit, result, error` (replies) · `ping, pong, ack, nack` (control) — see X5 |
-| `seq` / `ack` | per-session monotonic + cumulative ack |
-| `length` | ≤ `max_frame` (4 MiB), checked **before** allocating; blobs larger than that are fragmented (`MORE`) |
+| `flags` | `kMac` (1), `kAckRequested` (2), `kMore` (4, reserved and unused), `kCrcOmitted` (8) |
+| `op` | 16 bits: handshake 1–5 `hello, challenge, response, welcome, resume` · requests 16–34 `exec, load, call, reload, rollback, unload, revert, revert_to, checkpoint, revert_all, cancel, list, status, describe, pin, unpin, blob, subscribe, unsubscribe` · replies 48–52 `output, emit, result, error, event` · control 64–67 `ping, pong, ack, nack` (see X5 and [reference](guide/reference.md#wire-protocol)) |
+| `seq` / `ack` | per-session monotonic + cumulative ack; control frames carry a per-direction counter in `seq` |
+| `length` | ≤ `max_frame` (4 MiB; 16 KiB before the handshake), checked **before** allocating; a blob is sent as a series of `kBlob` requests (chunks of `client_options::blob_chunk`, 1 MiB) |
 | `crc32c` | catches corruption TCP's checksum misses; dropped under TLS (AEAD covers it) — as built, flag `kCrcOmitted`, accepted only on encrypted links (AA6) |
-| MAC | loopback/IPC integrity + replay protection (`seq` inside the MAC) |
+| MAC | integrity + replay protection on every frame after the handshake (`seq` inside the MAC), one key per direction |
 
 The header is fixed binary; only the payload is MessagePack (maps 1:1 onto Lua values).
 
@@ -600,33 +619,28 @@ flowchart TB
 |---|---|
 | CRC32C | corruption on non-TLS links |
 | seq/ack + resend window | loss across reconnects |
-| resume token (from handshake) | re-attaching to in-flight requests after reconnect |
+| sealed resume proof bound to the new link | re-attaching to in-flight requests after reconnect |
 | idempotency key + bounded response cache | double execution on retry |
-| ping/pong (2 s, dead after 3 misses) | half-open sockets, sleeping radios |
+| ping/pong (`limits.heartbeat_ms` 2 s, dead after `heartbeat_misses` 3; with resume on, a dead heartbeat detaches the session) | half-open sockets, sleeping radios |
 | capped exponential backoff + full jitter | reconnect storms |
-| **UDP-reliable transport** | own fragmentation + selective ack + retransmit; optional FEC policy (the only place FEC applies) |
+| **UDP-reliable transport** | own fragmentation (480 B) + selective ack + RFC 6298 retransmit; no FEC |
 
 ### 8.3 Session state machine
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Disconnected
-    Disconnected --> Connecting: dial / accept
-    Connecting --> Handshaking: link up
-    Connecting --> Backoff: fail
-    Handshaking --> Ready: hello · challenge · response · role assigned
-    Handshaking --> Closed: auth fail
-    Ready --> Degraded: missed pongs
-    Degraded --> Ready: pong
-    Degraded --> Backoff: 3 missed
-    Ready --> Backoff: link error
-    Backoff --> Connecting: min(cap, base·2^n) · full jitter
-    Backoff --> Closed: give up / close()
-    Ready --> Closed: close()
+    [*] --> Handshaking: link up (dialed or accepted)
+    Handshaking --> Ready: hello · challenge · response · sealed welcome
+    Handshaking --> Closed: auth fail / timeout / refused
+    Ready --> Detached: link lost or heartbeat dead (resume on)
+    Detached --> Ready: kResume on a new link (sealed, channel-bound)
+    Detached --> Closed: not resumed within resume_ms
+    Ready --> Closed: close() / kError / heartbeat dead (resume off)
     Closed --> [*]
-    note right of Ready
-        re-entry with resume token:
-        resend unacked frames
+    note right of Detached
+        the dialing side redials with capped
+        backoff + full jitter; both sides resend
+        unacknowledged frames after resuming
     end note
 ```
 
@@ -636,16 +650,17 @@ stateDiagram-v2
 
 | Layer | Decision |
 |---|---|
-| Bind address | loopback / local IPC by default; non-loopback requires a keyring **and** TLS (or an explicit `insecure_lan` opt-in) |
+| Bind address | chosen by the application (there is no default endpoint; tutorials use loopback); non-loopback requires a keyring **and** TLS (or an explicit `insecure_lan` opt-in) |
 | Authentication | `psk_keyring`: mutual challenge-response, keyed BLAKE2b (Monocypher); each key maps to an **identity** and a **role** |
-| Roles | `observe` (read, pure calls) · `patch` (mutations, load/revert) · `admin` (revert_all, blobs, `io`, admin-tagged bindings) |
+| Roles | `observe` (read, pure calls, subscriptions) · `patch` (mutations, load/revert) · `admin` (revert_all, pin/unpin, blobs, the full standard library, admin-tagged bindings) |
 | Script signing | Ed25519 (Monocypher): host only runs code signed by a trusted developer key; `rhp-cli` signs automatically with the identity's private key |
-| Channel | TLS 1.3 on networks: OpenSSL (desktop) / mbedTLS (iOS, Android) behind `tls::auto_backend`; keyed-BLAKE2b frame MAC on loopback/IPC. *As built (Stage 5):* the PSK handshake is bound to the TLS connection (RFC 9266 tls-exporter), so the host's certificate needs no PKI; `ca_pem` adds certificate checks (AA4) |
-| Sandbox | allowed libs: `string`, `table`, `math`, `utf8`, `coroutine`, `os.time`/`os.clock`; **full standard library for `kAdmin`** — `io`, `os` (incl. `execute`, `getenv`, `remove`, `rename`), `package.loadlib`, `debug` (decided: an admin key is fully trusted; `package.loadlib` can't load unsigned native code on iOS anyway); no `debug`, `package`, `dofile`, binary chunks (`load` forced to `"t"`), `string.dump` |
-| Limits | unlimited, run to completion by default; cancel always works; optional sticky totals / slicing per role |
+| Channel | TLS 1.3 on networks: the system's OpenSSL (desktop) or Mbed TLS (iOS, Android, and wherever OpenSSL isn't found) behind `tls::auto_backend`; keyed-BLAKE2b MAC on every frame after the handshake. *As built (Stage 5):* the PSK handshake is bound to the TLS connection (RFC 9266 tls-exporter), so the host's certificate needs no PKI; `ca_pem` adds certificate checks (AA4) |
+| Sandbox | non-admin: `string`, `table`, `math`, `utf8`, `coroutine`, `os.time`/`os.clock`; no `io`, `package`, `debug`, `dofile`, `loadfile`, `collectgarbage`, `string.dump`. **Admin: the full standard library** — `io`, `os` (incl. `execute`, `getenv`, `remove`, `rename`), `package.loadlib`, `debug` (decided: an admin key is fully trusted; `package.loadlib` can't load unsigned native code on iOS anyway). Every role: text-only `load` (binary chunks refused) and RHP's `require` (loaded modules only) |
+| Limits | unlimited, run to completion by default; cancel always works; optional sticky totals / slicing per host config (the same for every identity and role) |
 | Connections | unlimited concurrent clients per host (decided) — every one must authenticate |
 | Discovery leak | mDNS TXT advertises host name, platform, protocol_rev, app name + build id, installed lib names **only when the host opts in** (off by default). Never keys. `discovery<Rhp::net::no_discovery>` turns it off |
-| Audit | `Rhp::event::script_executed {identity, role, op, module, hash, signer, time}` + optional file sink |
+| Audit | `Rhp::event::script_executed {time, session, identity, granted, peer, op, module, hash, signer, outcome}` and the other host events, through `Rhp::audit::file_sink` / `ostream_sink` (JSON lines) |
+| Events exposure | `kSubscribe` needs only observe and covers every C++ `lua_event` in the process: keep secrets out of C++ event arguments |
 | Kill switches | compile-time `RHP_ENABLE=OFF` (host becomes a stub, patch points become direct calls) **and** runtime `host.set_enabled(false)` |
 
 > **iOS/App Store:** remote code that changes app behavior is restricted by store policy. Target dev/QA/enterprise builds; compile out with `RHP_ENABLE=OFF` for store builds. Check current Apple guidelines before shipping.
@@ -662,7 +677,7 @@ flowchart LR
         DISC["mDNS advertise / browse"]
     end
     subgraph USER["User thread — host.pump()"]
-        PUMP["scheduler: resume ready coroutines"] --> VMS["lua_State per identity"]
+        PUMP["events · frame callbacks · timers · ready requests"] --> VMS["lua_State per identity"]
         VMS --> RES["results · output · emit"]
     end
     IN --> PUMP
@@ -678,9 +693,12 @@ flowchart LR
 | Concurrency rule | each `lua_State` is used on one application thread; rings, cancel relays, queued events and pending client results carry cross-thread state |
 | Hosts per process | many; **no globals** in hosts (decided) |
 | Patch points / lua_events | one **process-wide registry**; any host may patch/deliver; stacking order = global ledger seq |
-| Patch point hit off the pump thread | Lua states aren't thread-safe, so the call runs the **C++ default** and increments a per-point `off_thread_misses` counter (shown in `status`) |
+| Patch point hit off the pump thread | Lua states aren't thread-safe, so the call runs the **C++ default** and increments a per-point counter (`patch_point::off_thread_misses()`) |
 | `lua_event` delivery | synchronous when fired on the owning pump thread, queued to the next `pump()` otherwise; fire-and-forget (no return values — use patch points to modify behavior) |
-| Clock | `clock<>` policy, `steady_clock` default; inject game time or a manual clock for deterministic tests |
+| Clock | `clock<>` policy, `steady_clock` default; inject game time or a manual clock for deterministic tests (the network thread never calls it: `pump()` samples an offset) |
+| Script events (`rhp.publish`) | never cross threads: queued and delivered on the sandbox's thread at its next `pump()` |
+| Remote subscriptions | the host engine is itself a `lua_event` listener; fires from other threads queue for the next pump; `client.on` callbacks run on the client's network thread |
+| Host events | published on the pump thread through a thread-safe hub; subscribe / unsubscribe from any thread |
 
 ---
 
@@ -688,76 +706,61 @@ flowchart LR
 
 ```text
 RHP/
-├── CMakeLists.txt
-├── CMakePresets.json
-├── .clang-format                  # 4 spaces, attached braces (rest: see F20)
-├── README.md
-├── LICENSE                        # Apache-2.0
-├── NOTICE
+├── CMakeLists.txt · CMakePresets.json · README.md · LICENSE (Apache-2.0) · NOTICE · CLAUDE.md
+├── .clang-format · .editorconfig · .gitattributes · .gitignore · .github/workflows/ci.yml
 ├── cmake/
-│   ├── CPM.cmake
-│   ├── Dependencies.cmake         # every pin in one place
-│   ├── RhpOptions.cmake
-│   ├── RhpWarnings.cmake
-│   ├── RhpSanitizers.cmake
-│   └── RhpPlatform.cmake
-├── Src/
-│   ├── CMakeLists.txt
-│   └── rhp/
-│       ├── rhp.hpp                # umbrella
-│       ├── CMakeLists.txt
-│       ├── utils/      fixed_string · type_list · function_traits · scope_guard · spsc_ring
-│       │               byte_buffer · crc32c(.cpp) · units · overloaded · detail/
-│       ├── core/       error · result · errors_mode · value(.cpp) · convert · ids · log(.cpp) · limits
-│       ├── platform/   os · random(.cpp)                                    (Stage 3) ← only OS #ifdefs
-│       ├── wire/       ops · frame(.cpp) · codec · codec/msgpack(.cpp) · messages(.cpp)   (Stage 3)
-│       ├── net/        endpoint · io_context(.cpp) · link · loopback/ · tcp/          (Stage 3)
-│       │               discovery · local/ · websocket/ · udp_reliable/ · mdns/ · detail/http   (Stage 6)
-│       ├── security/   authenticator · key(.cpp) · keyring(.cpp) · psk_keyring(.cpp)  (Stage 3)
-│       │               signer · ed25519(.cpp) · signing_keys(.cpp) · identity_file(.cpp) · hash(.cpp)   (Stage 4)
-│       │   tls/        tls · openssl(.cpp) · mbedtls(.cpp) · auto_backend — Rhp::security::tls  (Stage 5)
-│       ├── exec/       executor (pumped, steady_clock) · io_runner (owned_io_thread, zero_threads)
-│       ├── script/     stack · marshal · lib · patch_point · ledger · sandbox     (Stage 1)
-│       │               lua_event · stubs · scheduler, revisions, require in sandbox (Stage 2)
-│       │               hook_backend                                               (later)
-│       ├── event/      events(.cpp) · hub — typed host events, subscriptions, JSON  (Stage 4)
-│       ├── audit/      sinks(.cpp) — file_sink, ostream_sink                        (Stage 4)
-│       │               puc_lua/(.cpp — lua.h never leaks) · detail/
-│       ├── session/    session(.cpp): handshake · seq/ack/nack · MAC · heartbeat   (Stage 3)
-│       │               resume · secure_link(.cpp): TLS over any link, channel_policy   (Stage 5)
-│       ├── config/     config — the Rhp::config<> chain                              (Stage 3)
-│       ├── host/       host · detail/engine — host.cpp (+ blobs, events, pin, reverse: Stage 4)
-│       │               local_api                                                     (later)
-│       └── client/     client · pending · detail/engine — client.cpp                 (Stage 3–4)
-│                       fleet · async_stream                                          (later)
+│   ├── CPM.cmake · Dependencies.cmake      # every pin in one place
+│   ├── RhpOptions · RhpPlatform · RhpWarnings · RhpSanitizers · RhpModule (rhp_add_module)
+│   ├── RhpLua · RhpAsio · RhpMonocypher · RhpMbedtls · RhpTools   # third-party targets
+│   └── lua/lua_cxx.cpp · monocypher/*_cxx.cpp                   # C sources compiled as C++
+├── Src/rhp/                 # one folder per module, included as <rhp/<module>/...>, umbrella rhp.hpp
+│   ├── utils/      fixed_string · type_list · function_traits · scope_guard · spsc_ring · byte_buffer
+│   │               crc32c(.cpp) · base64 · units · overloaded
+│   ├── core/       error · result · errors_mode · value(.cpp) · convert · ids · log(.cpp) · limits · role · subscription
+│   ├── platform/   os · random(.cpp)                       ← general OS facts
+│   ├── wire/       ops · frame(.cpp) · codec · codec/msgpack(.cpp) · messages(.cpp)
+│   ├── net/        endpoint · io_context(.cpp) · link · discovery · loopback/ · tcp/ · websocket/ · udp_reliable/
+│   │               local/ · mdns/ · detail/http                  ← Asio and OS APIs only in their .cpp files
+│   ├── security/   authenticator · key · keyring · psk_keyring · signer · ed25519 · signing_keys · identity_file
+│   │               hash · http_auth                 tls/: tls · openssl(.cpp) · mbedtls(.cpp) · auto_backend
+│   ├── exec/       executor (pumped, steady_clock) · io_runner (owned_io_thread, zero_threads)
+│   ├── script/     stack · marshal · lib · patch_point · lua_event · ledger · sandbox · stubs · detail/
+│   │               puc_lua/: sandbox · schedule · script_events · tasks · lib_proxy · stack (.cpp, lua.h never leaks)
+│   ├── event/      events(.cpp) · hub — typed host events, subscriptions, JSON
+│   ├── audit/      sinks(.cpp) — file_sink, ostream_sink
+│   ├── session/    session(.cpp): handshake · seq/ack/nack · MAC · heartbeat · resume · secure_link(.cpp)
+│   ├── config/     config — the Rhp::config<> chain
+│   ├── host/       host · detail/engine — host.cpp (engine) · gateway.cpp (HTTP frontend)
+│   └── client/     client · pending · fleet · detail/ — client.cpp · fleet.cpp
 ├── Tests/
-│   ├── CMakeLists.txt
 │   ├── unit/          mirrors Src/rhp/* — files named `<thing>_tests.cpp`
-│   ├── support/       header-only test helpers (`rhp_test/…`)
-│   ├── integration/   host_client (Stage 3) · stage4 (signing, audit, blobs, pin, reverse, async)
+│   ├── integration/   host_client · stage4 · stage5 · stage6 · stage6_fleet · stage7
 │   ├── tools/         rhp-cli in-process + as a process against headless_server
 │   ├── compile_fail/  bad concepts, duplicate names — ctest WILL_FAIL
-│   ├── fuzz/          frame · envelope · msgpack · sandbox_escape (Stage 5)
-│   └── bench/         patch_point_call · frame_roundtrip · exec_latency · slice_overhead
+│   ├── fuzz/          frame · envelope · msgpack · sandbox_escape · network (replay drivers / libFuzzer)
+│   └── support/       header-only test helpers (`rhp_test/…`)
 ├── Examples/
-│   ├── hello_console/     exec · expose · patch points · load/revert/rollback, local + over TCP
+│   ├── hello_console/     exec · expose · patch points · load / call / revert, locally
+│   ├── frame_loop/        a game loop next to a runaway script, reload with state, LuaLS stubs
+│   ├── remote_exec/       three keys against one host over loopback and TCP, cancel, revert on disconnect
 │   ├── custom_transport/  writing your own Rhp::net::transport
-│   └── headless_server/   standalone host: key files, audit log, blobs, reverse mode (Stage 4)
+│   └── headless_server/   standalone host: key files, audit log, blobs, reverse mode, TLS, DNS-SD, HTTP gateway
 ├── Tools/
-│   ├── rhp-cli/           REPL (replxx, CLI11): connect · exec · load · revert · rollback · pin · stubs · watch · run · keygen · sign · blob
-│   ├── android/           run_tests.py — the test executables on a device / emulator over adb (Stage 5)
-│   └── ios/               simctl_run.sh — the ios-sim preset's test runner (Stage 5)
-├── Scripts/               sample .lua used by examples/tests
+│   ├── rhp-cli/           REPL and subcommands (replxx, CLI11): keygen · pubkey · sign · connect · run · exec · stubs
+│   │                      blob · watch · events · discover · fleet
+│   ├── android/           run_tests.py — the test executables on a device / emulator over adb
+│   └── ios/               simctl_run.sh — the ios-sim preset's test runner
 └── Docs/
-    ├── ARCHITECTURE.md
-    └── decisions/         one file per decision, named by topic (`lua-runtime.md`, no numbers)
+    ├── ARCHITECTURE.md · TODO.md
+    ├── guide/             the user guide
+    └── decisions/         one file per decision topic (`lua-runtime.md`, no numbers)
 ```
 
 Rules:
 1. Top level capitalized (`Src`, `Tests`, `Examples`, `Tools`, `Docs`); everything under `Src/rhp/` is **lowercase** because it's an include path and Linux/Android/iOS are case-sensitive.
 2. Folder ↔ namespace: `Src/rhp/script/` ⇔ `Rhp::script`; `detail/` ⇔ `Rhp::script::detail`.
 3. One `CMakeLists.txt` per module folder, files listed explicitly, no `GLOB_RECURSE`.
-4. Third-party headers (`lua.h`, `asio.hpp`, OpenSSL, mbedTLS, Monocypher, msgpack) only in `.cpp` files.
+4. Third-party and OS headers (`lua.h`, `asio.hpp`, OpenSSL, Mbed TLS, Monocypher, DNS-SD, IPC) only in `.cpp` files.
 5. `.hpp`/`.cpp`, `#pragma once`, 4-space indent, attached braces.
 6. No `v1`/`v2`/`V*` in any identifier, file, folder, namespace, or tag.
 
@@ -819,8 +822,10 @@ flowchart BT
     net["rhp_net"] --> platform
     net -. PRIVATE .-> asio[["Asio"]]
     sec["rhp_security"] --> wire
+    sec --> platform
     sec -. PRIVATE .-> mono[["Monocypher"]]
     tlsmod["rhp_tls"] --> core
+    tlsmod --> platform
     tlsmod -. PRIVATE, optional .-> tls[["OpenSSL (system) / Mbed TLS 4.2"]]
     session --> tlsmod
     exec["rhp_exec"] --> core
@@ -853,13 +858,12 @@ flowchart BT
 |---|---|---|
 | `RHP_ENABLE` | `ON` | `OFF` → inert host, direct-call patch points |
 | `RHP_BUILD_TESTS` / `RHP_BUILD_EXAMPLES` / `RHP_BUILD_TOOLS` | `ON` when top-level | |
-| `RHP_WITH_TLS` | `ON` | OpenSSL desktop / mbedTLS mobile |
+| `RHP_WITH_TLS` | `ON` | TLS 1.3 backends: the system's OpenSSL ≥ 3.0 (desktop, if found) and Mbed TLS 4.2 (unless `RHP_TLS_MBEDTLS=OFF`); `auto_backend` prefers OpenSSL |
 | `RHP_TLS_OPENSSL` | `AUTO` | the system's OpenSSL ≥ 3.0: `AUTO` (if found, desktop only), `ON` (required), `OFF` |
 | `RHP_TLS_MBEDTLS` | `ON` | build the Mbed TLS backend (fetched) |
 | `RHP_FUZZ` | `OFF` | Tests/fuzz as libFuzzer executables (Clang) |
-| Stage 6 networking | `RHP_ENABLE` / typed policies | choose WebSocket, reliable UDP or IPC with `transport<>`; `discovery<no_discovery>` disables discovery; HTTP listener and advertisement are runtime opt-ins |
-| `RHP_SANITIZE` | empty | `address;undefined` or `thread` |
-| `RHP_WARNINGS_AS_ERRORS` | `ON` | `/W4 /WX` · `-Wall -Wextra -Wpedantic -Werror` |
+| `RHP_SANITIZE` | empty | `address;undefined` (Clang), `address` (MSVC) or `thread` |
+| `RHP_WARNINGS_AS_ERRORS` | `ON` | MSVC `/W4 /permissive- /Zc:__cplusplus /utf-8 /WX`; Clang `-Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Werror` (RHP's own targets only) |
 
 ### 12.3 Presets (Ninja Multi-Config; opens directly in Visual Studio)
 
@@ -870,7 +874,7 @@ flowchart BT
 | `windows-msvc-asan` | MSVC AddressSanitizer | ✅ |
 | `linux-clang` / `linux-clang-asan` / `linux-clang-tsan` | Clang 17+, glibc 2.31+ | ✅ |
 | `linux-clang-fuzz` | Clang, `RHP_FUZZ=ON`, ASan+UBSan, RelWithDebInfo | libFuzzer runs (Tests/fuzz/README.md) |
-| `macos` | AppleClang, `arm64;x86_64`, macOS 13.3+ | hosted CI passes (without real multicast and the `[process]` cases: [TODO](TODO.md#hosted-ci-first-runs-2026-10-16)) |
+| `macos` | AppleClang, `arm64;x86_64`, macOS 13.3+ | hosted CI passes (without real multicast and the `[process]` cases: [TODO](TODO.md#open-items)) |
 | `ios-sim` | Ninja Multi-Config + AppleClang, `CMAKE_SYSTEM_NAME=iOS`, iOS 16.3+, simulator (plain executables: the Xcode generator's per-SDK paths are invisible to ctest) | hosted CI passes (without real multicast); runner uses `xcrun simctl spawn` as crosscompiling emulator (`Tools/ios/simctl_run.sh`) |
 | `ios-device` | Xcode, arm64 | build only |
 | `android-x64` | NDK Clang, API 26+ (`ANDROID_NDK_HOME`); built with NDK 29 | build verified; hosted CI job passes; adb runner available |
@@ -891,7 +895,7 @@ ctest --preset windows-msvc -C Debug
 ### 12.4 Consuming RHP (CPM / add_subdirectory)
 
 ```cmake
-CPMAddPackage(NAME rhp GITHUB_REPOSITORY tonytranrp/RHP GIT_TAG <commit-sha>)
+CPMAddPackage(NAME rhp GITHUB_REPOSITORY tonytranrp/RHP GIT_TAG stage-7)   # or a commit sha
 target_link_libraries(my_game PRIVATE Rhp::rhp)
 ```
 
@@ -902,14 +906,14 @@ target_link_libraries(my_game PRIVATE Rhp::rhp)
 ```mermaid
 flowchart TB
     U["unit (mirrors Src/rhp)"] --> I["integration<br/>loopback → TCP → TLS"]
-    I --> F["fuzz: frame · envelope · msgpack · sandbox"]
+    I --> F["fuzz: frame · envelope · msgpack · sandbox · network"]
     I --> CF["compile-fail: concepts, duplicate names"]
-    I --> B["bench: patch point · roundtrip · slice overhead"]
+    I --> B["bench (planned): patch point · roundtrip · slice overhead"]
 ```
 
 Must-have cases: revert matrix (every effect kind × load/reload/rollback/revert/revert_to/unload × cross-module interleaving) · transactional reload · scheduler (cancel from the I/O thread stops an infinite loop inside `pump()`; opt-in `slice_us` yields on time) · sandbox escapes · roles (observe can't mutate) · signing (unsigned/wrong-key rejected) · reconnect+resume exactly-once · CRC corruption → nack → resend · blob fragmentation · boundary instantiations (`Rhp::config<>`, empty `Rhp::lib<"x">`, `void` returns, minimal user transport).
 
-**CI:** `.github/workflows/ci.yml` defines the Stage 5 matrix. Its current macOS step name has a YAML syntax error, and prior jobs report an account billing/spending-limit block. No hosted platform verification should be inferred until the corresponding jobs pass; see [Status and TODO](TODO.md). Android device suites use the adb runner; the iOS simulator runner integrates with ctest.
+**CI** (`.github/workflows/ci.yml`, four jobs): `linux` (linux-clang, -asan, -tsan), `windows` (msvc, clang-cl; `-LE multicast`), `apple` (macOS universal with Mbed TLS, `-LE "multicast|process"`; the iOS simulator, `-LE multicast`; an iOS device build) and `android` (NDK r29; x86_64 tests on an API 34 emulator through `Tools/android/run_tests.py`; an arm64 build). Hosted runners can't pass real multicast, and the macOS `[process]` cases are an open issue ([TODO](TODO.md)). Android device suites use the same adb runner locally.
 
 ---
 
@@ -920,11 +924,16 @@ namespace Rhp {
 enum class errc : std::uint16_t {
     kOk, kTransport, kProtocol, kProtocolRevisionMismatch, kAuth, kForbidden, kBadSignature, kIntegrity, kTimeout,
     kCompile, kRuntime, kBudgetExceeded, kMemoryExceeded, kStaleHandle,
-    kNotFound, kAlreadyLoaded, kHasDependents, kRevertPartial, kIrreversible, kCancelled, kLimitExceeded, kDisabled
+    kNotFound, kAlreadyLoaded, kHasDependents, kRevertPartial, kIrreversible, kCancelled, kLimitExceeded, kDisabled,
+    kInvalidArgument, kTypeMismatch, kOutOfRange, kUnloaded
 };
 struct error { errc code; std::string message; std::string where; std::string traceback; };
 template <class T> using result = std::expected<T, error>;
-struct exception : std::exception { error err; /* what() → err.message */ };
+class exception : public std::exception {
+public:
+    const error& err() const noexcept;
+    const char* what() const noexcept override; // "[code] where: message"
+};
 }
 ```
 
@@ -948,13 +957,13 @@ All PRIVATE; none of their headers appear in `Src/rhp/**/*.hpp`.
 | Integrity | CRC32C (own software slicing-by-8; hardware dispatch not implemented) | — |
 | Crypto | Monocypher 4.0.3, compiled as C++ (BLAKE2b handshake + frame MAC from Stage 3; its optional RFC 8032 Ed25519 for script signatures and BLAKE2b-256 audit hashes from Stage 4) | CC0 / BSD-2 |
 | CLI | CLI11 2.7.2 (header-only) · replxx `release-0.0.4` (line editing; upstream quiet since 2021, built by our own target) — `rhp-cli` only | BSD-3 · BSD-3 |
-| TLS | OpenSSL 4.0.x (desktop) · mbedTLS 4.2 (mobile, custom Asio stream adapter) — as built: the system's OpenSSL ≥ 3.0 and Mbed TLS 4.2.0, both behind one sans-IO engine (no Asio SSL streams) | Apache-2.0 |
+| TLS | the system's OpenSSL ≥ 3.0 (desktop) and Mbed TLS 4.2.0 (release tarball, SHA-256 pinned), both behind one sans-IO engine (no Asio SSL streams) | Apache-2.0 |
 | WebSocket | own RFC 6455 framing on Asio | — |
 | HTTP gateway | own minimal HTTP/1.1 parser on Asio | — |
 | mDNS / DNS-SD | behind `Rhp::net::discovery`: Windows DNS-SD API, Apple `dns_sd`, own multicast responder on Linux/native Android; app NSD bridges can supply a policy (see Stage 6 decisions) | — |
-| Tests | Catch2 v3.16 | BSL-1.0 |
+| Tests | Catch2 v3.16.1 | BSL-1.0 |
 | Bench (planned; not fetched) | Google Benchmark | Apache-2.0 |
-| Fetching | CPM.cmake 0.42.x | MIT |
+| Fetching | CPM.cmake 0.42.3 | MIT |
 
 Apache-2.0 for RHP is compatible with all of the above.
 
@@ -982,7 +991,7 @@ flowchart LR
 | 4 ✅ | full lifecycle from `rhp-cli`, signed scripts only, audit log written — done: `rhp-cli` (replxx + CLI11) runs keygen → host key files → a signed REPL session (multi-line Lua, load / reload / rollback / call / pin / unload, stubs, blob, watch) against `Examples/headless_server` as a separate process, which writes a JSON-lines audit log; unsigned scripts from patch/admin are refused (`kBadSignature`); reverse mode (`rhp-cli --listen`, `headless_server --reverse`), async client calls (then / get / future / `co_await`), blobs and `pin` work over loopback and TCP; 370 tests green on MSVC, clang-cl, MSVC-ASan, Linux Clang, Clang ASan+UBSan, Clang TSan; the `RHP_ENABLE=OFF` build (153 tests) is green without Lua, Asio or Monocypher |
 | 5 ✅ | TLS on all 5 OS presets; kill-the-socket test resumes exactly-once — done: TLS 1.3 through OpenSSL (system) and Mbed TLS 4.2 behind `config<>::tls<>`, the PSK handshake bound to the TLS channel (a TLS-terminating relay fails it), resume after a lost link (200 calls through 20 socket cuts run exactly once, over TLS too, reverse mode too), libFuzzer targets for frame / envelope / msgpack / sandbox_escape (the sandbox fuzzer found and fixed a Lua stack overrun); 398 tests green on MSVC, clang-cl, MSVC-ASan, Linux Clang, Clang ASan+UBSan, Clang TSan; the `RHP_ENABLE=OFF` build (155 tests) is green without Lua, Asio, Monocypher or TLS; Android: `android-arm64` / `android-x64` build with NDK 29 and every suite passed on an arm64 phone (Android 16) through `Tools/android/run_tests.py`; libFuzzer ran ~13 million inputs across the four targets clean; macOS and the iOS simulator are covered by the CI workflow, which couldn't run yet (the account's Actions billing blocks jobs) |
 | 6 ✅ | fleet finds hosts via mDNS and broadcasts a script — the separate-process CLI discovers two hosts and collects both signed results over TLS; transports, gateway, discovery, fleet and tools are implemented. The review follow-ups are finished (§32): HTTP answer proofs and channel binding, host-clock idle expiry, per-request audit peers, a compiled fleet engine on one shared reactor with `load`/`call` broadcasts, and the four earlier runtime defects. Exact checks and platform limits: [Status and TODO](TODO.md). |
-| 7 ✅ | scripts schedule work and talk through events without a client request held open — done: `rhp.every_frame(s)` / `rhp.after` / `rhp.every` with pause, resume, reschedule and `rhp.timers()`; `rhp.spawn` tasks with status / cancel / join; `rhp.publish` / `rhp.once` / priorities / `rhp.wait_event`; `sandbox` and `host.on_script_event`; `client.on` / `rhp-cli events` subscribe to host events (protocol revision 4); a failing handler is reported and undoes only its own call (`handler_failed`). Decisions §33, checks: [Status and TODO](TODO.md). |
+| 7 ✅ | scripts schedule work and talk through events without a client request held open (560 tests green on MSVC, clang-cl, MSVC-ASan, Linux Clang 21, Clang ASan+UBSan, Clang TSan; `RHP_ENABLE=OFF` 169) — done: `rhp.every_frame(s)` / `rhp.after` / `rhp.every` with pause, resume, reschedule and `rhp.timers()`; `rhp.spawn` tasks with status / cancel / join; `rhp.publish` / `rhp.once` / priorities / `rhp.wait_event`; `sandbox` and `host.on_script_event`; `client.on` / `rhp-cli events` subscribe to host events (protocol revision 4); a failing handler is reported and undoes only its own call (`handler_failed`). Decisions §33, checks: [Status and TODO](TODO.md). |
 
 ---
 
@@ -1291,7 +1300,7 @@ Detailed rationale and primary sources: [Stage 6 networking decisions](decisions
 |---|---|---|
 | AC1 | Policy boundaries | WebSocket, reliable UDP and local IPC implement the existing transport concept. DNS-SD uses the new `discovery<D>` slot. HTTP feeds the host dispatcher as an optional frontend; fleet retains ordinary client instances. |
 | AC2 | WebSocket | own RFC 6455 binary framing at `/rhp`; client masking, continuations, control frames and close handshake. TLS stays inside the byte tunnel, preserving the session channel binding. Conventional WSS and browser clients are outside this transport's contract. |
-| AC3 | Reliable UDP | 480-byte fragments, random connection tokens, selective ACK, CRC32C, retransmission and congestion backoff reconstruct the ordered stream. TLS and session resume remain above it. FEC is optional and confined to this transport. |
+| AC3 | Reliable UDP | 480-byte fragments, random connection tokens, selective ACK, CRC32C, retransmission and congestion backoff reconstruct the ordered stream. TLS and session resume remain above it. FEC is optional and confined to this transport (as built: no FEC; see AD7). |
 | AC4 | IPC | owner-restricted overlapped named pipes on Windows; mode-0600 AF_UNIX sockets and inode-checked cleanup on POSIX; same-UID abstract AF_UNIX on Linux/Android. Authentication remains mandatory. |
 | AC5 | HTTP | timestamp/nonce request MAC plus the existing script signature; MessagePack arguments/results; logical sessions share the identity's sandbox, roles, deferred replies, cancellation, pins and cleanup. Idle expiry defaults to five minutes. |
 | AC6 | Discovery | advertisement is opt-in; library names require another opt-in. Windows native browsing resolves both native wildcard services and wire-owned constrained address records. Apple owns native A/AAAA and service records. Linux/native Android use the wire provider; APKs may supply an NSD policy. |

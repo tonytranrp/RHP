@@ -39,4 +39,4 @@ while (running) { host.pump(); game::update(); }
 - `install`, `on_blob`, `advertise`, `discovery_status` and `pump` belong to one thread (the pump thread). `on` / `on_any` / `on_script_event`, `set_enabled`, `port`, `gateway_port`, `sessions`, `identities` are thread-safe.
 - Lock order for C++ events: an event's own mutex, then the engine's `program_mutex_` (fires from other threads queue there); attach and detach never run under `program_mutex_`.
 - Nothing from `session` or the engine leaks into `host.hpp`; config policies are type-erased into `setup`. Gateway types stay in the private `detail/gateway.hpp`.
-- `RHP_ENABLE=0`: the host is inert (`install`, `on_blob`, `port` report `kDisabled`), no engine is built.
+- `RHP_ENABLE=0`: the host is inert (every result-bearing call — `install`, `on_blob`, `port`, `gateway_port`, `advertise`, `discovery_status` — reports `kDisabled`; `sessions()` / `identities()` return 0), no engine is built.

@@ -7,10 +7,10 @@ Everything about *how* a client and a host find and talk to each other.
 An `Rhp::endpoint` says where the peer is and which side waits. There is no default port.
 
 ```cpp
-Rhp::endpoint::listen("127.0.0.1", 7777)                           // wait here
-    Rhp::endpoint::dial("10.0.0.5", 7777)                          // connect there
-    Rhp::endpoint::listen("0.0.0.0", 7777, Rhp::net::require_tls)  // TLS even on loopback
-    Rhp::endpoint::listen("0.0.0.0", 7777, Rhp::net::insecure_lan) // plaintext allowed (trusted LAN only)
+Rhp::endpoint::listen("127.0.0.1", 7777)                       // wait here
+Rhp::endpoint::dial("10.0.0.5", 7777)                          // connect there
+Rhp::endpoint::listen("0.0.0.0", 7777, Rhp::net::require_tls)  // TLS even on loopback
+Rhp::endpoint::listen("0.0.0.0", 7777, Rhp::net::insecure_lan) // plaintext allowed (trusted LAN only)
 ```
 
 For a TCP listener, port 0 binds a free port; check and read `host.port()` (or `client.port()` in reverse mode). Dial endpoints need the actual listening port. Loopback uses an in-process channel name and number, and its listener reports port 0 rather than an OS socket port.
@@ -48,8 +48,6 @@ Rhp::client_options co;
 co.tls.ca_pem = authority_pem;
 co.tls.server_name = "game.lan";
 ```
-
-The three input variables above contain PEM **text loaded by the application**, not file paths. CLI `--cert`, `--key` and `--ca` instead accept paths and read those files. With a CA and an empty `server_name`, a dialed DNS name is selected automatically; for an IP endpoint, supply the intended certificate DNS name if you want name checking. CA-chain checks and PSK channel authentication are separate checks.
 
 The three input variables above contain PEM **text loaded by the application**, not file paths. CLI `--cert`, `--key` and `--ca` instead accept paths and read those files. With a CA and an empty `server_name`, a dialed DNS name is selected automatically; for an IP endpoint, supply the intended certificate DNS name if you want name checking. CA-chain checks and PSK channel authentication are separate checks.
 
@@ -130,7 +128,7 @@ struct my_transport {
 using cfg = Rhp::config<>::transport<my_transport>; // concept-checked on this line
 ```
 
-The concept allows `network` to be absent, which classifies the transport as local; set it to true for a transport crossing a network. Forward `loopback()`, `encrypted()` and `channel_binding()` when wrapping a link so the session sees its actual properties.
+Every transport must declare `network` (Stage 8): `true` for anything another machine can reach (the TLS address rules then apply), `false` for in-process, IPC or a cable. A transport without it doesn't compile, so none is silently treated as local. When wrapping a link, derive from `Rhp::net::link_decorator`: it forwards `loopback()`, `encrypted()` and `channel_binding()`, which the session's security depends on.
 
 Link rules: call the handler only on the `io_context`'s thread (use `io_context::post` from elsewhere), report `on_closed` exactly once and never after the link is destroyed, and write queued bytes before closing. See [`Examples/custom_transport`](../../Examples/custom_transport).
 

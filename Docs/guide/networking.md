@@ -34,7 +34,7 @@ if (!advertised) {
 }
 ```
 
-Calling `advertise()` again updates the record (leave `name` empty to keep the current one). Registration finishes on the network thread, so later problems such as a name conflict (`kAlreadyLoaded`) show up in `host.discovery_status()`. Library names are published only with `.include_libs = true`; installing another library then refreshes the record.
+Calling `advertise()` again updates the record (leave `name` empty to keep the current one; on the first call an empty name becomes `rhp-<random>`). Registration finishes on the network thread, so later problems such as a name conflict (`kAlreadyLoaded`) show up in `host.discovery_status()`. Library names are published only with `.include_libs = true`; installing another library then refreshes the record.
 
 The provider is the `discovery<D>` slot:
 
@@ -106,6 +106,7 @@ for (const auto& entry : group.call<double>("low_grav", "set", 1.6)) { /* host_r
 - `fleet_options::client` applies to every member. Its `on_output` / `on_emit` run on the fleet's network thread (inside the waits and `poll()` with `io<zero_threads>`, and possibly on the destroying thread while a fleet is torn down); never call the fleet from them.
 - One thread uses a fleet at a time.
 - `Rhp::discover<Cfg>(options)` is the same browse without a fleet.
+- Members: `size()`, `add(record)`, `discover(options)` (returns how many were added), `clear()`, `poll()`, `exec` / `load` / `call`. `Rhp::fleet_options` = `{client, timeout (10 s), tls (kAuto), insecure_lan}`; a fleet made without a signing key can only call loaded code and run observe scripts.
 
 The tools run the whole flow:
 
@@ -137,7 +138,7 @@ Rhp::host<> host{Rhp::endpoint::listen("127.0.0.1", 7777), keys, signers, option
 | `POST /cancel/{token}` | | cancels the request sent with `X-RHP-Request: {token}` |
 | `POST /cancel` | | cancels every request this key has in flight |
 
-Answers are MessagePack: the result, or an RHP error. Status codes: 200, 400 (bad request or arguments), 401 (proof refused or replayed), 403 (role or signature), 404, 408 (headers too slow), 409 (cancelled), 413 (too large), 422 (the script or module failed), 429 (too many requests), 500, 503 (host disabled), 504 (timed out). A suspended script answers when it finishes. Requests need `Content-Length` (no chunked bodies, no pipelining); `Expect: 100-continue` is answered. Heads are limited to 16 KiB and 64 fields, bodies to `limits.max_frame`.
+Answers are MessagePack: the result, or an RHP error. Status codes: 200, 400 (bad request or arguments), 401 (proof refused or replayed), 403 (role or signature), 404, 408 (the head took longer than `limits.handshake_timeout_ms`), 409 (cancelled), 413 (too large), 422 (the script or module failed), 429 (too many requests), 500, 503 (host disabled), 504 (timed out). A suspended script answers when it finishes. Requests need `Content-Length` (no chunked bodies, no pipelining); `Expect: 100-continue` is answered. Heads are limited to 16 KiB and 64 fields, bodies to `limits.max_frame`. Not routed over HTTP: rollback, checkpoint / revert_to, revert_all, pin / unpin, blob and subscribe; `DELETE` never forces an unload; HTTP exec runs with the chunk name `http.exec`.
 
 Each key has one logical session, kept across connections. It ends after `limits.gateway_idle_ms` (five minutes) with nothing in flight, which reverts its effects like any last session (pinned modules and other live sessions of the identity are kept). A request in flight is never expired while its client is connected; a client that hangs up cancels its request. Idle time is measured on the host's clock (`config<>::clock<>`): `pump()` samples its offset from `steady_clock` for the network thread, so a test clock that jumps ahead expires identities without real waiting, and the clock itself is only called on the pump thread. Proof freshness and the replay window always use the system clock, since clients sign with real time. Audit records (`script_executed`) name the caller of each request in `peer`, not the first caller of the key.
 

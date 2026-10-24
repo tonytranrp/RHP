@@ -51,7 +51,7 @@ namespace Rhp {
 // the developer's PC) and dials again, with capped exponential backoff and full jitter, whenever
 // that fails or the session ends.
 //
-// With RHP_ENABLE=0 the host is inert: it never listens, install() and port() report kDisabled.
+// With RHP_ENABLE=0 the host is inert: it never listens, and every result-bearing call reports kDisabled.
 template <configuration Cfg = config<>>
 class host {
 public:

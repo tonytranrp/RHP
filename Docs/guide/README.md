@@ -13,13 +13,13 @@ How to use RHP, what it supports, and how to configure and connect it. For *why*
 | [Networking and fleet](networking.md) | WebSocket, UDP, IPC, HTTP, DNS-SD and collect-all execution |
 | [Configuration](configuration.md) | `Rhp::config<>` slots, `Rhp::limits`, options, CMake switches |
 | [Security](security.md) | keys, roles, signing, setting up a host safely |
-| [Reference](reference.md) | error codes, events, Lua sandbox contents |
+| [Reference](reference.md) | error codes, host events, operations, wire protocol, Lua sandbox contents, threads |
 | [Limitations](limitations.md) | what RHP doesn't do, or does only partly |
 | [Status and TODO](../TODO.md) | what is built, what is next, recorded validation |
 
 ## What RHP is
 
-A running C++ program (the **host**) accepts Lua scripts from a **client** (your editor tooling, `rhp-cli`, a test harness) and runs them against an API **you** declare in C++. RHP can undo its journaled variable writes, patches, timers, subscriptions and functions with supplied inverses. Untagged functions are assumed pure; irreversible calls and arbitrary admin standard-library side effects are not automatically reversible. Non-admin scripts reach the bindings and sandbox libraries the host provides; an admin identity is fully trusted.
+A running C++ program (the **host**) accepts Lua scripts from a **client** (your editor tooling, `rhp-cli`, a test harness) and runs them against an API **you** declare in C++. RHP can undo its journaled variable writes, patches, timers, frame callbacks, subscriptions, tasks and functions with supplied inverses. Untagged functions are assumed pure; irreversible calls and arbitrary admin standard-library side effects are not automatically reversible. Non-admin scripts reach the bindings and sandbox libraries the host provides; an admin identity is fully trusted.
 
 ```text
  rhp-cli / your tool                       your game or app

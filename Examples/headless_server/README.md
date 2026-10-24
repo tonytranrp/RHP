@@ -1,6 +1,6 @@
 # headless_server
 
-A standalone host for `rhp-cli`: a tiny "game" (`game.gravity`, `game.tick`, `game.spawn` with undo, `game.add_score`) that reads its keyring and trusted signers from files, writes an audit log, takes blobs into a folder, and runs until told to stop.
+A standalone host for `rhp-cli`: a tiny "game" (`game.gravity`, `game.tick`, `game.entities`, `game.spawn` with undo, `game.add_score` with undo) that reads its keyring and trusted signers from files, writes an audit log, takes blobs into a folder, and runs until told to stop.
 
 ```bash
 rhp-cli keygen dev

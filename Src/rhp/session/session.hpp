@@ -99,10 +99,11 @@ protected:
 // frame from the peer end the session (or detach a resumable one).
 //
 // Resume (options.resumable): a lost link detaches the session; sends keep queueing. The dialing
-// side calls resume(link), which sends a sealed kResume {session} with the next control counter;
+// side calls resume(link), which sends a sealed kResume {session, proof} (bound to the new link) with the next control counter;
 // the other side's new connection hands its link to the session it names, which answers with a
 // sealed kWelcome. Both then resend what the other hasn't acknowledged, so every request and reply
-// is delivered exactly once. Not resumed within limits.resume_ms: the session ends (kTimeout).
+// is delivered exactly once. Not resumed within limits.resume_ms: the session ends with the lost link's
+// error code, "(not resumed within N ms)".
 //
 // Not thread-safe: every member is called on the io_context's thread.
 class session final {

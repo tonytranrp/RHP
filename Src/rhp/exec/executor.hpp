@@ -5,8 +5,8 @@
 
 namespace Rhp::exec {
 
-// Executor policy for Rhp::config<>::executor<...>: where scripts run. Stage 3 has one: scripts
-// run on the thread that calls host.pump() (an RHP-owned script thread may follow later).
+// Executor policy for Rhp::config<>::executor<...>: where scripts run. There is one: scripts run
+// on the thread that calls host.pump().
 template <class X>
 concept executor = requires {
     { X::kRunsInPump } -> std::convertible_to<bool>;

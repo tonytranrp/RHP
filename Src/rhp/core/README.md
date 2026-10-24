@@ -19,5 +19,5 @@ Types every other module speaks. Namespace `Rhp` (logger concept and loggers in 
 
 - May include `utils` and the standard library only. No Lua, sockets or threads.
 - `convert<T>` here only knows `Rhp::value`. The script layer adds Lua push/pull on top.
-- `Rhp::value` uses the default allocator; `std::pmr` injection applies to the engine's buffers (frames, Lua allocator), not to values handed to user code.
+- `Rhp::value` uses the default allocator; `std::pmr` injection applies to a sandbox's Lua allocator (`sandbox_options::memory`) and to `utils::byte_buffer`s you construct, not to values handed to user code.
 - Errors never cross the public API as exceptions in `expected` mode.

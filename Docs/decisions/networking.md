@@ -17,7 +17,7 @@
 - `Rhp::net::transport` concept: `name`, `listen(io, endpoint, accept_fn) → result<unique_ptr<listener>>` (binds at once), `dial(io, endpoint, connect_fn)` (asynchronous). Transports hand out `net::link`s (start / send / close / peer) that report to a `link_handler` on the context's thread; `on_closed` is posted, once, never after destruction.
 - Shipped: `net::loopback` (in-process channels named by host + port, ends may sit on different threads/contexts) and `net::tcp` (IPv4 + IPv6, `TCP_NODELAY`, `SO_REUSEADDR` only off Windows, port 0 → a free port).
 - Until TLS (Stage 5, now built) TCP allowed loopback addresses only (127.0.0.0/8, ::1, v4-mapped, `localhost`); anything else is `kForbidden` unless the endpoint carries `Rhp::net::insecure_lan`.
-- Stage 3 hosts listen and clients dial; reverse mode is Stage 4. Local IPC, WebSocket, UDP-reliable, the HTTP gateway and mDNS are Stage 5–6.
+- Stage 3 hosts listen and clients dial; reverse mode is Stage 4. Local IPC, WebSocket, UDP-reliable, the HTTP gateway and mDNS are Stage 6 ([stage6-networking.md](stage6-networking.md)).
 
 **Stage 4 (as built):** reverse mode. A host with `Rhp::endpoint::dial(...)` dials and redials (capped exponential backoff with full jitter between `limits.backoff_min_ms` and `backoff_max_ms`); a client with `Rhp::endpoint::listen(...)` listens, serves one host at a time, reports its port with `client::port()`, and survives its host (calls in flight fail; the next call waits for a host to dial in). Each connection is a fresh session; resume is Stage 5.
 

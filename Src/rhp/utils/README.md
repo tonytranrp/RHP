@@ -11,6 +11,7 @@ Generic building blocks with **zero** RHP, OS, Lua or network knowledge. Namespa
 | `overloaded.hpp` | lambda overload set for `std::visit` |
 | `units.hpp` | `_KiB`, `_MiB`, `_GiB` (overflow is a compile error) |
 | `spsc_ring.hpp` | bounded single-producer/single-consumer queue — the only lock-free structure RHP hand-rolls |
+| `base64.hpp` | base64 encode/decode (key files, HTTP headers) |
 | `byte_buffer.hpp` | growable bytes on an injectable `std::pmr::memory_resource`; little-endian load/store |
 | `crc32c.hpp` | CRC-32C for frame integrity |
 

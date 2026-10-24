@@ -2,7 +2,7 @@
 
 ## Requirements
 
-- CMake 3.28+, Ninja for the desktop/Android presets, and a C++23 compiler with the required standard-library support (`std::expected`, `std::format`, `std::print`). A compiler's language mode alone does not establish library support; see the [tested toolchains](../decisions/platforms-and-toolchains.md). GCC is not a target.
+- CMake 3.28+, Ninja for every preset except `ios-device` (Xcode), and a C++23 compiler with the required standard-library support (`std::expected`, `std::format`, `std::print`). A compiler's language mode alone does not establish library support; see the [tested toolchains](../decisions/platforms-and-toolchains.md). GCC is not a target.
 - Target floors: Windows 10 1809+, Linux glibc 2.31+, macOS 13.3+, iOS 16.3+, Android API 26+. macOS/iOS verification remains open in [Status and TODO](../TODO.md).
 - CMake fetches Lua, Asio, Monocypher and Mbed TLS. Desktop TLS uses system OpenSSL 3.0+ when found. Mbed TLS requires a C compiler; Lua and Monocypher are compiled as C++.
 
@@ -74,14 +74,15 @@ Other presets and configuration switches are in [configuration](configuration.md
 rhp-cli keygen dev --role patch
 ```
 
-This writes `dev.rhpid` (identity name, PSK, signing key) and prints two lines:
+This writes `dev.rhpid` (identity name, PSK, signing key) and prints:
 
 ```text
-dev patch <base64-psk>            ← add to keys.txt        (name role key)
-dev <base64-ed25519-public-key>   ← add to signers.pub     (name public-key)
+wrote dev.rhpid (keep it private)
+add to the host's keyring file:   dev patch <base64-psk>
+add to the host's signers file:   dev <base64-ed25519-public-key>
 ```
 
-Paste the actual generated lines into the two files; the angle-bracket values above are explanatory. `keygen` refuses to replace an existing identity unless you pass `--force`. Its keyring line contains a secret: keep that output, `keys.txt` and `dev.rhpid` out of source control.
+Paste the part after each colon into `keys.txt` (name role key) and `signers.pub` (name public-key); `rhp-cli pubkey -i dev.rhpid --role patch` prints the two bare lines again. The angle-bracket values above are explanatory. `keygen` refuses to replace an existing identity unless you pass `--force`. Its keyring line contains a secret: keep that output, `keys.txt` and `dev.rhpid` out of source control.
 
 **2. Start the supplied host in another terminal**, in the directory containing those key files:
 
@@ -117,7 +118,7 @@ rhp> return game.gravity
 rhp> quit
 ```
 
-`unload` removes this module's recorded effects. `revert_all` and `pin` require admin. For an admin identity, generate it with `--role admin` and put that role in the host keyring; editing an identity file cannot change the role granted by the host.
+`unload` removes this module's recorded effects. `revert_all` and `pin` require admin. `keygen` defaults to `--role admin` (this walkthrough passes `--role patch`); the role printed is only a suggestion for the host keyring, and editing an identity file cannot change the role granted by the host.
 
 **4. Embed a host in your application.** This complete `main.cpp` checks setup failures and runs Lua on the application's frame thread. Ctrl+C exits the loop and destroys the host on that same thread:
 
@@ -232,7 +233,7 @@ Destroying a client closes its session gracefully. If it was the identity's last
 
 ## Learn from the examples
 
-Build with `RHP_BUILD_EXAMPLES=ON` (default when RHP is the top-level project). The four finite examples are registered as `example.<name>`; `headless_server` is a long-running host exercised by the CLI process tests.
+Build with `RHP_BUILD_EXAMPLES=ON` (default when RHP is the top-level project). The four finite examples are registered as ctest `example.<name>` when tests are built too (the default top-level build); `headless_server` is a long-running host exercised by the CLI process tests.
 
 | Example | Shows |
 |---|---|

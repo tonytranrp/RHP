@@ -23,7 +23,7 @@ Windows: overlapped byte-mode pipes, the first instance created with `FILE_FLAG_
 
 ## Discovery
 
-- Windows: the DNS-SD API for browsing and for wildcard listeners; a listener bound to one address uses the wire responder, because native registration can't publish that address. Apple: `dns_sd` with owned address and service records (not built or run on this host: see [TODO](../TODO.md)). Linux and native Android executables: `mdns_wire`; an APK can supply an `NsdManager` policy.
+- Windows: the DNS-SD API for browsing and for wildcard listeners; a listener bound to one address uses the wire responder, because native registration can't publish that address. Apple: `dns_sd` with owned address and service records (built by hosted CI, not yet run against real multicast: see [TODO](../TODO.md)). Linux and native Android executables: `mdns_wire`; an APK can supply an `NsdManager` policy.
 - The wire responder follows RFC 6762: probe 3 × 250 ms after a random 0–250 ms delay, announce twice a second apart, then answer queries only; goodbye with TTL 0; a renamed record releases the old names first, an updated one is re-announced without probing; `update()` clears a previous conflict. The querier sends continuous queries from 1 s doubling to a minute and follows up missing SRV/TXT/A/AAAA records. Host-name listen addresses are resolved asynchronously; the I/O thread never blocks on DNS.
 - Bounds: 9000-byte packets, 128 records per packet, 1024 cached records, 255-byte TXT items, 1200 bytes of TXT.
 

@@ -28,7 +28,7 @@ Load it once (`rhp-cli run hud.lua -c HOST:PORT -i dev.rhpid --pin --name hud.ov
 | every `ms` | `rhp.every(ms, fn)`; add `{times = n}` to stop after `n` calls |
 | stop for a while | `rhp.pause(id)` … `rhp.resume(id)` (the time or frames left are kept) |
 | change the period | `rhp.reschedule(id, interval)` (milliseconds for timers, frames for frame callbacks) |
-| see what is scheduled | `rhp.timers()`: id, kind, interval, remaining, runs, times, paused, running |
+| see what is scheduled | `rhp.timers()`: id, kind (`"timer"` / `"frames"`), interval, remaining, runs, times, repeating, paused, running |
 | remove it | `rhp.off(id)` |
 
 Every call is a request of its own, with its own instruction and time budget, so a slow call never stalls the next pump on its own unless it has no limits and never waits. A callback that waits (`rhp.wait`, `rhp.sleep`, `rhp.wait_event`) doesn't get a second, overlapping call: the entry skips until the first call ends.
@@ -86,7 +86,7 @@ auto rounds = host.on_script_event("game.round_over", [](const Rhp::event::scrip
 // The subscription unsubscribes when it is destroyed: keep it alive.
 ```
 
-A standalone `Rhp::script::sandbox` has the same call: `box.on_script_event(name, fn)` (or `"*"` for every name). C++ events go the other way: declare `inline constexpr Rhp::lua_event<"game.player_died", int> player_died{};` and call `player_died.fire(id)`; scripts `rhp.on` it ([exposing C++](exposing-cpp.md)).
+A standalone `Rhp::script::sandbox` has the same call, `box.on_script_event(name, fn)` (or `"*"` for every name), with a `Rhp::script::script_event` (`name`, `module` id, `module_name`, `args`). C++ events go the other way: declare `inline constexpr Rhp::lua_event<"game.player_died", int> player_died{};` and call `player_died.fire(id)`; scripts `rhp.on` it ([exposing C++](exposing-cpp.md)).
 
 ## 5. Watch events from a tool
 

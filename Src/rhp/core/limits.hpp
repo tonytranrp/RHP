@@ -5,11 +5,12 @@
 namespace Rhp {
 
 // Structural, so it can be a template argument: Rhp::config<>::limits<Rhp::limits{ .memory = 64_MiB }>.
-// 0 means unlimited / off. Defaults follow the decided policy: unlimited, run to completion.
+// 0 usually means unlimited / off (some fields differ: see each). Defaults follow the decided policy:
+// unlimited, run to completion.
 struct limits {
     std::uint64_t instructions = 0; // total per run; once hit, sticky for the rest of that run
     std::uint64_t memory = 0;       // bytes per lua_State; once hit, sticky for the rest of that run
-    std::uint32_t wall_ms = 0;      // wall clock per run
+    std::uint32_t wall_ms = 0;      // time spent running (not suspended) per run or handler call
     std::uint32_t slice_us = 0;     // opt-in time slicing per pump(); 0 = run to completion
     std::uint32_t max_frame = 4u * 1024u * 1024u;
     std::uint64_t max_blob = 256ull * 1024ull * 1024ull; // bytes per blob (host.on_blob); 0 = only empty blobs

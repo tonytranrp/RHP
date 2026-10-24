@@ -17,3 +17,5 @@ rhp_audit.log
 
 # agent worktrees (Claude Code)
 /.claude/worktrees/
+# per-session handoff notes written by a local hook
+/.claude/handoff.md

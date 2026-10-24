@@ -1,6 +1,6 @@
 # Scheduling and limits
 
-**Decision:** scripts run as coroutines and **run to completion** by default. Totals (instructions, memory, wall time) are unlimited unless configured. A count hook checks an atomic cancel flag every 1000 instructions; the I/O thread sets it on `cancel`, `revert_all` or disconnect. Time slicing (`limits.slice_us`) is opt-in.
+**Decision:** scripts run as coroutines and **run to completion** by default. Totals (instructions, memory, wall time) are unlimited unless configured. A count hook checks an atomic cancel flag every `limits.cancel_check_instructions` (1000) instructions; the I/O thread sets it on `cancel`, `revert_all` or disconnect. Time slicing (`limits.slice_us`) is opt-in.
 
 **Why:** the user decided against slicing by default; the cancel flag keeps a runaway loop stoppable even while `pump()` is inside it.
 

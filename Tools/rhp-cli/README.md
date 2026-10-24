@@ -6,7 +6,7 @@ The REPL and scripting client for RHP hosts. Every script it sends is signed wit
 rhp-cli keygen dev
 ```
 
-Writes `dev.rhpid` (name, PSK, signing key; owner-only on POSIX — keep it private) and prints the two lines the host needs: one for its keyring file (`dev admin <psk>`) and one for its trusted-signers file (`dev <public key>`). `pubkey -i dev.rhpid --role patch` prints them again.
+Writes `dev.rhpid` (name, PSK, signing key; owner-only on POSIX — keep it private) and prints the two lines the host needs, after a label (`add to the host's keyring file:   dev admin <psk>`, `add to the host's signers file:   dev <public key>`): copy the part after the colon. `--role` defaults to `admin`; `-o/--out` names the file and `--force` replaces an existing one. `pubkey -i dev.rhpid --role patch` prints the bare lines again.
 
 ```bash
 rhp-cli connect 127.0.0.1:7777 -i dev.rhpid
@@ -46,12 +46,12 @@ Tab completes commands, lib names and functions (from the host's stubs) and load
 | `run <file> -c host:port -i id [--pin] [--name m]` | exec a file, or load it as a module (and pin it) |
 | `exec "<lua>" -c … -i …` | run one chunk, print what it returns |
 | `stubs -c … -i … [-o file]` | fetch LuaLS annotations |
-| `blob <sink> <file> -c … -i …` | push a file |
+| `blob <sink> <file> [--name n] -c … -i …` | push a file (`--name`: the name the sink sees, default the file name) |
 | `watch <folder> -c … -i …` | reload on save until Ctrl+C |
 | `events <name>... -c … -i …` | print host events (as `subscribe`) until Ctrl+C or the session ends |
 | `sign <file> -i …` | print `signer base64-signature` for other tools |
-| `discover [--app a] [--build b] [--platform p] [--wait ms]` | browse DNS-SD and print RHP endpoints |
-| `fleet <file> -i … [discovery filters]` | discover TCP hosts and run one signed script on all; print a result or error per host |
+| `discover [--app a] [--build b] [--platform p] [--wait ms]` | browse DNS-SD (`--wait` 1…60000 ms) and print `name address:port platform app build transport` per host |
+| `fleet <file> -i … [discovery filters] [--timeout ms] [--tls] [--insecure-lan] [--ca pem] [--server-name n]` | discover TCP hosts and run one signed script on all (the identity needs a signing key); print a result or error per host |
 
 Connection options: `-i/--identity` (or `RHP_IDENTITY`), `--listen` (reverse mode: listen at the address and wait for the host to dial in), `--timeout ms`. TLS: non-loopback addresses always use it; `--tls` asks for it on loopback too; `--ca pem` (+ `--server-name`) checks the host's certificate (by default the key handshake is bound to the TLS channel instead); with `--listen`, `--cert` / `--key` set this side's certificate. `--insecure-lan` is plaintext to a non-loopback address. A dropped connection is redialed and the session resumed on its own. Exit status: 0 when every command succeeded, 1 otherwise, 2 for usage errors.
 

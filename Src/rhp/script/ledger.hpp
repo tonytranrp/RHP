@@ -13,8 +13,8 @@
 namespace Rhp::script {
 
 // One thing a script did that RHP knows how to take back.
-// Implementations: var writes, patch handlers, Rhp::undo<F> calls, irreversible markers, and
-// anything a user hook_backend records. undo() runs at most once; the ledger then destroys it.
+// Implementations: var writes, patch handlers, Rhp::undo<F> calls, irreversible markers, schedule
+// entries, subscriptions and tasks. undo() runs at most once; the ledger then destroys it.
 class effect {
 public:
     virtual ~effect() = default;

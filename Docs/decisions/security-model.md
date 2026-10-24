@@ -44,3 +44,7 @@
 - Plaintext reaches a host only from loopback peers, local transports or an endpoint that says `insecure_lan`; `require_tls` refuses it everywhere.
 - A resume request is sealed with the session's MAC key and a control counter (replaying one is refused, nothing secret crosses the wire), and both resume frames prove the new connection's channel binding: a relay terminating TLS on the redial can't take a session over.
 - Known limits: idle unauthenticated connections count against `pending_handshakes` and can delay a resume; a probe can tell a known session id from an unknown one.
+
+**Stages 6–7 (as built)**
+- HTTP gateway: per-request keyed-BLAKE2b proofs (±30 s, one use, per-key replay quota), answer proofs (`X-RHP-Proof`) and opt-in RFC 9266 channel binding (`X-RHP-Channel`, `host_options::http_require_binding`) — see [Stage 6 networking](stage6-networking.md).
+- Remote event subscription (`kSubscribe`) needs only observe and covers every C++ `lua_event` in the process (script events only within the subscriber's identity): keep secrets out of C++ event arguments, or don't hand out keys to untrusted readers ([Stage 7](stage7-scheduling-events.md)).

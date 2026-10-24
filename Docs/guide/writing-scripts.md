@@ -7,17 +7,17 @@ Lua 5.5, text only (no binary chunks). Each identity (key) has its own Lua state
 | Function | Role | What |
 |---|---|---|
 | `rhp.patch(id, fn)` | patch | override a C++ patch point; `fn(original, ...)`; undone with the module |
-| `rhp.on(event, fn [, opts])` / `rhp.once(...)` | any | subscribe to a C++ event of that name, else to an `rhp.publish` of this identity; returns an id. `once` is removed after one delivery; `opts.priority` orders handlers (higher first) |
+| `rhp.on(event, fn [, opts])` / `rhp.once(...)` | any | subscribe to a C++ event of that name, else to an `rhp.publish` of this identity; returns an id. `once` is removed after one delivery; `opts.priority` orders handlers (higher first), `opts.on_error` sets its error policy; unknown option keys are errors; names are dotted lowercase |
 | `rhp.off(id)` | any | remove this module's timer, frame callback or subscription, or cancel its task |
-| `rhp.publish(event, ...)` | any | deliver copies of the values to this identity's handlers and waiters at the next `pump()`; false if the queue is full |
+| `rhp.publish(event, ...)` | any | deliver copies of the values to this identity's handlers and waiters at the next `pump()`; false if the queue is full. Raises `invalid_argument` for a non-dotted name, `forbidden` for an `rhp.` name or a name a C++ event uses, and a conversion error for functions or userdata |
 | `rhp.wait_event(event [, ms])` | any | suspend until the event fires: `true, ...`, or `false, "timeout"` |
-| `rhp.timer(ms, fn, repeating)` | any | return a timer id; call `fn` after `ms` (repeat when the third argument is true); undone with its module |
-| `rhp.after(ms, fn [, opts])` / `rhp.every(ms, fn [, opts])` | any | one call after `ms` / a call every `ms` (`opts.times` limits them) |
-| `rhp.every_frame(fn [, opts])` / `rhp.every_frames(n, fn [, opts])` | any | a call every `pump()` / every `n` pumps |
+| `rhp.timer(ms, fn [, repeating])` | any | return a timer id; call `fn` after `ms` (repeat when the third argument is true); undone with its module; no options (the sandbox's error policy) |
+| `rhp.after(ms, fn [, opts])` / `rhp.every(ms, fn [, opts])` | any | one call after `ms` / a call every `ms`; every form takes `opts.on_error`, and `opts.times` (1 … 2³²−1, `rhp.every` and frame callbacks only) limits the calls |
+| `rhp.every_frame(fn [, opts])` / `rhp.every_frames(n, fn [, opts])` | any | a call every `pump()` / every `n` pumps (`n` an integer, 1 … 10¹⁵) |
 | `rhp.pause(id)` / `rhp.resume(id)` / `rhp.reschedule(id, interval)` / `rhp.timers()` | any | control and list this module's timers and frame callbacks (`pause` / `resume` work on subscriptions too) |
 | `rhp.spawn(fn, ...)` / `rhp.tasks()` | any | start a background task (handle: `status()`, `cancel()`, `join()`, `id`) / this module's unfinished tasks |
-| `rhp.on_error(fn)` / `rhp.stats()` | any | hear about failed handlers / queue and handler counters |
-| `rhp.wait(frames)` / `rhp.next_frame()` | any | suspend for N `pump()` calls |
+| `rhp.on_error(fn [, opts])` / `rhp.stats()` | any | hear about failed handlers (`opts.priority`, `opts.on_error`) / `{dropped_events, queued_events, timers, subscriptions, tasks, waiting, handler_failures, memory}` |
+| `rhp.wait([frames])` / `rhp.next_frame()` | any | suspend for `frames` `pump()` calls (default 1) |
 | `rhp.sleep(ms)` | any | suspend for at least `ms` ms (clock is injectable) |
 | `rhp.emit(value)` | any | stream a value to the client while the script keeps running |
 | `rhp.frame()` | any | number of `pump()` calls so far |
@@ -88,7 +88,7 @@ Module states in `status` are `loading` (first load suspended), `active`, `rever
 
 ## Time, loops and limits
 
-Scripts run to completion by default. They become coroutines when they call `rhp.wait`, `rhp.next_frame` or `rhp.sleep`: the call returns early and the rest continues inside later `pump()` calls, with the final result delivered asynchronously. A remote blocking client still waits for that final result, while `client.async()` returns a pending result immediately.
+Scripts run to completion by default. Every request is a coroutine; it suspends when it calls `rhp.wait`, `rhp.next_frame`, `rhp.sleep`, `rhp.wait_event` or `task:join()`: the call returns early and the rest continues inside later `pump()` calls, with the final result delivered asynchronously. A remote blocking client still waits for that final result, while `client.async()` returns a pending result immediately.
 
 ```lua
 while true do
@@ -132,7 +132,7 @@ local poll = rhp.every(100, check_server, {times = 10})            -- ten calls,
 
 rhp.pause(hud)          -- stops calling; rhp.resume(hud) continues with the time / frames left
 rhp.reschedule(poll, 250)
-for _, t in ipairs(rhp.timers()) do print(t.id, t.kind, t.interval, t.remaining, t.runs) end
+for _, t in ipairs(rhp.timers()) do print(t.id, t.kind, t.interval, t.remaining, t.runs, t.times, t.repeating, t.paused, t.running) end -- kind: "timer" or "frames"
 ```
 
 - Frame callbacks fire before timers in a `pump()`, in the order they were made; due timers fire in due order. An entry made during a pump fires at the next one at the earliest.
@@ -182,7 +182,7 @@ A timer, frame callback, event handler or task that raises an error (or hits an 
 
 ```lua
 rhp.every_frame(update, {on_error = "remove"})
-rhp.on_error(function(f) print(f.module, f.kind, f.source, f.action, f.code, f.message) end)
+rhp.on_error(function(f) print(f.id, f.module, f.kind, f.source, f.action, f.code, f.message, f.where, f.traceback) end) -- kind: timer / frame / event / task
 ```
 
 Failures also reach C++ (`sandbox_options::on_handler_error`, or one `[handler failed] ...` output line) and a host's `event::handler_failed`. Patch handlers are different: an error falls back to the C++ default and faults their module.

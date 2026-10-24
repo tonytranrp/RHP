@@ -19,7 +19,7 @@ Rhp::host<> observe_only{endpoint, authenticator}; // no signers: only observe s
 | `port()` | bound network port after port 0, or a setup failure; IPC, dialing hosts and loopback report 0 |
 | `gateway_port()` | the optional HTTP listener's bound port or setup error |
 | `advertise(options)` / `discovery_status()` | explicit DNS-SD registration/update and subsequent provider errors; pump thread |
-| `sessions()` / `identities()` | authenticated sessions, including detached resumable ones / identities with a live sandbox, including sessionless pinned ones (any thread) |
+| `sessions()` / `identities()` | authenticated sessions, including detached resumable ones and HTTP logical sessions / identities with a live sandbox, including sessionless pinned ones (any thread) |
 | `set_enabled(bool)` / `enabled()` | runtime kill switch: while off, new connections are closed and every request answers `kDisabled` (what already ran stays; send `revert_all` first to undo it) |
 | `logger()` / `clock()` | references to policy objects; callers must synchronize mutation with their use by RHP |
 
@@ -64,7 +64,7 @@ Result-bearing operations return `Rhp::result<T>` by default (see [errors](confi
 
 | Call | Returns | Role |
 |---|---|---|
-| `exec(src)` / `exec<T>(src)` | all returned values / the first one converted to `T` | any (signed unless observe) |
+| `exec(src [, chunk])` / `exec<T>(src [, chunk])` | all returned values / the first one converted to `T` (`chunk` names the code in tracebacks, default `exec`) | any (signed unless observe) |
 | `load(name, src)` | `module_id` | patch |
 | `call(mod, "fn", args...)` | returned values | observe at the request level; called bindings still enforce their own roles |
 | `reload(mod, src)` | new `revision_id` | patch |
@@ -78,13 +78,13 @@ Result-bearing operations return `Rhp::result<T>` by default (see [errors](confi
 | `describe()` | LuaLS stubs filtered by your role | any |
 | `cancel()` / `cancel(request)` | stops everything in flight / one request | any thread |
 | `on(name, fn)` / `off(id)` | subscribe to host events: a C++ `lua_event` of that name, or an `rhp.publish` of this identity (`"*"`: every publish); `fn` gets a `remote_event` (`name`, `module`, `args`, `dropped`) on the network thread | observe |
-| `info()` / `connected()` | who the host says you are | |
+| `info()` / `connected()` | `session_info {connected, closed, session, identity, granted, host_platform, tls, resumes}` / whether a session is up | |
 
 `mod` is a `module_id` or name (`"low_grav"`) within this identity. `exec<T>` converts the first returned value, or nil if none; untyped `exec` and `call` return a `value_list`. Remote load/reload/call replies wait for suspended Lua to finish. `revert_summary::clean()` checks undo failures, not the `irreversible` count; inspect both before asserting full restoration.
 
 ### Async
 
-`c.async()` provides nonblocking script/lifecycle/introspection operations as `Rhp::pending<T>`; `cancel` and `blob` remain client methods. Choose one consumer for each result: `.get()`, `.then()`, `.future()` or `co_await`.
+`c.async()` provides exec, load, call, reload, rollback, revert, unload, list, status and describe as `Rhp::pending<T>`; checkpoint, revert_to, revert_all, pin / unpin, blob, on / off and cancel are blocking-only client methods. `pending` also has `request()`, `ready()` and `wait_for(ms)`; `c.exec_async<T>(src, fn)` starts an exec and calls `fn` with its result. Choose one consumer for each result: `.get()`, `.then()`, `.future()` or `co_await`.
 
 ```cpp
 auto p = c.async().exec<int>("return game.tick");

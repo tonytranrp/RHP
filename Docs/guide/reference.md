@@ -25,7 +25,7 @@ Result-bearing operations report `Rhp::error { code, message, where, traceback }
 | `revert_partial` | some effects could not be undone |
 | `irreversible` | reported effect that cannot be undone |
 | `cancelled` | stopped by `cancel` |
-| `limit_exceeded` | a limit was hit: too many pending handshakes, too many requests in flight, a blob over `max_blob`, a reply too large to cache |
+| `limit_exceeded` | a size, count or rate limit was hit: a frame or reply over `max_frame`, a peer leaving 64 MiB unacknowledged, MessagePack depth / element limits, too many pending handshakes, requests in flight or backlog, a blob over `max_blob`, a reply too large to cache, HTTP header / replay limits, too many arguments for a coroutine or `rhp.spawn` |
 | `disabled` | `RHP_ENABLE=OFF` or `set_enabled(false)` |
 | `invalid_argument` | bad call arguments, or writing a read-only member |
 | `type_mismatch` | value cannot convert to the requested type |
@@ -34,7 +34,7 @@ Result-bearing operations report `Rhp::error { code, message, where, traceback }
 
 ## Host events
 
-All carry `time`. `peer` is the transport address of the client.
+All carry `time`. `peer` is the transport address of the client. In JSON the `granted` field is written as `"role"`.
 
 | Event | When | Notable fields |
 |---|---|---|
@@ -42,21 +42,22 @@ All carry `time`. `peer` is the transport address of the client.
 | `session_resumed` | a session continued on a new link | `session`, `identity`, `peer`, `tls` |
 | `session_closed` | an authenticated session ended | `session`, `identity`, `peer`, `reason` |
 | `auth_failed` | a connection never authenticated | `peer`, `reason` |
-| `script_executed` | any request that runs code or changes state, refused ones included | `session`, `identity`, `granted`, `op`, `module`, `hash` (BLAKE2b-256 hex), `signer`, `outcome` |
-| `blob_received` | a blob finished or was refused | `sink`, `file`, `size`, `hash`, `outcome` |
-| `identity_reverted` | an identity's last session ended and the host reverted it | `undone`, `irreversible`, `failures`, `pinned` |
+| `script_executed` | any request that runs code or changes state, refused ones included | `session`, `identity`, `granted`, `peer` (per request; the HTTP caller over the gateway), `op`, `module`, `hash` (BLAKE2b-256 hex), `signer`, `outcome` |
+| `blob_received` | a blob finished or was refused | `session`, `identity`, `sink`, `file`, `size`, `hash`, `outcome` |
+| `identity_reverted` | an identity's last session ended and the host reverted it | `identity`, `undone`, `irreversible`, `failures`, `pinned` |
 | `handler_failed` | a script's timer, frame callback, event handler or task failed | `identity`, `module`, `kind`, `source`, `handler` (the script's id), `action` (`report` / `remove` / `fault`), `outcome` |
 
-`Rhp::event::to_json(event)` returns JSON text; sinks append a newline when writing it. A suspended request's `script_executed` reports its final outcome; see [audit semantics](host-and-client.md#events-and-audit). Session and blob events' `peer`/identity describe the connected peer, which may be a dialing host in reverse mode. `event::script_event` (`host.on_script_event`) is application traffic and not part of `event::any`.
+`Rhp::event::to_json(event)` returns JSON text; sinks append a newline when writing it. A suspended request's `script_executed` reports its final outcome; see [audit semantics](host-and-client.md#events-and-audit). Session events' `peer` and every event's `identity` describe the connected peer, which may be a dialing host in reverse mode. `event::script_event` (`host.on_script_event`) is application traffic and not part of `event::any`.
 
 ## Operations
 
 `exec`, `load`, `call`, `reload`, `rollback`, `checkpoint`, `revert_to`, `revert`, `unload`, `pin`, `unpin`, `revert_all`, `list`, `status`, `describe`, `blob`, `subscribe` / `unsubscribe` (`client.on` / `off`), and `cancel` (client side). Minimum roles are in [Host and client](host-and-client.md#rhpclientcfg).
 
-## Wire protocol (for custom clients)
+## Wire protocol
 
-- 28-byte little-endian header: magic `RHP\0`, 8-bit `protocol_revision`, 8-bit flags, 16-bit op, 64-bit seq, 64-bit ack, 32-bit payload length. Then MessagePack, a 4-byte CRC32C trailer (omitted on TLS links), and a 32-byte keyed MAC once authenticated.
-- Ops 1–15 handshake (`hello`, `challenge`, `response`, `welcome`, `resume`), 16–47 requests, 48–63 replies, 64+ control frames (`ping`, `pong`, `ack`, `nack`). Controls do not join data sequencing; their seq field carries a replay-protection counter, not always zero.
+- 28-byte little-endian header: magic `RHP\0`, 8-bit `protocol_revision`, 8-bit flags (`kMac` 1, `kAckRequested` 2, `kMore` 4 reserved, `kCrcOmitted` 8), 16-bit op, 64-bit seq, 64-bit ack, 32-bit payload length. Then MessagePack, a 4-byte CRC32C trailer (omitted on TLS links), and a 32-byte keyed MAC once authenticated. Before the handshake completes a payload may be at most 16 KiB.
+- Ops: handshake `hello` 1, `challenge` 2, `response` 3, `welcome` 4, `resume` 5; requests `exec` 16, `load` 17, `call` 18, `reload` 19, `rollback` 20, `unload` 21, `revert` 22, `revert_to` 23, `checkpoint` 24, `revert_all` 25, `cancel` 26, `list` 27, `status` 28, `describe` 29, `pin` 30, `unpin` 31, `blob` 32, `subscribe` 33, `unsubscribe` 34; replies `output` 48, `emit` 49, `result` 50, `error` 51, `event` 52; control `ping` 64, `pong` 65, `ack` 66, `nack` 67. Controls do not join data sequencing; their seq field carries a per-direction replay-protection counter.
+- Handshake payloads: `hello {rev, platform, auth}`, `challenge {rev, platform, auth}`, `response {auth}`, `welcome {session, identity, role, heartbeat_ms, platform}`, `resume {session, proof}`.
 - Requests and replies are envelopes `{req, idem?, body}`; req correlates output/results and idem identifies a retry within the retained session cache. Handshake messages are direct payloads; session-ending errors are unsequenced direct error maps.
 - `subscribe` (33) / `unsubscribe` (34) carry `{name}` and are answered nil; each delivery is an `event` reply (52) with `req` 0 and `{name, module, args, dropped}`.
 - Max frame 4 MiB; blobs are sent as chunked requests.
@@ -80,6 +81,6 @@ Details: [`../decisions/wire-format.md`](../decisions/wire-format.md) and `Docs/
 |---|---|
 | application/sandbox thread | Lua execution, owned patch layers, blob sinks and host events; same-thread `lua_event` fire may deliver synchronously outside pump |
 | RHP network thread | sockets, TLS, framing, acks, resume, cancel relays |
-| any thread | `cancel()`, `set_enabled()`, `sessions()`, `identities()`, hitting a patch point (runs the C++ default if its layer belongs to another thread), subscribing to events |
+| any thread | `cancel()`, `set_enabled()`, `sessions()`, `identities()`, `port()`, `gateway_port()`, hitting a patch point (runs the C++ default if its layer belongs to another thread), subscribing to events |
 
 Request/reply traffic crosses two SPSC rings and cancel relays; queued Lua events and pending client results use mutex-protected state. Async callbacks normally complete on the client I/O thread, or immediately on the registration thread if already ready. Owned-I/O and zero-thread operation have different progress rules; see [host/client threading](host-and-client.md#thread-rules). Details: [`../decisions/threading-model.md`](../decisions/threading-model.md).

@@ -12,8 +12,8 @@ The script engine: PUC Lua 5.5 (built as C++), the `Rhp::lib<>` binding DSL, pat
 | `marshal.hpp` | `push` / `pull` between C++ and the Lua stack; `pushable`, `pullable`, `Rhp::convertible` |
 | `stack.hpp` | `Rhp::script::stack`: the only wall between templates and the Lua C API (all out of line) |
 | `stubs.hpp` | `stubs::generate<L>(role)` / `write<L>` / `rhp_api(role)`: LuaLS annotations from a lib type, filtered by role; no Lua needed |
-| `detail/` | trampolines and lib builder, patch layers, variable layers, patch point registry, sandbox context |
-| `puc_lua/` | the `.cpp` files that include `lua.h`, plus the private `sandbox_impl.hpp` / `builtins.hpp`: `sandbox.cpp` (requests, faults, the frame), `schedule.cpp` (timers, frame callbacks), `script_events.cpp` (subscriptions, `rhp.publish`, `rhp.wait_event`, C++ listeners), `tasks.cpp` (`rhp.spawn`) |
+| `detail/` | trampolines and lib builder, patch layers, variable layers, patch point and event registries, sandbox context |
+| `puc_lua/` | the `.cpp` files that include `lua.h`, plus the private `sandbox_impl.hpp` / `builtins.hpp`: `sandbox.cpp` (requests, faults, the frame), `schedule.cpp` (timers, frame callbacks), `script_events.cpp` (subscriptions, `rhp.publish`, `rhp.wait_event`, C++ listeners), `tasks.cpp` (`rhp.spawn`), `lib_proxy.cpp` (locked lib proxies), `stack.cpp` (the Lua C API wall) |
 
 ## How a binding call flows
 

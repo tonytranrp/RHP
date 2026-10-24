@@ -14,14 +14,14 @@ What travels between a host and a client. Namespace `Rhp::wire`. No dependencies
 
 ```text
  0         4     5       6    8       16      24       28
- | "RHP\0" | rev | flags | op | seq    | ack    | length | payload | crc32c 4B | [MAC 32B]
+ | "RHP\0" | rev | flags | op | seq    | ack    | length | payload | [crc32c 4B unless kCrcOmitted] | [MAC 32B]
 ```
 
 Little-endian header; the payload is MessagePack. The CRC and the MAC both cover header + payload. Payloads are ≤ `limits.max_frame` (4 MiB), checked before anything is allocated.
 
 ## Payloads
 
-Every request and reply is an `envelope {req, idem?, body}`: `req` ties replies, output and emits to the client's request (0 = none), `idem` is the client's idempotency key. Handshake frames carry `hello` / `challenge` / `response` / `welcome` directly; a session-ending `kError` (seq 0) carries an `Rhp::error`.
+Every request and reply is an `envelope {req, idem?, body}`: `req` ties replies, output and emits to the client's request (0 = none), `idem` is the client's idempotency key. Handshake frames carry `hello` / `challenge` / `response` / `welcome` / `resume` directly; a session-ending `kError` (seq 0) carries an `Rhp::error`.
 
 | Op | Request body | Result body |
 |---|---|---|
@@ -38,7 +38,7 @@ Every request and reply is an `envelope {req, idem?, body}`: `req` ties replies,
 | cancel | `{target}` (0 = all of this session's) | no reply |
 | list / describe | nil | array of module status / LuaLS stubs string |
 
-`module` is an id (integer) or a name (string). Replies: `kResult`, `kError` (body = `Rhp::error`), `kOutput` (string), `kEmit` (`{module, value}`).
+`module` is an id (integer) or a name (string). `kSubscribe` / `kUnsubscribe` carry `{name}` (answered nil). Replies: `kResult`, `kError` (body = `Rhp::error`), `kOutput` (string), `kEmit` (`{module, value}`), `kEvent` (`req` 0, `{name, module, args, dropped}`).
 
 ## Rules
 

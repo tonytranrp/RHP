@@ -12,7 +12,7 @@ RHP deliberately accepts remote code. Authentication, roles, signatures and TLS 
 | Script signing | `patch` and `admin` code must be Ed25519-signed by a key in the host's trusted signers. `observe` may send unsigned code. A signature that is present must verify for every role |
 | Channel | TLS 1.3 on networks, bound to the key handshake. Post-authentication frames also have a per-session, per-direction keyed MAC |
 | Sandbox | allow-listed Lua libraries; `admin` gets the full standard library (an admin key is fully trusted) |
-| Audit | request events; source-bearing operations include BLAKE2b-256 hash and signer. Suspended-script final outcomes have an [open reporting defect](../TODO.md#confirmed-issues-at-the-current-commit) |
+| Audit | request events; source-bearing operations include BLAKE2b-256 hash and signer; a suspended request is reported when it finishes, with its final outcome |
 | Kill switches | compile time `RHP_ENABLE=OFF`; run time `host.set_enabled(false)` |
 
 ## Setting up keys
@@ -20,7 +20,7 @@ RHP deliberately accepts remote code. Authentication, roles, signatures and TLS 
 Do this once per developer with the CLI:
 
 ```bash
-rhp-cli keygen alice                       # alice.rhpid (private) + two lines for the host
+rhp-cli keygen alice --role patch          # alice.rhpid (private) + the keyring and signers lines (defaults to admin)
 rhp-cli pubkey -i alice.rhpid --role patch # prints the host lines again with another role
 ```
 
@@ -71,7 +71,9 @@ Signing covers `exec`, `load` and `reload` source. A signer authorizes those sou
 - Keep the host on loopback unless you need the network. If you need the network, leave TLS on; do not use `insecure_lan` outside a network you control.
 - One key per person, so the audit log and revert scopes mean something. Revoke by removing the line and restarting the host.
 - Give `admin` sparingly. Prefer `Rhp::requires_role<Rhp::role::kAdmin>` on only the dangerous bindings.
-- Set `limits` (`instructions`, `wall_ms`, `memory`, and `slice_us` for games) on any host that hands out keys to people you do not fully trust; defaults are unlimited. `observe` code is unsigned and can otherwise hold the pump thread or grow memory until someone cancels it.
+- Set `limits` (`instructions`, `wall_ms`, `memory`, and `slice_us` for games) on any host that hands out keys to people you do not fully trust; defaults are unlimited. `observe` code is unsigned and can otherwise hold the pump thread or grow memory until someone cancels it. Limits are host-wide: the same for every identity and role.
+- Remote event subscription (`client.on`, `kSubscribe`) needs only observe and covers every C++ `lua_event` in the process: don't put secrets in C++ event arguments, or don't hand keys to untrusted readers.
+- The HTTP gateway authenticates every request with its own proof and signs every answer (`X-RHP-Proof`); `host_options::http_require_binding` makes the TLS channel binding mandatory ([networking](networking.md)).
 - Run `host.on_any(Rhp::audit::file_sink{...})` in anything shared.
 - Use `RHP_ENABLE=OFF` for builds that must not accept remote code; an enabled release build remains an execution endpoint. The runtime switch refuses new request dispatch but does not undo prior effects or cancel a request already executing.
 - Never use `signer<Rhp::security::unsigned_scripts>` outside tests and fully trusted setups.
@@ -83,5 +85,5 @@ Signing covers `exec`, `load` and `reload` source. A signer authorizes those sou
 - A probe can tell a known session id from an unknown one.
 - Without `ca_pem`, the host's certificate is not validated; protection comes from binding the PSK handshake to the TLS channel. That is sound for PSK users but is not a PKI.
 - Mbed TLS calls are serialized by a process-wide lock.
-- Platform verification and the YAML/billing blockers for CI are tracked in [Status and TODO](../TODO.md). An existing preset/workflow is not a passed platform build.
+- Platform verification is tracked in [Status and TODO](../TODO.md): hosted CI passes, but macOS and iOS haven't run on real hardware. An existing preset is not a passed platform build.
 - Default admin retains `dofile`, `loadfile`, `collectgarbage` and `string.dump`, along with `io`, `debug` and native library loading. RHP's source loaders and replaced `load` are text-only; the admin state is not a containment boundary, and those outside effects are not journaled.

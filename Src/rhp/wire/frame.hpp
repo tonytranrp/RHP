@@ -15,7 +15,7 @@ namespace Rhp::wire {
 // Frame layout (little-endian):
 //
 //   0       4      5      6    8       16      24       28
-//   | "RHP\0" | rev | flags | op | seq    | ack    | length | payload (length bytes) | crc32c 4B | [mac 32B]
+//   | "RHP\0" | rev | flags | op | seq    | ack    | length | payload (length bytes) | [crc32c 4B unless kCrcOmitted] | [mac 32B]
 //
 // The CRC covers header + payload. The MAC (flag kMac) covers header + payload as well, so a
 // corrupted frame fails the CRC first (→ nack, resend) and only a forged one fails the MAC.
