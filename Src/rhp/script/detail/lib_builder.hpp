@@ -365,7 +365,11 @@ int call_fn(lua_State* L) {
 template <class Handles, class Entry>
 int get_var(lua_State* L) {
     stack s{L};
-    push_arg<Handles>(s, *Entry::pointer);
+    if constexpr (Entry::kind == entry_kind::kVar) {
+        push_arg<Handles>(s, var_layers<Entry::pointer>::read()); // serialized with other sandboxes' writes
+    } else {
+        push_arg<Handles>(s, *Entry::pointer); // ro: RHP never writes it
+    }
     return 1;
 }
 
@@ -383,8 +387,7 @@ int set_var(lua_State* L) {
     if (!incoming) {
         s.raise(arg_error(std::move(incoming).error(), label, 1));
     }
-    auto fx = std::make_unique<typename var_layers<Entry::pointer>::write_effect>(*Entry::pointer);
-    *Entry::pointer = std::move(*incoming);
+    auto fx = var_layers<Entry::pointer>::assign(std::move(*incoming));
     ctx.record_effect(std::string{label}, std::move(fx));
     return 0;
 }

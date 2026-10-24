@@ -1,9 +1,12 @@
 #include <algorithm>
+#include <atomic>
 #include <cstddef>
+#include <format>
 #include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -469,4 +472,36 @@ TEST_CASE("variable writes from several modules revert in any order", "[script][
         other.revert_all();
         CHECK(fx::g_gravity == 0.0f);
     }
+}
+
+namespace shared_var_fixtures {
+
+inline int g_shared = 0;
+using shared_lib = Rhp::lib<"sharedvar">::var<"v", &g_shared>;
+
+} // namespace shared_var_fixtures
+
+TEST_CASE("sandboxes on two threads write one variable without a data race", "[script][binding][threads]") {
+    shared_var_fixtures::g_shared = 0;
+    std::atomic<int> failures{0};
+    const auto writer = [&failures](int value) {
+        sandbox box;
+        if (!box.install<shared_var_fixtures::shared_lib>()) {
+            ++failures;
+            return;
+        }
+        const std::string write = std::format("sharedvar.v = {}", value);
+        for (int i = 0; i < 1'000; ++i) {
+            if (!box.exec(write) || !box.exec("return sharedvar.v")) {
+                ++failures;
+            }
+        }
+    }; // each sandbox reverts its writes when it dies, on its own thread
+    {
+        std::jthread a{writer, 1};
+        std::jthread b{writer, 2};
+    }
+    CHECK(failures == 0);
+    CHECK(shared_var_fixtures::g_shared == 0);
+    CHECK(Rhp::script::detail::var_layers<&shared_var_fixtures::g_shared>::depth() == 0);
 }

@@ -485,3 +485,21 @@ TEST_CASE("revert_report merges deferred with OR", "[script][ledger]") {
     total += std::move(after);
     CHECK(total.deferred); // stays set
 }
+
+TEST_CASE("var_layers assign remembers and writes in one step", "[script][ledger]") {
+    using layers = Rhp::script::detail::var_layers<&ledger_tests_fixtures::g_layered>;
+    ledger_tests_fixtures::g_layered = 0;
+    {
+        auto first = layers::assign(5);
+        CHECK(ledger_tests_fixtures::g_layered == 5);
+        CHECK(layers::read() == 5);
+        CHECK(layers::depth() == 1);
+        auto second = layers::assign(9);
+        CHECK(layers::read() == 9);
+        first->undo(); // the older write: the newer one now remembers 0
+        CHECK(ledger_tests_fixtures::g_layered == 9);
+        second->undo();
+        CHECK(ledger_tests_fixtures::g_layered == 0);
+        CHECK(layers::depth() == 0);
+    }
+}
