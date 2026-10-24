@@ -256,7 +256,10 @@ int push_return(stack& s, std::string_view label, R& r) {
 template <auto G, class... Captured>
 class undo_call_effect final : public effect {
 public:
-    explicit undo_call_effect(Captured... captured) : captured_(std::move(captured)...) {}
+    // Direct-initializes each capture (a std::string from a std::string_view argument is explicit).
+    template <class... A>
+        requires(sizeof...(A) == sizeof...(Captured))
+    explicit undo_call_effect(A&&... captured) : captured_(Captured(std::forward<A>(captured))...) {}
 
     void undo() override { std::apply(G, captured_); }
 

@@ -505,3 +505,31 @@ TEST_CASE("sandboxes on two threads write one variable without a data race", "[s
     CHECK(shared_var_fixtures::g_shared == 0);
     CHECK(Rhp::script::detail::var_layers<&shared_var_fixtures::g_shared>::depth() == 0);
 }
+
+namespace named_undo_fixtures {
+
+inline std::vector<std::string> g_named;
+
+inline void add_named(std::string_view name, double) {
+    g_named.emplace_back(name);
+}
+
+inline void remove_named(std::string_view name, double) {
+    std::erase(g_named, std::string{name});
+}
+
+// A void binding with a string_view parameter: its undo is fed the arguments, the view copied.
+using named_lib = Rhp::lib<"named">::fn<"add", &add_named, Rhp::undo<&remove_named>>;
+
+} // namespace named_undo_fixtures
+
+TEST_CASE("undo fed with arguments copies string_view arguments", "[script][binding]") {
+    named_undo_fixtures::g_named.clear();
+    sandbox box;
+    REQUIRE(box.install<named_undo_fixtures::named_lib>());
+    auto mod = box.load("named.use", "named.add('a_name_longer_than_any_small_string_buffer', 1.5)");
+    REQUIRE(mod);
+    REQUIRE(named_undo_fixtures::g_named.size() == 1);
+    REQUIRE(box.revert(*mod));
+    CHECK(named_undo_fixtures::g_named.empty());
+}
