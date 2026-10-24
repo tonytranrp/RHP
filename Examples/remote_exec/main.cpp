@@ -30,14 +30,13 @@ std::atomic<int> g_score_shadow{0};
 float g_gravity = -9.8f;
 int g_score = 0;
 
-int add_score(int points) {
+// The inverse of one addition takes exactly that addition back (it is fed the arguments).
+void add_score(int points) {
     g_score += points;
-    return g_score;
 }
 
-void remove_score(int total) {
-    (void)total;
-    g_score = 0;
+void remove_score(int points) {
+    g_score -= points;
 }
 
 using game_lib = Rhp::lib<"game">                           //
@@ -154,7 +153,7 @@ void tour(std::string_view title, const Rhp::endpoint& listen_at, const Rhp::sec
             expect("patch loads tuning.moon (moon gravity)", mod);
             check("the game sees gravity -1.6", gravity_becomes(-1.6f));
             if (mod) {
-                auto score = patch_client.template exec<int>("return game.add_score(10)");
+                auto score = patch_client.template exec<int>("game.add_score(10) return game.score");
                 expect("patch calls a reversible binding", score);
                 auto status = patch_client.status(*mod);
                 expect("status over the wire", status);

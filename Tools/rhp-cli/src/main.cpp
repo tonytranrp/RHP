@@ -14,9 +14,9 @@
 #include <cstdlib>
 #include <filesystem>
 #include <format>
-#include <iterator>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -445,7 +445,12 @@ int main(int argc, char** argv) {
     watch_cmd->add_option("folder", folder, "folder to watch")->required();
     add_connection_options(*watch_cmd, conn, false);
 
-    CLI11_PARSE(app, argc, argv);
+    try {
+        app.parse(argc, argv);
+    } catch (const CLI::ParseError& e) {
+        // Prints the help text or the usage error; usage errors exit 2 like the rest of rhp-cli.
+        return app.exit(e) == 0 ? 0 : 2;
+    }
     std::signal(SIGINT, on_interrupt);
 
     if (keygen_cmd->parsed()) {

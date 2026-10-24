@@ -2,9 +2,9 @@
 // signers from files, writes an audit log, accepts blobs into a folder, and keeps running until
 // told to stop. Try the full lifecycle from another terminal:
 //
-//   rhp-cli keygen dev                        # prints the two lines below
-//   echo "dev admin <psk>" > keys.txt
-//   echo "dev <public key>" > signers.pub
+//   rhp-cli keygen dev                        # writes dev.rhpid; prints the two host lines
+//   echo "dev admin <psk>" > keys.txt          # the text after "keyring file:"
+//   echo "dev <public key>" > signers.pub       # the text after "signers file:"
 //   headless_server --port 7777 --keys keys.txt --signers signers.pub --audit audit.log
 //   rhp-cli connect 127.0.0.1:7777 -i dev.rhpid
 //
@@ -22,6 +22,9 @@
 //   --tls                    TLS on every connection, loopback included
 //   --cert FILE --key FILE   the host's TLS certificate chain and key (PEM); default: ephemeral self-signed
 //   --ca FILE                reverse mode: check the listening rhp-cli's certificate against this CA
+//   --advertise              publish the host through DNS-SD (--name, --app, --build set the record)
+//   --advertise-libs         also publish the installed library names (needs --advertise)
+//   --http-port N            also serve the HTTP gateway on N (0 = any free port)
 #include <atomic>
 #include <charconv>
 #include <chrono>
@@ -61,19 +64,20 @@ void despawn(std::int64_t) {
     std::println("[game] despawned (entities: {})", g_entities);
 }
 
-std::int64_t add_score(std::int64_t points) {
+// The inverse of one addition takes exactly that addition back (it is fed the arguments).
+void add_score(std::int64_t points) {
     g_score += points;
-    return g_score;
 }
 
-void remove_score(std::int64_t) {
-    g_score = 0;
+void remove_score(std::int64_t points) {
+    g_score -= points;
 }
 
 using game_lib = Rhp::lib<"game">                            //
     ::var<"gravity", &g_gravity>                             //
     ::ro<"tick", &g_tick>                                    //
     ::ro<"entities", &g_entities>                            //
+    ::ro<"score", &g_score>                                  //
     ::fn<"spawn", &spawn, Rhp::undo<&despawn>>               //
     ::fn<"add_score", &add_score, Rhp::undo<&remove_score>>; //
 
@@ -193,7 +197,7 @@ struct options {
         }
     }
     if (o.keys.empty() || (!o.port && o.reverse.empty())) {
-        std::println(stderr, "usage: headless_server --port N --keys FILE [--signers FILE] [--audit FILE] [--blobs DIR] [--reverse H:N] [--tls] [--cert FILE --key FILE] [--ca FILE]");
+        std::println(stderr, "usage: headless_server --port N --keys FILE [--signers FILE] [--audit FILE] [--blobs DIR] [--reverse H:N] [--port-file FILE] [--stop-file FILE] [--seconds N] [--insecure-lan] [--tls] [--cert FILE --key FILE] [--ca FILE] [--advertise [--name N] [--app A] [--build B] [--advertise-libs]] [--http-port N]");
         return std::nullopt;
     }
     if (o.discovery.include_libs && !o.advertise) {
