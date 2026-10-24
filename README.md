@@ -103,6 +103,7 @@ Start with the [user guide](Docs/guide/README.md):
 | [Scheduling and events](Docs/guide/scheduling-and-events.md) | per-frame work, background tasks, events between modules, C++ and tools |
 | [Host and client](Docs/guide/host-and-client.md) | the C++ API, async calls, blobs, audit, `client.on` |
 | [Connecting](Docs/guide/connecting.md) / [Networking](Docs/guide/networking.md) | endpoints, TLS, reverse mode, `rhp-cli`, other transports, discovery, fleet |
+| [Python client](clients/python/README.md) | `rhp_client`: a pure-Python client (signed scripts, events, resume) |
 | [Configuration](Docs/guide/configuration.md) / [Security](Docs/guide/security.md) | limits, options, keys, roles, signing |
 | [Reference](Docs/guide/reference.md) | error codes, events, wire protocol, sandbox contents |
 | [Limitations](Docs/guide/limitations.md) | what RHP doesn't do (yet) |

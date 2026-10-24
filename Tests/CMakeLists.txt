@@ -50,6 +50,23 @@ if(RHP_BUILD_BENCH)
     add_subdirectory(bench)
 endif()
 
+# The Python client (clients/python) against this build's headless_server, when Python 3 with pytest
+# is available: its codec and frame vectors, then live sessions (signed scripts, events, cancel, resume).
+if(RHP_ENABLE AND RHP_BUILD_EXAMPLES AND NOT CMAKE_CROSSCOMPILING)
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(Python3_Interpreter_FOUND)
+        execute_process(COMMAND "${Python3_EXECUTABLE}" -c "import pytest" RESULT_VARIABLE rhp_no_pytest OUTPUT_QUIET ERROR_QUIET)
+        if(rhp_no_pytest EQUAL 0)
+            add_test(NAME python.client
+                COMMAND "${Python3_EXECUTABLE}" -m pytest -q -p no:cacheprovider "${PROJECT_SOURCE_DIR}/clients/python/tests"
+                WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}/clients/python")
+            set_tests_properties(python.client PROPERTIES
+                ENVIRONMENT "RHP_HEADLESS_SERVER=$<TARGET_FILE:headless_server>;PYTHONPATH=${PROJECT_SOURCE_DIR}/clients/python/src"
+                LABELS "python;process" TIMEOUT 600)
+        endif()
+    endif()
+endif()
+
 # Public headers stay ASCII: a compiler reading them in another code page (MSVC without /utf-8 on
 # a CJK system, with /WX) must not trip over a comment.
 add_test(NAME hygiene.ascii_headers

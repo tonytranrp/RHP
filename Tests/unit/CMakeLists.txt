@@ -35,6 +35,7 @@ rhp_add_test_suite(rhp_platform_tests
 
 rhp_add_test_suite(rhp_wire_tests
     SOURCES
+        wire/cross_language_tests.cpp
         wire/frame_tests.cpp
         wire/messages_tests.cpp
         wire/msgpack_tests.cpp

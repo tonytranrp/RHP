@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rhp-client"
+# RHP has no release numbers (progress is counted in stages); a Python package must still carry a
+# version, so this is a local version naming the stage it speaks for.
+version = "0+stage8"
+description = "Pure-Python client for RHP (Remote Hot Patch) hosts: signed Lua scripts over RHP's native protocol"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.9"
+dependencies = []
+
+[project.optional-dependencies]
+# TLS 1.3 with the RFC 9266 tls-exporter binding RHP's handshake needs.
+tls = ["pyOpenSSL>=23.2"]
+# Fast, constant-time Ed25519 signing (without it a pure-Python RFC 8032 signer is used).
+crypto = ["cryptography>=41"]
+# Hardware CRC32C for large frames on plain connections.
+speed = ["crc32c>=2.3"]
+test = ["pytest>=7"]
+
+[project.scripts]
+rhp-py = "rhp_client.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

@@ -1,0 +1,102 @@
+# rhp-client (Python)
+
+A pure-Python client for RHP hosts: connect with an identity file, run signed Lua, load and call
+modules, watch events. It speaks RHP's native protocol (revision 4) itself, so it needs no C++
+build, and it interoperates with `Rhp::host<>`, `rhp-cli` and `headless_server`.
+
+```python
+import rhp_client as rhp
+
+me = rhp.Identity.load("dev.rhpid")              # rhp-cli keygen dev (or: python -m rhp_client keygen dev)
+with rhp.connect("127.0.0.1", 7777, me) as host:
+    print(host.exec("return 6 * 7"))            # [42]
+    mod = host.load("low_grav", "local M = {} function M.set(g) game.gravity = g end return M")
+    host.call(mod, "set", -1.6)
+    host.on("game.round_over", lambda e: print(e.name, e.args))
+    print(host.unload(mod))                     # RevertSummary(undone=1, ...): gravity is back
+```
+
+## Install
+
+From a checkout of RHP:
+
+```bash
+pip install ./clients/python
+```
+
+Optional extras: `tls` (pyOpenSSL: TLS 1.3 with the RFC 9266 channel binding RHP's handshake
+needs), `crypto` (`cryptography`: fast, constant-time Ed25519; without it a pure-Python RFC 8032
+signer is used), `speed` (`crc32c`: hardware CRC32C for big frames on plain connections).
+
+```bash
+pip install "./clients/python[tls,crypto]"
+```
+
+RHP has no release numbers; the package's version is `0+stage8`, the stage it was written for. A
+host and its clients must speak the same protocol revision (`rhp_client.PROTOCOL_REVISION`).
+
+## Connecting
+
+`rhp.connect(host, port, identity, **options)` returns a connected `Client` (also a context manager:
+leaving the `with` block closes the session, and the host then reverts what this identity's scripts
+did unless a module is pinned).
+
+| Option | Default | What |
+|---|---|---|
+| `tls` | TLS except on loopback | `True` / `False` to force; TLS needs the `tls` extra |
+| `ca_file` | none | check the host's certificate against this CA. Without it the certificate isn't checked: the key proofs are bound to the TLS connection, so a relay that terminates TLS can't authenticate |
+| `timeout` | 10 s | connect and handshake |
+| `request_timeout` | none | how long a blocking call waits for its reply |
+| `resume` | `True` | when the link drops, reconnect and continue the same session (the host keeps it for `limits.resume_ms`, 6 s by default); requests in flight are sent again and run once |
+| `on_output` | none | `fn(request, line)` for every `print()` of this session's scripts |
+| `on_emit` | none | `fn(request, module, value)` for every `rhp.emit` |
+| `on_closed` | none | `fn(error)` when the session ends for good |
+
+## Operations
+
+Each blocks for its reply and raises `RhpError` (`.code`, `.message`, `.where`, `.traceback`) on
+failure. `exec_async`, `load_async` and `call_async` return a `concurrent.futures.Future`; any call
+can come from any thread.
+
+| Method | Returns |
+|---|---|
+| `exec(source, chunk="exec")` | the values the chunk returned (list) |
+| `load(name, source)` | module id |
+| `call(module, function, *args)` | the values the function returned |
+| `reload(module, source)` / `rollback(module, steps=1)` | new revision (0 if deferred) |
+| `revert(module)` / `unload(module, force=False)` / `revert_to(tag)` / `revert_all()` | `RevertSummary` |
+| `checkpoint(tag)`, `pin(module)`, `unpin(module)` | `None` |
+| `list()` / `status(module)` | `ModuleStatus` list / one |
+| `describe()` | LuaLS annotations for what this identity may use |
+| `cancel(request_or_future=0)` | stops one request (or all in flight); it fails with `cancelled` |
+| `blob(sink, name, data)` | the sink's verdict (the host registered the sink with `host.on_blob`) |
+| `on(name, callback)` / `off(id)` | subscribe to a C++ `lua_event` of the host program, or to `rhp.publish` of this identity's scripts (`"*"`: every publish) |
+
+Modules are named by id or by name. Scripts are signed with the identity's `signing_key` when it has
+one; an identity without one can only run code as an `observe` session.
+
+## Command line
+
+```bash
+python -m rhp_client -i dev.rhpid 127.0.0.1:7777 exec "return 6 * 7"
+python -m rhp_client -i dev.rhpid 127.0.0.1:7777 call low_grav set -1.6
+python -m rhp_client -i dev.rhpid 127.0.0.1:7777 events game.round_over
+python -m rhp_client keygen dev
+```
+
+## Threads
+
+Replies, output, emits and events are handled on the client's reading thread. Keep callbacks short
+and don't make a blocking call from one (it would wait for the thread that has to deliver its
+reply): such a call raises `invalid_argument`; use an `*_async` form there.
+
+## Tests
+
+```bash
+pip install "./clients/python[test]"
+pytest clients/python/tests
+```
+
+`tests/test_protocol.py` checks the codec, frames, handshake derivations and Ed25519 against golden
+vectors (RHP's C++ suite checks the same frames). `tests/test_live.py` runs sessions against RHP's own
+host when `RHP_HEADLESS_SERVER` names a built `headless_server`; RHP's ctest sets it (`python.client`).

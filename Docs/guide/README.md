@@ -10,6 +10,7 @@ How to use RHP, what it supports, and how to configure and connect it. For *why*
 | [Scheduling and events](scheduling-and-events.md) | a walkthrough: per-frame work, background tasks, script events, C++ and tool listeners, handler failures |
 | [Host and client](host-and-client.md) | the C++ API of `Rhp::host` / `Rhp::client`, async calls, blobs, audit |
 | [Connecting](connecting.md) | endpoints, TLS, reverse mode, reconnect, `rhp-cli`, custom transports |
+| [Python client](../../clients/python/README.md) | talk to a host from Python: `pip install ./clients/python`, signed scripts, events, resume |
 | [Networking and fleet](networking.md) | WebSocket, UDP, IPC, HTTP, DNS-SD and collect-all execution |
 | [Releases](releases.md) | signed releases a host keeps across restarts, health-checked candidates, revocation, staged rollout |
 | [Tools](tools.md) | tunables, the sampling profiler and the debugger (rhp-cli, DAP for editors, C++) |
@@ -50,7 +51,7 @@ A running C++ program (the **host**) accepts Lua scripts from a **client** (your
 | Releases | signed release manifests (`Rhp::release`): channels, anti-rollback floors, validity windows, scope (app / build / platform), health-watched candidates, persistence across restarts with boot-attempt quarantine, revocation lists, staged fleet rollout with rollback |
 | Tools | tunables (`Rhp::range` / `step` / `unit` / `doc` tags on lib variables, `tune` journaled), a sampling profiler with folded-stack output, a debugger (breakpoints, pause, step, stacks, variables) that pauses one script while the program runs, `rhp-cli dap` for editors |
 | Operations | audit events and JSON-lines log (`handler_failed` included), `host.on_script_event`, runtime kill switch (`set_enabled`), compile-time kill switch (`RHP_ENABLE=OFF`) |
-| Tooling | `rhp-cli` (REPL, `run`, `exec`, `stubs`, `blob`, `watch`, `events`, `keygen`, `pubkey`, `sign`, `discover`, `fleet`, `release`, `revoke`, `rollout`, `tune`, `profile`, `dap`), `headless_server`, five examples |
+| Tooling | the pure-Python client `rhp_client` (`clients/python`); `rhp-cli` (REPL, `run`, `exec`, `stubs`, `blob`, `watch`, `events`, `keygen`, `pubkey`, `sign`, `discover`, `fleet`, `release`, `revoke`, `rollout`, `tune`, `profile`, `dap`), `headless_server`, five examples |
 | Packaging | `find_package(rhp)` from an installed prefix (Debug and Release side by side), `add_subdirectory` or CPM; a generated `<rhp/build_config.hpp>`; dependency pins checked by commit and hash; third-party licenses installed |
 | Performance | `rhp_bench` benchmarks every hot path against raw Lua ([benchmarks](../benchmarks.md)); the cancel hook only where a cancel can come from (`limits.cancel_checks`) |
 | Platforms | target presets for Windows, Linux, macOS, iOS and Android; verified builds and remaining platform checks are recorded in [platform decisions](../decisions/platforms-and-toolchains.md) |
