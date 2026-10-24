@@ -6,6 +6,7 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <utility>
 
 #include <catch2/catch_test_macros.hpp>
@@ -65,6 +66,11 @@ owned_task await_owned(Rhp::pending<int> p, bool& resumed) {
 }
 
 task await_into(Rhp::pending<int> p, std::optional<Rhp::result<int>>& out) {
+    out = co_await std::move(p);
+}
+
+// Awaits a pending its caller keeps: the caller still asks it for request() and ready() meanwhile.
+task await_from(Rhp::pending<int>& p, std::optional<Rhp::result<int>>& out) {
     out = co_await std::move(p);
 }
 
@@ -189,4 +195,27 @@ TEST_CASE("pending: with a pump / waiting runs it", "[client][pending]") {
     Rhp::pending<int> p{state};
     CHECK(std::move(p).get() == 12);
     CHECK(pumped == 3);
+}
+
+TEST_CASE("pending: request and ready stay valid while and after co_await takes the result", "[client][pending]") {
+    call<int> c;
+    std::optional<Rhp::result<int>> out;
+    await_from(c.handle, out);      // suspended: the call is still in flight
+    CHECK(c.handle.request() == 7); // what client.cancel(p.request()) needs meanwhile
+    CHECK_FALSE(c.handle.ready());
+    c.state->complete(4);
+    REQUIRE(out);
+    REQUIRE(*out);
+    CHECK(**out == 4);
+    CHECK(c.handle.request() == 7);
+    CHECK_FALSE(c.handle.ready()); // the awaiter took the result
+}
+
+TEST_CASE("pending: a moved-from pending still names its request", "[client][pending]") {
+    call<int> c;
+    Rhp::pending<int> moved{std::move(c.handle)};
+    CHECK(moved.request() == 7);
+    CHECK(c.handle.request() == 7); // NOLINT(bugprone-use-after-move): the id is kept on purpose
+    CHECK_FALSE(c.handle.ready());
+    STATIC_REQUIRE_FALSE(std::is_copy_constructible_v<Rhp::pending<int>>); // one consumer per result
 }

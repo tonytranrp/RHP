@@ -202,12 +202,19 @@ public:
 
     // Stops every request this client has in flight (any thread; doesn't wait). The calls waiting
     // for them get kCancelled.
-    void cancel() noexcept { cancel(0); }
+    void cancel() noexcept {
+#if RHP_ENABLE
+        client_detail::cancel(*engine_, 0);
+#endif
+    }
 
-    // Stops one request (an async call's pending::request()).
+    // Stops one request (an async call's pending::request()). 0 names no request (a call that
+    // never started, e.g. on a closed client) and does nothing: it never means "all".
     void cancel(std::uint64_t request) noexcept {
 #if RHP_ENABLE
-        client_detail::cancel(*engine_, request);
+        if (request != 0) {
+            client_detail::cancel(*engine_, request);
+        }
 #else
         (void)request;
 #endif

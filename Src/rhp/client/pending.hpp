@@ -172,7 +172,8 @@ private:
 //
 // Callbacks and coroutine resumptions run on the client's network thread (with io<zero_threads>,
 // inside poll(), a blocking call, or get()): keep them short and don't make blocking calls on the
-// same client from them. `request()` names the call for client.cancel(request).
+// same client from them. `request()` names the call for client.cancel(request); it stays valid
+// while and after the result is consumed (also on a moved-from pending). Move-only: one consumer.
 template <class T, ::Rhp::errors::mode Errors = ::Rhp::errors::expected>
 class pending {
 public:
@@ -180,24 +181,35 @@ public:
     using return_type = typename Errors::template return_t<T>;
     using future_type = std::conditional_t<std::is_same_v<Errors, ::Rhp::errors::throwing>, T, result<T>>;
 
-    explicit pending(std::shared_ptr<client_detail::pending_state<T>> state) noexcept : state_(std::move(state)) {}
+    explicit pending(std::shared_ptr<client_detail::pending_state<T>> state) noexcept
+        : state_(std::move(state)), request_(state_ != nullptr ? state_->request() : 0) {}
 
-    [[nodiscard]] std::uint64_t request() const { return state_->request(); }
-    [[nodiscard]] bool ready() const { return state_->ready(); }
+    pending(const pending&) = delete;
+    pending& operator=(const pending&) = delete;
+    pending(pending&&) noexcept = default;
+    pending& operator=(pending&&) noexcept = default;
+    ~pending() = default;
+
+    [[nodiscard]] std::uint64_t request() const noexcept { return request_; }
+    [[nodiscard]] bool ready() const { return state_ != nullptr && state_->ready(); }
     // True once the result is in (runs the network meanwhile with io<zero_threads>).
-    bool wait_for(std::chrono::milliseconds timeout) { return state_->wait_for(timeout); }
+    bool wait_for(std::chrono::milliseconds timeout) { return state_ != nullptr && state_->wait_for(timeout); }
 
     template <std::invocable<result<T>> F>
     void then(F fn) && {
+        if (!state_) {
+            fn(taken());
+            return;
+        }
         state_->then(std::function<void(result<T>)>{std::move(fn)});
     }
 
-    [[nodiscard]] return_type get() && { return Errors::finish(state_->take()); }
+    [[nodiscard]] return_type get() && { return Errors::finish(state_ != nullptr ? state_->take() : taken()); }
 
     [[nodiscard]] std::future<future_type> future() && {
         auto promise = std::make_shared<std::promise<future_type>>();
         std::future<future_type> f = promise->get_future();
-        state_->then([promise](result<T> r) {
+        std::move(*this).then([promise](result<T> r) {
             if constexpr (std::is_same_v<Errors, ::Rhp::errors::throwing>) {
                 if (!r) {
                     promise->set_exception(std::make_exception_ptr(exception{std::move(r).error()}));
@@ -252,10 +264,20 @@ public:
         std::coroutine_handle<> suspended_;
     };
 
-    [[nodiscard]] awaiter operator co_await() && { return awaiter{std::move(state_)}; }
+    // Shares the state, so request() and ready() keep working while (and after) the call is awaited.
+    [[nodiscard]] awaiter operator co_await() && { return awaiter{state_ != nullptr ? state_ : taken_state()}; }
 
 private:
-    std::shared_ptr<client_detail::pending_state<T>> state_;
+    [[nodiscard]] static result<T> taken() { return fail(errc::kInvalidArgument, "this result was already taken", "pending"); }
+    // An already-completed state holding the "taken" error, for awaiting a moved-from pending.
+    [[nodiscard]] static std::shared_ptr<client_detail::pending_state<T>> taken_state() {
+        auto s = std::make_shared<client_detail::pending_state<T>>(0, nullptr);
+        s->complete(taken());
+        return s;
+    }
+
+    std::shared_ptr<client_detail::pending_state<T>> state_; // declared before request_ (its initializer reads it)
+    std::uint64_t request_ = 0;
 };
 
 } // namespace Rhp
