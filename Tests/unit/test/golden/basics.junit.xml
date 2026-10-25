@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="rhp-lua-tests" tests="11" failures="2" errors="2" skipped="2" time="0">
+  <testsuite name="specs/basics_spec.lua" tests="10" failures="2" errors="1" skipped="2" time="0" timestamp="0">
+    <properties><property name="seed" value="42"/></properties>
+    <testcase classname="specs.basics_spec" name="damage subtracts armor" file="specs/basics_spec.lua" line="5" time="0"/>
+    <testcase classname="specs.basics_spec" name="damage never goes below zero" file="specs/basics_spec.lua" line="9" time="0"/>
+    <testcase classname="specs.basics_spec" name="damage fails on purpose" file="specs/basics_spec.lua" line="13" time="0">
+      <failure message="Expected objects to be equal." type="assertion">Expected objects to be equal.&#10;Passed in:&#10;(number) 7&#10;Expected:&#10;(number) 8&#10;    at test (specs/basics_spec.lua:14:1)&#10;specs/basics_spec.lua:14: in function</failure>
+    </testcase>
+    <testcase classname="specs.basics_spec" name="damage fails a deep comparison" file="specs/basics_spec.lua" line="17" time="0">
+      <failure message="Expected objects to be the same." type="assertion">Expected objects to be the same.&#10;Passed in:&#10;(table: <addr>) {&#10;  [a] = (number) 1&#10; *[b] = (table: <addr>) {&#10;   *[c] = (number) 3 } }&#10;Expected:&#10;(table: <addr>) {&#10;  [a] = (number) 1&#10; *[b] = (table: <addr>) {&#10;   *[c] = (number) 2 } }&#10;First difference at b.c: 3 instead of 2&#10;    at test (specs/basics_spec.lua:18:1)&#10;specs/basics_spec.lua:18: in function</failure>
+    </testcase>
+    <testcase classname="specs.basics_spec" name="damage errors on purpose" file="specs/basics_spec.lua" line="21" time="0">
+      <error message="specs/basics_spec.lua:23: attempt to index a nil value (local &apos;t&apos;)" type="error">specs/basics_spec.lua:23: attempt to index a nil value (local &apos;t&apos;)&#10;    at test (specs/basics_spec.lua:23:1)&#10;specs/basics_spec.lua:23: in function</error>
+    </testcase>
+    <testcase classname="specs.basics_spec" name="damage is pending" file="specs/basics_spec.lua" line="26" time="0">
+      <skipped message="pending"/>
+    </testcase>
+    <testcase classname="specs.basics_spec" name="damage is skipped" file="specs/basics_spec.lua" line="28" time="0">
+      <skipped message="skipped"/>
+    </testcase>
+    <testcase classname="specs.basics_spec" name="hooks runs before_each first" file="specs/basics_spec.lua" line="38" time="0"/>
+    <testcase classname="specs.basics_spec" name="hooks ran after_each after the first test" file="specs/basics_spec.lua" line="42" time="0"/>
+    <testcase classname="specs.basics_spec" name="handles tables and strings #fast" file="specs/basics_spec.lua" line="47" time="0"/>
+  </testsuite>
+  <testsuite name="specs/broken_describe_spec.lua" tests="2" failures="0" errors="1" skipped="0" time="0" timestamp="0">
+    <properties><property name="seed" value="42"/></properties>
+    <testcase classname="specs.broken_describe_spec" name="declared before (ok)" file="specs/broken_describe_spec.lua" line="2" time="0"/>
+    <testcase classname="specs.broken_describe_spec" name="(file) describe &apos;broken&apos; failed: specs/broken_describe_spec.lua:5: attempt to index a nil value (local &apos;x&apos;)" file="specs/broken_describe_spec.lua" line="5" time="0">
+      <error message="describe &apos;broken&apos; failed: specs/broken_describe_spec.lua:5: attempt to index a nil value (local &apos;x&apos;)" type="error">describe &apos;broken&apos; failed: specs/broken_describe_spec.lua:5: attempt to index a nil value (local &apos;x&apos;)&#10;specs/broken_describe_spec.lua:5: in function&#10;specs/broken_describe_spec.lua:3: in main chunk</error>
+    </testcase>
+  </testsuite>
+</testsuites>

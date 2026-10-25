@@ -1,0 +1,4 @@
+::error file=specs/basics_spec.lua,line=14,title=damage fails on purpose::Expected objects to be equal.%0APassed in:%0A(number) 7%0AExpected:%0A(number) 8
+::error file=specs/basics_spec.lua,line=18,title=damage fails a deep comparison::Expected objects to be the same.%0APassed in:%0A(table: <addr>) {%0A  [a] = (number) 1%0A *[b] = (table: <addr>) {%0A   *[c] = (number) 3 } }%0AExpected:%0A(table: <addr>) {%0A  [a] = (number) 1%0A *[b] = (table: <addr>) {%0A   *[c] = (number) 2 } }%0AFirst difference at b.c: 3 instead of 2
+::error file=specs/basics_spec.lua,line=23,title=damage errors on purpose::specs/basics_spec.lua:23: attempt to index a nil value (local 't')
+::error file=specs/broken_describe_spec.lua,line=5,title=Lua test file::describe 'broken' failed: specs/broken_describe_spec.lua:5: attempt to index a nil value (local 'x')

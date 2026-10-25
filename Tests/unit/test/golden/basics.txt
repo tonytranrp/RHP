@@ -1,0 +1,48 @@
+RHP Lua tests: 2 file(s), seed 42
+specs/basics_spec.lua
+  FAIL damage fails on purpose
+      Expected objects to be equal.
+      Passed in:
+      (number) 7
+      Expected:
+      (number) 8
+      at specs/basics_spec.lua:14
+        specs/basics_spec.lua:14: in function
+  FAIL damage fails a deep comparison
+      Expected objects to be the same.
+      Passed in:
+      (table: <addr>) {
+        [a] = (number) 1
+       *[b] = (table: <addr>) {
+         *[c] = (number) 3 } }
+      Expected:
+      (table: <addr>) {
+        [a] = (number) 1
+       *[b] = (table: <addr>) {
+         *[c] = (number) 2 } }
+      First difference at b.c: 3 instead of 2
+      at specs/basics_spec.lua:18
+        specs/basics_spec.lua:18: in function
+  ERR  damage errors on purpose
+      specs/basics_spec.lua:23: attempt to index a nil value (local 't')
+      at specs/basics_spec.lua:23
+        specs/basics_spec.lua:23: in function
+  TODO damage is pending
+      pending
+  5 of 10 passed (<time>)
+specs/broken_describe_spec.lua
+  ERROR describe 'broken' failed: specs/broken_describe_spec.lua:5: attempt to index a nil value (local 'x')
+      at specs/broken_describe_spec.lua:5
+        specs/broken_describe_spec.lua:5: in function
+        specs/broken_describe_spec.lua:3: in main chunk
+  1 of 1 passed (<time>)
+
+most instructions:
+    <n>  damage fails a deep comparison (specs/basics_spec.lua)
+    <n>  handles tables and strings #fast (specs/basics_spec.lua)
+    <n>  damage fails on purpose (specs/basics_spec.lua)
+most memory (peak):
+    <n>  damage fails a deep comparison (specs/basics_spec.lua)
+    <n>  handles tables and strings #fast (specs/basics_spec.lua)
+    <n>  damage fails on purpose (specs/basics_spec.lua)
+6 passed, 2 failed, 1 error, 1 pending, 1 skipped, 1 file error in <time> (seed 42)

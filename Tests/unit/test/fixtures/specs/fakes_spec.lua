@@ -1,0 +1,57 @@
+-- Libs faked from an API description (no real program). Every test name ends with its outcome.
+local combat = require("game.combat")
+
+describe("description fakes", function()
+    it("functions record calls and return defaults (ok)", function()
+        assert.equals(0, arena.spawn("orc", 2))
+        assert.equals(0, arena.count())
+        assert.same({ { "orc", 2 } }, fake.calls("arena.spawn"))
+    end)
+
+    it("calls are forgotten between tests (ok)", function()
+        assert.same({}, fake.calls("arena.spawn"))
+    end)
+
+    it("fake.returns sets results (ok)", function()
+        fake.returns("arena.count", 7)
+        assert.equals(7, arena.count())
+        fake.reset("arena.count")
+        assert.equals(0, arena.count())
+    end)
+
+    it("arguments are type checked (errors)", function()
+        arena.spawn(1, 2)
+    end)
+
+    it("variables keep values (ok)", function()
+        assert.equals(0.0, arena.gravity)
+        arena.gravity = 3.5
+        assert.equals(3.5, arena.gravity)
+    end)
+
+    it("handles have methods and properties (ok)", function()
+        local u = arena.make(1)
+        assert.equals(0, u:move(2))
+        assert.equals(0, u.x)
+        local v = fake.handle("unit", { x = 9 })
+        assert.equals(9, v.x)
+        assert.same({ { 2 } }, fake.calls("unit:move"))
+    end)
+
+    it("stubs and spies work on fakes (ok)", function()
+        stub(arena, "spawn").returns(42)
+        assert.equals(42, arena.spawn("orc", 1))
+        local u = fake.handle("unit")
+        local s = spy.on(u, "move")
+        u:move(1)
+        fake.handle("unit"):move(2)
+        assert.spy(s).was.called(2)
+    end)
+
+    it("modules use the fakes (ok)", function()
+        combat.start()
+        test.advance(3000)
+        assert.equals(1, #fake.calls("arena.spawn"))
+        combat.stop()
+    end)
+end)

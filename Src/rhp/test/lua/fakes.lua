@@ -29,6 +29,11 @@ function registry.reset(path)
     registry.returns[path] = nil
 end
 
+-- Every test starts with no recorded calls and no configured results.
+T.before_test = function()
+    registry.reset()
+end
+
 local handle_types = {} -- name -> {methods = table, properties = {name = type}, next_id = n}
 
 local function default_of(type_name)
@@ -98,7 +103,8 @@ local function fake_function(path, desc, strict, self_type)
             end
         end
         local calls = registry.calls[path]
-        local recorded = { n = args.n - first + 1 }
+        local count = args.n - first + 1
+        local recorded = {} -- the arguments as a plain list, as fake<L> records them
         for i = first, args.n do
             recorded[i - first + 1] = args[i]
         end
@@ -109,7 +115,7 @@ local function fake_function(path, desc, strict, self_type)
         end
         if strict then
             local shown = {}
-            for i = 1, recorded.n do
+            for i = 1, count do
                 shown[i] = T.inline(recorded[i])
             end
             error(format("not mocked: %s(%s)", path, concat(shown, ", ")), 2)
