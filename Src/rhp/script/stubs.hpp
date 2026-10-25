@@ -178,7 +178,11 @@ private:
             out += std::format(" {}", Meta::unit());
         }
         if (!Meta::doc().empty()) {
-            out += std::format("{} {}", out.empty() ? "" : ":", Meta::doc());
+            std::string doc{Meta::doc()};
+            for (char& c : doc) {
+                c = c == '\n' || c == '\r' ? ' ' : c; // one annotation line
+            }
+            out += std::format("{} {}", out.empty() ? "" : ":", doc);
         }
         return out;
     }

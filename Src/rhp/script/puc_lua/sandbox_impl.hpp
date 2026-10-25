@@ -136,6 +136,7 @@ struct request_record {
     int thread_ref = kNoRef;
     run_budget budget;
     bool running = false;
+    bool checked = false;        // armed for cancels and limits when it started (start_request; rearm_all keeps it)
     bool suspended_once = false; // its result goes to on_result
     bool sliced = false;         // the hook yielded it at the end of a time slice
     std::uint64_t wake_frame = 0;
@@ -457,9 +458,14 @@ private:
     // The hook's count and mask changed (the profiler or the debugger started or stopped): every
     // request coroutine and the main thread get the new one.
     void rearm_all() noexcept;
-    // Whether the run on top would be checked (cancels, limits) if the profiler weren't arming the
-    // hook everywhere.
+    // Whether the run on top is checked (cancels, limits): what its thread's hook is armed for,
+    // besides the profiler and the debugger.
     [[nodiscard]] bool checked_now() const noexcept;
+    // Gives L the hook mask and count it should have now (a thread armed before the profiler or the
+    // debugger changed them: a coroutine a script made, a run that was re-armed meanwhile).
+    void sync_hook(lua_State* L, bool checked) noexcept;
+    // One profiler tick of `elapsed` instructions: a sample once they add up to the interval.
+    void profile_tick(lua_State* L, std::uint64_t elapsed) noexcept;
     // The coroutine of a request the debugger paused (kNotFound otherwise).
     [[nodiscard]] result<lua_State*> paused_thread(request_id id) const;
     void publish_debug_event(std::string_view kind, const debug_stop& stop);

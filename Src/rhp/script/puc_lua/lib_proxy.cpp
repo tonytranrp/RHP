@@ -79,6 +79,8 @@ void make_lib_proxy(stack& s, std::string_view label) {
     lua_setfield(L, -2, "__tostring");
     s.push_string(label);
     lua_setfield(L, -2, "__name");
+    lua_pushboolean(L, 1);
+    lua_setfield(L, -2, "__rhp_lib"); // the debugger reads through these proxies only (C++ getters)
     lua_pushliteral(L, "locked");
     lua_setfield(L, -2, "__metatable");
     lua_setmetatable(L, proxy);

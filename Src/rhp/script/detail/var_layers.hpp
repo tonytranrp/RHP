@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cstddef>
 #include <iterator>
 #include <memory>
 #include <mutex>
@@ -37,7 +38,9 @@ public:
     [[nodiscard]] static std::unique_ptr<write_effect> assign(value_type incoming) {
         const std::scoped_lock lock{mutex()};
         auto& stack = layers();
-        stack.reserve(stack.size() + 1); // the one allocation, before anything changes
+        if (stack.size() == stack.capacity()) { // the one allocation, before anything changes (doubling: no quadratic growth)
+            stack.reserve(std::max<std::size_t>(8, stack.capacity() * 2));
+        }
         // Not layered until the assignment succeeded: if copying or assigning throws, its destructor
         // has nothing to detach (and doesn't take the lock this scope holds).
         std::unique_ptr<write_effect> fx{new write_effect(locked{}, *Ptr)};

@@ -36,8 +36,9 @@ namespace {
 constexpr const char* kDebugEvent = "rhp.debug";
 constexpr std::size_t kMaxText = 120;           // characters of a rendered string
 constexpr std::size_t kMaxFields = 200;         // fields listed per table
-constexpr std::size_t kMaxCount = 100'000;      // fields counted per table
+constexpr std::size_t kMaxCount = 1'000; // fields counted per table (shown as "1000+")
 constexpr std::size_t kMaxBreakpoints = 10'000; // lines per source
+constexpr std::size_t kMaxPaused = 32; // requests paused at once; more breakpoint stops are reported as hits
 
 template <class F>
 result<void> protect(lua_State* L, F&& fn) {
@@ -52,13 +53,14 @@ result<void> protect(lua_State* L, F&& fn) {
         &h);
 }
 
-// The module (or exec chunk) name a function was compiled under, without '@' / '='.
+// The module (or exec chunk) name a function was compiled under, without '@' / '='; for code a
+// script load()ed without a name, Lua's short form ([string "..."]).
 std::string_view chunk_of(const lua_Debug& ar) noexcept {
     const std::string_view source = ar.source != nullptr ? std::string_view{ar.source, ar.srclen} : std::string_view{};
     if (!source.empty() && (source.front() == '@' || source.front() == '=')) {
         return source.substr(1);
     }
-    return source;
+    return std::string_view{ar.short_src};
 }
 
 int stack_depth(lua_State* L) noexcept {
@@ -77,38 +79,93 @@ bool is_identifier(std::string_view s) noexcept {
     return std::ranges::all_of(s, [](char c) { return std::isalnum(static_cast<unsigned char>(c)) != 0 || c == '_'; });
 }
 
-std::string quoted(std::string_view s) {
+// Length of the valid UTF-8 sequence at s[i] (0: not one).
+std::size_t utf8_length(std::string_view s, std::size_t i) noexcept {
+    const auto c = static_cast<unsigned char>(s[i]);
+    const std::size_t n = c < 0x80 ? 1 : (c >> 5) == 0x6 ? 2 : (c >> 4) == 0xE ? 3 : (c >> 3) == 0x1E ? 4 : 0;
+    if (n == 0 || i + n > s.size()) {
+        return 0;
+    }
+    for (std::size_t k = 1; k < n; ++k) {
+        if ((static_cast<unsigned char>(s[i + k]) >> 6) != 0x2) {
+            return 0;
+        }
+    }
+    return n;
+}
+
+// A string as Lua would write it: "..." with \" \\ escaped, control bytes and bytes that aren't
+// UTF-8 as \xHH (so the text is valid UTF-8 for JSON tools). Cut after `limit` bytes (0: never).
+std::string quoted(std::string_view s, std::size_t limit = kMaxText) {
     std::string out = "\"";
-    for (const char c : s.substr(0, kMaxText)) {
+    const std::size_t end = limit != 0 ? std::min(s.size(), limit) : s.size();
+    for (std::size_t i = 0; i < end;) {
+        const char c = s[i];
+        const std::size_t n = utf8_length(s, i);
         if (c == '"' || c == '\\') {
             out += '\\';
             out += c;
-        } else if (static_cast<unsigned char>(c) < 0x20) {
+            ++i;
+        } else if (n == 0 || static_cast<unsigned char>(c) < 0x20) {
             std::format_to(std::back_inserter(out), "\\x{:02x}", static_cast<unsigned char>(c));
+            ++i;
         } else {
-            out += c;
+            out.append(s.substr(i, n));
+            i += n;
         }
     }
-    out += s.size() > kMaxText ? "\"..." : "\"";
+    out += end < s.size() ? "\"..." : "\"";
     return out;
 }
 
-// The name a table field is listed (and addressed in paths) by: `name`, `[3]`, `["a b"]`.
-std::string key_name(lua_State* L, int key) {
+// The inverse of quoted() for a whole (uncut) quoted text: nullopt if it isn't one.
+std::optional<std::string> unquoted(std::string_view q) {
+    if (q.size() < 2 || q.front() != q.back() || (q.front() != '"' && q.front() != '\'')) {
+        return std::nullopt;
+    }
+    std::string out;
+    for (std::size_t i = 1; i + 1 < q.size(); ++i) {
+        if (q[i] != '\\') {
+            out += q[i];
+            continue;
+        }
+        if (++i + 1 >= q.size()) {
+            return std::nullopt;
+        }
+        if (q[i] == 'x') {
+            unsigned v = 0;
+            const auto [end, ec] = std::from_chars(q.data() + i + 1, q.data() + std::min(i + 3, q.size() - 1), v, 16);
+            if (ec != std::errc{} || end != q.data() + i + 3) {
+                return std::nullopt;
+            }
+            out += static_cast<char>(v);
+            i += 2;
+        } else {
+            out += q[i];
+        }
+    }
+    return out;
+}
+
+// The name a table field is listed (and addressed in paths) by: `name`, `[3]`, `["a b"]`, `[true]`.
+// Float, table, function and other keys are listed (`[1.5]`, `[table]`) but can't be addressed.
+std::string key_name(lua_State* L, int key, bool& addressable) {
+    addressable = true;
     switch (lua_type(L, key)) {
     case LUA_TSTRING: {
         std::size_t n = 0;
         const char* p = lua_tolstring(L, key, &n);
         const std::string_view k{p, n};
-        return is_identifier(k) ? std::string{k} : std::format("[{}]", quoted(k));
+        return is_identifier(k) ? std::string{k} : std::format("[{}]", quoted(k, 0));
     }
     case LUA_TNUMBER:
         if (lua_isinteger(L, key) != 0) {
             return std::format("[{}]", lua_tointeger(L, key));
         }
+        addressable = false;
         return std::format("[{}]", lua_tonumber(L, key));
     case LUA_TBOOLEAN: return lua_toboolean(L, key) != 0 ? "[true]" : "[false]";
-    default: return std::format("[{}]", lua_typename(L, lua_type(L, key)));
+    default: addressable = false; return std::format("[{}]", lua_typename(L, lua_type(L, key)));
     }
 }
 
@@ -121,9 +178,13 @@ bool descend(lua_State* L, std::string_view key) {
     }
     if (key.size() >= 2 && key.front() == '[' && key.back() == ']') {
         const std::string_view inner = key.substr(1, key.size() - 2);
-        if (inner.size() >= 2 && (inner.front() == '"' || inner.front() == '\'') && inner.back() == inner.front()) {
-            const std::string_view text = inner.substr(1, inner.size() - 2);
-            lua_pushlstring(L, text.data(), text.size());
+        if (!inner.empty() && (inner.front() == '"' || inner.front() == '\'')) {
+            const auto text = unquoted(inner);
+            if (!text) {
+                lua_pop(L, 1);
+                return false;
+            }
+            lua_pushlstring(L, text->data(), text->size());
         } else if (inner == "true" || inner == "false") {
             lua_pushboolean(L, inner == "true" ? 1 : 0);
         } else {
@@ -203,6 +264,17 @@ debug_variable render(lua_State* L, int index, std::string name) {
     return v;
 }
 
+// A lib proxy (make_lib_proxy marks its metatable), read raw.
+bool is_lib_proxy(lua_State* L, int index) {
+    if (lua_getmetatable(L, index) == 0) {
+        return false;
+    }
+    lua_pushliteral(L, "__rhp_lib");
+    const bool lib = lua_rawget(L, -2) == LUA_TBOOLEAN;
+    lua_pop(L, 2);
+    return lib;
+}
+
 // Every raw field of the table on top (left on the stack), at most kMaxFields.
 std::vector<debug_variable> fields_of(lua_State* L) {
     std::vector<debug_variable> out;
@@ -214,23 +286,39 @@ std::vector<debug_variable> fields_of(lua_State* L) {
             out.push_back(debug_variable{"...", "", std::format("(more than {} fields)", kMaxFields), false});
             break;
         }
-        out.push_back(render(L, -1, key_name(L, -2)));
+        bool addressable = true;
+        debug_variable v = render(L, -1, key_name(L, -2, addressable));
+        v.expandable = v.expandable && addressable;
+        out.push_back(std::move(v));
         lua_pop(L, 1);
     }
     return out;
 }
 
-// Pushes onto L the frame function's upvalue `name` (false if it has none).
+// "[3]" -> 3, "...[3]" (with `prefix` "...") -> 3; 0 otherwise.
+int indexed_name(std::string_view name, std::string_view prefix) noexcept {
+    if (!name.starts_with(prefix) || name.size() < prefix.size() + 3 || name[prefix.size()] != '[' || name.back() != ']') {
+        return 0;
+    }
+    int n = 0;
+    const std::string_view digits = name.substr(prefix.size() + 1, name.size() - prefix.size() - 2);
+    const auto [end, ec] = std::from_chars(digits.data(), digits.data() + digits.size(), n);
+    return ec == std::errc{} && end == digits.data() + digits.size() && n > 0 ? n : 0;
+}
+
+// Pushes onto L the frame function's upvalue `name` ("[n]": the n-th, for C functions' unnamed
+// upvalues); false if it has none.
 bool push_upvalue(lua_State* co, lua_State* L, lua_Debug& ar, std::string_view name) {
     lua_getinfo(co, "f", &ar); // pushes the function onto co
     lua_xmove(co, L, 1);
     const int fn = lua_gettop(L);
+    const int index = indexed_name(name, "");
     for (int n = 1;; ++n) {
         const char* up = lua_getupvalue(L, fn, n);
         if (up == nullptr) {
             break;
         }
-        if (std::string_view{up} == name) {
+        if (n == index || std::string_view{up} == name) {
             lua_remove(L, fn);
             return true;
         }
@@ -240,8 +328,15 @@ bool push_upvalue(lua_State* co, lua_State* L, lua_Debug& ar, std::string_view n
     return false;
 }
 
-// Pushes onto L the frame's local `name` (the innermost one when shadowed).
+// Pushes onto L the frame's local `name` (the innermost one when shadowed; "...[n]": the n-th vararg).
 bool push_local(lua_State* co, lua_State* L, lua_Debug& ar, std::string_view name) {
+    if (const int vararg = indexed_name(name, "..."); vararg != 0) {
+        if (lua_getlocal(co, &ar, -vararg) == nullptr) {
+            return false;
+        }
+        lua_xmove(co, L, 1);
+        return true;
+    }
     int found = 0;
     for (int n = 1;; ++n) {
         const char* local = lua_getlocal(co, &ar, n);
@@ -361,7 +456,15 @@ std::optional<std::vector<std::string>> parse_path(std::string_view text) {
             }
             out.push_back(std::move(*name));
         } else if (text[i] == '[') {
-            const std::size_t close = text.find(']', i);
+            std::size_t close = i + 1;
+            if (close < text.size() && (text[close] == '"' || text[close] == '\'')) { // a quoted key may hold ']'
+                const char q = text[close];
+                for (++close; close < text.size() && text[close] != q; ++close) {
+                    close += text[close] == '\\' ? 1 : 0;
+                }
+                ++close;
+            }
+            close = text.find(']', close);
             if (close == std::string_view::npos) {
                 return std::nullopt;
             }
@@ -379,7 +482,11 @@ std::optional<std::vector<std::string>> parse_path(std::string_view text) {
 // ---- the line hook ---------------------------------------------------------------------------------
 
 void sandbox_impl::line_event(lua_State* L, lua_Debug* ar) {
-    if (!debugger_ || running_.empty() || closing_lua_) {
+    if (running_.empty() || closing_lua_) {
+        return;
+    }
+    if (!debugger_ || !debugger_->wants_lines()) {
+        sync_hook(L, checked_now()); // a thread armed while the debugger needed lines: they stop
         return;
     }
     debugger_state& d = *debugger_;
@@ -388,9 +495,11 @@ void sandbox_impl::line_event(lua_State* L, lua_Debug* ar) {
     const bool own_thread = req != nullptr && top.thread == L;
     std::string_view reason;
     if (d.step && own_thread && req->id == d.step->request) {
-        const int depth = stack_depth(L);
+        // depth <= start (over) / depth < start (out), probed with one lua_getstack
         const step_mode mode = d.step->mode;
-        if (mode == step_mode::kInto || (mode == step_mode::kOver && depth <= d.step->depth) || (mode == step_mode::kOut && depth < d.step->depth)) {
+        lua_Debug probe{};
+        if (mode == step_mode::kInto || (mode == step_mode::kOver && lua_getstack(L, d.step->depth, &probe) == 0) ||
+            (mode == step_mode::kOut && d.step->depth >= 2 && lua_getstack(L, d.step->depth - 1, &probe) == 0)) {
             reason = "step";
         }
     }
@@ -413,13 +522,17 @@ void sandbox_impl::line_event(lua_State* L, lua_Debug* ar) {
         reason = "breakpoint";
     }
     try {
+        std::string label = req != nullptr ? where_of(*req) : std::string{};
+        if (label.empty() && req != nullptr) {
+            label = req->kind == request_kind::kExec ? "exec" : "?";
+        }
         debug_stop stop{req != nullptr ? req->id : request_id{},
-                        req != nullptr ? where_of(*req) : std::string{},
+                        std::move(label),
                         std::string{reason},
                         std::string{source},
                         static_cast<std::uint32_t>(std::max(line, 0)),
                         req != nullptr ? req->owner.module : current_.module};
-        if (!own_thread || lua_isyieldable(L) == 0) {
+        if (!own_thread || lua_isyieldable(L) == 0 || d.paused.size() >= kMaxPaused) {
             // A handler game code called, a coroutine the script made, code under a C call: it can't
             // wait here. A breakpoint is reported once per place; pause and step wait for a line that can.
             if (reason == "breakpoint" && d.reported.insert(std::format("{}:{}", source, line)).second) {
@@ -433,8 +546,8 @@ void sandbox_impl::line_event(lua_State* L, lua_Debug* ar) {
             d.step.reset();
         }
         req->waiting = wait_kind::kDebug;
-        publish_debug_event("paused", stop);
-        d.paused.insert_or_assign(stop.request, std::move(stop));
+        const auto at = d.paused.insert_or_assign(stop.request, std::move(stop)).first;
+        publish_debug_event("paused", at->second);
     } catch (...) { // out of memory: don't pause
         if (req != nullptr && req->waiting == wait_kind::kDebug) {
             req->waiting = wait_kind::kNone;
@@ -452,7 +565,11 @@ void sandbox_impl::publish_debug_event(std::string_view kind, const debug_stop& 
     info.emplace_back(value{"source"}, value{stop.source});
     info.emplace_back(value{"line"}, value{static_cast<std::int64_t>(stop.line)});
     info.emplace_back(value{"label"}, value{stop.label});
-    (void)queue_script_event(kDebugEvent, module_id{}, value_list{value{std::move(info)}});
+    // To C++ listeners (and through the host, to clients) at the end of this operation or pump();
+    // never to the sandbox's own scripts (a handler pausing would publish again).
+    if (!listeners_->empty()) {
+        listener_calls_.push_back(queued_script_event{kDebugEvent, module_id{}, value_list{value{std::move(info)}}});
+    }
 }
 
 void sandbox_impl::forget_paused(request_id id) noexcept {
@@ -623,6 +740,8 @@ result<std::vector<debug_variable>> sandbox_impl::debug_variables(request_id id,
             return;
         }
         luaL_checkstack(L, 8, "rhp: debug");
+        // The paused coroutine stopped in a Lua frame whose top is its own top: room for the values
+        // lua_getlocal / lua_getinfo push onto it while reading (popped again before this returns).
         if (lua_checkstack(*co, 4) == 0) {
             failure = make_error(errc::kLimitExceeded, "the paused coroutine's stack is full", "debug");
             return;
@@ -681,6 +800,8 @@ result<debug_variable> sandbox_impl::debug_evaluate(request_id id, std::uint32_t
             return;
         }
         luaL_checkstack(L, 8, "rhp: debug");
+        // The paused coroutine stopped in a Lua frame whose top is its own top: room for the values
+        // lua_getlocal / lua_getinfo push onto it while reading (popped again before this returns).
         if (lua_checkstack(*co, 4) == 0) {
             failure = make_error(errc::kLimitExceeded, "the paused coroutine's stack is full", "debug");
             return;
@@ -705,8 +826,9 @@ result<debug_variable> sandbox_impl::debug_evaluate(request_id id, std::uint32_t
         }
         for (std::size_t i = 1; i < path->size(); ++i) {
             const std::string& key = (*path)[i];
-            if (lua_type(L, -1) == LUA_TUSERDATA && key.front() != '[') {
-                // A lib proxy (its getters are C++): read through it. Anything else stays raw.
+            if (lua_type(L, -1) == LUA_TUSERDATA && key.front() != '[' && is_lib_proxy(L, -1)) {
+                // A lib proxy: its getters are C++ (a variable, a sub-lib, a function). Nothing else
+                // is read through a metamethod.
                 lua_getfield(L, -1, key.c_str());
                 lua_remove(L, -2);
                 continue;

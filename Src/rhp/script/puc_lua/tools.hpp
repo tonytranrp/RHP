@@ -34,16 +34,42 @@ struct frames_hash {
     }
 };
 
+// A frame as lua_getinfo reports it, by the addresses of its strings (they live while the function
+// does); a hit is checked against the text it was made from, so a reused address can't mislabel.
+struct frame_key {
+    const char* source = nullptr;
+    const char* name = nullptr;
+    int line = 0;
+
+    [[nodiscard]] bool operator==(const frame_key&) const = default;
+};
+
+struct frame_key_hash {
+    [[nodiscard]] std::size_t operator()(const frame_key& k) const noexcept {
+        const auto a = reinterpret_cast<std::uintptr_t>(k.source);
+        const auto b = reinterpret_cast<std::uintptr_t>(k.name);
+        return std::hash<std::uintptr_t>{}(a ^ (b * 0x9E3779B97F4A7C15ull) ^ static_cast<std::uintptr_t>(k.line));
+    }
+};
+
+struct frame_slot {
+    std::uint32_t id = 0;
+    std::string source;
+    std::string name;
+};
+
 struct profiler_state {
     profile_options options;
     std::chrono::steady_clock::time_point started;
     std::uint64_t samples = 0;
     std::uint64_t dropped = 0;
+    std::uint64_t pending = 0; // instructions since the last sample
     std::unordered_map<std::string, std::uint32_t, string_hash, std::equal_to<>> frame_ids; // frame text -> id
     std::vector<std::string> frames;                                                        // id -> frame text
     std::unordered_map<std::vector<std::uint32_t>, std::uint64_t, frames_hash> stacks;      // innermost frame first
     std::vector<std::uint32_t> scratch;                                                     // one sample's frame ids, reused
     std::string text;                                                                       // one frame's text, reused
+    std::unordered_map<frame_key, frame_slot, frame_key_hash> known; // frames seen, by the addresses of their strings
 };
 
 struct debugger_state {

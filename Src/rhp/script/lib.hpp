@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <expected>
 #include <functional>
+#include <limits>
 #include <optional>
 #include <string_view>
 #include <tuple>
@@ -118,12 +119,14 @@ consteval bool bound_fits() {
         return false;
     } else if constexpr (std::integral<T>) {
         if constexpr (std::floating_point<decltype(B)>) {
-            return static_cast<long double>(static_cast<T>(B)) == static_cast<long double>(B);
+            return B >= static_cast<decltype(B)>((std::numeric_limits<T>::min)()) && B <= static_cast<decltype(B)>((std::numeric_limits<T>::max)()) &&
+                   static_cast<long double>(static_cast<T>(B)) == static_cast<long double>(B);
         } else {
             return std::in_range<T>(B);
         }
-    } else {
-        return true;
+    } else { // floating point: within T's range
+        return static_cast<long double>(B) >= -static_cast<long double>((std::numeric_limits<T>::max)()) &&
+               static_cast<long double>(B) <= static_cast<long double>((std::numeric_limits<T>::max)());
     }
 }
 
@@ -142,10 +145,10 @@ template <class T, class Step>
 consteval bool step_fits() {
     if constexpr (std::is_void_v<Step>) {
         return true;
-    } else if constexpr (!tunable_number<T> || !tag_number<decltype(Step::value)>) {
+    } else if constexpr (!tunable_number<T> || !tag_number<decltype(Step::value)> || !bound_fits<T, Step::value>()) {
         return false;
     } else {
-        return Step::value > 0;
+        return Step::value > 0; // an integer variable's step is a whole number (bound_fits)
     }
 }
 

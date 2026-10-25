@@ -26,6 +26,8 @@ namespace Rhp::script::detail {
 namespace {
 
 constexpr std::uint32_t kMinInterval = 100;
+constexpr std::size_t kMaxDepth = 256;
+constexpr std::size_t kMaxStacks = 100'000;
 
 // The chunk name a module or exec was compiled under ("@game.combat", "=exec") without its marker.
 std::string_view chunk_of(const lua_Debug& ar) noexcept {
@@ -53,9 +55,24 @@ void frame_text(std::string& out, const lua_Debug& ar, std::string_view name = "
         out += name;
         std::format_to(std::back_inserter(out), " ({}:{})", chunk_of(ar), ar.linedefined);
     }
+    for (char& c : out) { // the folded format separates frames with ';' and stacks with newlines
+        if (c == ';' || c == '\n' || c == '\r') {
+            c = ' ';
+        }
+    }
 }
 
 } // namespace
+
+void sandbox_impl::profile_tick(lua_State* L, std::uint64_t elapsed) noexcept {
+    profiler_state& p = *profiler_;
+    p.pending += elapsed;
+    if (p.pending < p.options.interval) {
+        return; // the hook fires every min(check interval, profile interval) instructions
+    }
+    p.pending %= p.options.interval;
+    profile_sample(L);
+}
 
 void sandbox_impl::profile_sample(lua_State* L) noexcept {
     profiler_state& p = *profiler_;
@@ -76,9 +93,24 @@ void sandbox_impl::profile_sample(lua_State* L) noexcept {
             if (lua_getinfo(L, "Sn", &ar) == 0) {
                 break;
             }
-            frame_text(p.text, ar);
             unnamed_outer = ar.name == nullptr && ar.what != nullptr && std::string_view{ar.what} == "Lua";
-            p.scratch.push_back(intern());
+            const std::string_view source = ar.source != nullptr ? std::string_view{ar.source, ar.srclen} : std::string_view{};
+            const std::string_view name = ar.name != nullptr ? std::string_view{ar.name} : std::string_view{};
+            const frame_key key{ar.source, ar.name, ar.linedefined};
+            if (const auto known = p.known.find(key); known != p.known.end() && known->second.source == source && known->second.name == name) {
+                p.scratch.push_back(known->second.id); // seen before: no text to build
+                continue;
+            }
+            if (p.frames.size() >= 4 * p.options.max_stacks) {
+                ++p.dropped; // too many distinct frames (code that keeps making new ones)
+                return;
+            }
+            frame_text(p.text, ar);
+            const std::uint32_t id = intern();
+            if (p.known.size() < p.options.max_stacks) {
+                p.known.insert_or_assign(key, frame_slot{id, std::string{source}, std::string{name}});
+            }
+            p.scratch.push_back(id);
         }
         // The request's own function was called by C++: name it from the request.
         const active_run& top = running_.back();
@@ -110,7 +142,8 @@ result<void> sandbox_impl::start_profile(const profile_options& options) {
     auto p = std::make_unique<profiler_state>();
     p->options = options;
     p->options.interval = std::max(options.interval, kMinInterval);
-    p->options.max_depth = std::max<std::size_t>(options.max_depth, 1);
+    p->options.max_depth = std::clamp<std::size_t>(options.max_depth, 1, kMaxDepth);
+    p->options.max_stacks = std::clamp<std::size_t>(options.max_stacks, 1, kMaxStacks);
     p->started = steady::now();
     profiler_ = std::move(p);
     rearm_all();

@@ -645,6 +645,9 @@ std::uint32_t sandbox_impl::hook_count() const noexcept {
 void sandbox_impl::arm_hook(lua_State* L, bool armed) noexcept {
     int mask = armed || profiler_ ? LUA_MASKCOUNT : 0;
     if (debugger_ && debugger_->wants_lines()) {
+        // Every line, with a bitmap check first. (Switching line events per function on calls and
+        // returns would be cheaper for loops, but lua_sethook restarts the instruction countdown:
+        // a loop of calls would never reach a count event, so limits and cancels would stop working.)
         mask |= LUA_MASKLINE;
     }
     if (mask == 0) {
@@ -661,7 +664,7 @@ void sandbox_impl::rearm_all() noexcept {
     reset_hook();
     for (const auto& [id, req] : requests_) {
         if (req->thread != nullptr) {
-            arm_hook(req->thread, hook_everywhere() || (checks_requests() && (checked_kind(req->kind) || checked_depth_ != 0)));
+            arm_hook(req->thread, hook_everywhere() || req->checked);
         }
     }
 }
@@ -677,7 +680,23 @@ bool sandbox_impl::checked_now() const noexcept {
         return true;
     }
     const active_run& top = running_.back();
-    return top.request != nullptr && checked_kind(top.request->kind);
+    return top.request != nullptr && top.request->checked;
+}
+
+void sandbox_impl::sync_hook(lua_State* L, bool checked) noexcept {
+    int mask = checked || profiler_ ? LUA_MASKCOUNT : 0;
+    if (debugger_ && debugger_->wants_lines()) {
+        mask |= LUA_MASKLINE;
+    }
+    const int count = static_cast<int>(hook_count());
+    if (lua_gethookmask(L) == mask && ((mask & LUA_MASKCOUNT) == 0 || lua_gethookcount(L) == count)) {
+        return;
+    }
+    if (mask == 0) {
+        lua_sethook(L, nullptr, 0, 0);
+    } else {
+        lua_sethook(L, &sandbox_impl::count_hook, mask, count);
+    }
 }
 
 bool sandbox_impl::checks_requests() const noexcept {
@@ -807,10 +826,17 @@ void sandbox_impl::count_hook(lua_State* L, lua_Debug* ar) {
     if (self.running_.empty()) {
         return; // a handler called from game code runs inside run_handler, so this is GC / setup code
     }
-    if (self.profiler_ && !self.hook_dirty_) {
-        self.profile_sample(L);
-        if (!self.checked_now()) {
-            return; // armed for the profiler only
+    // The instructions since this thread's last count event: its own count, which may be older than
+    // hook_count() (a thread armed before the profiler started or stopped).
+    const auto elapsed = static_cast<std::uint64_t>(lua_gethookcount(L));
+    if (!self.hook_dirty_) { // after a stop the hook fires on every instruction until the run ends
+        const bool checked = self.checked_now();
+        if (self.profiler_) {
+            self.profile_tick(L, elapsed);
+        }
+        self.sync_hook(L, checked);
+        if (!checked) {
+            return; // armed for the profiler only, or a thread whose hook was out of date
         }
     }
     self.check_cancels();
@@ -824,7 +850,7 @@ void sandbox_impl::count_hook(lua_State* L, lua_Debug* ar) {
         }
         run_budget& budget = *run.budget;
         if (budget.sticky == sticky_stop::kNone) {
-            if (limits.instructions != 0 && (budget.instructions += self.hook_count()) > limits.instructions) {
+            if (limits.instructions != 0 && (budget.instructions += elapsed) > limits.instructions) {
                 budget.sticky = sticky_stop::kBudget;
             } else if (limits.wall_ms != 0 && budget.active + (now - run.started) > std::chrono::milliseconds{limits.wall_ms}) {
                 budget.sticky = sticky_stop::kWall;
@@ -1188,7 +1214,8 @@ request_record& sandbox_impl::start_request(request_kind kind, const effect_owne
     // Requests check for cancel() (handlers only when a limit or cancel_scope::kEverything asks).
     // A handler started while a checked run is active is part of that run's work (an event fired
     // synchronously by its code): it checks too.
-    arm_hook(co, hook_everywhere() || (checks_requests() && (checked_kind(kind) || checked_depth_ != 0)));
+    req->checked = checks_requests() && (checked_kind(kind) || checked_depth_ != 0);
+    arm_hook(co, hook_everywhere() || req->checked);
     try {
         // lua_xmove never grows the destination: a new coroutine has room for about 20 values.
         if (lua_checkstack(co, nargs + 1) == 0) {
@@ -1493,6 +1520,10 @@ value_list sandbox_impl::collect_results(lua_State* L, int first, int last) {
 
 void sandbox_impl::request_ended(request_record& req, const result<value_list>* outcome, bool abandoned) noexcept {
     stop_waiting(req);
+    if (debugger_ && debugger_->step && debugger_->step->request == req.id) {
+        debugger_->step.reset(); // a step that ran off the end of its request
+        rearm_all();
+    }
     if (req.resume_ref != kNoRef) {
         luaL_unref(state_, LUA_REGISTRYINDEX, req.resume_ref);
         req.resume_ref = kNoRef;
