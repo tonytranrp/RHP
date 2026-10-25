@@ -5,6 +5,7 @@
 // host -i id [--root folder]`; breakpoints set in <root>/game/combat.lua apply to the module
 // "game.combat". Paused requests are DAP threads.
 
+#include <algorithm>
 #include <charconv>
 #include <chrono>
 #include <concepts>
