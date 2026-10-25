@@ -71,6 +71,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
     namespace w = Rhp::wire;
     all<w::hello, w::challenge, w::response, w::welcome, w::resume, w::envelope, w::module_ref, w::exec_request, w::load_request, w::call_request, w::reload_request,
         w::rollback_request, w::unload_request, w::module_request, w::tag_request, w::cancel_request, w::blob_chunk, w::revert_summary, w::module_status,
-        w::emit_message, w::subscribe_request, w::event_message, Rhp::error>(*v);
+        w::emit_message, w::subscribe_request, w::event_message, w::release_apply_request, w::release_channel_request, w::revoke_request,
+        w::release_info_message, w::release_apply_reply, w::channel_status_message, w::release_status_reply, Rhp::error>(*v);
     return 0;
 }

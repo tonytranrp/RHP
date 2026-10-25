@@ -6,9 +6,11 @@ endif()
 
 rhp_add_module(platform
     HEADERS
+        files.hpp
         os.hpp
         random.hpp
     SOURCES
+        files.cpp
         random.cpp
     DEPS
         Rhp::core

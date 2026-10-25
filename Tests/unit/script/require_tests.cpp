@@ -151,9 +151,10 @@ TEST_CASE("require records dependencies and unload checks them", "[script][requi
     REQUIRE(box.unload(*a)); // nobody requires it any more
 }
 
-TEST_CASE("kUnloaded is the newest error code", "[script][require]") {
-    STATIC_REQUIRE(Rhp::kLastErrc == errc::kUnloaded);
+TEST_CASE("kUnloaded keeps its name and value after the release codes", "[script][require]") {
     STATIC_REQUIRE(Rhp::to_string(errc::kUnloaded) == "unloaded");
+    STATIC_REQUIRE(static_cast<int>(errc::kUnloaded) + 4 == static_cast<int>(Rhp::kLastErrc));
+    STATIC_REQUIRE(Rhp::kLastErrc == errc::kOutOfScope);
 }
 
 TEST_CASE("the scratch module records no dependencies", "[script][require]") {

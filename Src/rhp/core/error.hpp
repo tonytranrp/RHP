@@ -34,10 +34,14 @@ enum class errc : std::uint16_t {
     kTypeMismatch,
     kOutOfRange,
     kUnloaded,
+    kExpired,    // outside its validity window (a release's not_before / not_after)
+    kRevoked,    // a revocation list withdrew it (a release, or the key that signed it)
+    kSuperseded, // an equal or newer one was already accepted (a release's seq)
+    kOutOfScope, // meant for another app, build or platform
 };
 
 // The highest errc value (for iterating every code).
-inline constexpr errc kLastErrc = errc::kUnloaded;
+inline constexpr errc kLastErrc = errc::kOutOfScope;
 
 [[nodiscard]] constexpr std::string_view to_string(errc code) noexcept {
     switch (code) {
@@ -67,6 +71,10 @@ inline constexpr errc kLastErrc = errc::kUnloaded;
     case errc::kTypeMismatch: return "type_mismatch";
     case errc::kOutOfRange: return "out_of_range";
     case errc::kUnloaded: return "unloaded";
+    case errc::kExpired: return "expired";
+    case errc::kRevoked: return "revoked";
+    case errc::kSuperseded: return "superseded";
+    case errc::kOutOfScope: return "out_of_scope";
     }
     return "unknown";
 }

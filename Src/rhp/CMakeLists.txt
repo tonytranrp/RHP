@@ -13,6 +13,7 @@ add_subdirectory(script)   # layer 3
 add_subdirectory(event)    # layer 3
 add_subdirectory(audit)    # layer 4
 add_subdirectory(session)  # layer 4
+add_subdirectory(release)  # layer 4
 add_subdirectory(config)   # layer 5
 add_subdirectory(host)     # layer 5
 add_subdirectory(client)   # layer 5
@@ -25,6 +26,6 @@ target_sources(rhp INTERFACE
     BASE_DIRS "${PROJECT_SOURCE_DIR}/Src"
     FILES rhp.hpp
 )
-target_link_libraries(rhp INTERFACE Rhp::utils Rhp::core Rhp::script Rhp::audit Rhp::host Rhp::client)
+target_link_libraries(rhp INTERFACE Rhp::utils Rhp::core Rhp::script Rhp::audit Rhp::release Rhp::host Rhp::client)
 set_target_properties(rhp PROPERTIES EXPORT_NAME rhp FOLDER "rhp")
 set_property(GLOBAL APPEND PROPERTY RHP_INSTALL_TARGETS rhp)
