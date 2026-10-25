@@ -118,7 +118,9 @@ The supplied memory resource must outlive the sandbox. It covers Lua allocations
 | `RHP_WARNINGS_AS_ERRORS` | top-level only | warnings are errors in RHP's own targets (off when RHP is a subproject, so a newer compiler's new warning doesn't break the parent's build) |
 | `RHP_INSTALL` | top-level only | install rules and the `rhp` CMake package (`find_package(rhp)`); see [getting started](getting-started.md#installed-package) |
 | `RHP_BUILD_BENCH` | OFF | build `Tests/bench` (`rhp_bench`); see [benchmarks](../benchmarks.md) |
-| `RHP_LUA_JUMP_YIELDS` | ON | coroutine yields jump (`_longjmp`) instead of throwing; errors still throw. Ignored with the MSVC ABI, whose `longjmp` unwinds |
+| `RHP_LUA_JUMP_YIELDS` | ON | coroutine yields jump (`_longjmp`) instead of throwing; errors still throw. With the MSVC ABI only on x64 (and a process with a CET shadow stack throws anyway); ignored under ThreadSanitizer |
+| `RHP_PCH` | top-level only | one shared precompiled header of standard headers for RHP's libraries and one for its tests (`cmake/RhpPch.cmake`) |
+| `RHP_UNITY_BUILD` | OFF | compile RHP's libraries, tests and tools as unity files: faster clean builds (CI), slower edits |
 | `RHP_WITH_TLS` | ON | TLS 1.3 for network endpoints |
 | `RHP_TLS_OPENSSL` | AUTO | `AUTO` (use system OpenSSL ≥ 3.0 if found, desktop only), `ON` (required), `OFF` |
 | `RHP_TLS_MBEDTLS` | ON | build the Mbed TLS backend (mobile, and the fallback) |
@@ -126,6 +128,8 @@ The supplied memory resource must outlive the sandbox. It covers Lua allocations
 | `RHP_SANITIZE` | empty | `address;undefined`, `address` (MSVC) or `thread` |
 
 `CPM_SOURCE_CACHE` can be shared across builds. Dependency versions are pinned in one file, `cmake/Dependencies.cmake`: each git dependency's checkout must be the commit its tag named when it was pinned (a moved tag fails the configure), and CPM.cmake itself is checked against its SHA-256.
+
+When RHP is the top-level project and the generator is Ninja, links share a job pool sized by the machine's memory (a full Debug build otherwise runs out of memory linking every test at once).
 
 RHP's own targets also get these defaults, only when the including project hasn't set them: position-independent code; hidden symbol visibility (so a shared library that links RHP statically doesn't export, or clash on, RHP's, Lua's or Mbed TLS's symbols); a `d` postfix on Debug archives; and on MSVC, debug information inside the objects (`/Z7`), so an installed static library needs no PDB files. A parent's `CMAKE_CXX_STANDARD` below 23 stays its own: RHP's targets raise their users to C++23 through their compile features.
 

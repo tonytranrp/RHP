@@ -58,7 +58,7 @@ What changed and why:
 
 ### Where the remaining cost is
 
-- **The cancel hook.** By default (`limits.cancel_checks = kRequests`) every `exec` / `load` / `call` / task runs with Lua's count hook armed, so a client's cancel can stop a runaway loop. Stock Lua checks an armed hook on every instruction, which roughly doubles the time of loop-heavy code (`fib(22)`: about 2x raw). The `unchecked` rows run the same calls with `cancel_checks = kNone`: they run at raw-Lua speed. For trusted scripts that never need a remote cancel, set `kNone`; instruction, memory and wall-time limits still arm the hook when set.
+- **The cancel hook.** By default (`limits.cancel_checks = kRequests`) every `exec` / `load` / `call` / task runs with Lua's count hook armed, so a client's cancel can stop a runaway loop. Stock Lua checks an armed hook on every instruction, which roughly doubled the time of loop-heavy code (`fib(22)`: about 2x raw); since the [overall optimization pass](#overall-optimization-pass) a count that isn't due is counted down inline, and the same code runs at about 1.2-1.5x raw. The `unchecked` rows run the same calls with `cancel_checks = kNone`: they run at raw-Lua speed. For trusted scripts that never need a remote cancel, set `kNone`; instruction, memory and wall-time limits still arm the hook when set.
 - **A request per call.** `sandbox::call` starts a request (a pooled coroutine, a ledger owner, result conversion): about 0.4 µs over a raw `lua_pcall` of an empty function.
 - **Binding calls** cost about 2-3.5x a hand-written `lua_CFunction` (arguments converted through `Rhp::result<T>`, the role check, the label). Fine for gameplay calls; a binding called millions of times per frame is better written to take a batch.
 - **Variable reads** go through the variable's layer stack under a lock (Stage 8 made RHP's own reads and writes of a `var` thread-safe): about 70-100 ns each. A value read every frame in a hot loop is cheaper to pass in as an argument.
@@ -168,3 +168,45 @@ What the numbers say:
 - **A measured test costs about 150 us, an unmeasured one about 40 us.** The difference is the full garbage collection on each side of a measured test (the retained-memory figure); there was a second collection on each side before, needed only for objects with finalizers. `--no-measure` skips them for fast iteration.
 - **Assertions and spies are cheap enough for hot loops.** An `assert.equals` costs about 1.3 us (word chains are made once per spelling and resolved once), an `expect(...).to.equal` about 2 us (one table per word, messages built only for a failure), a call through a spy about 2.3 us (arguments without tables aren't copied).
 
+
+## Overall optimization pass
+
+Measured on 2026-10-25 on the same laptop (MSVC Release, pinned to one core at high priority, 30 samples): the suite before this pass (`main` at Stage 12) and after it, each run twice in alternating order; each side's number is the lower of its two means. What changed and why is in [the decision](decisions/performance-and-build-speed.md).
+
+| Benchmark | Before | After | Change |
+|---|---:|---:|---:|
+| e2e rhp: signed exec of a one-line script (the same script again) | 168 us | 18.3 us | -89% |
+| e2e rhp: call of a module function (loopback, one thread) | 17.4 us | 12.4 us | -29% |
+| lua rhp: 100k arithmetic loop (default cancel checks) | 1.85 ms | 1.01 ms | -45% |
+| lua rhp: fib(22) | 2.86 ms | 1.71 ms | -40% |
+| lua rhp: 10k closures | 1.64 ms | 1.31 ms | -20% |
+| lua rhp: empty function call (`sandbox::call`) | 571 ns | 392 ns | -31% |
+| requests rhp: call with two arguments | 478 ns | 306 ns | -36% |
+| lua rhp: 1k coroutine yields (Windows) | 2.95 ms | 104 us | -96% |
+| scheduler rhp: resume 1000 tasks (Windows) | 2.88 ms | 172 us | -94% |
+| scheduler rhp: pump with 1000 frame callbacks | 245 us | 175 us | -29% |
+| scheduler rhp: an idle pump | 137-156 ns | 79-90 ns | about -40% |
+| bindings rhp: 10k journaled var writes then their revert | 7.3 ms | 1.87 ms | -74% |
+| bindings rhp: 10k ready async calls | 3.65 ms | 1.93 ms | -47% |
+| bindings rhp: 10k reads of a lib variable | 843 us | 667 us | -21% |
+| bindings rhp: 10k calls held in a local | 742 us | 563 us | -24% |
+| requests rhp: checkpoint and revert_to over 100 scratch effects | 53.8 us | 41.1 us | -24% |
+| wire rhp: msgpack encode of a small reply | 368 ns | 202 ns | -45% |
+| wire rhp: encode a frame of 4 KiB / 64 KiB | 1.38 us / 22.2 us | 317 ns / 4.79 us | -77% / -78% |
+| wire rhp: decode a frame of 64 KiB | 8.52 us | 3.94 us | -54% |
+| wire rhp: crc32c of 4 KiB / 64 KiB | 336 ns / 5.72 us | 185 ns / 2.84 us | -45% / -50% |
+| testing: 10k `assert.equals` / `expect().to.equal` in one test | 12.9 / 18.8 ms | 10.6 / 16.2 ms | -18% / -14% |
+
+Rows not listed moved by less than about 10% (within this machine's noise), apart from three. Two raw twins moved, whose code didn't change: noise. `tunables rhp: write one variable` journals every write of the benchmark into one sandbox, so its mean measures the journal's reallocations (its standard deviation is larger than its mean on both sides; the lower bounds agree). Windows yields jump now (an x64 process without a CET shadow stack); on Linux they already did.
+
+The biggest remaining cost of loop-heavy scripts is gone: with the default `cancel_checks = kRequests`, a loop runs at about 1.2x raw Lua (it was 1.85-2x), so `kNone` is only worth it for the last few percent.
+
+Builds (clean `windows-msvc` Debug, 16 threads, 16 GB):
+
+| | Before | After |
+|---|---:|---:|
+| build wall time | 174-183 s | 111 s (106 s with `RHP_UNITY_BUILD`) |
+| compile time summed over jobs | 2953-3097 s | 1765 s |
+| Catch2 (108 sources) | about 450 s | about 110 s (unity) |
+| linking, summed | 364-399 s | 110 s (job pool) |
+| full ctest run (16 cores) | 77 s | 42-62 s |

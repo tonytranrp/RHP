@@ -873,6 +873,8 @@ flowchart BT
 | `RHP_TLS_MBEDTLS` | `ON` | build the Mbed TLS backend (fetched) |
 | `RHP_FUZZ` | `OFF` | Tests/fuzz as libFuzzer executables (Clang) |
 | `RHP_SANITIZE` | empty | `address;undefined` (Clang), `address` (MSVC) or `thread` |
+| `RHP_PCH` | `ON` when top-level | one shared precompiled header for the libraries, one for the tests |
+| `RHP_UNITY_BUILD` | `OFF` | RHP's own targets as unity files (CI: linux-clang, windows-msvc) |
 | `RHP_WARNINGS_AS_ERRORS` | `ON` | MSVC `/W4 /permissive- /Zc:__cplusplus /utf-8 /WX`; Clang `-Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Werror` (RHP's own targets only) |
 
 ### 12.3 Presets (Ninja Multi-Config; opens directly in Visual Studio)
