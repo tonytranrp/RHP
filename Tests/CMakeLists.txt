@@ -56,8 +56,13 @@ endif()
 if(RHP_ENABLE AND RHP_BUILD_EXAMPLES AND NOT CMAKE_CROSSCOMPILING)
     find_package(Python3 COMPONENTS Interpreter QUIET)
     if(Python3_Interpreter_FOUND)
-        execute_process(COMMAND "${Python3_EXECUTABLE}" -c "import pytest" RESULT_VARIABLE rhp_no_pytest OUTPUT_QUIET ERROR_QUIET)
-        if(rhp_no_pytest EQUAL 0)
+        # Asked once per interpreter (starting Python takes a second of every configure).
+        if(NOT RHP_PYTEST_PROBED STREQUAL "${Python3_EXECUTABLE}")
+            execute_process(COMMAND "${Python3_EXECUTABLE}" -c "import pytest" RESULT_VARIABLE rhp_no_pytest OUTPUT_QUIET ERROR_QUIET)
+            set(RHP_PYTEST_PROBED "${Python3_EXECUTABLE}" CACHE INTERNAL "")
+            set(RHP_HAS_PYTEST "${rhp_no_pytest}" CACHE INTERNAL "")
+        endif()
+        if(RHP_HAS_PYTEST EQUAL 0)
             add_test(NAME python.client
                 COMMAND "${Python3_EXECUTABLE}" -m pytest -q -p no:cacheprovider "${PROJECT_SOURCE_DIR}/clients/python/tests"
                 WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}/clients/python")
