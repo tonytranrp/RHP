@@ -76,9 +76,10 @@ using cfg = Rhp::config<>::limits<Rhp::limits{.instructions = 50'000'000, .memor
 | `backoff_min_ms` / `backoff_max_ms` | 250 / 30000 | capped redial backoff for dialing hosts and resuming clients, with jitter |
 | `gateway_idle_ms` | 5 min | logical HTTP identity idle expiry; stops pending requests too; 0 disables expiry |
 | `cancel_check_instructions` | 1000 | count-hook interval for cancellation and budgets; 0 uses the default interval |
+| `cancel_checks` | `kRequests` | which runs check for `cancel()` (an `Rhp::cancel_scope`): `kRequests` (exec / load / call / reload and tasks, plus the main thread while an operation runs), `kEverything` (handler calls too: timers, frame callbacks, events, patch handlers hit from game code), `kNone` (nothing: a cancel stops a request only before it starts or resumes). The instruction, wall-time and slice limits arm the check for every run whatever this says |
 | `event_queue` | 65536 | events queued per sandbox for its next pump (C++ fires from other threads, `rhp.publish`); more are dropped and counted; 0 = unlimited |
 
-Instruction, memory and execution-time limits default to unlimited; slicing defaults to off. Set budgets on the **host** that executes code. Instruction/time checks run at hook boundaries and cannot preempt C++ bindings. A host pump can dispatch several operations and pump several identity sandboxes, so `slice_us` is not a hard bound on the whole application frame.
+Instruction, memory and execution-time limits default to unlimited; slicing defaults to off. Set budgets on the **host** that executes code. Instruction/time checks run at hook boundaries and cannot preempt C++ bindings. The hook traps every Lua instruction while it is armed (a tight loop runs about half as fast under it), which is why `cancel_checks` confines it to requests by default: a host only ever cancels requests, and a handler that may loop forever needs a limit anyway. Trusted scripts that never need a remote cancel run at raw-Lua speed with `kNone` ([benchmarks](../benchmarks.md#where-the-remaining-cost-is)). A host pump can dispatch several operations and pump several identity sandboxes, so `slice_us` is not a hard bound on the whole application frame.
 
 `executor<pumped>` is the only implemented script execution model; accepting a custom marker does not install a scheduler. `clock` affects script sleep/timer time on a host or local sandbox, and the HTTP listener's idle expiry (`pump()` samples the clock's offset from `steady_clock` for the network thread, so the clock is only ever called on the pump thread); not protocol deadlines, heartbeats or HTTP proof freshness. The client logger/clock slots do not currently supply engine callbacks. `engine<>` is not a slot (Lua 5.5 is the only engine).
 
@@ -90,7 +91,7 @@ Passed to the constructors at run time: [`Rhp::host_options`](host-and-client.md
 |---|---|
 | `caller_role` | role of the identity (local default: patch) |
 | `limits` | as above |
-| `memory` | a `std::pmr::memory_resource*` for every Lua allocation (default resource when null) |
+| `memory` | a `std::pmr::memory_resource*` for every Lua allocation; when null, the C heap (`malloc` / `realloc` / `free`, as Lua's own allocator: blocks grow in place). `limits.memory` applies either way |
 | `output` / `on_output` | receive `print()` lines (with request and module for `on_output`) |
 | `on_emit` | receive `rhp.emit` values |
 | `on_result` | receive the final result of requests that suspended |
@@ -113,14 +114,19 @@ The supplied memory resource must outlive the sandbox. It covers Lua allocations
 | `RHP_BUILD_TESTS` | top-level only | build `Tests/` |
 | `RHP_BUILD_EXAMPLES` | top-level only | build `Examples/` |
 | `RHP_BUILD_TOOLS` | top-level only | build `Tools/` (`rhp-cli`; needs `RHP_ENABLE=ON`) |
-| `RHP_WARNINGS_AS_ERRORS` | ON | warnings are errors in RHP's own targets |
+| `RHP_WARNINGS_AS_ERRORS` | top-level only | warnings are errors in RHP's own targets (off when RHP is a subproject, so a newer compiler's new warning doesn't break the parent's build) |
+| `RHP_INSTALL` | top-level only | install rules and the `rhp` CMake package (`find_package(rhp)`); see [getting started](getting-started.md#installed-package) |
+| `RHP_BUILD_BENCH` | OFF | build `Tests/bench` (`rhp_bench`); see [benchmarks](../benchmarks.md) |
+| `RHP_LUA_JUMP_YIELDS` | ON | coroutine yields jump (`_longjmp`) instead of throwing; errors still throw. Ignored with the MSVC ABI, whose `longjmp` unwinds |
 | `RHP_WITH_TLS` | ON | TLS 1.3 for network endpoints |
 | `RHP_TLS_OPENSSL` | AUTO | `AUTO` (use system OpenSSL ≥ 3.0 if found, desktop only), `ON` (required), `OFF` |
 | `RHP_TLS_MBEDTLS` | ON | build the Mbed TLS backend (mobile, and the fallback) |
 | `RHP_FUZZ` | OFF | build libFuzzer executables (Clang); otherwise they are ctest replay drivers |
 | `RHP_SANITIZE` | empty | `address;undefined`, `address` (MSVC) or `thread` |
 
-`CPM_SOURCE_CACHE` can be shared across builds. Dependency versions are pinned in one file, `cmake/Dependencies.cmake`.
+`CPM_SOURCE_CACHE` can be shared across builds. Dependency versions are pinned in one file, `cmake/Dependencies.cmake`: each git dependency's checkout must be the commit its tag named when it was pinned (a moved tag fails the configure), and CPM.cmake itself is checked against its SHA-256.
+
+RHP's own targets also get these defaults, only when the including project hasn't set them: position-independent code; hidden symbol visibility (so a shared library that links RHP statically doesn't export, or clash on, RHP's, Lua's or Mbed TLS's symbols); a `d` postfix on Debug archives; and on MSVC, debug information inside the objects (`/Z7`), so an installed static library needs no PDB files. A parent's `CMAKE_CXX_STANDARD` below 23 stays its own: RHP's targets raise their users to C++23 through their compile features.
 
 A disabled build can use a separate build directory:
 

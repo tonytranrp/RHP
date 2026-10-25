@@ -1,17 +1,18 @@
 # Status and TODO
 
-Last updated 2026-10-24. Stages 0–7 are implemented and released (tag `stage-7`). Stage 8 (packaging and hardening) is in progress on branch `stage-8-packaging-hardening`. Progress is tracked as "Stage N" only (no `v1` / `v2` naming anywhere). Known limits are in [the guide's limitations page](guide/limitations.md).
+Last updated 2026-10-24. Stages 0–7 are implemented and released (tag `stage-7`). Stage 8 (packaging, hardening and performance) is implemented on branch `stage-8-packaging-hardening`, awaiting review and merge (tag `stage-8` then). Progress is tracked as "Stage N" only (no `v1` / `v2` naming anywhere). Known limits are in [the guide's limitations page](guide/limitations.md).
 
-## Stage 8 — packaging and hardening (in progress)
+## Stage 8 — packaging, hardening and performance
 
-Done when: *a stranger can install RHP with `find_package`, the reproduced threading and lifetime defects are fixed with regressions, and the hot paths have benchmarks.*
+Done when: *a stranger can install RHP with `find_package`, the reproduced threading and lifetime defects are fixed with regressions, and the hot paths have benchmarks and the optimizations they justify.* Decisions: [Stage 8](decisions/stage8-packaging-performance.md), ARCHITECTURE §34.
 
-- [ ] Documentation matches the code (audit of every page against the sources)
-- [ ] Hardening: logger level race, `network` required on transports (+ `link_decorator`), pump-thread checks for setup calls, `pending::request()` after `co_await`, `var` writes across threads, unsubscribe and detach barriers, blocking calls and destruction on the client's network thread, throwing callbacks
-- [ ] One generated build header (`<rhp/core/build.hpp>`) instead of per-header `RHP_ENABLE` / `RHP_TLS_HAS_*` fallbacks
-- [ ] Packaging: `install()` + exported `RhpConfig.cmake`, a consumer test, third-party notices, hashed dependency pins
-- [ ] CI: `RHP_ENABLE=OFF`, MSVC ASan, fuzz smoke and package-consumer jobs
-- [ ] Benchmarks (`Tests/bench`) and the optimizations they justify, results in `Docs/benchmarks.md`
+- [x] Documentation matches the code (audit of every page against the sources)
+- [x] Hardening: logger level race, `network` required on transports (+ `link_decorator`), pump-thread checks for setup calls, `pending::request()` after `co_await`, `var` writes across threads, unsubscribe and detach barriers, blocking calls and destruction on the client's network thread, throwing callbacks
+- [x] One generated build header (`<rhp/build_config.hpp>`) instead of per-header `RHP_ENABLE` / `RHP_TLS_HAS_*` fallbacks
+- [x] Packaging: `install()` + exported `rhp-config.cmake`, a consumer test (`Tests/package`), third-party notices, hashed dependency pins
+- [x] CI: `RHP_ENABLE=OFF`, MSVC ASan, fuzz smoke and package-consumer jobs (not yet run on GitHub: the account's billing block)
+- [x] Benchmarks (`Tests/bench`) and the optimizations they justify, results in [benchmarks](benchmarks.md)
+- Stage 8 follow-ups: coroutine yields still throw on the MSVC ABI (a `_longjmp` there unwinds); binding calls cost about 3x a raw C function (argument conversion through `result<T>`, role and label lookups); `msgpack` encoding appends byte by byte; an optional LTO build (static libraries built with LTO tie consumers to one compiler version, so it can't be the default). A `zero_threads` client may destroy itself from a callback its `poll()` runs; a fleet member destroyed from its own callback is not covered. Mbed TLS builds as `rhp_mbedtls_*` targets so a parent project can build its own copy; OpenSSL is found with `find_package` and shared with the parent.
 
 ## Open items
 
@@ -30,6 +31,23 @@ Done when: *a stranger can install RHP with `find_package`, the reproduced threa
 Process for every stage: one branch + PR per stage, conventional commits (`feat:`, `fix:`, `test:`, `docs:`, `ci:`), rebase-merge only when told to.
 
 ## Recorded validation
+
+### Stage 8 (2026-10-24)
+
+Debug builds on this Windows/WSL host, after the review fixes (`b59f3c4`):
+
+| Check | Result |
+|---|---|
+| MSVC x64 (fresh build directory) | 595/595 |
+| clang-cl x64 | 595/595 |
+| MSVC x64 + ASan | 593/593 (the two `package` cases are skipped for sanitizer builds) |
+| `RHP_ENABLE=OFF`, MSVC | 188/188 |
+| Linux Clang 21 | 595/595 |
+| Linux Clang ASan + UBSan | 593/593 |
+| Linux Clang TSan (Mbed TLS) | 593/593, no TSan reports |
+| Release benchmarks, Windows (MSVC) and WSL (Clang), each pinned to one core | [benchmarks](benchmarks.md) |
+
+A read-only review of the branch found eleven defects (cancel checks lost inside handlers a pumped request reaches, a request pool that allocated while ending requests, a coroutine leaked by a failed start, a client destroyed by its own `poll()` callback, blocking calls on the client's network thread, Mbed TLS target names clashing with a parent's, ...); all are fixed, with regression tests where a test can observe them. Not run: Android (no device attached this time), macOS/iOS (hosted CI covers them), long libFuzzer runs.
 
 ### Stage 7 (2026-10-17)
 

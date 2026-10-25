@@ -132,7 +132,9 @@ CPMAddPackage(NAME rhp GITHUB_REPOSITORY tonytranrp/RHP GIT_TAG stage-7)   # or 
 target_link_libraries(my_app PRIVATE Rhp::rhp)
 ```
 
-Releases are tagged by stage (`stage-7`); there are no `v1`-style version numbers. Hosts, clients and `rhp-cli` must come from the same protocol revision (Stage 7: revision 4).
+Or install it once and use `find_package(rhp CONFIG REQUIRED)` (no version: RHP counts stages, not releases); see [getting started](Docs/guide/getting-started.md#installed-package).
+
+Releases are tagged by stage (`stage-7`, then `stage-8`); there are no `v1`-style version numbers. Hosts, clients and `rhp-cli` must come from the same protocol revision (Stages 7 and 8: revision 4). What RHP costs on top of plain Lua is measured in [benchmarks](Docs/benchmarks.md).
 
 ## Limitations
 

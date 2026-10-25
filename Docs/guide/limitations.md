@@ -1,6 +1,6 @@
 # Limitations
 
-What RHP does not do, or does only partly, as of Stage 7. Most of these are deliberate design limits; the rest are open work tracked in [Status and TODO](../TODO.md). Read this before putting RHP in front of anyone you don't fully trust.
+What RHP does not do, or does only partly, as of Stage 8. Most of these are deliberate design limits; the rest are open work tracked in [Status and TODO](../TODO.md). Read this before putting RHP in front of anyone you don't fully trust.
 
 ## Safety and trust
 
@@ -14,6 +14,7 @@ What RHP does not do, or does only partly, as of Stage 7. Most of these are deli
 ## Scheduling and events
 
 - **Runaway pump-time work can't be cancelled from the network.** A timer, frame callback, event handler or task run by `pump()` (not by a client request) that never returns can only be stopped by limits (`instructions`, `wall_ms`, `slice_us`). Ending the identity's last session doesn't stop it either.
+- **Handlers don't check for `cancel()` by default.** With `limits.cancel_checks = kRequests` (the default) only requests and tasks check; a timer, frame callback, event handler or patch handler hit from game code runs unchecked, so `sandbox::cancel()` from a watchdog thread can't stop one stuck in a loop. Set `kEverything` for that (every handler then pays the per-instruction hook), or a limit. `kNone` turns checking off entirely: a cancel then stops a request only before it starts or resumes.
 - **Tasks without waits hold the pump.** A task is cooperative. Without `rhp.sleep` / `rhp.wait` / `rhp.next_frame` / `rhp.wait_event`, or `limits.slice_us`, it runs until its per-resume budget stops it.
 - **Script events stay in one identity.** `rhp.publish` reaches only the same key's sandbox. To bridge identities, forward in C++ with `host.on_script_event`.
 - **Script event values are data.** No functions, userdata or handles. Delivery is one pump later, never synchronous.
@@ -36,7 +37,7 @@ What RHP does not do, or does only partly, as of Stage 7. Most of these are deli
 ## Networking
 
 - **Session state doesn't survive a host restart.** Resume covers a dropped connection within `limits.resume_ms` (6 s by default). A restarted host starts fresh, and identities without pins are reverted when their last session ends.
-- **Protocol revisions must match exactly.** Stage 7 speaks revision 4. Older hosts, clients and `rhp-cli` builds are refused at connect time.
+- **Protocol revisions must match exactly.** Stage 8 speaks revision 4 (unchanged since Stage 7). Older hosts, clients and `rhp-cli` builds are refused at connect time.
 - **`io<zero_threads>` stops the network inside a stuck script.** A zero-thread host whose script is stuck in `pump()` also stops serving the network, so cancel can't reach it.
 - **Mbed TLS is serialized.** Its calls go through one process-wide lock, because its PSA core isn't thread-safe in the default build.
 - **Fleet broadcasts cover `exec`, `load` and `call`.** `rhp-cli fleet` runs `exec` only.
@@ -50,5 +51,5 @@ What RHP does not do, or does only partly, as of Stage 7. Most of these are deli
 - **Hosted CI leaves some tests out.**
   - Real multicast cases are skipped on hosted Windows and Apple runners.
   - On hosted macOS, the three cross-process `rhp-cli` ↔ `headless_server` tests fail (the spawned host stops listening after its first connection) and are excluded until someone debugs them on a Mac.
-- **Validation is Debug only.** Recorded results are Debug builds. Release builds and long libFuzzer runs aren't part of the routine checks.
-- **No benchmarks yet.** `Tests/bench` is planned.
+- **Validation is mostly Debug.** Recorded test results are Debug builds; benchmarks run Release. Long libFuzzer runs aren't part of the routine checks (CI runs one minute per target).
+- **Coroutine yields still throw on MSVC.** Elsewhere a yield is a jump (tens of nanoseconds); with the MSVC ABI it stays a C++ exception (microseconds), so `rhp.next_frame` / `rhp.sleep` loops cost more on Windows. See [benchmarks](../benchmarks.md).

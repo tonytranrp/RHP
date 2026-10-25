@@ -1,0 +1,114 @@
+# Benchmarks
+
+What RHP costs on top of the Lua code it runs, measured by `rhp_bench` (`Tests/bench`). Every RHP benchmark that has a plain-Lua (or plain C++) equivalent sits next to a **raw twin** with the same name: `lua raw: fib(22)` runs on a bare `lua_State`, `lua rhp: fib(22)` runs the same Lua through a sandbox. The ratio between the two is RHP's overhead on that work, and it travels between machines far better than absolute times do.
+
+Stage 8 wrote the suite first, measured, then removed what the numbers showed RHP wasting. The tables below are that before and after.
+
+## Running it
+
+```bash
+cmake --preset windows-msvc -B build/bench -DRHP_BUILD_BENCH=ON
+```
+
+```bash
+cmake --build build/bench --config Release --target rhp_bench
+```
+
+```bash
+build/bench/Tests/bench/Release/rhp_bench "[bench]" --benchmark-samples 50 --benchmark-resamples 2000 --benchmark-warmup-time 200 --reporter xml::out=bench.xml
+```
+
+```bash
+python Tools/bench/summarize.py bench.xml
+```
+
+`Tools/bench/compare.py before.xml after.xml` diffs two runs and reports a change only when the confidence intervals don't overlap and the means differ by more than 5% (`--threshold`). The `unchecked` side runs the same work with `limits.cancel_checks = kNone`. Groups can be run alone: `"[lua]"`, `"[bindings]"`, `"[patch]"`, `"[events]"`, `"[scheduler]"`, `"[requests]"`, `"[wire]"`, `"[security]"`, `"[e2e]"`.
+
+Always benchmark a Release build (`RelWithDebInfo` on MSVC inlines less). On a laptop or a hybrid-core CPU, pin the process to one performance core and keep the machine idle; even then, treat differences under 10% as noise unless they repeat. ctest only runs a two-sample smoke pass (`bench.smoke`) so the suite keeps compiling and running.
+
+## What each group measures
+
+| Group | RHP side | Raw twin |
+|---|---|---|
+| `lua` | module functions called through `sandbox::call`: an arithmetic loop, recursion, tables, strings, closures, coroutines, `pcall` errors; `exec` of a one-liner | the same Lua on a `lua_State` with the standard libraries |
+| `bindings` | `Rhp::lib` function calls (through the lib and held in a local), variable reads, journaled writes plus their revert, handle round trips | a hand-written `lua_CFunction` and a plain table field |
+| `patch` | an unpatched patch point; patched by a Lua handler, with and without `original` | a direct call through a function pointer; `lua_pcall` of the handler |
+| `events` | `lua_event::fire` with nobody listening and with 1 / 10 / 100 handlers; a `pump()` delivering an `rhp.publish` | calling the same number of Lua functions |
+| `scheduler` | one `pump()` with N frame callbacks, idle timers, sleeping tasks or tasks resuming every frame (N = 0 ... 10000) | resuming N coroutines from Lua |
+| `requests` | `call` with arguments, `reload`, `load` + `unload`, `checkpoint` + `revert_to` | |
+| `wire` | MessagePack encode / decode, value copy, CRC32C, frame encode / decode at 64 B, 4 KiB, 64 KiB | `memcpy` of the same bytes |
+| `security` | BLAKE2b-256, Ed25519 sign and verify of 4 KiB | |
+| `e2e` | a signed `exec` and a `call` from a client to a host over loopback, both on one thread (`io<zero_threads>`) | the same `exec` on a sandbox directly (`e2e local`) |
+
+## Results
+
+Measured on 2026-10-24 on one laptop (Windows 11, MSVC 19.51 Release, process pinned to one core at high priority; WSL Ubuntu, Clang 21 Release, `taskset -c 2`), 40 samples each. "Before" is the suite at `201713b` (Stage 8 benchmarks, before any optimization); "after" is the Stage 8 branch with the review fixes. Changes under about 15% on a row are within this machine's run-to-run noise: the raw twins, whose code didn't change, move by that much between runs.
+
+What changed and why:
+
+- **Events** (-66…-84%): a delivery used to start a full request per handler (record, coroutine, error-location strings, clock reads). Records, map nodes and coroutines are now pooled, locations are formatted only when a handler fails, and clocks are read only with `limits.wall_ms`.
+- **Scheduler** (-76…-99.9%): `pump()` remembers the next due frame and time, so idle timers and sleeping tasks cost nothing until one is due. Frame callbacks reuse pooled requests.
+- **Coroutines on Linux** (about 20x): Lua compiled as C++ threw a C++ exception on every yield; yields now `_longjmp` (`RHP_LUA_JUMP_YIELDS`, errors still throw). The raw twin uses the same Lua build, so it got faster too. MSVC keeps exceptions (a `_longjmp` there unwinds), which is why Windows yields didn't move.
+- **Patched calls** (-56…-65%): a Lua patch layer builds the `original` function once instead of per call.
+- **Bindings** (up to -43%): lib functions resolve through a members table used directly as `__index`; journaled writes allocate less.
+- **Wire** (-60…-81%): hardware CRC32C (SSE4.2 / ARMv8 CRC) and frames encoded into one allocation.
+- **Security / end to end** (signing -39…-46%, end to end about -10%): the Ed25519 public key is derived once, and hosts check script signatures on the network thread while `pump()` keeps running scripts.
+
+### Where the remaining cost is
+
+- **The cancel hook.** By default (`limits.cancel_checks = kRequests`) every `exec` / `load` / `call` / task runs with Lua's count hook armed, so a client's cancel can stop a runaway loop. Stock Lua checks an armed hook on every instruction, which roughly doubles the time of loop-heavy code (`fib(22)`: about 2x raw). The `unchecked` rows run the same calls with `cancel_checks = kNone`: they run at raw-Lua speed. For trusted scripts that never need a remote cancel, set `kNone`; instruction, memory and wall-time limits still arm the hook when set.
+- **A request per call.** `sandbox::call` starts a request (a pooled coroutine, a ledger owner, result conversion): about 0.4 µs over a raw `lua_pcall` of an empty function.
+- **Binding calls** cost about 2-3.5x a hand-written `lua_CFunction` (arguments converted through `Rhp::result<T>`, the role check, the label). Fine for gameplay calls; a binding called millions of times per frame is better written to take a batch.
+- **Variable reads** go through the variable's layer stack under a lock (Stage 8 made RHP's own reads and writes of a `var` thread-safe): about 70-100 ns each. A value read every frame in a hot loop is cheaper to pass in as an argument.
+
+Rows under a few nanoseconds (an unpatched point, an event fired with nobody listening) are at the timer's resolution: read them as "free", not as a ratio.
+
+### Before and after Stage 8
+
+| Benchmark | Windows before | Windows after | Windows change | Linux before | Linux after | Linux change |
+|---|---:|---:|---:|---:|---:|---:|
+| events rhp: deliver to 1 handlers | 932 ns | 315 ns | -66% | 677 ns | 213 ns | -69% |
+| events rhp: deliver to 100 handlers | 78.4 us | 12.4 us | -84% | 66.9 us | 13.7 us | -80% |
+| events rhp: pump delivering a publish to 100 handlers | 89.9 us | 14.9 us | -83% | 77.5 us | 13 us | -83% |
+| scheduler rhp: pump with 1000 frame callbacks | 1.14 ms | 223 us | -81% | 773 us | 186 us | -76% |
+| scheduler rhp: pump with 10000 idle timers | 82.7 us | 130 ns | -100% | 72.6 us | 107 ns | -100% |
+| scheduler rhp: pump with 10000 sleeping tasks | 131 us | 157 ns | -100% | 197 us | 135 ns | -100% |
+| scheduler rhp: resume 1000 tasks | 3.38 ms | 2.72 ms | -20% | 1.87 ms | 148 us | -92% |
+| scheduler raw: resume 1000 tasks | 2.82 ms | 2.65 ms | -6% | 2.77 ms | 98.5 us | -96% |
+| lua rhp: 1k coroutine yields | 2.86 ms | 2.59 ms | -9% | 2.2 ms | 85.5 us | -96% |
+| lua raw: 1k coroutine yields | 2.93 ms | 2.55 ms | -13% | 2.04 ms | 109 us | -95% |
+| patch rhp: call into a Lua handler | 228 ns | 81 ns | -65% | 165 ns | 72.2 ns | -56% |
+| patch rhp: call into a Lua handler calling original | 383 ns | 163 ns | -58% | 239 ns | 103 ns | -57% |
+| bindings rhp: 10k calls of bench.add | 1.26 ms | 724 us | -42% | 889 us | 831 us | -6% |
+| bindings rhp: 10k journaled var writes then their revert | 13.8 ms | 7.81 ms | -43% | 29 ms | 18 ms | -38% |
+| lua rhp: empty function call | 1.03 us | 507 ns | -51% | 893 ns | 747 ns | -16% |
+| lua rhp: 1k pcall errors | 5.67 ms | 3.32 ms | -41% | 2.5 ms | 2.58 ms | +3% |
+| requests rhp: call with two arguments | 959 ns | 420 ns | -56% | 720 ns | 550 ns | -24% |
+| requests rhp: checkpoint and revert_to over 100 scratch effects | 50.2 us | 53 us | +5% | 37.8 us | 42.1 us | +11% |
+| wire rhp: crc32c of 4096 bytes | 1.55 us | 291 ns | -81% | 1.69 us | 338 ns | -80% |
+| wire rhp: encode a frame of 4096 bytes | 3.75 us | 1.51 us | -60% | 2.31 us | 516 ns | -78% |
+| wire rhp: decode a frame of 4096 bytes | 1.7 us | 369 ns | -78% | 2.21 us | 436 ns | -80% |
+| security rhp: ed25519 sign of 4 KiB | 85.1 us | 51.6 us | -39% | 98.8 us | 53 us | -46% |
+| e2e rhp: signed exec of a one-line script | 217 us | 192 us | -12% | 190 us | 184 us | -3% |
+| e2e rhp: call of a module function | 20.4 us | 18.4 us | -10% | 8.89 us | 7.92 us | -11% |
+
+### What RHP costs on top of raw Lua (after)
+
+| Work | Windows raw | Windows rhp | Windows rhp / raw | Windows unchecked / raw | Linux raw | Linux rhp | Linux rhp / raw | Linux unchecked / raw |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `lua`: empty function call | 93.6 ns | 507 ns | 5.41x | 5.24x | 89.2 ns | 747 ns | 8.37x | 5.25x |
+| `lua`: 100k arithmetic loop | 729 us | 1.36 ms | 1.87x | 1.01x | 831 us | 1.4 ms | 1.68x | 1.09x |
+| `lua`: fib(22) | 1.05 ms | 2.09 ms | 1.99x | 1.00x | 1.14 ms | 2.12 ms | 1.87x | 0.80x |
+| `lua`: 10k table fill and ipairs | 289 us | 431 us | 1.49x | 0.98x | 253 us | 327 us | 1.29x | 1.13x |
+| `lua`: 1k tostring and concat | 120 us | 156 us | 1.30x | - | 115 us | 122 us | 1.06x | - |
+| `lua`: 10k closures | 1.05 ms | 1.35 ms | 1.29x | 1.34x | 745 us | 1.35 ms | 1.81x | 1.06x |
+| `lua`: 1k coroutine yields | 2.55 ms | 2.59 ms | 1.02x | - | 109 us | 85.5 us | 0.78x | - |
+| `lua`: 1k pcall errors | 2.6 ms | 3.32 ms | 1.28x | - | 1.72 ms | 2.58 ms | 1.50x | - |
+| `bindings`: 10k calls of bench.add | 331 us | 724 us | 2.18x | - | 279 us | 831 us | 2.98x | - |
+| `bindings`: 10k calls of bench.add held in a local | 272 us | 621 us | 2.28x | - | 177 us | 602 us | 3.40x | - |
+| `bindings`: 10k reads of bench.speed | 99.6 us | 1.03 ms | 10.29x | - | 158 us | 682 us | 4.31x | - |
+| `patch`: call of the C++ default | 0.862 ns | 1.08 ns | 1.26x | - | 1.81 ns | 0.503 ns | 0.28x | - |
+| `patch`: call into a Lua handler | 21.1 ns | 81 ns | 3.84x | - | 29.5 ns | 72.2 ns | 2.45x | - |
+| `events`: deliver to 1 handlers | 24.2 ns | 315 ns | 13.02x | - | 43.5 ns | 213 ns | 4.90x | - |
+| `events`: deliver to 100 handlers | 2.18 us | 12.4 us | 5.67x | - | 1.29 us | 13.7 us | 10.57x | - |
+| `scheduler`: resume 1000 tasks | 2.65 ms | 2.72 ms | 1.03x | - | 98.5 us | 148 us | 1.50x | - |

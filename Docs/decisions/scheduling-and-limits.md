@@ -15,6 +15,7 @@
 - Stops (cancel, instruction budget, memory) apply to runs: `exec`, `load`, `call` and the patch handlers they trigger. Handlers hit from game code outside a run aren't limited until the Stage 2 scheduler.
 - Once a stop fires, the count hook switches to every instruction on the running thread and the main thread. A script that keeps re-entering `pcall` can otherwise swallow a stop that only fires every 1000 instructions.
 - The memory limit covers the whole `lua_State` (allocator over `std::pmr`); growth is refused for the rest of the run once it's hit, and Lua's emergency GC reclaims afterwards.
+- Stage 8: the hook is armed only where something can cancel (`limits.cancel_checks`, an `Rhp::cancel_scope`): by default request coroutines (exec, load, call, reload, tasks) and the main thread while an operation runs; handler calls run without it unless `kEverything` is set; `kNone` arms it nowhere. The instruction, wall-time and slice limits arm it everywhere. Why: while armed, Lua traps every instruction (a tight loop ran 1.8-2.4x slower than raw Lua), and the host's cancel relay only ever targets requests. See [Stage 8 decisions](stage8-packaging-performance.md#cancel-scope).
 - `cancel()` while nothing runs is a no-op: each run clears the flag when it starts.
 
 **Stage 2 (as built)**

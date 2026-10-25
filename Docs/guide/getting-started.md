@@ -34,9 +34,38 @@ For a project that already uses CPM, replace `add_subdirectory` with a pinned pa
 CPMAddPackage(NAME rhp GITHUB_REPOSITORY tonytranrp/RHP GIT_TAG stage-7)
 ```
 
-`stage-7` is the release this guide describes (releases are tagged by stage). Pin a commit sha instead if you need a fixed build between releases; a host and its clients must use the same protocol revision. RHP's tests, tools and examples default to OFF when consumed as a subproject; build the CLI from RHP's own checkout as described next.
+`stage-7` is the latest release tag (releases are tagged by stage; this guide already describes Stage 8, tagged `stage-8` when it is released). Pin a commit sha instead if you need a fixed build between releases; a host and its clients must use the same protocol revision. RHP's tests, tools, examples and install rules default to OFF when consumed as a subproject, and its warnings aren't errors there; build the CLI from RHP's own checkout as described next.
 
-`Rhp::rhp` links everything and provides `<rhp/rhp.hpp>`. For local scripting, link `Rhp::script` and include `<rhp/script/sandbox.hpp>`. A client-only tool can link `Rhp::client` and include `<rhp/client/client.hpp>` without linking Lua. Targets propagate C++23, include paths, platform definitions and `RHP_ENABLE`; use those targets rather than copying include directories and libraries by hand.
+### Installed package
+
+RHP also installs as a CMake package. From RHP's checkout (tests and tools aren't needed for this):
+
+```bash
+cmake --preset windows-msvc -B build/package -DRHP_BUILD_TESTS=OFF -DRHP_BUILD_EXAMPLES=OFF -DRHP_BUILD_TOOLS=OFF
+```
+
+```bash
+cmake --build build/package --config Release
+```
+
+```bash
+cmake --install build/package --config Release --prefix C:/sdk/rhp
+```
+
+Build and install `Debug` the same way into the same prefix to have both (Debug archives carry a `d` suffix). The consumer:
+
+```cmake
+cmake_minimum_required(VERSION 3.28)
+project(rhp_demo LANGUAGES CXX)
+
+find_package(rhp CONFIG REQUIRED)   # -DCMAKE_PREFIX_PATH=C:/sdk/rhp
+add_executable(rhp_demo main.cpp)
+target_link_libraries(rhp_demo PRIVATE Rhp::rhp)
+```
+
+`find_package(rhp)` takes no version: RHP has no release numbers, so a versioned request never matches. A package built for another OS, pointer size, Android ABI or C++ ABI is refused. The package sets `rhp_STAGE`, `rhp_PROTOCOL_REVISION`, `rhp_ENABLE`, `rhp_TLS_HAS_OPENSSL`, `rhp_TLS_HAS_MBEDTLS` and `rhp_PLATFORM`; it brings the archives of the third-party code RHP compiled in (`lib/rhp/`) but none of their headers, and their licenses in `share/doc/rhp/licenses`. With MSVC a configuration only maps to an installed one with the same runtime: a Debug consumer needs a Debug RHP installed. When RHP was built with OpenSSL, the consumer's machine needs OpenSSL 3.0+ too. The generated `<rhp/build_config.hpp>` records how the package was built, so a translation unit that defines `RHP_ENABLE` (or the TLS or platform macros) differently fails to compile instead of disagreeing with the library.
+
+`Rhp::rhp` links everything and provides `<rhp/rhp.hpp>`. For local scripting, link `Rhp::script` and include `<rhp/script/sandbox.hpp>`. A client-only tool can link `Rhp::client` and include `<rhp/client/client.hpp>` without linking Lua. Targets propagate C++23, include paths, platform definitions and `RHP_ENABLE`; use those targets rather than copying include directories and libraries by hand. RHP's public headers are ASCII and survive `<windows.h>` included first without `NOMINMAX`.
 
 ## Build RHP itself
 
