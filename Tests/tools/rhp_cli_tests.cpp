@@ -16,6 +16,8 @@
 #include <utility>
 #include <vector>
 
+#include "dap.hpp"
+#include "json.hpp"
 #include "release_files.hpp"
 #include "shell.hpp"
 #include "text.hpp"
@@ -82,6 +84,15 @@ struct screen {
             }
         }
         return false;
+    }
+    [[nodiscard]] std::string all() {
+        const std::scoped_lock lock{mutex};
+        std::string out;
+        for (const auto& [s, line] : lines) {
+            out += line;
+            out += '\n';
+        }
+        return out;
     }
     [[nodiscard]] std::string last() {
         const std::scoped_lock lock{mutex};
@@ -169,6 +180,34 @@ TEST_CASE("rhp-cli: rollout stages parse whole", "[cli][text]") {
     for (const char* bad : {"", "0.5abc:30", "0.5:30x", "nan:10", "inf", "1.5:0", "-0.1:0", ":10", "0.5:"}) {
         CHECK_FALSE(rhp_cli::parse_stage(bad).has_value());
     }
+}
+
+TEST_CASE("rhp-cli: JSON round trips and rejects what isn't JSON", "[cli][text]") {
+    const auto v = rhp_cli::parse_json(R"( {"seq": 3, "ok": true, "x": -1.5e2, "s": "a\"b\\n\u00e9\ud83d\ude00", "list": [1, null, {}], "e": []} )");
+    REQUIRE(v.has_value());
+    CHECK(*v->find("seq") == Rhp::value{3});
+    CHECK(*v->find("ok") == Rhp::value{true});
+    CHECK(*v->find("x") == Rhp::value{-150.0});
+    CHECK(*v->find("s") == Rhp::value{"a\"b\\n\xc3\xa9\xf0\x9f\x98\x80"});
+    CHECK(v->find("list")->get_if<Rhp::value::array>()->size() == 3);
+    CHECK(rhp_cli::parse_json(rhp_cli::to_json(*v)) == v);
+    CHECK(rhp_cli::to_json(Rhp::value{"tab\there"}) == R"("tab\there")");
+    for (const char* bad : {"", "{", "[1,]", "{\"a\" 1}", "tru", "\"unterminated", "01x", "{\"a\":1}}", "\"\x01\"", "nan"}) {
+        CHECK_FALSE(rhp_cli::parse_json(bad).has_value());
+    }
+    std::string deep(100, '[');
+    deep += std::string(100, ']');
+    CHECK_FALSE(rhp_cli::parse_json(deep).has_value());
+}
+
+TEST_CASE("rhp-cli: source paths map to module names", "[cli][text]") {
+    const rhp_cli::source_map plain{""};
+    CHECK(plain.module_for("C:/work/game/combat.lua") == "combat");
+    CHECK(plain.path_for("game.combat") == "game.combat");
+    const std::string root = (fs::temp_directory_path() / "rhp_src").string();
+    const rhp_cli::source_map rooted{root};
+    CHECK(rooted.module_for((fs::path{root} / "game" / "combat.lua").string()) == "game.combat");
+    CHECK(rooted.path_for("game.combat") == (fs::path{root} / "game/combat.lua").string());
 }
 
 TEST_CASE("rhp-cli: unfinished Lua keeps the REPL reading", "[cli][text]") {
@@ -695,3 +734,136 @@ TEST_CASE("rhp-cli: releases are built, applied, kept across a restart and revok
 }
 
 #endif
+
+TEST_CASE("rhp-cli: the shell tunes profiles and debugs", "[cli][shell]") {
+    g_level = 0;
+    const auto dev = *Rhp::security::ed25519_secret_key::generate();
+    const auto psk = *Rhp::security::key::generate();
+    const auto at = Rhp::endpoint::listen("cli.tools", 1);
+    Rhp::host<cfg> host{at, Rhp::security::keyring{{"dev", psk, Rhp::role::kAdmin}}, Rhp::security::trusted_signers{{"dev", dev.public_key()}}};
+    REQUIRE(host.install<cli_lib>());
+    std::jthread game{[&host](std::stop_token stop) {
+        while (!stop.stop_requested()) {
+            host.pump();
+            std::this_thread::sleep_for(1ms);
+        }
+    }};
+    screen out;
+    Rhp::client<cfg> c{at.reversed(), Rhp::security::psk_identity{"dev", psk}, Rhp::security::signing_key{"dev", dev}};
+    rhp_cli::shell<cfg> sh{c, out.printer()};
+
+    CHECK(sh.feed("tunables"));
+    CHECK(out.has("s4cli.level = 0 (integer)"));
+    CHECK(sh.feed("tune s4cli.level 4"));
+    CHECK(g_level == 4);
+    CHECK(sh.feed("profile start 200"));
+    CHECK(sh.feed("local s = 0 for i = 1, 30000 do s = s + i end return s"));
+    CHECK(sh.feed("profile stop"));
+    CHECK(out.has("samples every 200 instructions"));
+    CHECK(sh.failures() == 0);
+
+    scratch_dir dir;
+    dir.write("dbg.lua", "function twice(n)\n  local d = n * 2\n  return d\nend");
+    CHECK(sh.feed(std::format("load cli.dbg {}", dir.file("dbg.lua"))));
+    CHECK(sh.feed("break cli.dbg 3"));
+    CHECK(out.has("breakpoints in cli.dbg: 3"));
+    CHECK(sh.feed("local r = require('cli.dbg').twice(21) return r")); // not a tail call: Lua keeps the callee's name
+    CHECK(eventually([&] { return out.has("paused at cli.dbg:3"); }));
+    CHECK(sh.feed("stack"));
+    CHECK(out.has("#0 twice (cli.dbg:3)"));
+    CHECK(sh.feed("locals"));
+    CHECK(out.has("d = 42"));
+    CHECK(sh.feed("print n"));
+    CHECK(out.has("n = 21 (number)"));
+    CHECK(sh.feed("continue"));
+    CHECK(eventually([&] {
+        (void)sh.feed("paused");
+        return out.has("42") && out.has("nothing is paused");
+    }));
+    CHECK(sh.failures() == 0);
+}
+
+TEST_CASE("rhp-cli: the DAP server drives the debugger", "[cli][dap]") {
+    const auto dev = *Rhp::security::ed25519_secret_key::generate();
+    const auto psk = *Rhp::security::key::generate();
+    const auto at = Rhp::endpoint::listen("cli.dap", 1);
+    Rhp::host<cfg> host{at, Rhp::security::keyring{{"dev", psk, Rhp::role::kAdmin}}, Rhp::security::trusted_signers{{"dev", dev.public_key()}}};
+    std::jthread game{[&host](std::stop_token stop) {
+        while (!stop.stop_requested()) {
+            host.pump();
+            std::this_thread::sleep_for(1ms);
+        }
+    }};
+    Rhp::client<cfg> c{at.reversed(), Rhp::security::psk_identity{"dev", psk}, Rhp::security::signing_key{"dev", dev}};
+    Rhp::client<cfg> runner{at.reversed(), Rhp::security::psk_identity{"dev", psk}, Rhp::security::signing_key{"dev", dev}};
+    REQUIRE(runner.load("game.dap", "function f(a)\n  local b = {x = a}\n  return b.x + 1\nend"));
+    std::mutex mutex;
+    std::vector<Rhp::value> sent;
+    const std::string root = (fs::temp_directory_path() / "rhp_dap_src").string();
+    rhp_cli::dap_server<cfg> server{c, root, [&](std::string_view bytes) {
+                                        const auto body = bytes.substr(bytes.find("\r\n\r\n") + 4);
+                                        auto v = rhp_cli::parse_json(body);
+                                        REQUIRE(v.has_value());
+                                        const std::scoped_lock lock{mutex};
+                                        sent.push_back(std::move(*v));
+                                    }};
+    const auto last_body = [&](std::string_view command) -> Rhp::value {
+        const std::scoped_lock lock{mutex};
+        for (auto it = sent.rbegin(); it != sent.rend(); ++it) {
+            const Rhp::value* cmd = it->find("command");
+            if (cmd != nullptr && *cmd == Rhp::value{std::string{command}}) {
+                const Rhp::value* ok = it->find("success");
+                REQUIRE(ok != nullptr);
+                CHECK(*ok == Rhp::value{true});
+                const Rhp::value* body = it->find("body");
+                return body != nullptr ? *body : Rhp::value{};
+            }
+        }
+        FAIL_CHECK("no response to " << command);
+        return Rhp::value{};
+    };
+    const auto request = [&](std::string_view command, std::string_view args) {
+        server.handle(std::format(R"({{"seq": 1, "type": "request", "command": "{}", "arguments": {}}})", command, args));
+        return last_body(command);
+    };
+    CHECK(request("initialize", "{}").find("supportsConfigurationDoneRequest") != nullptr);
+    const std::string path = (fs::path{root} / "game" / "dap.lua").generic_string();
+    const auto bps = request("setBreakpoints", std::format(R"({{"source": {{"path": "{}"}}, "breakpoints": [{{"line": 3}}]}})", path));
+    CHECK(rhp_cli::to_json(bps) == R"({"breakpoints":[{"verified":true,"line":3}]})");
+    auto call = runner.async().call("game.dap", "f", 5);
+    std::int64_t thread = 0;
+    REQUIRE(eventually([&] {
+        const auto threads = request("threads", "{}");
+        const auto* list = threads.find("threads")->get_if<Rhp::value::array>();
+        if (list->empty()) {
+            return false;
+        }
+        thread = *list->front().find("id")->get_if<std::int64_t>();
+        return true;
+    }));
+    const auto stack = request("stackTrace", std::format(R"({{"threadId": {}}})", thread));
+    const auto& frame = stack.find("stackFrames")->get_if<Rhp::value::array>()->front();
+    CHECK(*frame.find("name") == Rhp::value{"f"});
+    CHECK(*frame.find("line") == Rhp::value{3});
+    const auto frame_id = *frame.find("id")->get_if<std::int64_t>();
+    const auto scopes = request("scopes", std::format(R"({{"frameId": {}}})", frame_id));
+    const auto locals_ref = *scopes.find("scopes")->get_if<Rhp::value::array>()->front().find("variablesReference")->get_if<std::int64_t>();
+    const auto locals = request("variables", std::format(R"({{"variablesReference": {}}})", locals_ref));
+    std::int64_t b_ref = 0;
+    for (const auto& v : *locals.find("variables")->get_if<Rhp::value::array>()) {
+        if (*v.find("name") == Rhp::value{"b"}) {
+            b_ref = *v.find("variablesReference")->get_if<std::int64_t>();
+        }
+    }
+    REQUIRE(b_ref != 0);
+    const auto fields = request("variables", std::format(R"({{"variablesReference": {}}})", b_ref));
+    CHECK(rhp_cli::to_json(fields).find(R"("name":"x","value":"5")") != std::string::npos);
+    const auto eval = request("evaluate", std::format(R"({{"expression": "b.x", "frameId": {}}})", frame_id));
+    CHECK(*eval.find("result") == Rhp::value{"5"});
+    (void)request("continue", std::format(R"({{"threadId": {}}})", thread));
+    const auto r = std::move(call).get();
+    REQUIRE(r.has_value());
+    CHECK(*r == Rhp::value_list{Rhp::value{6}});
+    (void)request("disconnect", "{}");
+    CHECK(server.done());
+}

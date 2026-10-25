@@ -26,6 +26,7 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+#include <fcntl.h>
 #include <io.h>
 #include <process.h>
 #include <windows.h>
@@ -184,6 +185,13 @@ result<void> make_private_directory(const std::filesystem::path& path) {
     }
 #endif
     return {};
+}
+
+void binary_stdio() noexcept {
+#if defined(RHP_PLATFORM_WINDOWS)
+    (void)_setmode(_fileno(stdin), _O_BINARY);
+    (void)_setmode(_fileno(stdout), _O_BINARY);
+#endif
 }
 
 } // namespace Rhp::platform

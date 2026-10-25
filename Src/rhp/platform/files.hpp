@@ -22,4 +22,8 @@ namespace Rhp::platform {
 // Creates `path` (and its parents) if missing; on POSIX every directory it creates is its owner's only.
 [[nodiscard]] result<void> make_private_directory(const std::filesystem::path& path);
 
+// Makes standard input and output binary (no newline translation on Windows; nothing elsewhere):
+// for byte-counted protocols over stdio (rhp-cli dap).
+void binary_stdio() noexcept;
+
 } // namespace Rhp::platform

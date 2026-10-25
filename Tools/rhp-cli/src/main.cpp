@@ -36,11 +36,13 @@
 #endif
 
 #include "release_files.hpp"
+#include "dap.hpp"
 #include "shell.hpp"
 #include "text.hpp"
 #include <CLI/CLI.hpp>
 #include <replxx.hxx>
 
+#include <rhp/platform/files.hpp>
 #include <rhp/rhp.hpp>
 
 namespace {
@@ -102,7 +104,8 @@ extern "C" void on_interrupt(int) {
 // Writes shell output: colored through replxx in the REPL, plain lines otherwise. Thread-safe.
 class terminal {
 public:
-    explicit terminal(replxx::Replxx* rx, bool color) : rx_(rx), color_(color) {}
+    // `to_stderr`: every line goes to stderr (stdout carries a protocol: rhp-cli dap).
+    explicit terminal(replxx::Replxx* rx, bool color, bool to_stderr = false) : rx_(rx), color_(color), to_stderr_(to_stderr) {}
 
     void operator()(rhp_cli::style s, std::string_view text) {
         const char* open = "";
@@ -120,7 +123,7 @@ public:
         const std::scoped_lock lock{mutex_};
         if (rx_ != nullptr) {
             rx_->write(line.data(), static_cast<int>(line.size()));
-        } else if (s == rhp_cli::style::kError) {
+        } else if (s == rhp_cli::style::kError || to_stderr_) {
             std::fputs(line.c_str(), stderr);
         } else {
             std::fputs(line.c_str(), stdout);
@@ -131,6 +134,7 @@ public:
 private:
     replxx::Replxx* rx_;
     bool color_;
+    bool to_stderr_;
     std::mutex mutex_;
 };
 
@@ -170,8 +174,8 @@ struct connected {
     std::unique_ptr<terminal> out;
 };
 
-[[nodiscard]] std::optional<connected> open(const connection_options& o, replxx::Replxx* rx) {
-    auto out = std::make_unique<terminal>(rx, stdout_is_terminal() && env("NO_COLOR").empty());
+[[nodiscard]] std::optional<connected> open(const connection_options& o, replxx::Replxx* rx, bool to_stderr = false) {
+    auto out = std::make_unique<terminal>(rx, !to_stderr && stdout_is_terminal() && env("NO_COLOR").empty(), to_stderr);
     auto id = Rhp::security::identity_file::load(o.identity);
     if (!id) {
         (*out)(rhp_cli::style::kError, std::format("{}", id.error()));
@@ -620,6 +624,27 @@ int main(int argc, char** argv) {
     rollout_cmd->add_flag("--tls", conn.tls, "TLS even on loopback");
     rollout_cmd->add_flag("--insecure-lan", conn.insecure_lan, "allow plaintext to non-loopback endpoints");
 
+    std::string tune_path;
+    std::string tune_value;
+    auto* tune_cmd = app.add_subcommand("tune", "list the host's variables and their tags (tunables), or set one");
+    tune_cmd->add_option("path", tune_path, "a lib or a variable (lists what starts with it)");
+    tune_cmd->add_option("value", tune_value, "set the variable to this (a Lua literal: 2.5, true, \"text\")");
+    add_connection_options(*tune_cmd, conn, false);
+
+    double profile_seconds = 5;
+    std::uint32_t profile_interval = 1000;
+    std::string profile_out;
+    auto* profile_cmd = app.add_subcommand("profile", "sample your identity's scripts for a while, print where they spend instructions");
+    profile_cmd->add_option("--seconds", profile_seconds, "how long to sample (default 5)");
+    profile_cmd->add_option("--interval", profile_interval, "instructions per sample (default 1000, at least 100)");
+    profile_cmd->add_option("-o,--out", profile_out, "also write the folded stacks (flamegraph.pl, speedscope)");
+    add_connection_options(*profile_cmd, conn, false);
+
+    std::string dap_root;
+    auto* dap_cmd = app.add_subcommand("dap", "a Debug Adapter Protocol server on stdin / stdout, for editors");
+    dap_cmd->add_option("--root", dap_root, "the folder module sources are in (<root>/game/combat.lua is module game.combat)");
+    add_connection_options(*dap_cmd, conn, false);
+
     auto* revoke_cmd = app.add_subcommand("revoke", "build, sign and send revocation lists");
     revoke_cmd->require_subcommand(1);
     rhp_cli::revocation_spec revocations;
@@ -806,6 +831,21 @@ int main(int argc, char** argv) {
         return repl(conn);
     }
 
+    if (dap_cmd->parsed()) {
+        Rhp::platform::binary_stdio(); // byte-counted messages: no newline translation
+        auto dc = open(conn, nullptr, true);
+        if (!dc) {
+            return 1;
+        }
+        std::mutex write_mutex;
+        rhp_cli::dap_server<cli_cfg> server{*dc->client, dap_root, [&](std::string_view bytes) {
+            const std::scoped_lock lock{write_mutex};
+            std::fwrite(bytes.data(), 1, bytes.size(), stdout);
+            std::fflush(stdout);
+        }};
+        return server.run([] { return rhp_cli::read_dap_message(stdin); });
+    }
+
     auto c = open(conn, nullptr);
     if (!c) {
         return 1;
@@ -873,6 +913,17 @@ int main(int argc, char** argv) {
             return 1;
         }
         std::println("{}: {}", channel, rconfirm_cmd->parsed() ? "confirmed" : (hold ? "deactivated, held" : "deactivated"));
+    } else if (tune_cmd->parsed()) {
+        ok = tune_value.empty() ? sh.tunables(tune_path) : sh.tune(tune_path, rhp_cli::parse_literal(tune_value));
+    } else if (profile_cmd->parsed()) {
+        if (!sh.profile("start", std::to_string(profile_interval))) {
+            return 1;
+        }
+        const auto until = std::chrono::steady_clock::now() + std::chrono::duration<double>{profile_seconds};
+        while (std::chrono::steady_clock::now() < until && !g_interrupted.load()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds{50});
+        }
+        ok = sh.profile("stop", profile_out);
     } else if (events_cmd->parsed()) {
         for (const std::string& event : event_names) {
             if (!sh.subscribe(event)) {
