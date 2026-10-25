@@ -66,6 +66,7 @@ TEST_CASE("bench wire: values codec frames and checksums", "[bench][wire]") {
         BENCHMARK("wire raw: memcpy of " + std::to_string(size) + " bytes") {
             std::vector<std::byte> out(payload.size());
             std::memcpy(out.data(), payload.data(), payload.size());
+            Catch::Benchmark::keep_memory(out.data()); // or Clang drops the copy altogether
             return out.size();
         };
         BENCHMARK("wire rhp: crc32c of " + std::to_string(size) + " bytes") {

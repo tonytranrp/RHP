@@ -4,7 +4,8 @@
     rhp_bench "[bench]" --reporter xml::out=bench.xml --benchmark-samples 100
     python Tools/bench/summarize.py bench.xml > bench.md
 
-Benchmarks are named "<group> <side>: <work>", side being raw (plain Lua / C++), rhp or local.
+Benchmarks are named "<group> <side>: <work>", side being raw (plain Lua / C++), rhp, local or
+unchecked (a sandbox with limits.cancel_checks = kNone).
 A raw benchmark and an rhp benchmark of the same group and work are twins: the table shows the
 rhp mean as a multiple of the raw one (the overhead RHP adds to that work).
 """
@@ -13,7 +14,7 @@ import re
 import sys
 import xml.etree.ElementTree as ET
 
-NAME = re.compile(r"^(?P<group>\S+) (?P<side>raw|rhp|local): (?P<work>.+)$")
+NAME = re.compile(r"^(?P<group>\S+) (?P<side>raw|rhp|local|unchecked): (?P<work>.+)$")
 
 
 def load(path):
@@ -22,6 +23,8 @@ def load(path):
     for result in ET.parse(path).getroot().iter("BenchmarkResults"):
         mean = result.find("mean")
         stddev = result.find("standardDeviation")
+        if mean is None:  # a benchmark that failed or was skipped
+            continue
         rows.append((
             result.get("name"),
             float(mean.get("value")),

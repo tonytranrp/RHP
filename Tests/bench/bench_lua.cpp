@@ -1,6 +1,9 @@
 // A: plain Lua work, run by a raw lua_State and by a sandbox (a module function called through
 // sandbox::call). The ratio is what RHP's request machinery and hooks cost on script code itself.
+// "unchecked" runs the same calls with limits.cancel_checks = kNone: no cancel hook, so the gap
+// between rhp and unchecked is what being cancellable costs.
 #include <string_view>
+#include <utility>
 
 #include "bench_support.hpp"
 #include <catch2/benchmark/catch_benchmark.hpp>
@@ -48,11 +51,24 @@ TEST_CASE("bench lua: script work raw and in a sandbox", "[bench][lua]") {
         return r->size();
     };
 
+    Rhp::script::sandbox_options fast = rhp_bench::quiet();
+    fast.limits.cancel_checks = Rhp::cancel_scope::kNone;
+    Rhp::script::sandbox unchecked{std::move(fast)};
+    const auto fast_mod = rhp_bench::load(unchecked, "bench.work", kWork);
+    const auto call_unchecked = [&](std::string_view fn) {
+        auto r = unchecked.call(fast_mod, fn);
+        REQUIRE(r);
+        return r->size();
+    };
+
     BENCHMARK("lua raw: empty function call") {
         return call_raw("empty");
     };
     BENCHMARK("lua rhp: empty function call") {
         return call_box("empty");
+    };
+    BENCHMARK("lua unchecked: empty function call") {
+        return call_unchecked("empty");
     };
     BENCHMARK("lua raw: 100k arithmetic loop") {
         return call_raw("loop");
@@ -60,17 +76,26 @@ TEST_CASE("bench lua: script work raw and in a sandbox", "[bench][lua]") {
     BENCHMARK("lua rhp: 100k arithmetic loop") {
         return call_box("loop");
     };
+    BENCHMARK("lua unchecked: 100k arithmetic loop") {
+        return call_unchecked("loop");
+    };
     BENCHMARK("lua raw: fib(22)") {
         return call_raw("fib");
     };
     BENCHMARK("lua rhp: fib(22)") {
         return call_box("fib");
     };
+    BENCHMARK("lua unchecked: fib(22)") {
+        return call_unchecked("fib");
+    };
     BENCHMARK("lua raw: 10k table fill and ipairs") {
         return call_raw("table");
     };
     BENCHMARK("lua rhp: 10k table fill and ipairs") {
         return call_box("table");
+    };
+    BENCHMARK("lua unchecked: 10k table fill and ipairs") {
+        return call_unchecked("table");
     };
     BENCHMARK("lua raw: 1k tostring and concat") {
         return call_raw("strings");
@@ -83,6 +108,9 @@ TEST_CASE("bench lua: script work raw and in a sandbox", "[bench][lua]") {
     };
     BENCHMARK("lua rhp: 10k closures") {
         return call_box("closures");
+    };
+    BENCHMARK("lua unchecked: 10k closures") {
+        return call_unchecked("closures");
     };
     BENCHMARK("lua raw: 1k coroutine yields") {
         return call_raw("coroutines");
