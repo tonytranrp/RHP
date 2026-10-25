@@ -119,7 +119,7 @@ The supplied memory resource must outlive the sandbox. It covers Lua allocations
 | `RHP_INSTALL` | top-level only | install rules and the `rhp` CMake package (`find_package(rhp)`); see [getting started](getting-started.md#installed-package) |
 | `RHP_BUILD_BENCH` | OFF | build `Tests/bench` (`rhp_bench`); see [benchmarks](../benchmarks.md) |
 | `RHP_LUA_JUMP_YIELDS` | ON | coroutine yields jump (`_longjmp`) instead of throwing; errors still throw. With the MSVC ABI only on x64 (and a process with a CET shadow stack throws anyway); ignored under ThreadSanitizer |
-| `RHP_PCH` | top-level, not cross-compiling | one shared precompiled header of standard headers for RHP's libraries and one for its tests (`cmake/RhpPch.cmake`) |
+| `RHP_PCH` | top-level, not cross-compiling, not clang-cl | one shared precompiled header of standard headers for RHP's libraries and one for its tests (`cmake/RhpPch.cmake`) |
 | `RHP_UNITY_BUILD` | OFF | compile RHP's libraries, tests and tools as unity files: faster clean builds (CI), slower edits |
 | `RHP_WITH_TLS` | ON | TLS 1.3 for network endpoints |
 | `RHP_TLS_OPENSSL` | AUTO | `AUTO` (use system OpenSSL ≥ 3.0 if found, desktop only), `ON` (required), `OFF` |
