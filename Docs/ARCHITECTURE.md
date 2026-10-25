@@ -1388,3 +1388,20 @@ Taken without a questionnaire: the user asked for Stage 9 (asynchronous bindings
 | AH7 | Methods | `lib::method<"name", &f, tags...>` and `lib::property<"name", &f [, requires_role]>` belong to the handle type of `f`'s first parameter, declared in the lib tree. Labels `handle:name` / `handle.name`; `(self)` names a bad handle argument. |
 | AH8 | Member table | Methods table as `__index` (a C `__index` once properties exist); `__newindex` refuses writes. Names unique per handle at compile time (tree) and install time (sandbox, all or nothing). |
 | AH9 | Same trampoline | Methods and properties are bindings: roles, undo, results, async and stubs (`---@field name fun(self: h, ...)`, `---@async`) work the same. |
+
+## 36. Decision log (round 12, Stage 10)
+
+Taken without a questionnaire: the user asked for Stage 10 (release manifests, persistence and rollout). Per-topic reasoning: [Stage 10 decisions](decisions/stage10-releases.md); usage: [Releases](guide/releases.md).
+
+| # | Topic | Decision |
+|---|---|---|
+| AI1 | Release | A signed canonical manifest (channel, seq, label, app / builds / platforms, validity window, role, libs, module hashes, health policy) plus sources in an unsigned envelope; the BLAKE2b-256 of the body is the id. |
+| AI2 | Signatures | Domains `rhp/release` and `rhp/revocation`, separate from scripts; release keys in their own trust list with channel patterns and a threshold of distinct keys; revocation lists need `*` keys. |
+| AI3 | Channels | `release::manager` owns one sandbox per channel (role from the manifest, capped by `max_role`), independent of identities; usable alone or served by `host.serve`. |
+| AI4 | Checks | Envelope and canonical body, signatures, revoked / quarantined, scope, window, floor and jump, role, libs, hashes; new codes `kExpired`, `kRevoked`, `kSuperseded`, `kOutOfScope`. Restore runs the same checks. |
+| AI5 | Anti-rollback | Per-channel seq floors that only rise (accepted releases, revocation lists). |
+| AI6 | Swap | In place in manifest order (reload same-name modules, load new, unload dropped); any failure is undone and the old release keeps running; a role change uses a fresh sandbox. |
+| AI7 | Confirm | `now`, `health` (watched candidate: faults, handler failures, fail events; confirmed after `health_window`), `manual`; rollback runs the fallback. |
+| AI8 | Persistence | A checksummed state document and the envelopes it names in a `storage` (memory or directory, synced renames); boot attempts counted before a candidate loads, quarantine after `max_boot_attempts`. |
+| AI9 | Revocation | Cumulative signed lists of ids, keys and floors; applied over the wire (any identity), in an envelope or locally. |
+| AI10 | Rollout | `fleet::rollout`: canaries, cumulative fractions in a release-fixed order, health-watched apply, observed stages, confirm, rollback on more than `max_failures`. Protocol revision 5 adds the release ops; `release_changed` host event. |

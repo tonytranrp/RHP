@@ -8,7 +8,7 @@ Result-bearing operations report `Rhp::error { code, message, where, traceback }
 |---|---|
 | `transport` | connection failed, closed, or a TLS alert |
 | `protocol` | malformed frame or message |
-| `protocol_revision_mismatch` | host and client speak different protocol revisions (currently 4) |
+| `protocol_revision_mismatch` | host and client speak different protocol revisions (currently 5) |
 | `auth` | authentication/MAC/resume-proof failure, or a certificate verification failure when certificate checks are enabled |
 | `forbidden` | role too low, pinned module, or a non-loopback address without TLS or `insecure_lan` |
 | `bad_signature` | script unsigned (and not observe), unknown signer, or signature does not verify |
@@ -31,6 +31,10 @@ Result-bearing operations report `Rhp::error { code, message, where, traceback }
 | `type_mismatch` | value cannot convert to the requested type |
 | `out_of_range` | a number does not fit the target integer type, or is not an integer |
 | `unloaded` | touched a force-unloaded module |
+| `expired` | a release outside its validity window (`not_before` / `not_after`, with the manager's clock skew) |
+| `revoked` | a release (or the key that signed it) a revocation list withdrew, or one quarantined on this host |
+| `superseded` | a release whose seq isn't above its channel's floor, or a revocation list not newer than the last |
+| `out_of_scope` | a release meant for another app, build or platform |
 
 ## Host events
 
@@ -46,20 +50,22 @@ All carry `time`. `peer` is the transport address of the client. In JSON the `gr
 | `blob_received` | a blob finished or was refused | `session`, `identity`, `sink`, `file`, `size`, `hash`, `outcome` |
 | `identity_reverted` | an identity's last session ended and the host reverted it | `identity`, `undone`, `irreversible`, `failures`, `pinned` |
 | `handler_failed` | a script's timer, frame callback, event handler or task failed | `identity`, `module`, `kind`, `source`, `handler` (the script's id), `action` (`report` / `remove` / `fault`), `outcome` |
+| `release_changed` | a served release manager (`host.serve`) applied, confirmed, rolled back or refused a release, or applied a revocation list | `kind` (`applied` / `confirmed` / `rolled_back` / `refused` / `revocations`), `channel`, `release` and `fallback` (hex ids), `seq`, `reason`, `outcome` |
 
 `Rhp::event::to_json(event)` returns JSON text; sinks append a newline when writing it. A suspended request's `script_executed` reports its final outcome; see [audit semantics](host-and-client.md#events-and-audit). Session events' `peer` and every event's `identity` describe the connected peer, which may be a dialing host in reverse mode. `event::script_event` (`host.on_script_event`) is application traffic and not part of `event::any`.
 
 ## Operations
 
-`exec`, `load`, `call`, `reload`, `rollback`, `checkpoint`, `revert_to`, `revert`, `unload`, `pin`, `unpin`, `revert_all`, `list`, `status`, `describe`, `blob`, `subscribe` / `unsubscribe` (`client.on` / `off`), and `cancel` (client side). Minimum roles are in [Host and client](host-and-client.md#rhpclientcfg).
+`exec`, `load`, `call`, `reload`, `rollback`, `checkpoint`, `revert_to`, `revert`, `unload`, `pin`, `unpin`, `revert_all`, `list`, `status`, `describe`, `blob`, `subscribe` / `unsubscribe` (`client.on` / `off`), `release_apply` / `release_confirm` / `release_deactivate` (admin), `release_status` / `revoke` ([releases](releases.md)), and `cancel` (client side). Minimum roles are in [Host and client](host-and-client.md#rhpclientcfg).
 
 ## Wire protocol
 
 - 28-byte little-endian header: magic `RHP\0`, 8-bit `protocol_revision`, 8-bit flags (`kMac` 1, `kAckRequested` 2, `kMore` 4 reserved, `kCrcOmitted` 8), 16-bit op, 64-bit seq, 64-bit ack, 32-bit payload length. Then MessagePack, a 4-byte CRC32C trailer (omitted on TLS links), and a 32-byte keyed MAC once authenticated. Before the handshake completes a payload may be at most 16 KiB.
-- Ops: handshake `hello` 1, `challenge` 2, `response` 3, `welcome` 4, `resume` 5; requests `exec` 16, `load` 17, `call` 18, `reload` 19, `rollback` 20, `unload` 21, `revert` 22, `revert_to` 23, `checkpoint` 24, `revert_all` 25, `cancel` 26, `list` 27, `status` 28, `describe` 29, `pin` 30, `unpin` 31, `blob` 32, `subscribe` 33, `unsubscribe` 34; replies `output` 48, `emit` 49, `result` 50, `error` 51, `event` 52; control `ping` 64, `pong` 65, `ack` 66, `nack` 67. Controls do not join data sequencing; their seq field carries a per-direction replay-protection counter.
+- Ops: handshake `hello` 1, `challenge` 2, `response` 3, `welcome` 4, `resume` 5; requests `exec` 16, `load` 17, `call` 18, `reload` 19, `rollback` 20, `unload` 21, `revert` 22, `revert_to` 23, `checkpoint` 24, `revert_all` 25, `cancel` 26, `list` 27, `status` 28, `describe` 29, `pin` 30, `unpin` 31, `blob` 32, `subscribe` 33, `unsubscribe` 34, `release_apply` 35, `release_confirm` 36, `release_deactivate` 37, `release_status` 38, `revoke` 39; replies `output` 48, `emit` 49, `result` 50, `error` 51, `event` 52; control `ping` 64, `pong` 65, `ack` 66, `nack` 67. Controls do not join data sequencing; their seq field carries a per-direction replay-protection counter.
 - Handshake payloads: `hello {rev, platform, auth}`, `challenge {rev, platform, auth}`, `response {auth}`, `welcome {session, identity, role, heartbeat_ms, platform}`, `resume {session, proof}`.
 - Requests and replies are envelopes `{req, idem?, body}`; req correlates output/results and idem identifies a retry within the retained session cache. Handshake messages are direct payloads; session-ending errors are unsequenced direct error maps.
 - `subscribe` (33) / `unsubscribe` (34) carry `{name}` and are answered nil; each delivery is an `event` reply (52) with `req` 0 and `{name, module, args, dropped}`.
+- `release_apply` (35) carries `{envelope, confirm}` and answers `{channel, id, seq, running, already, replaced, signers}`; `release_confirm` / `release_deactivate` (36, 37) carry `{channel, hold}`; `release_status` (38) answers `{app, build, platform, revocation_seq, channels}`; `revoke` (39) carries `{envelope}` and answers the number of channels that changed. Envelopes are opaque bytes here ([releases](releases.md)).
 - Max frame 4 MiB; blobs are sent as chunked requests.
 
 Details: [`../decisions/wire-format.md`](../decisions/wire-format.md) and `Docs/ARCHITECTURE.md` §8. The protocol revision is a plain integer; there is no "v" naming anywhere in RHP.

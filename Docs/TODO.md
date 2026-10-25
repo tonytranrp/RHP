@@ -1,6 +1,18 @@
 # Status and TODO
 
-Last updated 2026-10-24. Stages 0–7 are implemented and released (tag `stage-7`). Stage 8 (packaging, hardening and performance) is implemented on branch `stage-8-packaging-hardening` (PR #8), awaiting review and merge (tag `stage-8` then). Stage 9 (asynchronous bindings and methods on handles) is implemented on branch `stage-9-async-methods`, stacked on Stage 8. Progress is tracked as "Stage N" only (no `v1` / `v2` naming anywhere). Known limits are in [the guide's limitations page](guide/limitations.md).
+Last updated 2026-10-24. Stages 0–7 are implemented and released (tag `stage-7`). Stage 8 (packaging, hardening and performance) is implemented on branch `stage-8-packaging-hardening` (PR #8), awaiting review and merge (tag `stage-8` then). Stage 9 (asynchronous bindings and methods on handles) is implemented on branch `stage-9-async-methods` (PR #9), stacked on Stage 8. Stage 10 (release manifests, persistence and rollout) is implemented on branch `stage-10-releases`, stacked on Stage 9. Progress is tracked as "Stage N" only (no `v1` / `v2` naming anywhere). Known limits are in [the guide's limitations page](guide/limitations.md).
+
+## Stage 10 — release manifests, persistence and rollout
+
+Done when: *a host keeps a signed release across restarts, refuses old, foreign, expired or revoked ones, can watch a candidate and roll it back, and a fleet can spread a release stage by stage and pull it back.* Decisions: [Stage 10](decisions/stage10-releases.md), ARCHITECTURE §36. Usage: [Releases](guide/releases.md).
+
+- [x] `Rhp::release`: canonical manifests, envelopes, revocation lists, release trust (channel patterns, thresholds), stores (memory, directory with synced renames)
+- [x] `release::manager`: channels, checks, anti-rollback floors, in-place swaps, confirm modes (now / health / manual), restore with boot-attempt quarantine, revocation, expiry, events
+- [x] Wire revision 5 (release ops), `host.serve`, client calls, `release_changed` host event
+- [x] `fleet::rollout` (canaries, stages, health-watched, rollback on failure), `fleet::release_status`
+- [x] `rhp-cli release` / `revoke` / `rollout`; `headless_server --releases`
+- [x] Tests: unit (codecs, trust, manager), host/client integration, rollout over three TCP hosts, a CLI process test across a restart
+- Stage 10 follow-ups: release ops on the HTTP gateway; the Python client's release calls (and its protocol revision); delta updates; a host-side rollout coordinator.
 
 ## Stage 9 — asynchronous bindings and methods on handles
 

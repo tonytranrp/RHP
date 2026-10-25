@@ -11,6 +11,7 @@ How to use RHP, what it supports, and how to configure and connect it. For *why*
 | [Host and client](host-and-client.md) | the C++ API of `Rhp::host` / `Rhp::client`, async calls, blobs, audit |
 | [Connecting](connecting.md) | endpoints, TLS, reverse mode, reconnect, `rhp-cli`, custom transports |
 | [Networking and fleet](networking.md) | WebSocket, UDP, IPC, HTTP, DNS-SD and collect-all execution |
+| [Releases](releases.md) | signed releases a host keeps across restarts, health-checked candidates, revocation, staged rollout |
 | [Configuration](configuration.md) | `Rhp::config<>` slots, `Rhp::limits`, options, CMake switches |
 | [Security](security.md) | keys, roles, signing, setting up a host safely |
 | [Reference](reference.md) | error codes, host events, operations, wire protocol, Lua sandbox contents, threads |
@@ -33,7 +34,7 @@ A running C++ program (the **host**) accepts Lua scripts from a **client** (your
                                          └─────────────────────────────┘
 ```
 
-## What is available today (Stages 0–9)
+## What is available today (Stages 0–10)
 
 | Area | Supported |
 |---|---|
@@ -45,10 +46,11 @@ A running C++ program (the **host**) accepts Lua scripts from a **client** (your
 | Security | pre-shared-key mutual authentication, 3 roles, Ed25519 script signing, TLS 1.3 (OpenSSL or Mbed TLS), TLS channel binding, per-frame MAC |
 | Reliability | CRC32C, seq / ack / nack / resend, heartbeat, **resume** after a lost link with exactly-once calls |
 | Client | blocking, `then` callbacks, `std::future`, `co_await`; cancel; blobs; output and `rhp.emit` callbacks; `client.on` subscriptions to host events |
+| Releases | signed release manifests (`Rhp::release`): channels, anti-rollback floors, validity windows, scope (app / build / platform), health-watched candidates, persistence across restarts with boot-attempt quarantine, revocation lists, staged fleet rollout with rollback |
 | Operations | audit events and JSON-lines log (`handler_failed` included), `host.on_script_event`, runtime kill switch (`set_enabled`), compile-time kill switch (`RHP_ENABLE=OFF`) |
 | Tooling | `rhp-cli` (REPL, `run`, `exec`, `stubs`, `blob`, `watch`, `events`, `keygen`, `pubkey`, `sign`, `discover`, `fleet`), `headless_server`, five examples |
 | Packaging | `find_package(rhp)` from an installed prefix (Debug and Release side by side), `add_subdirectory` or CPM; a generated `<rhp/build_config.hpp>`; dependency pins checked by commit and hash; third-party licenses installed |
 | Performance | `rhp_bench` benchmarks every hot path against raw Lua ([benchmarks](../benchmarks.md)); the cancel hook only where a cancel can come from (`limits.cancel_checks`) |
 | Platforms | target presets for Windows, Linux, macOS, iOS and Android; verified builds and remaining platform checks are recorded in [platform decisions](../decisions/platforms-and-toolchains.md) |
 
-Start with the [runnable CLI walkthrough](getting-started.md#first-run-host-plus-rhp-cli), then the [complete local sandbox example](getting-started.md#without-any-network). The guide describes the current Stage 9 API; historical architecture decisions retain their stage context. Open items and platform checks are in [Status and TODO](../TODO.md).
+Start with the [runnable CLI walkthrough](getting-started.md#first-run-host-plus-rhp-cli), then the [complete local sandbox example](getting-started.md#without-any-network). The guide describes the current Stage 10 API; historical architecture decisions retain their stage context. Open items and platform checks are in [Status and TODO](../TODO.md).

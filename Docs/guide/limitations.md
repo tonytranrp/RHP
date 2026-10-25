@@ -37,7 +37,7 @@ What RHP does not do, or does only partly, as of Stage 8. Most of these are deli
 ## Networking
 
 - **Session state doesn't survive a host restart.** Resume covers a dropped connection within `limits.resume_ms` (6 s by default). A restarted host starts fresh, and identities without pins are reverted when their last session ends.
-- **Protocol revisions must match exactly.** Stage 8 speaks revision 4 (unchanged since Stage 7). Older hosts, clients and `rhp-cli` builds are refused at connect time.
+- **Protocol revisions must match exactly.** Stage 10 speaks revision 5 (Stage 7 and 8 spoke 4). Older hosts, clients and `rhp-cli` builds are refused at connect time.
 - **`io<zero_threads>` stops the network inside a stuck script.** A zero-thread host whose script is stuck in `pump()` also stops serving the network, so cancel can't reach it.
 - **Mbed TLS is serialized.** Its calls go through one process-wide lock, because its PSA core isn't thread-safe in the default build.
 - **Fleet broadcasts cover `exec`, `load` and `call`.** `rhp-cli fleet` runs `exec` only.

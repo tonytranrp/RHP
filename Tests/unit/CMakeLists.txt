@@ -102,6 +102,14 @@ if(RHP_ENABLE)
         LINKS
             Rhp::session
     )
+
+    rhp_add_test_suite(rhp_release_tests
+        SOURCES
+            release/codec_tests.cpp
+            release/manager_tests.cpp
+        LINKS
+            Rhp::release
+    )
 else()
     # RHP_ENABLE=OFF: keys, the keyring and signer files still build (a disabled host takes them);
     # signing reports kDisabled; host and client are inert.
