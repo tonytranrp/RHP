@@ -36,9 +36,14 @@ public:
     // happened.
     [[nodiscard]] static std::unique_ptr<write_effect> assign(value_type incoming) {
         const std::scoped_lock lock{mutex()};
+        auto& stack = layers();
+        stack.reserve(stack.size() + 1); // the one allocation, before anything changes
+        // Not layered until the assignment succeeded: if copying or assigning throws, its destructor
+        // has nothing to detach (and doesn't take the lock this scope holds).
         std::unique_ptr<write_effect> fx{new write_effect(locked{}, *Ptr)};
-        layers().push_back(fx.get());
         *Ptr = std::move(incoming);
+        stack.push_back(fx.get()); // can't throw: reserved
+        fx->layered_ = true;
         return fx;
     }
 
@@ -56,6 +61,7 @@ public:
         explicit write_effect(value_type replaced) : replaced_(std::move(replaced)) {
             const std::scoped_lock lock{mutex()};
             layers().push_back(this);
+            layered_ = true;
         }
 
         write_effect(const write_effect&) = delete;
@@ -71,6 +77,9 @@ public:
         write_effect(locked, value_type replaced) : replaced_(std::move(replaced)) {}
 
         void detach(bool restore) {
+            if (!layered_) {
+                return;
+            }
             const std::scoped_lock lock{mutex()};
             auto& stack = layers();
             const auto it = std::ranges::find(stack, this);
@@ -83,9 +92,11 @@ public:
                 *Ptr = std::move(replaced_);
             }
             stack.erase(it);
+            layered_ = false;
         }
 
         value_type replaced_;
+        bool layered_ = false; // on the stack (set under the lock; detach takes it off for good)
     };
 
     // Number of script writes currently layered on the variable (all sandboxes).

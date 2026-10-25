@@ -350,8 +350,12 @@ struct sandbox_impl::active_scope {
         if (self.running_.empty()) {
             self.cancel_running_.store(false, std::memory_order_release);
         }
-        self.running_.push_back(active_run{budget, thread, request, self.timed_ ? steady::now() : steady::time_point{}});
+        const bool checked = request != nullptr && checked_kind(request->kind);
+        self.running_.push_back(active_run{budget, thread, request, self.timed_ ? steady::now() : steady::time_point{}, checked});
         self.current_ = owner;
+        if (checked) {
+            self.enter_checked();
+        }
     }
 
     active_scope(const active_scope&) = delete;
@@ -362,8 +366,12 @@ struct sandbox_impl::active_scope {
         if (top.budget != nullptr && self.timed_) {
             top.budget->active += steady::now() - top.started;
         }
+        const bool checked = top.checked;
         self.running_.pop_back();
         self.current_ = previous;
+        if (checked) {
+            self.leave_checked();
+        }
         if (self.running_.empty() && self.hook_dirty_) {
             self.hook_dirty_ = false;
             self.reset_hook();
@@ -399,20 +407,12 @@ struct sandbox_impl::slice_scope {
 struct sandbox_impl::operation_scope {
     sandbox_impl& self;
 
-    explicit operation_scope(sandbox_impl& s) : self(s) {
-        if (self.operations_++ == 0 && self.checks_requests() && !self.hook_everywhere()) {
-            self.arm_hook(self.state_, true);
-        }
-    }
+    explicit operation_scope(sandbox_impl& s) : self(s) { self.enter_checked(); }
 
     operation_scope(const operation_scope&) = delete;
     operation_scope& operator=(const operation_scope&) = delete;
 
-    ~operation_scope() {
-        if (--self.operations_ == 0 && self.checks_requests() && !self.hook_everywhere()) {
-            self.arm_hook(self.state_, false);
-        }
-    }
+    ~operation_scope() { self.leave_checked(); }
 };
 
 // ---- construction --------------------------------------------------------------------------------
@@ -422,6 +422,9 @@ sandbox_impl::sandbox_impl(sandbox_options options)
       memory_(options_.memory),
       timed_(options_.limits.wall_ms != 0),
       thread_(std::this_thread::get_id()) {
+    // Room for every spare up front: putting a finished request back never allocates (or throws).
+    spare_requests_.reserve(kSpareRequests);
+    spare_threads_.reserve(kSpareRequests);
     state_ = lua_newstate(&sandbox_impl::allocate, this, luaL_makeseed(nullptr));
     if (state_ == nullptr) {
         throw std::bad_alloc{};
@@ -643,7 +646,21 @@ bool sandbox_impl::checks_requests() const noexcept {
 }
 
 void sandbox_impl::reset_hook() noexcept {
-    arm_hook(state_, hook_everywhere() || (operations_ != 0 && checks_requests()));
+    arm_hook(state_, hook_everywhere() || (checked_depth_ != 0 && checks_requests()));
+}
+
+// A stop already switched the hook to every instruction (hook_dirty_): leave it, the outermost run
+// resets it when it ends.
+void sandbox_impl::enter_checked() noexcept {
+    if (checked_depth_++ == 0 && checks_requests() && !hook_everywhere() && !hook_dirty_) {
+        arm_hook(state_, true);
+    }
+}
+
+void sandbox_impl::leave_checked() noexcept {
+    if (--checked_depth_ == 0 && checks_requests() && !hook_everywhere() && !hook_dirty_) {
+        arm_hook(state_, false);
+    }
 }
 
 void* sandbox_impl::allocate(void* ud, void* ptr, std::size_t old_size, std::size_t new_size) noexcept {
@@ -1075,7 +1092,7 @@ void sandbox_impl::abandon_requests(Pred pred, std::string_view why) {
             finished_.emplace_back(id, outcome);
         }
         if (spare_requests_.size() < kSpareRequests) {
-            spare_requests_.push_back(std::move(node)); // node handles move without throwing: on failure it's just freed
+            spare_requests_.push_back(std::move(node)); // reserved in the constructor: no allocation
         }
     }
 }
@@ -1120,29 +1137,40 @@ request_record& sandbox_impl::start_request(request_kind kind, const effect_owne
         req->thread_ref = luaL_ref(L, LUA_REGISTRYINDEX);
     }
     // Requests check for cancel() (handlers only when a limit or cancel_scope::kEverything asks).
-    const bool request = kind == request_kind::kExec || kind == request_kind::kLoad || kind == request_kind::kCall || kind == request_kind::kTask;
-    arm_hook(co, (request && checks_requests()) || hook_everywhere());
-    // lua_xmove never grows the destination: a new coroutine has room for about 20 values.
-    if (lua_checkstack(co, nargs + 1) == 0) {
-        req->start_error = make_error(errc::kLimitExceeded, std::format("{} arguments don't fit a coroutine stack", nargs));
-    }
-    req->thread = co;
-    if (req->start_error) {
-        lua_pop(L, nargs + 1); // the request ends at its first step
-    } else {
-        lua_xmove(L, co, nargs + 1); // the function and its arguments
+    // A handler started while a checked run is active is part of that run's work (an event fired
+    // synchronously by its code): it checks too.
+    arm_hook(co, hook_everywhere() || (checks_requests() && (checked_kind(kind) || checked_depth_ != 0)));
+    try {
+        // lua_xmove never grows the destination: a new coroutine has room for about 20 values.
+        if (lua_checkstack(co, nargs + 1) == 0) {
+            req->start_error = make_error(errc::kLimitExceeded, std::format("{} arguments don't fit a coroutine stack", nargs));
+        }
+        req->thread = co;
+        if (req->start_error) {
+            lua_pop(L, nargs + 1); // the request ends at its first step
+        } else {
+            lua_xmove(L, co, nargs + 1); // the function and its arguments
+        }
+        if (node) {
+            node.key() = req->id;
+            requests_.insert(std::move(node)); // reuses the node: no allocation
+        } else {
+            requests_.emplace(req->id, std::move(fresh));
+        }
+    } catch (...) { // out of memory part way: the coroutine is emptied and kept (the pool has room: it was just taken from, or reserved)
+        lua_settop(co, 0);
+        if (spare_threads_.size() < spare_threads_.capacity()) {
+            spare_threads_.emplace_back(co, req->thread_ref);
+        } else {
+            luaL_unref(L, LUA_REGISTRYINDEX, req->thread_ref);
+        }
+        throw;
     }
 
     if (from_operation) {
         last_request_ = req->id;
     }
     requests_dirty_ = true;
-    if (node) {
-        node.key() = req->id;
-        requests_.insert(std::move(node));
-    } else {
-        requests_.emplace(req->id, std::move(fresh));
-    }
     return *req;
 }
 
@@ -1281,12 +1309,14 @@ result<value_list> sandbox_impl::complete(request_id id, result<int> outcome) {
         finished_.emplace_back(req.id, out);
     }
     if (spare_requests_.size() < kSpareRequests) {
-        spare_requests_.push_back(std::move(node)); // node handles move without throwing: on failure it's just freed
+        spare_requests_.push_back(std::move(node)); // reserved in the constructor: no allocation
     }
     return out;
 }
 
 result<value_list> sandbox_impl::complete_load(module_record& mod, revision_id revision, lua_State* thread) {
+    // on_save / on_restore of a reload that pump() completed still belong to the reload: checked.
+    const operation_scope checked{*this};
     lua_State* L = state_;
     lua_xmove(thread, L, 1); // the exports table the loader returned
     if (mod.state == module_state::kLoading && mod.live.revision == revision) {
@@ -1365,16 +1395,10 @@ void sandbox_impl::close_thread(request_record& req, bool failed) noexcept {
         });
     }
     // A coroutine that returned normally is reusable: empty it and keep it for the next request.
-    bool kept = false;
     if (!failed && !closing_lua_ && lua_status(req.thread) == LUA_OK && spare_threads_.size() < kSpareRequests) {
         lua_settop(req.thread, 0);
-        try {
-            spare_threads_.emplace_back(req.thread, req.thread_ref);
-            kept = true;
-        } catch (...) { // out of memory: it's released instead
-        }
-    }
-    if (!kept) {
+        spare_threads_.emplace_back(req.thread, req.thread_ref); // reserved in the constructor: no allocation
+    } else {
         luaL_unref(state_, LUA_REGISTRYINDEX, req.thread_ref);
     }
     req.thread_ref = kNoRef;

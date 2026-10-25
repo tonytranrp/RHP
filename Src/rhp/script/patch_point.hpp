@@ -15,6 +15,7 @@
 #include <rhp/script/stack.hpp>
 #include <rhp/utils/fixed_string.hpp>
 #include <rhp/utils/function_traits.hpp>
+#include <rhp/utils/scope_guard.hpp>
 
 namespace Rhp {
 
@@ -110,7 +111,15 @@ private:
         auto& ctx = s.context();
         s.push_copy(fn_index);
         const int fn_ref = s.ref();
+        // Until the layer owns the reference: building it allocates Lua objects, which may raise.
+        bool owned = false;
+        const utils::scope_guard release{[&]() noexcept {
+            if (!owned) {
+                s.unref(fn_ref);
+            }
+        }};
         auto layer = std::make_unique<script::detail::lua_patch_layer<signature>>(s, ctx.current_owner(), fn_ref, state_, id);
+        owned = true;
         return std::make_unique<script::detail::patch_effect<signature>>(state_, std::move(layer));
     }
 

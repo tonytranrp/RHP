@@ -313,9 +313,11 @@ public:
 
     // io<zero_threads>: handles whatever the network has ready (pings, streamed output, async
     // results) without blocking. Call it from your loop between requests. No-op with an I/O thread.
+    // A callback run here may destroy this client: the engine stays alive until poll() returns.
     void poll() {
 #if RHP_ENABLE
-        client_detail::poll(*engine_);
+        const auto keep = engine_;
+        client_detail::poll(*keep);
 #endif
     }
 
@@ -426,7 +428,7 @@ private:
     template <class T>
     pending_t<T> start(wire::op code, result<value> body, result<T> (*convert)(result<value>&&)) {
 #if RHP_ENABLE
-        auto state = std::make_shared<client_detail::pending_state<T>>(0, client_detail::pump_fn(*engine_));
+        auto state = std::make_shared<client_detail::pending_state<T>>(0, client_detail::pump_fn(*engine_), client_detail::blocking_check(*engine_));
         if (!body) {
             state->complete(std::unexpected{std::move(body).error()});
             return pending_t<T>{std::move(state)};

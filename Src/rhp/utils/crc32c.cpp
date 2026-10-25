@@ -11,10 +11,15 @@
 #define RHP_CRC32C_X86 1
 #include <nmmintrin.h>
 #if defined(_MSC_VER)
-#include <intrin.h>
-#define RHP_TARGET_SSE42
+#include <intrin.h> // __cpuid (clang-cl too)
 #else
 #include <cpuid.h>
+#endif
+// cl.exe compiles the intrinsic for any target; Clang (clang-cl included) wants the feature on the
+// function that uses it.
+#if defined(_MSC_VER) && !defined(__clang__)
+#define RHP_TARGET_SSE42
+#else
 #define RHP_TARGET_SSE42 __attribute__((target("sse4.2")))
 #endif
 #elif defined(__aarch64__) && defined(__ARM_FEATURE_CRC32)

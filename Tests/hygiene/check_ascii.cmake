@@ -4,8 +4,9 @@ file(GLOB_RECURSE headers LIST_DIRECTORIES false "${ROOT}/*.hpp" "${ROOT}/*.h" "
 set(bad "")
 foreach(header IN LISTS headers)
     file(READ "${header}" bytes HEX)
-    # Hex pairs 80..ff are the non-ASCII bytes; pairs are matched from the start of the string.
-    string(REGEX MATCH "^(..)*[89a-f].." hit "${bytes}")
+    # Hex pairs 80..ff are the non-ASCII bytes: a pair whose first digit is 8..f, counted in whole
+    # pairs from the start of the string.
+    string(REGEX MATCH "^(..)*[89a-f]" hit "${bytes}")
     if(hit)
         list(APPEND bad "${header}")
     endif()

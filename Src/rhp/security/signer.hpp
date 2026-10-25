@@ -20,6 +20,10 @@ namespace Rhp::security {
 //
 // The host runs unsigned code only for observe sessions (they can't mutate anything); a signature
 // that is present must verify, whatever the role.
+//
+// Threads: the host calls trust::verify on its network thread (one session at a time per thread,
+// but different hosts sharing one trust object may call it concurrently), and key::sign on whichever
+// thread sends. Both are const: keep them free of unsynchronized mutable state.
 template <class S>
 concept signer = std::copy_constructible<typename S::key> && std::copy_constructible<typename S::trust> &&
                  requires(const typename S::key& k, const typename S::trust& t, std::string_view source, const value& signature) {

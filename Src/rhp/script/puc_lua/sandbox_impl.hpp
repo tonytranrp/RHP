@@ -401,6 +401,7 @@ private:
         lua_State* thread = nullptr;  // the request's coroutine; nullptr for handlers (never sliced)
         request_record* request = nullptr;
         steady::time_point started;
+        bool checked = false; // a run of a checked request kind (enter_checked)
     };
 
     void open_libraries();
@@ -411,8 +412,16 @@ private:
     void arm_hook(lua_State* L, bool armed) noexcept;
     [[nodiscard]] bool hook_everywhere() const noexcept;
     [[nodiscard]] bool checks_requests() const noexcept; // cancel_checks isn't kNone
+    // Requests that check for cancel() (exec, load, call, tasks; cancel_scope::kRequests).
+    [[nodiscard]] static constexpr bool checked_kind(request_kind k) noexcept {
+        return k == request_kind::kExec || k == request_kind::kLoad || k == request_kind::kCall || k == request_kind::kTask;
+    }
     [[nodiscard]] std::uint32_t check_interval() const noexcept;
     struct operation_scope;
+    // An operation or a checked request run starts / ends: while any is active the main thread (patch
+    // handlers, on_save / on_restore) and handler coroutines started meanwhile check too.
+    void enter_checked() noexcept;
+    void leave_checked() noexcept;
     void check_cancels() noexcept;
     // Consumes a pending cancel(request) for `id`; a request with one is ended instead of resumed.
     [[nodiscard]] bool take_cancel(request_id id);
@@ -516,7 +525,7 @@ private:
     // Finished requests' map nodes (record included) and coroutines, reused by start_request.
     std::vector<decltype(requests_)::node_type> spare_requests_;
     std::vector<std::pair<lua_State*, int>> spare_threads_; // (thread, registry ref)
-    std::uint32_t operations_ = 0;                          // operations running (operation_scope)
+    std::uint32_t checked_depth_ = 0;                       // operations and checked request runs active (enter_checked)
     // The earliest frame / script time a suspended request wakes at, so an idle pump() doesn't walk
     // them all. Anything that may wake one sooner (a request starting or suspending, a delivery)
     // sets requests_dirty_ and the next resume pass walks them anyway.

@@ -31,7 +31,10 @@ public:
     // With io<zero_threads> nobody else runs the network: get() / wait_for() run it through this.
     using pump_fn = std::function<void(std::chrono::milliseconds)>;
 
-    pending_state(std::uint64_t request, pump_fn pump) : request_(request), pump_(std::move(pump)) {}
+    // `blocked` (when set) says the calling thread is the one that has to deliver the result: get()
+    // there would wait for itself, so it reports an error instead.
+    pending_state(std::uint64_t request, pump_fn pump, std::function<bool()> blocked = {})
+        : request_(request), pump_(std::move(pump)), blocked_(std::move(blocked)) {}
 
     void complete(result<T> r) {
         std::function<void(result<T>)> fn;
@@ -84,6 +87,9 @@ public:
     bool wait_for(std::chrono::milliseconds timeout) {
         const auto deadline = std::chrono::steady_clock::now() + timeout;
         std::unique_lock lock{mutex_};
+        if (!done_ && blocked_ && blocked_()) {
+            return false; // the network thread itself: nothing would arrive while it waits
+        }
         if (!pump_) {
             return cv_.wait_until(lock, deadline, [this] { return done_; });
         }
@@ -103,6 +109,11 @@ public:
     // Blocks for the result (running the network with io<zero_threads>).
     result<T> take() {
         std::unique_lock lock{mutex_};
+        if (!done_ && blocked_ && blocked_()) {
+            return fail(errc::kInvalidArgument,
+                        "get() on the client's own network thread (a callback or a co_await continuation) would wait for itself; use then() or co_await",
+                        "pending");
+        }
         if (!pump_) {
             cv_.wait(lock, [this] { return done_; });
         } else {
@@ -158,6 +169,7 @@ private:
     std::coroutine_handle<> waiter_;
     std::uint64_t request_ = 0;
     pump_fn pump_;
+    std::function<bool()> blocked_;
 };
 
 } // namespace client_detail

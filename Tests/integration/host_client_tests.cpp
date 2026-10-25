@@ -838,3 +838,51 @@ TEST_CASE("host+client: a client destroyed in its own completion callback shuts 
     CHECK(std::chrono::steady_clock::now() - started < 900ms);
     CHECK(eventually([&] { return host->sessions() == 0; }));
 }
+
+TEST_CASE("host+client: a zero_threads client destroyed in a callback run by its poll() shuts down cleanly", "[integration][client][lifetime]") {
+    using zero_cfg = loopback_cfg::io<Rhp::exec::zero_threads>;
+    keys k;
+    const auto at = Rhp::endpoint::listen("hc.self_destroy_zero", 1);
+    running_host<loopback_cfg> host{at, k};
+    auto* c = new Rhp::client<zero_cfg>{host.dial_at(at), k.as_patch(), k.signer()};
+    bool destroyed = false;
+    c->async().exec("return 1").then([c, &destroyed](Rhp::result<std::vector<value>>) {
+        delete c; // inside c->poll(): the engine outlives the poll that runs this
+        destroyed = true;
+    });
+    const auto deadline = std::chrono::steady_clock::now() + 10s;
+    while (!destroyed && std::chrono::steady_clock::now() < deadline) {
+        c->poll();
+        std::this_thread::sleep_for(1ms);
+    }
+    CHECK(destroyed);
+    CHECK(eventually([&] { return host->sessions() == 0; }));
+}
+
+TEST_CASE("host+client: waiting calls on the client's own network thread report errors instead of deadlocking", "[integration][client][threads]") {
+    keys k;
+    const auto at = Rhp::endpoint::listen("hc.network_thread_waits", 1);
+    running_host<loopback_cfg> host{at, k};
+    Rhp::client<loopback_cfg> c{host.dial_at(at), k.as_patch(), k.signer()};
+    REQUIRE(c.connect());
+    auto slow = c.async().exec<int>("rhp.sleep(20) return 2");
+    std::atomic<int> get_code{-1};
+    std::atomic<int> on_code{-1};
+    std::atomic<int> off_code{-1};
+    std::atomic<bool> done{false};
+    c.async().exec<int>("return 1").then([&](Rhp::result<int>) {
+        // All on the network thread that delivers results: each would wait for itself.
+        auto r = std::move(slow).get();
+        get_code = r ? 0 : static_cast<int>(r.error().code);
+        auto sub = c.on("hc.never", [](const Rhp::remote_event&) {});
+        on_code = sub ? 0 : static_cast<int>(sub.error().code);
+        auto off = c.off(1);
+        off_code = off ? 0 : static_cast<int>(off.error().code);
+        done = true;
+    });
+    REQUIRE(eventually([&] { return done.load(); }));
+    CHECK(get_code.load() == static_cast<int>(errc::kInvalidArgument));
+    CHECK(on_code.load() == static_cast<int>(errc::kInvalidArgument));
+    CHECK(off_code.load() == static_cast<int>(errc::kInvalidArgument));
+    CHECK(c.exec<int>("return 3") == 3); // the session is fine
+}

@@ -108,6 +108,11 @@ using host_lib = Rhp::lib<"host">        //
 
 inline constexpr Rhp::lua_event<"tests.sched.ping", int, std::string_view> ping{};
 
+inline void host_fire_ping() {
+    ping.fire(1, "sync");
+}
+using firing_lib = Rhp::lib<"firing">::fn<"ping", &host_fire_ping>;
+
 } // namespace scheduler_tests_fixtures
 
 namespace {
@@ -1013,6 +1018,38 @@ TEST_CASE("cancel_scope kEverything lets cancel() stop a frame callback stuck in
     // The default policy (report) undid that call only: the module and its callback stay.
     CHECK(box.status(*mod)->state == module_state::kActive);
     REQUIRE(box.unload(*mod));
+}
+
+TEST_CASE("a request resumed by pump stays cancellable inside a patch handler it reaches", "[script][scheduler]") {
+    capture out;
+    sandbox box = make_box(out);
+    const auto patch = box.load("tests.sched.spin_patch2", R"lua(rhp.patch("tests.sched.damage", function(o, b, t) while true do end end))lua");
+    REQUIRE(patch.has_value());
+    // Suspends once, so pump() (not an operation) resumes it; then a binding hits the patched point.
+    REQUIRE(box.exec("rhp.next_frame() return host.hit(2)"));
+    const Rhp::request_id request = box.last_request();
+    REQUIRE(box.pending(request));
+    with_canceller(box, request, [&] {
+        box.pump();
+        return 0;
+    });
+    CHECK_FALSE(box.pending(request));
+    REQUIRE(out.results.size() == 1);
+    CHECK(out.results[0].second.error().code == errc::kCancelled);
+    REQUIRE(box.unload(*patch));
+    CHECK(fx::damage.depth() == 0);
+}
+
+TEST_CASE("an event handler fired synchronously by a request is cancelled with it", "[script][scheduler]") {
+    capture out;
+    sandbox box = make_box(out);
+    REQUIRE(box.install<fx::firing_lib>());
+    const auto handler = box.load("tests.sched.spin_handler", "rhp.on('tests.sched.ping', function() while true do end end)");
+    REQUIRE(handler.has_value());
+    const auto run = with_canceller(box, std::nullopt, [&] { return box.exec("firing.ping() return 'unreached'"); });
+    REQUIRE_FALSE(run.has_value());
+    CHECK(run.error().code == errc::kCancelled);
+    REQUIRE(box.unload(*handler));
 }
 
 TEST_CASE("by default requests check for cancel and handlers run unchecked", "[script][scheduler]") {

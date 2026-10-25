@@ -31,6 +31,7 @@
 #include <rhp/platform/random.hpp>
 #include <rhp/session/secure_link.hpp>
 #include <rhp/session/session.hpp>
+#include <rhp/utils/scope_guard.hpp>
 #include <rhp/wire/messages.hpp>
 #include <rhp/wire/ops.hpp>
 
@@ -45,6 +46,9 @@ constexpr std::chrono::milliseconds kPollSlice{5};
 constexpr std::chrono::milliseconds kCloseWait{1'000};
 // Room a blob chunk leaves for the envelope and the frame around its bytes.
 constexpr std::size_t kChunkOverhead = 1024;
+
+// The engine whose network thread this is (set while its I/O thread runs; compared, never used).
+thread_local const void* t_network_engine = nullptr;
 
 // A fresh idempotency key: 63 random bits (wire integers are signed 64-bit), never 0.
 [[nodiscard]] std::uint64_t random_key() {
@@ -198,6 +202,9 @@ public:
         if (!fn) {
             return fail(errc::kInvalidArgument, "client.on needs a callback", "client.on");
         }
+        if (auto ok = may_block("client.on"); !ok) {
+            return std::unexpected{std::move(ok).error()};
+        }
         // One subscribe / unsubscribe at a time, across the blocking request: otherwise a second on()
         // could return before the first one's subscribe failed and was rolled back, or an off() and an
         // on() of one name could reach the host in the wrong order.
@@ -219,6 +226,9 @@ public:
     }
 
     result<void> unsubscribe(std::uint64_t id) {
+        if (auto ok = may_block("client.off"); !ok) {
+            return ok;
+        }
         const std::scoped_lock serial{subscribe_mutex_};
         auto last = forget_listener(id);
         if (!last) {
@@ -401,8 +411,17 @@ public:
 
     void run_io(std::stop_token stop) {
         if (owned_io_ != nullptr) {
+            t_network_engine = this;
+            const utils::scope_guard clear{[]() noexcept { t_network_engine = nullptr; }};
             io_.run(std::move(stop)); // a shared reactor is run by its owner
         }
+    }
+
+    [[nodiscard]] std::function<bool()> blocking_check() const {
+        if (!setup_.io_thread) {
+            return {};
+        }
+        return [self = static_cast<const void*>(this)] { return t_network_engine == self; };
     }
 
     void poll() {
@@ -1024,6 +1043,10 @@ void poll(engine& e) {
 
 std::function<void(std::chrono::milliseconds)> pump_fn(engine& e) {
     return e.pump();
+}
+
+std::function<bool()> blocking_check(engine& e) {
+    return e.blocking_check();
 }
 
 void run_io(engine& e, std::stop_token stop) {

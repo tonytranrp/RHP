@@ -306,9 +306,9 @@ private:
     // `original(...)` inside a handler: calls the layer below this one, or the C++ default.
     static int original(lua_State* L) {
         stack s{L};
-        // The upvalue is always this layer's token: the closure is built in the constructor and
-        // scripts can't reach upvalues (no debug library).
-        auto* token = static_cast<original_token*>(s.to_light_userdata(stack::upvalue_index(1)));
+        // The upvalue is this layer's token unless an admin script replaced it (debug.setupvalue):
+        // checked by its metatable, never trusted blindly.
+        auto* token = static_cast<original_token*>(s.to_userdata(stack::upvalue_index(1), kOriginalTokenKey));
         if (token == nullptr || token->frame == nullptr) {
             s.raise(make_error(errc::kInvalidArgument, "original() is only valid while its patch handler runs"));
         }

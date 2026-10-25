@@ -117,6 +117,9 @@ void close(engine& e) noexcept;
 void poll(engine& e);
 // zero_threads: what an async result's get() runs while it waits; empty with an I/O thread.
 [[nodiscard]] std::function<void(std::chrono::milliseconds)> pump_fn(engine& e);
+// True on this engine's own network thread, where waiting for one of its results would wait for
+// itself. Compares the engine's address only: safe to call after the engine is gone.
+[[nodiscard]] std::function<bool()> blocking_check(engine& e);
 void run_io(engine& e, std::stop_token stop);
 
 struct session_info {
