@@ -5,7 +5,9 @@
 // host -i id [--root folder]`; breakpoints set in <root>/game/combat.lua apply to the module
 // "game.combat". Paused requests are DAP threads.
 
+#include <charconv>
 #include <chrono>
+#include <concepts>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -15,10 +17,12 @@
 #include <format>
 #include <functional>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -58,9 +62,10 @@ public:
         return name;
     }
 
-    [[nodiscard]] std::string path_for(std::string_view module) const {
-        if (root_.empty()) {
-            return std::string{module};
+    // The file a module came from, when there is a root and the file is in it.
+    [[nodiscard]] std::optional<std::string> path_for(std::string_view module) const {
+        if (root_.empty() || module.empty()) {
+            return std::nullopt;
         }
         std::string rel{module};
         for (char& c : rel) {
@@ -68,50 +73,90 @@ public:
                 c = '/';
             }
         }
-        return (std::filesystem::path{root_} / (rel + ".lua")).string();
+        std::filesystem::path p = std::filesystem::path{root_} / (rel + ".lua");
+        p.make_preferred();
+        std::error_code ec;
+        if (!std::filesystem::is_regular_file(p, ec)) {
+            return std::nullopt;
+        }
+        return p.string();
     }
 
 private:
     std::string root_;
 };
 
-// Reads DAP messages ("Content-Length: n\r\n\r\n<json>") from a stream. nullopt at the end.
-[[nodiscard]] inline std::optional<std::string> read_dap_message(std::FILE* in) {
-    std::size_t length = 0;
-    bool any = false;
+// Reads DAP messages ("Content-Length: n\r\n\r\n<json>") from a stream. nullopt at the end, and
+// for what isn't DAP (no length, a length that isn't a number, a header line that never ends, a
+// body over 64 MiB): the stream can't be resynchronized after that.
+// `next_byte()` returns the next byte as an unsigned char value, or EOF.
+template <std::invocable Next>
+[[nodiscard]] std::optional<std::string> read_dap_message(Next&& next_byte) {
+    constexpr std::size_t kMaxHeader = 1024;   // bytes in one header line
+    constexpr std::size_t kMaxHeaders = 32;    // header lines in one message
+    constexpr std::size_t kMaxBody = 64u << 20;
+    std::optional<std::size_t> length;
+    std::size_t headers = 0;
     std::string line;
     while (true) {
-        const int c = std::fgetc(in);
+        const int c = static_cast<int>(next_byte());
         if (c == EOF) {
             return std::nullopt;
         }
         if (c != '\n') {
             if (c != '\r') {
+                if (line.size() == kMaxHeader) {
+                    return std::nullopt;
+                }
                 line += static_cast<char>(c);
             }
             continue;
         }
         if (line.empty()) {
-            if (any) {
-                break; // the blank line after the headers
+            if (headers == 0) {
+                continue; // blank lines between messages
             }
-            continue;
+            break; // the blank line after the headers
+        }
+        if (++headers > kMaxHeaders) {
+            return std::nullopt;
         }
         constexpr std::string_view kLength = "Content-Length:";
         if (line.starts_with(kLength)) {
-            length = static_cast<std::size_t>(std::strtoull(line.c_str() + kLength.size(), nullptr, 10));
-            any = true;
+            std::string_view digits = std::string_view{line}.substr(kLength.size());
+            while (!digits.empty() && (digits.front() == ' ' || digits.front() == '\t')) {
+                digits.remove_prefix(1);
+            }
+            while (!digits.empty() && (digits.back() == ' ' || digits.back() == '\t')) {
+                digits.remove_suffix(1);
+            }
+            std::size_t n = 0;
+            const auto [end, ec] = std::from_chars(digits.data(), digits.data() + digits.size(), n);
+            if (digits.empty() || ec != std::errc{} || end != digits.data() + digits.size() || length) {
+                return std::nullopt; // not a number, or two lengths
+            }
+            length = n;
         }
         line.clear();
     }
-    if (length > (64u << 20)) {
+    if (!length || *length > kMaxBody) {
         return std::nullopt;
     }
-    std::string body(length, '\0');
-    if (length != 0 && std::fread(body.data(), 1, length, in) != length) {
-        return std::nullopt;
+    const std::size_t length_value = *length;
+    std::string body;
+    body.reserve(length_value);
+    for (std::size_t i = 0; i < length_value; ++i) {
+        const int c = static_cast<int>(next_byte());
+        if (c == EOF) {
+            return std::nullopt; // cut short
+        }
+        body += static_cast<char>(c);
     }
     return body;
+}
+
+[[nodiscard]] inline std::optional<std::string> read_dap_message(std::FILE* in) {
+    return read_dap_message([in] { return std::fgetc(in); });
 }
 
 template <Rhp::configuration Cfg>
@@ -121,43 +166,46 @@ public:
         : client_(c), sources_(std::move(root)), write_(std::move(write)) {}
 
     // Handles messages until the client disconnects or `next` returns nothing; returns the exit status.
-    int run(const std::function<std::optional<std::string>()>& next) {
-        auto events = client_.on("rhp.debug", [this](const Rhp::remote_event& e) {
+    // `next` runs on a reader thread that may outlive this call (blocked in a read): it owns its
+    // copy of `next` and shares only the inbox with the server.
+    int run(std::function<std::optional<std::string>()> next) {
+        const std::shared_ptr<inbox> box = inbox_;
+        auto events = client_.on("rhp.debug", [box](const Rhp::remote_event& e) {
             if (!e.args.empty()) {
-                const std::scoped_lock lock{mutex_};
-                events_.push_back(e.args.front());
+                const std::scoped_lock lock{box->mutex};
+                box->events.push_back(e.args.front());
+                box->wake.notify_all();
             }
         });
         if (!events) {
             log(std::format("can't subscribe to rhp.debug: {}", events.error()));
             return 1;
         }
-        std::jthread reader{[this, &next](std::stop_token stop) {
+        std::jthread reader{[box, next = std::move(next)](std::stop_token stop) {
             while (!stop.stop_requested()) {
                 auto message = next();
-                const std::scoped_lock lock{mutex_};
+                const std::scoped_lock lock{box->mutex};
                 if (!message) {
-                    eof_ = true;
-                    wake_.notify_all();
+                    box->eof = true;
+                    box->wake.notify_all();
                     return;
                 }
-                inbox_.push_back(std::move(*message));
-                wake_.notify_all();
+                box->messages.push_back(std::move(*message));
+                box->wake.notify_all();
             }
         }};
         while (!done_) {
             std::optional<std::string> message;
             std::vector<Rhp::value> events_now;
             {
-                std::unique_lock lock{mutex_};
-                wake_.wait_for(lock, std::chrono::milliseconds{50}, [&] { return !inbox_.empty() || !events_.empty() || eof_; });
-                if (!inbox_.empty()) {
-                    message = std::move(inbox_.front());
-                    inbox_.pop_front();
+                std::unique_lock lock{box->mutex};
+                box->wake.wait_for(lock, std::chrono::milliseconds{50}, [&] { return !box->messages.empty() || !box->events.empty() || box->eof; });
+                if (!box->messages.empty()) {
+                    message = std::move(box->messages.front());
+                    box->messages.pop_front();
                 }
-                events_now.assign(events_.begin(), events_.end());
-                events_.clear();
-                if (eof_ && inbox_.empty() && !message) {
+                events_now.swap(box->events);
+                if (box->eof && box->messages.empty() && !message) {
                     done_ = true;
                 }
             }
@@ -209,6 +257,18 @@ private:
         std::string scope;
         std::vector<std::string> path;
     };
+
+    // What the reader thread and the event callback hand to the server loop.
+    struct inbox {
+        std::mutex mutex;
+        std::condition_variable wake;
+        std::deque<std::string> messages;
+        std::vector<Rhp::value> events;
+        bool eof = false;
+    };
+
+    static constexpr std::int64_t kNoThread = 0;     // the thread shown when nothing is paused
+    static constexpr std::size_t kMaxRefs = 100'000; // frame / variable references kept (oldest go first)
 
     static std::string str(const Rhp::value& m, std::string_view key) {
         const Rhp::value* v = m.find(key);
@@ -265,19 +325,28 @@ private:
     }
 
     std::int64_t frame_id(std::uint64_t request, std::uint32_t level) {
-        frames_.push_back(frame_ref{request, level});
-        return static_cast<std::int64_t>(frames_.size());
+        if (frames_.size() >= kMaxRefs) {
+            frames_.erase(frames_.begin());
+        }
+        const std::int64_t id = ++next_ref_;
+        frames_.emplace(id, frame_ref{request, level});
+        return id;
     }
 
     std::int64_t var_id(var_ref ref) {
-        vars_.push_back(std::move(ref));
-        return static_cast<std::int64_t>(vars_.size());
+        if (vars_.size() >= kMaxRefs) {
+            vars_.erase(vars_.begin());
+        }
+        const std::int64_t id = ++next_ref_;
+        vars_.emplace(id, std::move(ref));
+        return id;
     }
 
-    // A script ran on: the frames and variables handed out describe a stack that is gone.
-    void forget_refs() {
-        frames_.clear();
-        vars_.clear();
+    // A script ran on: the frames and variables handed out for it describe a stack that is gone.
+    // Other paused scripts keep theirs.
+    void forget_refs(std::uint64_t request) {
+        std::erase_if(frames_, [&](const auto& f) { return f.second.request == request; });
+        std::erase_if(vars_, [&](const auto& v) { return v.second.request == request; });
     }
 
     void host_event(const Rhp::value& e) {
@@ -325,7 +394,11 @@ private:
             V::array out;
             for (const std::uint32_t line : r.lines) {
                 const bool kept = std::ranges::find(set->lines, line) != set->lines.end();
-                out.push_back(obj({{"verified", V{kept}}, {"line", V{static_cast<std::int64_t>(line)}}}));
+                if (kept) {
+                    out.push_back(obj({{"verified", V{true}}, {"line", V{static_cast<std::int64_t>(line)}}}));
+                } else {
+                    out.push_back(obj({{"verified", V{false}}, {"line", V{static_cast<std::int64_t>(line)}}, {"message", V{"the host didn't keep this breakpoint"}}}));
+                }
             }
             return obj({{"breakpoints", V{std::move(out)}}});
         }
@@ -338,9 +411,15 @@ private:
             for (const auto& p : paused->paused) {
                 threads.push_back(obj({{"id", V{static_cast<std::int64_t>(p.request)}}, {"name", V{std::format("{} (request {})", p.label, p.request)}}}));
             }
+            if (threads.empty()) { // editors expect a thread to show (and to send "pause" to)
+                threads.push_back(obj({{"id", V{kNoThread}}, {"name", V{"(no script paused)"}}}));
+            }
             return obj({{"threads", V{std::move(threads)}}});
         }
         if (command == "stackTrace") {
+            if (num(args, "threadId") == kNoThread) {
+                return obj({{"stackFrames", V{V::array{}}}, {"totalFrames", V{std::int64_t{0}}}});
+            }
             const auto request = static_cast<std::uint64_t>(num(args, "threadId"));
             auto stack = action("stack", request);
             if (!stack) {
@@ -352,7 +431,12 @@ private:
                 m.emplace_back(V{"id"}, V{frame_id(request, f.level)});
                 m.emplace_back(V{"name"}, V{f.name});
                 if (f.what != "C") {
-                    m.emplace_back(V{"source"}, obj({{"name", V{f.source}}, {"path", V{sources_.path_for(f.source)}}}));
+                    V::map source;
+                    source.emplace_back(V{"name"}, V{f.source});
+                    if (auto path = sources_.path_for(f.source)) {
+                        source.emplace_back(V{"path"}, V{std::move(*path)});
+                    }
+                    m.emplace_back(V{"source"}, V{std::move(source)});
                 }
                 m.emplace_back(V{"line"}, V{static_cast<std::int64_t>(f.line)});
                 m.emplace_back(V{"column"}, V{std::int64_t{1}});
@@ -362,11 +446,11 @@ private:
             return obj({{"stackFrames", V{std::move(frames)}}, {"totalFrames", V{count}}});
         }
         if (command == "scopes") {
-            const auto id = num(args, "frameId");
-            if (id < 1 || static_cast<std::size_t>(id) > frames_.size()) {
+            const auto it = frames_.find(num(args, "frameId"));
+            if (it == frames_.end()) {
                 return Rhp::fail(Rhp::errc::kNotFound, "no such frame (the script ran on)", "dap");
             }
-            const frame_ref f = frames_[static_cast<std::size_t>(id - 1)];
+            const frame_ref f = it->second;
             V::array scopes;
             for (const auto& [name, scope] : {std::pair{"Locals", "locals"}, std::pair{"Upvalues", "upvalues"}, std::pair{"Globals", "globals"}}) {
                 scopes.push_back(obj({{"name", V{name}}, {"variablesReference", V{var_id(var_ref{f.request, f.level, scope, {}})}}, {"expensive", V{false}}}));
@@ -374,11 +458,11 @@ private:
             return obj({{"scopes", V{std::move(scopes)}}});
         }
         if (command == "variables") {
-            const auto id = num(args, "variablesReference");
-            if (id < 1 || static_cast<std::size_t>(id) > vars_.size()) {
+            const auto it = vars_.find(num(args, "variablesReference"));
+            if (it == vars_.end()) {
                 return Rhp::fail(Rhp::errc::kNotFound, "no such variables (the script ran on)", "dap");
             }
-            const var_ref ref = vars_[static_cast<std::size_t>(id - 1)];
+            const var_ref ref = it->second;
             Rhp::debug_request r;
             r.action = "variables";
             r.request = ref.request;
@@ -402,11 +486,14 @@ private:
             return obj({{"variables", V{std::move(out)}}});
         }
         if (command == "continue" || command == "next" || command == "stepIn" || command == "stepOut") {
+            if (num(args, "threadId") == kNoThread) {
+                return command == "continue" ? obj({{"allThreadsContinued", V{false}}}) : V{};
+            }
             const auto request = static_cast<std::uint64_t>(num(args, "threadId"));
             const std::string mode = command == "continue" ? "continue" : command == "next" ? "over"
                                                                       : command == "stepIn" ? "into"
                                                                                             : "out";
-            forget_refs();
+            forget_refs(request);
             auto r = action(mode, request);
             if (!r) {
                 return std::unexpected{std::move(r).error()};
@@ -421,11 +508,11 @@ private:
             return V{};
         }
         if (command == "evaluate") {
-            const auto id = num(args, "frameId");
-            if (id < 1 || static_cast<std::size_t>(id) > frames_.size()) {
+            const auto it = frames_.find(num(args, "frameId"));
+            if (it == frames_.end()) {
                 return Rhp::fail(Rhp::errc::kNotFound, "evaluate needs a paused frame", "dap");
             }
-            const frame_ref f = frames_[static_cast<std::size_t>(id - 1)];
+            const frame_ref f = it->second;
             Rhp::debug_request r;
             r.action = "evaluate";
             r.request = f.request;
@@ -434,6 +521,9 @@ private:
             auto v = debug(r);
             if (!v) {
                 return std::unexpected{std::move(v).error()};
+            }
+            if (v->variables.empty()) {
+                return Rhp::fail(Rhp::errc::kProtocol, "the host sent no value", "dap");
             }
             const auto& var = v->variables.front();
             return obj({{"result", V{var.text}}, {"type", V{var.type}}, {"variablesReference", V{std::int64_t{0}}}});
@@ -446,13 +536,10 @@ private:
     std::function<void(std::string_view)> write_;
     std::int64_t seq_ = 0;
     bool done_ = false;
-    std::vector<frame_ref> frames_;
-    std::vector<var_ref> vars_;
-    std::mutex mutex_;
-    std::condition_variable wake_;
-    std::deque<std::string> inbox_;
-    std::vector<Rhp::value> events_;
-    bool eof_ = false;
+    std::int64_t next_ref_ = 0;
+    std::map<std::int64_t, frame_ref> frames_; // DAP frame ids (stackTrace)
+    std::map<std::int64_t, var_ref> vars_;     // DAP variable references (scopes, variables)
+    std::shared_ptr<inbox> inbox_ = std::make_shared<inbox>();
 };
 
 } // namespace rhp_cli

@@ -200,7 +200,13 @@ private:
                 if (!cp) {
                     return std::nullopt;
                 }
-                if (*cp >= 0xD800 && *cp < 0xDC00 && literal("\\u")) { // a surrogate pair
+                if (*cp >= 0xDC00 && *cp < 0xE000) {
+                    return std::nullopt; // a low surrogate on its own
+                }
+                if (*cp >= 0xD800 && *cp < 0xDC00) { // a surrogate pair, or a lone high surrogate
+                    if (!literal("\\u")) {
+                        return std::nullopt;
+                    }
                     auto low = hex4();
                     if (!low || *low < 0xDC00 || *low >= 0xE000) {
                         return std::nullopt;

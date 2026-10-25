@@ -139,7 +139,11 @@ public:
                 for (std::size_t i = 3; i < quoted.size(); ++i) {
                     args.push_back(parse_literal(quoted[i]));
                 }
-                report_values(client_.call(parse_module(arg(1)), arg(2), args));
+                const std::string function = arg(2);
+                (void)wait_or_detach(client_.async().call(parse_module(arg(1)), function, args), function, [this](const Rhp::result<Rhp::value_list>& r) {
+                    report_values(r);
+                    return r.has_value();
+                });
             }
         } else if (cmd == "rollback") {
             if (need(1, "rollback <module> [steps]")) {
@@ -273,7 +277,24 @@ public:
     // Runs Lua in the scratch module and prints what it returned. True on success. A script that
     // pauses at a breakpoint goes to the background: its result prints when it finishes.
     bool exec(std::string_view source) {
-        auto p = client_.async().exec(source);
+        return wait_or_detach(client_.async().exec(source), "exec", [this](const Rhp::result<Rhp::value_list>& r) {
+            if (!r) {
+                error(r.error());
+                return false;
+            }
+            if (!r->empty()) {
+                plain(format_values(*r));
+            }
+            return true;
+        });
+    }
+
+    // Waits for a request (Ctrl+C cancels it). When a script of it pauses at a breakpoint (a pause
+    // whose request label is `label`, or ends in "." + label), it moves to the background and `done`
+    // runs when it ends; returns what `done` returned, or true for a backgrounded request.
+    template <class Pending, class Done>
+    bool wait_or_detach(Pending p, std::string label, Done done) {
+        pause_seen_.store(false); // pauses before this request aren't its own
         bool cancelled = false;
         while (!p.wait_for(std::chrono::milliseconds{50})) {
             if (!cancelled && interrupted_ && interrupted_()) {
@@ -281,20 +302,19 @@ public:
                 cancelled = true;
                 info("cancelling...");
             }
-            if (took_pause()) {
-                background_.push_back(std::move(p));
+            if (took_pause(label)) {
+                auto held = std::make_shared<Pending>(std::move(p));
+                background_.push_back([held, done]() mutable {
+                    if (!held->wait_for(std::chrono::milliseconds{0})) {
+                        return false;
+                    }
+                    (void)done(std::move(*held).get());
+                    return true;
+                });
                 return true;
             }
         }
-        auto r = std::move(p).get();
-        if (!r) {
-            error(r.error());
-            return false;
-        }
-        if (!r->empty()) {
-            plain(format_values(*r));
-        }
-        return true;
+        return done(std::move(p).get());
     }
 
     // load (or reload, by name) a file as a module; `pin` keeps it after this client leaves.
@@ -305,28 +325,30 @@ public:
             return false;
         }
         if (reload_only) {
-            auto r = client_.reload(parse_module(name), *source);
-            if (!r) {
-                error(r.error());
+            return wait_or_detach(client_.async().reload(parse_module(name), *source), name, [this, name](const Rhp::result<Rhp::revision_id>& r) {
+                if (!r) {
+                    error(r.error());
+                    return false;
+                }
+                info(std::format("reloaded {} (revision {})", name, *r));
+                return true;
+            });
+        }
+        return wait_or_detach(client_.async().load(name, *source), name, [this, name, pin](const Rhp::result<Rhp::module_id>& mod) {
+            if (!mod) {
+                error(mod.error());
                 return false;
             }
-            info(std::format("reloaded {} (revision {})", name, *r));
+            info(std::format("loaded {} #{}", name, *mod));
+            if (pin) {
+                if (auto pinned = client_.pin(*mod); !pinned) {
+                    error(pinned.error());
+                    return false;
+                }
+                info(std::format("pinned {}: it stays after this client disconnects", name));
+            }
             return true;
-        }
-        auto mod = client_.load(name, *source);
-        if (!mod) {
-            error(mod.error());
-            return false;
-        }
-        info(std::format("loaded {} #{}", name, *mod));
-        if (pin) {
-            if (auto pinned = client_.pin(*mod); !pinned) {
-                error(pinned.error());
-                return false;
-            }
-            info(std::format("pinned {}: it stays after this client disconnects", name));
-        }
-        return true;
+        });
     }
 
     // Writes the host's LuaLS stubs to `path` (empty: prints them).
@@ -612,7 +634,8 @@ public:
             return false;
         }
         // Wait a little for what happens next: the script finishes, or pauses again.
-        for (int i = 0; i < 40 && !took_pause(); ++i) {
+        pause_seen_.store(false);
+        for (int i = 0; i < 40 && !took_pause({}); ++i) {
             if (report_background()) {
                 return true;
             }
@@ -812,6 +835,10 @@ private:
             const bool paused = kind != nullptr && kind->get_if<std::string>() != nullptr && *kind->get_if<std::string>() == "paused";
             if (const Rhp::value* req = info_map.find("request"); req != nullptr && req->get_if<std::int64_t>() != nullptr && paused) {
                 last_paused_.store(static_cast<std::uint64_t>(*req->get_if<std::int64_t>()));
+                {
+                    const std::scoped_lock lock{pause_mutex_};
+                    pause_label_ = text("label");
+                }
                 pause_seen_.store(true);
             }
             out_(style::kInfo, std::format("{} at {}:{} (request {}, {}){}", paused ? "paused" : "hit (can't pause here)", text("source"), text("line"), text("request"),
@@ -824,25 +851,29 @@ private:
         }
     }
 
-    bool took_pause() { return pause_seen_.exchange(false); }
+    // A pause arrived since the flag was cleared (of a request labelled `label`, when one is given).
+    bool took_pause(const std::string& label) {
+        if (!pause_seen_.load()) {
+            return false;
+        }
+        if (!label.empty()) {
+            const std::scoped_lock lock{pause_mutex_};
+            if (pause_label_ != label && !pause_label_.ends_with("." + label)) {
+                return false;
+            }
+        }
+        return pause_seen_.exchange(false);
+    }
 
-    // Prints the results of scripts that paused and have finished since. True if one did.
+    // Prints the results of requests that paused and have finished since. True if one did.
     bool report_background() {
         bool any = false;
         for (auto it = background_.begin(); it != background_.end();) {
-            if (!it->wait_for(std::chrono::milliseconds{0})) {
-                ++it;
-                continue;
-            }
-            auto r = std::move(*it).get();
-            it = background_.erase(it);
-            any = true;
-            if (!r) {
-                error(r.error());
-            } else if (!r->empty()) {
-                plain(format_values(*r));
+            if ((*it)()) {
+                it = background_.erase(it);
+                any = true;
             } else {
-                info("the paused script finished");
+                ++it;
             }
         }
         return any;
@@ -949,8 +980,9 @@ Ctrl+C cancels a running script.)");
     std::optional<std::uint64_t> debug_events_; // the "rhp.debug" subscription, once debugging started
     std::atomic<bool> pause_seen_{false};
     std::atomic<std::uint64_t> last_paused_{0};
-    using pending_values = decltype(std::declval<Rhp::client<Cfg>&>().async().exec(std::string_view{}));
-    std::vector<pending_values> background_; // scripts that paused while exec waited for them
+    std::mutex pause_mutex_;
+    std::string pause_label_;                        // of the last pause (guarded by pause_mutex_)
+    std::vector<std::function<bool()>> background_; // requests that paused while the shell waited: true once done and printed
     std::jthread watcher_;
 };
 
