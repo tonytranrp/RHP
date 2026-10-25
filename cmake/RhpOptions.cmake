@@ -16,8 +16,10 @@ option(RHP_LUA_JUMP_YIELDS "Coroutine yields jump (_longjmp) instead of throwing
 option(RHP_FUZZ "Build Tests/fuzz as libFuzzer executables (Clang only); without it they are ctest replay drivers" OFF)
 # Clean builds (CI) compile RHP's own targets as unity files, 16 sources each: about a third less wall
 # time; an edit then recompiles its whole batch, so it is off for everyday work.
-# Shared precompiled headers: on for RHP's own desktop builds (measured there), off for cross builds.
-if(RHP_IS_TOP_LEVEL AND NOT CMAKE_CROSSCOMPILING)
+# Shared precompiled headers: on for RHP's own desktop builds (measured there), off for cross builds
+# and for clang-cl, which refuses a precompiled header compiled with other /D macros (each module
+# defines its own: RHP_TLS_HAS_*, LUA_USE_APICHECK, ...).
+if(RHP_IS_TOP_LEVEL AND NOT CMAKE_CROSSCOMPILING AND NOT (CMAKE_CXX_COMPILER_ID STREQUAL "Clang" AND CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC"))
     set(_rhp_pch_default ON)
 else()
     set(_rhp_pch_default OFF)
