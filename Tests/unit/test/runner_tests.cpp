@@ -6,7 +6,10 @@
 #include <format>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <map>
+#include <memory>
+#include <regex>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -19,6 +22,7 @@
 #include <rhp/script/lua_event.hpp>
 #include <rhp/script/patch_point.hpp>
 #include <rhp/script/sandbox.hpp>
+#include <rhp/core/json.hpp>
 #include <rhp/test/test.hpp>
 
 namespace fs = std::filesystem;
@@ -119,7 +123,7 @@ struct run {
 run run_specs(Rhp::test::run_options o, Rhp::test::install_fn install = install_arena()) {
     reset();
     std::ostringstream out;
-    auto report = Rhp::test::make_text_reporter(out, false, true);
+    auto report = Rhp::test::make_text_reporter(out, false, true, o.coverage);
     Rhp::test::runner r{std::move(o), std::move(install)};
     run x{r.run(*report), ""};
     x.text = out.str();
@@ -592,4 +596,367 @@ TEST_CASE("tests that never end are stopped", "[test][timeout]") {
     REQUIRE(waiter != nullptr);
     CHECK(waiter->outcome == status::kError);
     CHECK(waiter->message.find("500 frames") != std::string::npos);
+}
+
+namespace runner_tests_fixture {
+
+const Rhp::test::file_coverage* coverage_of(const run& x, std::string_view file) {
+    for (const auto& f : x.result.coverage) {
+        if (f.file == file) {
+            return &f;
+        }
+    }
+    return nullptr;
+}
+
+std::uint64_t hits_at(const Rhp::test::file_coverage& f, std::uint32_t line) {
+    for (std::size_t i = 0; i < f.lines.size(); ++i) {
+        if (f.lines[i] == line) {
+            return f.hits[i];
+        }
+    }
+    return (std::numeric_limits<std::uint64_t>::max)(); // not an executable line
+}
+
+constexpr std::uint64_t kNotExecutable = (std::numeric_limits<std::uint64_t>::max)();
+
+} // namespace runner_tests_fixture
+
+TEST_CASE("coverage counts lines of the scripts and honours exclusions", "[test][coverage]") {
+    const temp_tree tree{"cov", {"coverage_spec.lua"}};
+    Rhp::test::run_options o = tree.options({"coverage_spec.lua"});
+    o.coverage = {{Rhp::test::coverage_kind::kSummary, {}}};
+    for (const auto share : {Rhp::test::isolation::kFile, Rhp::test::isolation::kTest}) {
+        o.share = share;
+        const run x = run_specs(o);
+        INFO(x.text);
+        CHECK(x.result.totals.passed == 2);
+        const auto* combat = coverage_of(x, "scripts/game/combat.lua");
+        REQUIRE(combat != nullptr);
+        CHECK(hits_at(*combat, 1) == kNotExecutable); // a comment
+        CHECK(hits_at(*combat, 3) == kNotExecutable); // blank
+        CHECK(hits_at(*combat, 37) == 3);             // the loop body of big_list(3)
+        CHECK(hits_at(*combat, 10) == 1);             // damage(5, 1)
+        CHECK(hits_at(*combat, 8) == 0);              // armor >= base never
+        CHECK(hits_at(*combat, 26) == 0);             // stop() never runs
+        CHECK(hits_at(*combat, 45) == 200000);
+        CHECK(hits_at(*combat, 2) == (share == Rhp::test::isolation::kFile ? 1 : 2)); // loaded once per sandbox
+        const auto* util = coverage_of(x, "scripts/game/util.lua");
+        REQUIRE(util != nullptr);
+        CHECK(hits_at(*util, 5) == 1);
+        CHECK(hits_at(*util, 10) == kNotExecutable); // rhp: coverage off
+        CHECK(hits_at(*util, 16) == kNotExecutable); // luacov: disable
+        CHECK(hits_at(*util, 21) == 0);
+        CHECK(coverage_of(x, "specs/coverage_spec.lua") == nullptr);
+        CHECK(x.text.find("scripts/game/combat.lua") != std::string::npos); // the summary table
+
+        const std::string lcov = Rhp::test::lcov_text(x.result.coverage);
+        CHECK(lcov.find("SF:scripts/game/combat.lua\n") != std::string::npos);
+        CHECK(lcov.find("DA:37,3\n") != std::string::npos);
+        CHECK(lcov.find("end_of_record") != std::string::npos);
+        const std::string cobertura = Rhp::test::cobertura_text(x.result.coverage, tree.root.generic_string());
+        CHECK(cobertura.find("<coverage line-rate=") != std::string::npos);
+        CHECK(cobertura.find("filename=\"scripts/game/combat.lua\"") != std::string::npos);
+        CHECK(cobertura.find("<line number=\"37\" hits=\"3\" branch=\"false\"/>") != std::string::npos);
+    }
+
+    o.share = Rhp::test::isolation::kFile;
+    o.coverage_tests = true;
+    const run with_tests = run_specs(o);
+    const auto* spec = coverage_of(with_tests, "specs/coverage_spec.lua");
+    REQUIRE(spec != nullptr);
+    CHECK(hits_at(*spec, 5) == 1);
+}
+
+TEST_CASE("the profiler samples every test", "[test][profile]") {
+    const temp_tree tree{"prof", {"coverage_spec.lua"}};
+    Rhp::test::run_options o = tree.options({"coverage_spec.lua"});
+    o.profile = true;
+    o.profile_interval = 100;
+    const run x = run_specs(o);
+    INFO(x.text);
+    REQUIRE_FALSE(x.result.profile.empty());
+    const auto* sum = find(x.result, "spends time in sum");
+    REQUIRE(sum != nullptr);
+    REQUIRE_FALSE(sum->profile.empty());
+    bool in_sum = false;
+    for (const auto& s : sum->profile) {
+        in_sum = in_sum || s.stack.find("sum") != std::string::npos;
+    }
+    CHECK(in_sum);
+    const std::string folded = Rhp::test::folded_text(x.result.profile);
+    CHECK(folded.find("sum") != std::string::npos);
+    CHECK(folded.back() == '\n');
+}
+
+namespace runner_tests_fixture {
+
+// Report text without what changes between runs: durations, timestamps, table addresses.
+std::string normalized(std::string text) {
+    static const std::regex ms_text{R"(\b\d+(\.\d+)? (ms|s)\b)"};
+    static const std::regex ms_json{R"#("(ms|time_ms|wall_ms|duration_ms)":-?[0-9.e+-]+)#"};
+    static const std::regex xml_time{R"#(\b(time|timestamp)="[^"]*")#"};
+    static const std::regex tap_time{R"(duration_ms: [0-9.]+)"};
+    static const std::regex address{R"((table|function|userdata|thread): (0x)?[0-9A-Fa-f]+)"};
+    static const std::regex sizes{R"(peak [0-9.]+ (B|KiB|MiB), [0-9]+ alloc)"};
+    static const std::regex json_costs{R"#("(peak|bytes|allocations|retained|frames|instructions)":-?[0-9]+)#"};
+    static const std::regex ranking{R"(^ +[0-9][0-9.]*( (B|KiB|MiB))?  )"}; // "most instructions" lines
+    text = std::regex_replace(text, ms_text, "<time>");
+    text = std::regex_replace(text, ms_json, "\"$1\":0");
+    text = std::regex_replace(text, xml_time, "$1=\"0\"");
+    text = std::regex_replace(text, tap_time, "duration_ms: 0");
+    text = std::regex_replace(text, address, "$1: <addr>");
+    text = std::regex_replace(text, sizes, "<memory>");
+    text = std::regex_replace(text, json_costs, "\"$1\":0");
+    std::string out;
+    std::istringstream lines{text};
+    for (std::string line; std::getline(lines, line);) {
+        out += std::regex_replace(line, ranking, "    <n>  ") + "\n";
+    }
+    return out;
+}
+
+void check_golden(std::string_view name, const std::string& actual) {
+    const fs::path golden = kFixtures.parent_path() / "golden" / name;
+    const std::string text = normalized(actual);
+    std::string expected = fs::exists(golden) ? temp_tree::read_file(golden) : std::string{};
+    std::erase(expected, '\r'); // a checkout with CRLF line ends
+    if (text != expected) {
+        temp_tree::write_file(fs::path{golden} += ".actual", text); // review it, then rename it over the golden file
+    }
+    INFO("golden " << golden.generic_string());
+    CHECK(text == expected);
+}
+
+std::string report_with(Rhp::test::report_kind kind, Rhp::test::run_options o) {
+    std::ostringstream out;
+    std::unique_ptr<Rhp::test::reporter> r;
+    switch (kind) {
+    case Rhp::test::report_kind::kText: r = Rhp::test::make_text_reporter(out, false, false); break;
+    case Rhp::test::report_kind::kTap: r = Rhp::test::make_tap_reporter(out); break;
+    case Rhp::test::report_kind::kJunit: r = Rhp::test::make_junit_reporter(out); break;
+    case Rhp::test::report_kind::kJson: r = Rhp::test::make_json_reporter(out); break;
+    case Rhp::test::report_kind::kGithub: r = Rhp::test::make_github_reporter(out); break;
+    }
+    reset();
+    Rhp::test::runner runner{std::move(o), install_arena()};
+    (void)runner.run(*r);
+    return out.str();
+}
+
+} // namespace runner_tests_fixture
+
+TEST_CASE("reporters write the formats they promise", "[test][reporter]") {
+    const Rhp::test::run_options o = options_for({"basics_spec.lua", "broken_describe_spec.lua"});
+    check_golden("basics.txt", report_with(Rhp::test::report_kind::kText, o));
+    check_golden("basics.tap", report_with(Rhp::test::report_kind::kTap, o));
+    check_golden("basics.junit.xml", report_with(Rhp::test::report_kind::kJunit, o));
+    check_golden("basics.jsonl", report_with(Rhp::test::report_kind::kJson, o));
+    check_golden("basics.github", report_with(Rhp::test::report_kind::kGithub, o));
+}
+
+TEST_CASE("the API description lists libs functions variables and handles", "[test][fake]") {
+    auto api = Rhp::test::describe_api(install_arena());
+    REQUIRE(api);
+    const std::string json = Rhp::json::to_text(*api);
+    INFO(json);
+    CHECK(json.find("\"name\":\"arena\"") != std::string::npos);
+    CHECK(json.find("\"name\":\"spawn\",\"params\":[\"string\",\"integer\"],\"returns\":[\"integer\"]") != std::string::npos);
+    CHECK(json.find("\"name\":\"gravity\",\"type\":\"number\",\"writable\":true") != std::string::npos);
+    CHECK(json.find("\"name\":\"unit\",\"methods\":[{\"name\":\"move\",\"params\":[\"integer\"]") != std::string::npos);
+}
+
+TEST_CASE("libs faked from a description stand in for the program", "[test][fake]") {
+    auto api = Rhp::test::describe_api(install_arena());
+    REQUIRE(api);
+    Rhp::test::run_options o = options_for({"fakes_spec.lua"});
+    o.api = *api;
+    run x = run_specs(o, {}); // no real libs at all
+    INFO(x.text);
+    check_conventions(x);
+    const auto* typed = find(x.result, "description fakes arguments are type checked (errors)");
+    REQUIRE(typed != nullptr);
+    CHECK(typed->message.find("string") != std::string::npos);
+    CHECK(g_spawned.empty());
+
+    o.strict_fakes = true;
+    x = run_specs(o, {});
+    const auto* strict = find(x.result, "description fakes functions record calls and return defaults (ok)");
+    REQUIRE(strict != nullptr);
+    CHECK(strict->outcome == status::kError);
+    CHECK(strict->message.find("not mocked") != std::string::npos);
+}
+
+TEST_CASE("fake of a lib records calls instead of reaching the program", "[test][fake]") {
+    const Rhp::test::install_fn install = [](Rhp::script::sandbox& box) { return box.install<Rhp::test::fake<arena_lib>>(); };
+    Rhp::test::run_options o = options_for({"fake_cpp_spec.lua"});
+    run x = run_specs(o, install);
+    INFO(x.text);
+    check_conventions(x);
+    CHECK(g_spawned.empty());
+    CHECK(g_gravity == 9.5);
+    CHECK(Rhp::test::fake_registry::instance().calls("arena.spawn").empty()); // reset for each test
+
+    o.strict_fakes = true;
+    x = run_specs(o, install);
+    const auto* strict = find(x.result, "fake<L> calls are recorded with their arguments (ok)");
+    REQUIRE(strict != nullptr);
+    CHECK(strict->outcome == status::kError);
+    CHECK(strict->message.find("not mocked") != std::string::npos);
+    CHECK_FALSE(Rhp::test::fake_registry::instance().strict());
+}
+
+namespace runner_tests_fixture {
+
+struct cli_run {
+    int status = 0;
+    std::string out;
+    std::string err;
+};
+
+cli_run run_cli(std::vector<std::string> args, const Rhp::test::install_fn& install = install_arena()) {
+    std::vector<std::string_view> views{args.begin(), args.end()};
+    std::ostringstream out;
+    std::ostringstream err;
+    reset();
+    const int status = Rhp::test::run_cli(views, install, "lua-tests", out, err);
+    return {status, out.str(), err.str()};
+}
+
+Rhp::result<Rhp::test::cli_options> parse(std::vector<std::string_view> args) {
+    return Rhp::test::parse_args(args);
+}
+
+} // namespace runner_tests_fixture
+
+TEST_CASE("arguments parse into options", "[test][cli]") {
+    auto p = parse({"specs", "-s", "scripts", "--filter", "combat", "--filter-out", "slow", "-t", "a,b", "--exclude-tags", "net", "--seed", "7", "--shuffle",
+                    "--repeat", "3", "--fail-fast", "--isolation", "test", "--role", "admin", "--timeout", "250", "--max-frames", "99", "--instructions", "1000",
+                    "--memory", "4096", "-r", "junit:out/j.xml", "-r", "tap", "-v", "--coverage", "lcov", "--coverage", "cobertura:c.xml", "--coverage-tests",
+                    "--profile=50", "--profile-out", "p.folded", "--no-measure", "--strict-undo", "--ci", "-u", "--fuzz", "300", "--property-runs", "20",
+                    "--api", "api.json", "--strict-fakes", "--list", "--no-color", "--root", "r"});
+    REQUIRE(p);
+    const Rhp::test::run_options& o = p->run;
+    CHECK(o.tests == std::vector<fs::path>{"specs"});
+    CHECK(o.scripts == std::vector<fs::path>{"scripts"});
+    CHECK(o.filters == std::vector<std::string>{"combat"});
+    CHECK(o.filters_out == std::vector<std::string>{"slow"});
+    CHECK(o.tags == std::vector<std::string>{"a", "b"});
+    CHECK(o.exclude_tags == std::vector<std::string>{"net"});
+    CHECK(o.seed == 7u);
+    CHECK(o.shuffle);
+    CHECK(o.repeat == 3);
+    CHECK(o.fail_fast);
+    CHECK(o.share == Rhp::test::isolation::kTest);
+    CHECK(o.caller == Rhp::role::kAdmin);
+    CHECK(o.timeout == std::chrono::milliseconds{250});
+    CHECK(o.max_frames == 99);
+    CHECK(o.limits.instructions == 1000);
+    CHECK(o.limits.memory == 4096);
+    REQUIRE(o.reports.size() == 2);
+    CHECK(o.reports[0].kind == Rhp::test::report_kind::kJunit);
+    CHECK(o.reports[0].path == fs::path{"out/j.xml"});
+    CHECK(o.reports[1].kind == Rhp::test::report_kind::kTap);
+    CHECK(o.reports[1].path.empty());
+    CHECK(o.verbose);
+    REQUIRE(o.coverage.size() == 2);
+    CHECK(o.coverage[0].path == fs::path{"lcov.info"});
+    CHECK(o.coverage[1].kind == Rhp::test::coverage_kind::kCobertura);
+    CHECK(o.coverage[1].path == fs::path{"c.xml"});
+    CHECK(o.coverage_tests);
+    CHECK(o.profile);
+    CHECK(o.profile_interval == 50);
+    CHECK(o.profile_out == fs::path{"p.folded"});
+    CHECK_FALSE(o.measure);
+    CHECK(o.strict_undo);
+    CHECK(o.ci);
+    CHECK(o.update_snapshots);
+    CHECK(o.fuzz_ms == 300u);
+    CHECK(o.property_runs == 20);
+    CHECK(p->api_file == fs::path{"api.json"});
+    CHECK(o.strict_fakes);
+    CHECK(o.list_only);
+    CHECK(o.color == false);
+    CHECK(o.root == fs::path{"r"});
+
+    CHECK(parse({"--help"})->help);
+    CHECK(parse({"-r", "C:/reports/x.txt"}).error().message.find("unknown reporter") != std::string::npos);
+    CHECK(parse({"-r", "junit:C:/reports/x.xml"})->run.reports[0].path == fs::path{"C:/reports/x.xml"});
+    for (const auto& bad : std::vector<std::vector<std::string_view>>{
+             {"--bogus"}, {"--seed", "x"}, {"--seed"}, {"--repeat", "0"}, {"--isolation", "module"}, {"--role", "root"}, {"--timeout", "0"},
+             {"-r", "html"}, {"--coverage", "gcov"}, {"--profile=x"}, {"--property-runs", "0"}, {"--max-frames", "-1"}}) {
+        INFO(bad[0]);
+        const auto r = parse(bad);
+        REQUIRE_FALSE(r);
+        CHECK(r.error().code == Rhp::errc::kInvalidArgument);
+    }
+}
+
+TEST_CASE("the command line runs tests and writes reports", "[test][cli]") {
+    const temp_tree tree{"cli", {"basics_spec.lua", "isolation_spec.lua", "coverage_spec.lua"}};
+    const std::string root = tree.root.generic_string();
+    const std::string specs = (tree.root / "specs").generic_string();
+    const std::string scripts = (tree.root / "scripts").generic_string();
+
+    cli_run r = run_cli({"--help"});
+    CHECK(r.status == 0);
+    CHECK(r.out.starts_with("usage: lua-tests"));
+    r = run_cli({});
+    CHECK(r.status == 2);
+    CHECK(r.err.find("no test files") != std::string::npos);
+    r = run_cli({"--bogus"});
+    CHECK(r.status == 2);
+
+    r = run_cli({specs + "/isolation_spec.lua", "-s", scripts, "--root", root, "--no-color"});
+    INFO(r.out << r.err);
+    CHECK(r.status == 0);
+    CHECK(r.out.find("2 passed") != std::string::npos);
+
+    r = run_cli({specs + "/basics_spec.lua", specs + "/coverage_spec.lua", "-s", scripts, "--root", root, "--seed", "1", "-r", "text",
+                 "-r", "junit:" + root + "/out/junit.xml", "-r", "json:" + root + "/out/events.jsonl", "-r", "tap:" + root + "/out/tap.txt",
+                 "--coverage", "summary", "--coverage", "lcov:" + root + "/out/lcov.info", "--coverage", "cobertura:" + root + "/out/cobertura.xml",
+                 "--profile-out", root + "/out/profile.folded"});
+    CHECK(r.status == 1); // basics has failures
+    CHECK(r.out.find("seed 1") != std::string::npos);
+    CHECK(r.out.find("scripts/game/combat.lua") != std::string::npos); // the coverage summary
+    CHECK(temp_tree::read_file(tree.root / "out" / "junit.xml").find("<testsuites") != std::string::npos);
+    CHECK(temp_tree::read_file(tree.root / "out" / "events.jsonl").find("\"event\":\"run_end\"") != std::string::npos);
+    CHECK(temp_tree::read_file(tree.root / "out" / "tap.txt").starts_with("TAP version 14"));
+    CHECK(temp_tree::read_file(tree.root / "out" / "lcov.info").find("SF:scripts/game/combat.lua") != std::string::npos);
+    CHECK(temp_tree::read_file(tree.root / "out" / "cobertura.xml").find("<coverage") != std::string::npos);
+    CHECK(temp_tree::read_file(tree.root / "out" / "profile.folded").find("sum") != std::string::npos);
+
+    // Folders are searched; --list doesn't run anything.
+    r = run_cli({specs, "-s", scripts, "--root", root, "--list"});
+    CHECK(r.status == 0);
+    CHECK(r.out.find("specs/basics_spec.lua:5  damage subtracts armor") != std::string::npos);
+    CHECK(r.out.find("specs/isolation_spec.lua") != std::string::npos);
+    CHECK(r.out.find("(skipped)") != std::string::npos);
+    r = run_cli({specs, "-s", scripts, "--root", root, "--list", "-r", "json", "-t", "fast"});
+    CHECK(r.status == 0);
+    const auto first = Rhp::json::parse(r.out.substr(0, r.out.find('\n')));
+    REQUIRE(first);
+    CHECK(first->find("event")->get_if<std::string>() != nullptr);
+    CHECK(r.out.find("handles tables and strings #fast") != std::string::npos);
+    CHECK(r.out.find("damage subtracts armor") == std::string::npos);
+}
+
+TEST_CASE("the API description round trips through a file", "[test][cli]") {
+    const temp_tree tree{"api", {"fakes_spec.lua"}};
+    const std::string root = tree.root.generic_string();
+    const std::string api = root + "/out/api.json";
+    cli_run r = run_cli({"--dump-api", api});
+    CHECK(r.status == 0);
+    REQUIRE(fs::exists(api));
+    CHECK(Rhp::json::parse(temp_tree::read_file(api)).has_value());
+
+    r = run_cli({root + "/specs/fakes_spec.lua", "-s", root + "/scripts", "--root", root, "--api", api, "--filter-out", "type checked"}, {});
+    INFO(r.out << r.err);
+    CHECK(r.status == 0);
+    r = run_cli({root + "/specs/fakes_spec.lua", "--api", root + "/missing.json"}, {});
+    CHECK(r.status == 2);
+    temp_tree::write_file(tree.root / "bad.json", "{\"not\": \"an api\"}");
+    r = run_cli({root + "/specs/fakes_spec.lua", "--api", root + "/bad.json"}, {});
+    CHECK(r.status == 2);
+    CHECK(r.err.find("isn't an API description") != std::string::npos);
 }

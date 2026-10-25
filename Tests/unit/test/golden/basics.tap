@@ -1,0 +1,42 @@
+TAP version 14
+# seed 42
+ok 1 - specs/basics_spec.lua: damage subtracts armor
+ok 2 - specs/basics_spec.lua: damage never goes below zero
+not ok 3 - specs/basics_spec.lua: damage fails on purpose
+  ---
+  message: "Expected objects to be equal.\nPassed in:\n(number) 7\nExpected:\n(number) 8"
+  severity: fail
+  at: "specs/basics_spec.lua:14"
+  expected: "8"
+  actual: "7"
+  stack: "specs/basics_spec.lua:14: in function"
+  ...
+not ok 4 - specs/basics_spec.lua: damage fails a deep comparison
+  ---
+  message: "Expected objects to be the same.\nPassed in:\n(table: <addr>) {\n  [a] = (number) 1\n *[b] = (table: <addr>) {\n   *[c] = (number) 3 } }\nExpected:\n(table: <addr>) {\n  [a] = (number) 1\n *[b] = (table: <addr>) {\n   *[c] = (number) 2 } }\nFirst difference at b.c: 3 instead of 2"
+  severity: fail
+  at: "specs/basics_spec.lua:18"
+  expected: "{\n  a = 1,\n  b = {\n    c = 2,\n  },\n}"
+  actual: "{\n  a = 1,\n  b = {\n    c = 3,\n  },\n}"
+  stack: "specs/basics_spec.lua:18: in function"
+  ...
+not ok 5 - specs/basics_spec.lua: damage errors on purpose
+  ---
+  message: "specs/basics_spec.lua:23: attempt to index a nil value (local 't')"
+  severity: error
+  at: "specs/basics_spec.lua:23"
+  stack: "specs/basics_spec.lua:23: in function"
+  ...
+ok 6 - specs/basics_spec.lua: damage is pending # TODO pending
+ok 7 - specs/basics_spec.lua: damage is skipped # SKIP
+ok 8 - specs/basics_spec.lua: hooks runs before_each first
+ok 9 - specs/basics_spec.lua: hooks ran after_each after the first test
+ok 10 - specs/basics_spec.lua: handles tables and strings \#fast
+ok 11 - specs/broken_describe_spec.lua: declared before (ok)
+not ok 12 - specs/broken_describe_spec.lua: describe 'broken' failed: specs/broken_describe_spec.lua:5: attempt to index a nil value (local 'x')
+  ---
+  message: "describe 'broken' failed: specs/broken_describe_spec.lua:5: attempt to index a nil value (local 'x')"
+  at: "specs/broken_describe_spec.lua:5"
+  ...
+1..12
+# 6 passed, 2 failed, 2 errors, 1 pending, 1 skipped

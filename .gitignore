@@ -19,3 +19,4 @@ rhp_audit.log
 /.claude/worktrees/
 # per-session handoff notes written by a local hook
 /.claude/handoff.md
+Tests/unit/test/golden/*.actual

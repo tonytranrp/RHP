@@ -29,6 +29,7 @@
 #include <rhp/script/sandbox.hpp>
 #include <rhp/test/detail/framework.hpp>
 #include <rhp/test/fake_registry.hpp>
+#include <rhp/utils/scope_guard.hpp>
 #include <rhp/test/runner.hpp>
 #include <rhp/utils/crc32c.hpp>
 
@@ -593,7 +594,7 @@ struct runner::impl {
                     clock = *due;
                     idle = 0;
                 } else if (const script::sandbox_stats st = box.stats();
-                       st.queued_events == 0 && (st.waiting != 0 || st.async_waiting != 0) && ++idle > 100) {
+                           st.queued_events == 0 && (st.waiting != 0 || st.async_waiting != 0) && ++idle > 100) {
                     timed_out = true;
                     box.cancel(id);
                     box.pump();
@@ -1018,6 +1019,7 @@ struct runner::impl {
             return r;
         }
 
+        fake_registry::instance().reset(); // fake<L> calls and results belong to one test
         (void)box.checkpoint("rhp.test");
         const script::sandbox_stats before_stats = box.stats();
         const std::size_t before_effects = box.effects().size();
@@ -1298,6 +1300,10 @@ struct runner::impl {
         run_result rr;
         rr.seed = seed;
         const auto started = steady::now();
+        // fake<L> libs are strict for this run when asked (and as they were afterwards).
+        const bool was_strict = fake_registry::instance().strict();
+        fake_registry::instance().set_strict(was_strict || options.strict_fakes);
+        const utils::scope_guard restore{[was_strict]() noexcept { fake_registry::instance().set_strict(was_strict); }};
         const std::vector<fs::path> files = test_files();
         out.run_started(seed, files.size());
         bool stop = false;
