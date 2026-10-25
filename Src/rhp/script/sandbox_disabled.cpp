@@ -38,7 +38,7 @@ sandbox::~sandbox() = default;
 sandbox::sandbox(sandbox&&) noexcept = default;
 sandbox& sandbox::operator=(sandbox&&) noexcept = default;
 
-result<void> sandbox::install_lib(std::string_view, c_function, stub_fn, detail::tunables_fn) {
+result<void> sandbox::install_lib(std::string_view, c_function, stub_fn, detail::tunables_fn, api_fn) {
     return disabled();
 }
 
@@ -136,6 +136,10 @@ const ledger& sandbox::effects() const noexcept {
     return impl_->effects_;
 }
 
+value sandbox::api() const {
+    return value{value::map{}};
+}
+
 std::string sandbox::stubs() const {
     return {};
 }
@@ -217,6 +221,52 @@ profile_report sandbox::profile() const {
 
 profile_report sandbox::stop_profile() {
     return {};
+}
+
+void sandbox::start_metering() {}
+
+void sandbox::stop_metering() {}
+
+run_meter sandbox::meter() {
+    return {};
+}
+
+void sandbox::reset_peak() noexcept {}
+
+result<void> sandbox::collect_garbage() {
+    return disabled();
+}
+
+result<void> sandbox::set_gc_mode(gc_mode) {
+    return disabled();
+}
+
+result<void> sandbox::start_coverage() {
+    return disabled();
+}
+
+coverage_report sandbox::coverage() const {
+    return {};
+}
+
+coverage_report sandbox::stop_coverage() {
+    return {};
+}
+
+result<void> sandbox::enable_testing(testing_options) {
+    return disabled();
+}
+
+std::optional<std::chrono::steady_clock::time_point> sandbox::next_due() const {
+    return std::nullopt;
+}
+
+result<value_list> sandbox::call_point(std::string_view, std::span<const value>) {
+    return disabled();
+}
+
+result<void> sandbox::fire_event(std::string_view, std::span<const value>) {
+    return disabled();
 }
 
 } // namespace Rhp::script

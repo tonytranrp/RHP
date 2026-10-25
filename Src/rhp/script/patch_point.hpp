@@ -2,12 +2,21 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <format>
 #include <memory>
+#include <optional>
+#include <span>
+#include <string>
 #include <string_view>
+#include <tuple>
+#include <type_traits>
 #include <utility>
+#include <vector>
 
 #include <rhp/build_config.hpp>
+#include <rhp/core/convert.hpp>
 #include <rhp/core/result.hpp>
+#include <rhp/core/value.hpp>
 #include <rhp/script/detail/context.hpp>
 #include <rhp/script/detail/patch_layers.hpp>
 #include <rhp/script/detail/patch_registry.hpp>
@@ -16,6 +25,7 @@
 #include <rhp/utils/fixed_string.hpp>
 #include <rhp/utils/function_traits.hpp>
 #include <rhp/utils/scope_guard.hpp>
+#include <rhp/utils/type_list.hpp>
 
 namespace Rhp {
 
@@ -126,12 +136,58 @@ private:
     static std::size_t depth_erased() { return state_.depth(); }
     static std::uint64_t misses_erased() { return state_.off_thread_misses(); }
 
+    // Calls the point from values (test runners call points this way): every parameter must come
+    // from a value and the result go back to one.
+    static result<std::vector<value>> invoke_erased(std::span<const value> args) {
+        using traits = utils::function_traits<signature>;
+        if (args.size() != traits::arity) {
+            return fail(errc::kInvalidArgument, std::format("expected {} arguments, got {}", traits::arity, args.size()), std::string{id});
+        }
+        return [&]<class... A>(utils::type_list<A...>) -> result<std::vector<value>> {
+            return [&]<std::size_t... I>(std::index_sequence<I...>) -> result<std::vector<value>> {
+                std::tuple<result<std::remove_cvref_t<A>>...> converted{from_value<std::remove_cvref_t<A>>(args[I])...};
+                std::optional<error> bad;
+                ((bad || std::get<I>(converted) ? void() : void(bad = std::get<I>(converted).error())), ...);
+                if (bad) {
+                    bad->where = std::format("{} argument {}", id, bad->where.empty() ? std::string{"?"} : bad->where);
+                    return std::unexpected{std::move(*bad)};
+                }
+                using R = typename traits::return_type;
+                if constexpr (std::is_void_v<R>) {
+                    dispatch(std::move(*std::get<I>(converted))...);
+                    return std::vector<value>{};
+                } else {
+                    return std::vector<value>{to_value(dispatch(std::move(*std::get<I>(converted))...))};
+                }
+            }(std::index_sequence_for<A...>{});
+        }(typename traits::args{});
+    }
+
+    template <class A>
+    static constexpr bool kValueParameter = from_value_convertible<std::remove_cvref_t<A>> &&
+                                            !(std::is_lvalue_reference_v<A> && !std::is_const_v<std::remove_reference_t<A>>);
+
+    static constexpr bool kValueCallable = []<class... A>(utils::type_list<A...>) {
+        using R = typename utils::function_traits<signature>::return_type;
+        return (kValueParameter<A> && ...) && (std::is_void_v<R> || to_value_convertible<std::remove_cvref_t<R>>);
+    }(typename utils::function_traits<signature>::args{});
+
+    // invoke_erased, or nullptr (its body isn't instantiated then).
+    static constexpr auto invoker_ = [] {
+        if constexpr (kValueCallable) {
+            return &patch_point::invoke_erased;
+        } else {
+            return static_cast<decltype(&patch_point::invoke_erased)>(nullptr);
+        }
+    }();
+
     static constexpr script::detail::point_descriptor descriptor_{
         id,
         utils::arity_v<decltype(Default)>,
         &attach_lua,
         &depth_erased,
         &misses_erased,
+        invoker_,
     };
 
     static inline constinit script::detail::point_state<signature> state_{Default};

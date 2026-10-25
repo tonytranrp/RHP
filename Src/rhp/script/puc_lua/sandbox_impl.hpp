@@ -3,6 +3,7 @@
 // Private to Src/rhp/script/puc_lua: the sandbox behind Rhp::script::sandbox. Deliberately free of
 // lua.h (the .cpp files that include this one include lua.h themselves).
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -300,6 +301,7 @@ struct handler_opts {
 
 struct profiler_state;
 struct debugger_state;
+struct coverage_state;
 
 class sandbox_impl final : public context, public event_listener {
 public:
@@ -326,7 +328,8 @@ public:
     void enqueue(std::string_view event, const event_args& args) noexcept override;
 
     // ---- sandbox operations ------------------------------------------------------------------
-    result<void> install_lib(std::string_view name, c_function build, std::string (*describe)(role), tunables_fn collect);
+    result<void> install_lib(std::string_view name, c_function build, std::string (*describe)(role), tunables_fn collect, value (*api)(role));
+    [[nodiscard]] value api() const;
     result<value_list> exec(std::string_view source, std::string_view chunk_name);
     result<std::vector<tunable_info>> tunables(std::string_view prefix);
     result<void> tune(std::string_view path, const value& v);
@@ -345,6 +348,37 @@ public:
     result<void> start_profile(const profile_options& options);
     [[nodiscard]] profile_report profile() const;
     profile_report stop_profile();
+
+    // ---- testing (testing.cpp) ----------------------------------------------------------------
+    void start_metering();
+    void stop_metering();
+    [[nodiscard]] run_meter meter();
+    void reset_peak() noexcept { peak_ = memory_used_; }
+    result<void> collect_garbage();
+    result<void> set_gc_mode(gc_mode mode);
+    result<void> start_coverage();
+    [[nodiscard]] coverage_report coverage() const;
+    coverage_report stop_coverage();
+    result<void> enable_testing(testing_options options);
+    [[nodiscard]] std::optional<steady::time_point> next_due() const;
+    result<value_list> call_point(std::string_view id, std::span<const value> args);
+    result<void> fire_event(std::string_view name, std::span<const value> args);
+    [[nodiscard]] bool metering() const noexcept { return metering_; }
+    // Folds the instructions L ran since its last hook tick into the meter (and into the budgets of
+    // the runs on the stack, so a limit still sees them). Cheap; a no-op unless metering.
+    void credit_hook_progress(lua_State* L) noexcept;
+    // The test bridge's services (testing.cpp).
+    [[nodiscard]] const testing_options& test_options() const noexcept { return testing_; }
+    [[nodiscard]] steady::duration script_elapsed() const { return script_now() - testing_started_; }
+    // Swaps `key` of a lib proxy's members, a module's exports or a plain table for the value on
+    // top of L's stack (popped), journaled: undoing the effect puts the original back. Pushes the
+    // original. Raises for anything else.
+    void swap_member(lua_State* L, int target, int key);
+    // Swaps a lib variable's getter and setter (`getter` / `setter` stack slots), journaled. Pushes
+    // the original getter and setter.
+    void swap_variable(lua_State* L, int target, int key, int getter, int setter);
+    // The module behind a require() proxy at `index` (nullptr if it isn't one, or the module is gone).
+    [[nodiscard]] const module_record* module_of_proxy(lua_State* L, int index) const noexcept;
     result<module_id> load(std::string_view name, std::string_view source);
     result<revision_id> reload(module_id mod, std::string_view source);
     result<revision_id> rollback(module_id mod, std::size_t steps);
@@ -451,6 +485,13 @@ private:
 
     void open_libraries();
     void open_stage7_libraries(); // the task metatable (tasks.cpp)
+    // Coverage (testing.cpp): a line event, and a chunk just compiled (its function on top of the stack).
+    void coverage_line(lua_State* L, lua_Debug* ar) noexcept;
+    void coverage_compiled(lua_State* L, std::string_view chunk) noexcept;
+    // The hook counts instructions on every run (the profiler or the meter is on).
+    [[nodiscard]] bool counts_everywhere() const noexcept { return profiler_ != nullptr || metering_; }
+    // The hook needs line events (coverage, or the debugger's breakpoints, steps and pause).
+    [[nodiscard]] bool wants_line_events() const noexcept;
     // The debugger's line hook: breakpoints, steps and pause() (debug.cpp).
     void line_event(lua_State* L, lua_Debug* ar);
     // One profiler sample of L's stack (profile.cpp).
@@ -592,6 +633,21 @@ private:
     sandbox_options options_;
     std::pmr::memory_resource* memory_; // nullptr: the C heap (realloc)
     std::size_t memory_used_ = 0;
+    // Allocation counters (sandbox::meter): always on, a few increments per allocation.
+    std::size_t peak_ = 0;
+    std::uint64_t allocations_ = 0;
+    std::uint64_t frees_ = 0;
+    std::uint64_t bytes_allocated_ = 0;
+    std::array<std::uint64_t, kAllocKinds> objects_{};
+    // The meter (start_metering): exact instruction counts and the time Lua runs.
+    bool metering_ = false;
+    std::uint64_t meter_instructions_ = 0;
+    steady::duration meter_active_{};
+    steady::time_point meter_run_started_{}; // the outermost run started (while metering)
+    // The test bridge (enable_testing).
+    bool testing_on_ = false;
+    testing_options testing_{};
+    steady::time_point testing_started_{};
     bool timed_ = false; // limits.wall_ms: runs read the clock
     lua_State* state_ = nullptr;
     int loader_ref_ = kNoRef;
@@ -600,6 +656,7 @@ private:
     std::map<module_id, module_record> modules_;
     std::map<std::string, std::uint64_t, std::less<>> checkpoints_;
     std::vector<std::string (*)(role)> describers_;
+    std::vector<value (*)(role)> api_describers_;
     std::vector<tunable_info> tunables_; // every ::var and ::ro of the installed libs
     id_generator<module_id> ids_;
     module_id scratch_;
@@ -657,6 +714,7 @@ private:
     std::optional<steady::time_point> slice_deadline_;
     bool hook_dirty_ = false;
     std::unique_ptr<profiler_state> profiler_;  // while profiling
+    std::unique_ptr<coverage_state> coverage_;  // while recording coverage
     std::unique_ptr<debugger_state> debugger_;  // breakpoints, steps, paused requests (created on first use)
 
     // Shared with other threads.

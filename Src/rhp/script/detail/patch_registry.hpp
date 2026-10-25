@@ -3,10 +3,12 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <span>
 #include <string_view>
 #include <vector>
 
 #include <rhp/core/result.hpp>
+#include <rhp/core/value.hpp>
 
 namespace Rhp::script {
 
@@ -27,6 +29,9 @@ struct point_descriptor {
     std::size_t (*depth)() = nullptr;
     // Calls that hit a layer owned by another thread and ran the C++ default instead.
     std::uint64_t (*off_thread_misses)() = nullptr;
+    // Calls the point with values converted to its parameters (overrides included) and returns its
+    // result as values (none for void). nullptr when a parameter or the result isn't a value type.
+    result<std::vector<value>> (*invoke)(std::span<const value> args) = nullptr;
 };
 
 // Process-wide id -> point table. Returns false if another point type already uses the id; that

@@ -2,6 +2,7 @@
 
 // Private to Src/rhp/script/puc_lua: the profiler's and the debugger's state (profile.cpp, debug.cpp).
 
+#include <algorithm>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -63,13 +64,13 @@ struct profiler_state {
     std::chrono::steady_clock::time_point started;
     std::uint64_t samples = 0;
     std::uint64_t dropped = 0;
-    std::uint64_t pending = 0; // instructions since the last sample
+    std::uint64_t pending = 0;                                                              // instructions since the last sample
     std::unordered_map<std::string, std::uint32_t, string_hash, std::equal_to<>> frame_ids; // frame text -> id
     std::vector<std::string> frames;                                                        // id -> frame text
     std::unordered_map<std::vector<std::uint32_t>, std::uint64_t, frames_hash> stacks;      // innermost frame first
     std::vector<std::uint32_t> scratch;                                                     // one sample's frame ids, reused
     std::string text;                                                                       // one frame's text, reused
-    std::unordered_map<frame_key, frame_slot, frame_key_hash> known; // frames seen, by the addresses of their strings
+    std::unordered_map<frame_key, frame_slot, frame_key_hash> known;                        // frames seen, by the addresses of their strings
 };
 
 struct debugger_state {
@@ -100,6 +101,74 @@ struct debugger_state {
 
     // Line events are needed (the hook adds LUA_MASKLINE).
     [[nodiscard]] bool wants_lines() const noexcept { return !breakpoints.empty() || pause_next || step.has_value(); }
+};
+
+// Line coverage (testing.cpp): hit counts per chunk, found from the running function's prototype.
+struct coverage_state {
+    struct chunk_hits {
+        std::string name;
+        std::vector<std::uint32_t> lines;             // executable lines, sorted
+        std::vector<std::uint64_t> hits;              // per entry of `lines`
+        std::vector<std::uint32_t> slot;              // line -> index in `lines` + 1 (0: not executable)
+        std::map<std::uint32_t, std::uint64_t> extra; // lines that ran but weren't known
+        std::uint64_t distinct = 0;                   // entries of `lines` hit at least once
+    };
+
+    std::vector<chunk_hits> chunks;
+    std::unordered_map<std::string, std::uint32_t, string_hash, std::equal_to<>> by_name;
+    std::unordered_map<const void*, std::uint32_t> by_proto; // function prototype -> chunk
+    const void* last_proto = nullptr;                        // the prototype of the last line event
+    std::uint32_t last_chunk = 0;
+    std::uint64_t distinct = 0; // (chunk, line) pairs hit at least once, `extra` included
+
+    // The chunk named `name` (created without lines when it is new).
+    std::uint32_t chunk(std::string_view name) {
+        if (const auto it = by_name.find(name); it != by_name.end()) {
+            return it->second;
+        }
+        const auto index = static_cast<std::uint32_t>(chunks.size());
+        chunks.push_back(chunk_hits{std::string{name}, {}, {}, {}, {}, 0});
+        by_name.emplace(std::string{name}, index);
+        return index;
+    }
+
+    // Adds executable lines to a chunk (a module compiled again keeps the lines of before too).
+    void add_lines(std::uint32_t index, const std::vector<std::uint32_t>& lines) {
+        chunk_hits& c = chunks[index];
+        for (const std::uint32_t line : lines) {
+            if (line < c.slot.size() && c.slot[line] != 0) {
+                continue;
+            }
+            const auto pos = std::ranges::lower_bound(c.lines, line);
+            const auto at = static_cast<std::size_t>(pos - c.lines.begin());
+            c.lines.insert(pos, line);
+            c.hits.insert(c.hits.begin() + static_cast<std::ptrdiff_t>(at), std::uint64_t{0});
+            if (const auto e = c.extra.find(line); e != c.extra.end()) { // ran before it was known
+                c.hits[at] = e->second;
+                c.distinct += e->second != 0 ? 1 : 0; // already in the sandbox-wide count
+                c.extra.erase(e);
+            }
+        }
+        std::uint32_t top = c.lines.empty() ? 0 : c.lines.back();
+        c.slot.assign(static_cast<std::size_t>(top) + 1, 0);
+        for (std::size_t i = 0; i < c.lines.size(); ++i) {
+            c.slot[c.lines[i]] = static_cast<std::uint32_t>(i + 1);
+        }
+    }
+
+    void hit(std::uint32_t index, std::uint32_t line) {
+        chunk_hits& c = chunks[index];
+        if (line < c.slot.size() && c.slot[line] != 0) {
+            if (c.hits[c.slot[line] - 1]++ == 0) {
+                ++c.distinct;
+                ++distinct;
+            }
+            return;
+        }
+        if (c.extra[line]++ == 0) {
+            ++distinct;
+        }
+    }
 };
 
 } // namespace Rhp::script::detail

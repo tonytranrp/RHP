@@ -41,6 +41,12 @@ void push_lib_path(lua_State* L, std::string_view path);
 // lib's setter (role, range and journal included).
 int lua_tune_thunk(lua_State* L);
 
+// testing.cpp: rhp.api() (sandbox::api as a table).
+int lua_rhp_api(lua_State* L);
+
+// testing.cpp: coroutine.wrap (the standard one, crediting the meter like the guarded resume).
+int lua_coroutine_wrap(lua_State* L);
+
 // The reserved event every failed handler call is published as (to Lua and C++ listeners).
 inline constexpr const char* kHandlerFailedEvent = "rhp.handler_failed";
 

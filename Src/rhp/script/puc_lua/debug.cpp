@@ -485,8 +485,13 @@ void sandbox_impl::line_event(lua_State* L, lua_Debug* ar) {
     if (running_.empty() || closing_lua_) {
         return;
     }
+    if (coverage_) {
+        coverage_line(L, ar);
+    }
     if (!debugger_ || !debugger_->wants_lines()) {
-        sync_hook(L, checked_now()); // a thread armed while the debugger needed lines: they stop
+        if (!coverage_) {
+            sync_hook(L, checked_now()); // a thread armed while lines were needed: they stop
+        }
         return;
     }
     debugger_state& d = *debugger_;
