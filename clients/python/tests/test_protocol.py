@@ -104,9 +104,9 @@ def keys():
 
 def test_frames_match_vectors():
     k = keys()
-    hello = {"rev": 4, "platform": "python", "auth": {"key": "dev", "nonce": NC}}
+    hello = {"rev": PROTOCOL_REVISION, "platform": "python", "auth": {"key": "dev", "nonce": NC}}
     assert encode_frame(Op.HELLO, 0, 0, msgpack.encode(hello)).hex() == frame_hex("hello (client, plaintext)")
-    challenge = {"rev": 4, "platform": "windows", "auth": {"nonce": NH, "proof": k["rhp/host"]}}
+    challenge = {"rev": PROTOCOL_REVISION, "platform": "windows", "auth": {"nonce": NH, "proof": k["rhp/host"]}}
     assert encode_frame(Op.CHALLENGE, 0, 0, msgpack.encode(challenge)).hex() == frame_hex("challenge (host)")
     assert encode_frame(Op.RESPONSE, 0, 0, msgpack.encode({"auth": {"proof": k["rhp/client"]}})).hex() == frame_hex("response (client)")
     welcome = {"session": 1, "identity": "dev", "role": "admin", "heartbeat_ms": 2000, "platform": "windows"}

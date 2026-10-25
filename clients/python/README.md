@@ -1,7 +1,7 @@
 # rhp-client (Python)
 
 A pure-Python client for RHP hosts: connect with an identity file, run signed Lua, load and call
-modules, watch events. It speaks RHP's native protocol (revision 4) itself, so it needs no C++
+modules, watch events. It speaks RHP's native protocol (revision 6, Stage 11) itself, so it needs no C++
 build, and it interoperates with `Rhp::host<>`, `rhp-cli` and `headless_server`.
 
 ```python
@@ -32,7 +32,7 @@ signer is used), `speed` (`crc32c`: hardware CRC32C for big frames on plain conn
 pip install "./clients/python[tls,crypto]"
 ```
 
-RHP has no release numbers; the package's version is `0+stage8`, the stage it was written for. A
+RHP has no release numbers; the package's version is `0+stage11`, the stage it was written for. A
 host and its clients must speak the same protocol revision (`rhp_client.PROTOCOL_REVISION`).
 
 ## Connecting
@@ -71,6 +71,11 @@ can come from any thread.
 | `cancel(request_or_future=0)` | stops one request (or all in flight); it fails with `cancelled` |
 | `blob(sink, name, data)` | the sink's verdict (the host registered the sink with `host.on_blob`) |
 | `on(name, callback)` / `off(id)` | subscribe to a C++ `lua_event` of the host program, or to `rhp.publish` of this identity's scripts (`"*"`: every publish) |
+| `release_apply(envelope, confirm="now")`, `release_confirm(channel, expected=b"")`, `release_deactivate(channel, hold=False, expected=b"")` | admin: run a signed `.rhprel`; confirm or stop what a channel runs (the id of the release, bound to `expected` when given) |
+| `release_status()` / `revoke(envelope)` | the host's channels / apply a signed `.rhprev` (channels changed) |
+| `tunables(prefix="")` / `tune(path, value)` | the variables the host's libs expose (`Tunable`: value, range, step, unit, doc) / set one as a script would |
+| `profile("start" \| "read" \| "stop", interval=1000)` | `ProfileReport`: samples per folded stack (`.folded()` for flame graphs) |
+| `debug(action, **fields)` | the debugger: `break` (source, lines), `pause`, `paused`, `continue` / `into` / `over` / `out` (request), `stack`, `variables` (request, frame, scope, path), `evaluate` (request, frame, expression), `reset`; pauses arrive as the event `rhp.debug` |
 
 Modules are named by id or by name. Scripts are signed with the identity's `signing_key` when it has
 one; an identity without one can only run code as an `observe` session.

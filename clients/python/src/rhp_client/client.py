@@ -31,7 +31,7 @@ from ._session import Session
 from ._transport import is_loopback, open_stream
 from .identity import Identity, sign_script
 
-__all__ = ["Client", "connect", "RevertSummary", "ModuleStatus", "Event"]
+__all__ = ["Client", "connect", "RevertSummary", "ModuleStatus", "Event", "Tunable", "ProfileReport"]
 
 ModuleRef = Union[int, str]  # a module id, or its name
 
@@ -86,6 +86,48 @@ class Event:
     args: List[Any]
     module: int = 0  # the publishing module (0: C++ or the sandbox itself)
     dropped: int = 0  # deliveries to this session the host dropped since the previous one
+
+
+@dataclass
+class Tunable:
+    """A variable a host lib exposes (::var / ::ro), with its value and tags."""
+
+    path: str
+    type: str
+    value: Any
+    writable: bool = False
+    min: Optional[float] = None
+    max: Optional[float] = None
+    step: Optional[float] = None
+    unit: str = ""
+    doc: str = ""
+
+    @classmethod
+    def from_value(cls, v: Any) -> "Tunable":
+        return cls(v.get("path", ""), v.get("type", "any"), v.get("value"), bool(v.get("writable", False)), v.get("min"), v.get("max"),
+                   v.get("step"), v.get("unit", "") or "", v.get("doc", "") or "")
+
+
+@dataclass
+class ProfileReport:
+    """What the sampling profiler saw: `stacks` maps a folded stack ("outer;inner") to its samples."""
+
+    running: bool = False
+    interval: int = 0
+    samples: int = 0
+    dropped: int = 0
+    elapsed_us: int = 0
+    stacks: List[tuple] = field(default_factory=list)  # (stack, samples), most samples first
+
+    @classmethod
+    def from_value(cls, v: Any) -> "ProfileReport":
+        v = v or {}
+        return cls(bool(v.get("running", False)), v.get("interval", 0), v.get("samples", 0), v.get("dropped", 0), v.get("elapsed_us", 0),
+                   [(s[0], s[1]) for s in v.get("stacks") or []])
+
+    def folded(self) -> str:
+        """The `stack samples` lines flamegraph.pl and speedscope read."""
+        return "".join("%s %d\n" % (stack, n) for stack, n in self.stacks)
 
 
 def _mix64(x: int) -> int:
@@ -308,6 +350,53 @@ class Client:
         while in_flight:
             result = self._wait(in_flight.pop(0))
         return result
+
+    # ---- releases (a host that serves a release manager) ----------------------------------------------
+
+    def release_apply(self, envelope: bytes, confirm: str = "now") -> dict:
+        """Admin: runs a signed release envelope (a .rhprel file). `confirm`: "now", "health" or "manual"."""
+        return self._wait(self._start(Op.RELEASE_APPLY, {"envelope": bytes(envelope), "confirm": confirm}))
+
+    def release_confirm(self, channel: str, expected: bytes = b"") -> bytes:
+        """Admin: the channel's running candidate becomes active; returns its id. With `expected` (a
+        release id), only if that is the candidate."""
+        return self._wait(self._start(Op.RELEASE_CONFIRM, {"channel": channel, "hold": False, "release": bytes(expected)}))
+
+    def release_deactivate(self, channel: str, hold: bool = False, expected: bytes = b"") -> bytes:
+        """Admin: stops what runs in the channel (falling back, or with `hold` running nothing); returns its id."""
+        return self._wait(self._start(Op.RELEASE_DEACTIVATE, {"channel": channel, "hold": hold, "release": bytes(expected)}))
+
+    def release_status(self) -> dict:
+        """The host's channels: {app, build, platform, revocation_seq, channels: [...]}."""
+        return self._wait(self._start(Op.RELEASE_STATUS, None))
+
+    def revoke(self, envelope: bytes) -> int:
+        """Sends a signed revocation list (a .rhprev file); returns how many channels changed."""
+        return self._wait(self._start(Op.REVOKE, {"envelope": bytes(envelope)}))
+
+    # ---- tools: this identity's own sandbox ------------------------------------------------------------
+
+    def tunables(self, prefix: str = "") -> List[Tunable]:
+        """The variables the host's libs expose, with values and tags (a lib or path prefix, or all)."""
+        return [Tunable.from_value(t) for t in self._wait(self._start(Op.TUNABLES, {"prefix": prefix})) or []]
+
+    def tune(self, path: str, value: Any) -> None:
+        """Patch: writes a variable as a script would (its range checked, journaled like an exec)."""
+        self._wait(self._start(Op.TUNE, {"path": path, "value": value}))
+
+    def profile(self, action: str = "read", interval: int = 1000) -> ProfileReport:
+        """The sampling profiler: "start" (every `interval` instructions), "read" or "stop"."""
+        body = {"action": action, "interval": interval, "max_depth": 64, "max_stacks": 10000}
+        return ProfileReport.from_value(self._wait(self._start(Op.PROFILE, body)))
+
+    def debug(self, action: str, **fields: Any) -> dict:
+        """Patch: the debugger. `action` is "break" (source=, lines=), "pause", "paused", "continue" /
+        "into" / "over" / "out" (request=), "stack" (request=), "variables" (request=, frame=, scope=,
+        path=), "evaluate" (request=, frame=, expression=) or "reset". Pauses are the event
+        "rhp.debug" (subscribe with on()). Returns {lines, paused, frames, variables}."""
+        body = {"action": action}
+        body.update(fields)
+        return self._wait(self._start(Op.DEBUG, body))
 
     # ---- events -------------------------------------------------------------------------------------
 

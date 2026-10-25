@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "rhp-client"
 # RHP has no release numbers (progress is counted in stages); a Python package must still carry a
 # version, so this is a local version naming the stage it speaks for.
-version = "0+stage8"
+version = "0+stage11"
 description = "Pure-Python client for RHP (Remote Hot Patch) hosts: signed Lua scripts over RHP's native protocol"
 readme = "README.md"
 license = "Apache-2.0"

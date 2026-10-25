@@ -161,6 +161,43 @@ def test_resume_after_a_dropped_connection(host):
         assert c.exec("return kept + 1") == [42]  # same session: the scratch module kept its global
 
 
+def test_tunables_profiler_and_debugger(host):
+    with host.connect() as c:
+        tunables = {t.path: t for t in c.tunables("game")}
+        assert "game.gravity" in tunables and tunables["game.gravity"].writable
+        c.tune("game.gravity", 1.5)
+        assert c.exec("return game.gravity") == [1.5]
+        with pytest.raises(rhp.RhpError) as missing:
+            c.tune("game.nope", 1)
+        assert missing.value.code == "not_found"
+
+        assert c.profile("start", 200).running
+        c.load("py.work", "function spin()\n  local s = 0\n  for i = 1, 50000 do s = s + i end\n  return s\nend")
+        c.call("py.work", "spin")
+        report = c.profile("stop")
+        assert not report.running and report.samples > 50
+        assert any("spin (py.work:1)" in stack for stack, _ in report.stacks)
+        assert report.folded().count("\n") == len(report.stacks)
+
+        paused = threading.Event()
+        c.on("rhp.debug", lambda e: paused.set() if e.args and e.args[0].get("kind") == "paused" else None)
+        c.load("py.dbg", "function add(a, b)\n  local sum = a + b\n  return sum\nend")
+        assert c.debug("break", source="py.dbg", lines=[3])["lines"] == [3]
+        call = c.call_async("py.dbg", "add", 2, 5)
+        assert paused.wait(10)
+        stop = c.debug("paused")["paused"][0]
+        assert stop["line"] == 3 and stop["reason"] == "breakpoint"
+        assert c.debug("stack", request=stop["request"])["frames"][0]["name"] == "add"
+        names = {v["name"]: v["text"] for v in c.debug("variables", request=stop["request"])["variables"]}
+        assert names["sum"] == "7"
+        assert c.debug("evaluate", request=stop["request"], expression="a")["variables"][0]["text"] == "2"
+        c.debug("continue", request=stop["request"])
+        assert call.result(10) == [7]
+        with pytest.raises(rhp.RhpError) as releases:
+            c.release_status()  # this host serves no release manager
+        assert releases.value.code == "not_found"
+
+
 @pytest.fixture
 def blob_host(tmp_path):
     (tmp_path / "h").mkdir()
