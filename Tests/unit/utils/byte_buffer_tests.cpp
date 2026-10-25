@@ -2,6 +2,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory_resource>
+#include <span>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -50,4 +51,30 @@ TEST_CASE("byte_buffer allocates from the injected memory resource", "[utils][by
     byte_buffer buf{&arena};
     buf.append("fits in the arena");
     REQUIRE(buf.size() == 17);
+}
+
+TEST_CASE("byte_buffer appends large and small pieces and its own bytes", "[utils][byte_buffer]") {
+    byte_buffer buf;
+    std::array<std::byte, 5000> big{};
+    for (std::size_t i = 0; i < big.size(); ++i) {
+        big[i] = static_cast<std::byte>(i * 7u);
+    }
+    for (int i = 0; i < 3; ++i) {
+        buf.append(std::span<const std::byte>{big});
+        buf.append_le<std::uint8_t>(static_cast<std::uint8_t>(i));
+    }
+    REQUIRE(buf.size() == 3 * (big.size() + 1));
+    REQUIRE(buf.view()[big.size()] == std::byte{0});
+    REQUIRE(buf.view()[2 * (big.size() + 1) + 4999] == big[4999]);
+
+    // Appending a view of the buffer itself survives the reallocation the append needs.
+    byte_buffer self;
+    self.append("abcdef");
+    for (int i = 0; i < 12; ++i) {
+        self.append(self.view());
+    }
+    REQUIRE(self.size() == 6u << 12);
+    for (std::size_t i = 0; i < self.size(); i += 997) {
+        REQUIRE(self.view()[i] == static_cast<std::byte>("abcdef"[i % 6]));
+    }
 }
