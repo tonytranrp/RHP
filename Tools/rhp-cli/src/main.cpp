@@ -51,7 +51,7 @@
 
 namespace {
 
-using cli_cfg = Rhp::config<>::logger<Rhp::core::null_logger>;
+using rhp_cli::cli_cfg;
 using cli_shell = rhp_cli::shell<cli_cfg>;
 
 std::atomic<bool> g_interrupted{false};
