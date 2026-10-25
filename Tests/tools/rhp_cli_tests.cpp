@@ -10,6 +10,7 @@
 #include <iostream>
 #include <iterator>
 #include <mutex>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -192,7 +193,8 @@ TEST_CASE("rhp-cli: JSON round trips and rejects what isn't JSON", "[cli][text]"
     CHECK(v->find("list")->get_if<Rhp::value::array>()->size() == 3);
     CHECK(rhp_cli::parse_json(rhp_cli::to_json(*v)) == v);
     CHECK(rhp_cli::to_json(Rhp::value{"tab\there"}) == R"("tab\there")");
-    for (const char* bad : {"", "{", "[1,]", "{\"a\" 1}", "tru", "\"unterminated", "01x", "{\"a\":1}}", "\"\x01\"", "nan"}) {
+    for (const char* bad : {"", "{", "[1,]", "{\"a\" 1}", "tru", "\"unterminated", "01x", "{\"a\":1}}", "\"\x01\"", "nan", R"("\ud83d")", R"("\ude00")", R"("\ud83dx")",
+                            R"("\ud83dA")"}) {
         CHECK_FALSE(rhp_cli::parse_json(bad).has_value());
     }
     std::string deep(100, '[');
@@ -203,11 +205,54 @@ TEST_CASE("rhp-cli: JSON round trips and rejects what isn't JSON", "[cli][text]"
 TEST_CASE("rhp-cli: source paths map to module names", "[cli][text]") {
     const rhp_cli::source_map plain{""};
     CHECK(plain.module_for("C:/work/game/combat.lua") == "combat");
-    CHECK(plain.path_for("game.combat") == "game.combat");
+    CHECK_FALSE(plain.path_for("game.combat").has_value()); // no root: no file to show
     const std::string root = (fs::temp_directory_path() / "rhp_src").string();
     const rhp_cli::source_map rooted{root};
     CHECK(rooted.module_for((fs::path{root} / "game" / "combat.lua").string()) == "game.combat");
-    CHECK(rooted.path_for("game.combat") == (fs::path{root} / "game/combat.lua").string());
+    std::error_code ec;
+    fs::remove_all(root, ec);
+    CHECK_FALSE(rooted.path_for("game.combat").has_value()); // not there (yet)
+    fs::create_directories(fs::path{root} / "game");
+    std::ofstream{fs::path{root} / "game" / "combat.lua"} << "return 1\n";
+    CHECK(rooted.path_for("game.combat") == (fs::path{root} / "game" / "combat.lua").make_preferred().string());
+    fs::remove_all(root, ec);
+}
+
+TEST_CASE("rhp-cli: DAP messages are read by their length and refused when malformed", "[cli][dap]") {
+    const auto read_all = [](std::string_view bytes) {
+        std::vector<std::optional<std::string>> out;
+        std::istringstream in{std::string{bytes}};
+        while (true) {
+            auto m = rhp_cli::read_dap_message([&in] { return in.get(); });
+            const bool end = !m;
+            out.push_back(std::move(m));
+            if (end) {
+                break;
+            }
+        }
+        return out;
+    };
+    const auto ok = read_all("Content-Length: 2\r\n\r\n{}\r\nContent-Length:3\r\nContent-Type: application/json\r\n\r\nabcContent-Length: 0 \r\n\r\n");
+    REQUIRE(ok.size() == 4);
+    CHECK(ok[0] == "{}");
+    CHECK(ok[1] == "abc");
+    CHECK(ok[2] == "");
+    CHECK_FALSE(ok[3].has_value());
+    std::string long_header = "X-Junk: ";
+    long_header += std::string(4000, 'a');
+    std::string many_headers;
+    for (int i = 0; i < 40; ++i) {
+        many_headers += "X: y\r\n";
+    }
+    many_headers += "Content-Length: 2\r\n\r\n{}";
+    for (const std::string& bad : {std::string{"X: y\r\n\r\n{}"}, std::string{"Content-Length: 2x\r\n\r\n{}"}, std::string{"Content-Length: -1\r\n\r\n"},
+                                   std::string{"Content-Length:\r\n\r\n"}, std::string{"Content-Length: 99999999999999999999999\r\n\r\n"},
+                                   std::string{"Content-Length: 70000000\r\n\r\n"}, std::string{"Content-Length: 2\r\nContent-Length: 2\r\n\r\n{}"},
+                                   std::string{"Content-Length: 5\r\n\r\n{}"}, long_header, many_headers}) {
+        const auto got = read_all(bad);
+        CHECK(got.size() == 1);
+        CHECK_FALSE(got.front().has_value());
+    }
 }
 
 TEST_CASE("rhp-cli: unfinished Lua keeps the REPL reading", "[cli][text]") {
@@ -778,7 +823,20 @@ TEST_CASE("rhp-cli: the shell tunes profiles and debugs", "[cli][shell]") {
     CHECK(sh.feed("continue"));
     CHECK(eventually([&] {
         (void)sh.feed("paused");
-        return out.has("42") && out.has("nothing is paused");
+        return out.has("nothing is paused");
+    }));
+    {
+        const std::scoped_lock lock{out.mutex};
+        CHECK(std::ranges::any_of(out.lines, [](const auto& l) { return l.second == "42"; })); // the paused exec's own result line
+    }
+    // A call that pauses goes to the background too.
+    CHECK(sh.feed("break cli.dbg 2"));
+    CHECK(sh.feed("call cli.dbg twice 5"));
+    CHECK(eventually([&] { return out.has("paused at cli.dbg:2"); }));
+    CHECK(sh.feed("continue"));
+    CHECK(eventually([&] {
+        const std::scoped_lock lock{out.mutex};
+        return std::ranges::any_of(out.lines, [](const auto& l) { return l.second == "10"; });
     }));
     CHECK(sh.failures() == 0);
 }
@@ -827,6 +885,9 @@ TEST_CASE("rhp-cli: the DAP server drives the debugger", "[cli][dap]") {
         return last_body(command);
     };
     CHECK(request("initialize", "{}").find("supportsConfigurationDoneRequest") != nullptr);
+    // Nothing paused yet: one placeholder thread, with no frames.
+    CHECK(rhp_cli::to_json(request("threads", "{}")) == R"j({"threads":[{"id":0,"name":"(no script paused)"}]})j");
+    CHECK(rhp_cli::to_json(request("stackTrace", R"({"threadId": 0})")) == R"({"stackFrames":[],"totalFrames":0})");
     const std::string path = (fs::path{root} / "game" / "dap.lua").generic_string();
     const auto bps = request("setBreakpoints", std::format(R"({{"source": {{"path": "{}"}}, "breakpoints": [{{"line": 3}}]}})", path));
     CHECK(rhp_cli::to_json(bps) == R"({"breakpoints":[{"verified":true,"line":3}]})");
@@ -839,7 +900,7 @@ TEST_CASE("rhp-cli: the DAP server drives the debugger", "[cli][dap]") {
             return false;
         }
         thread = *list->front().find("id")->get_if<std::int64_t>();
-        return true;
+        return thread != 0;
     }));
     const auto stack = request("stackTrace", std::format(R"({{"threadId": {}}})", thread));
     const auto& frame = stack.find("stackFrames")->get_if<Rhp::value::array>()->front();

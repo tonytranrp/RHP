@@ -1,6 +1,7 @@
 // Stage 11 tools over a sandbox: tunables, the profiler and the debugger.
 #include <algorithm>
 #include <cstdint>
+#include <format>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -207,6 +208,59 @@ TEST_CASE("profiling keeps results and instruction limits as they are", "[script
     }
 }
 
+TEST_CASE("the profiler samples at its own interval whatever the cancel checks", "[script][profile]") {
+    // The hook fires every min(check interval, profile interval) instructions: a profile interval
+    // longer or shorter than the check interval, or no checks at all, still gives a sample per interval.
+    const auto samples = [](Rhp::limits l, std::uint32_t interval) {
+        sandbox box{sandbox_options{.limits = l}};
+        const auto mod = box.load("prof.rate", "function spin()\n local s = 0\n for i = 1, 200000 do s = s + i end\n return s\n end");
+        REQUIRE(mod.has_value());
+        REQUIRE(box.start_profile({.interval = interval}));
+        REQUIRE(box.call(*mod, "spin"));
+        return box.stop_profile().samples;
+    };
+    const std::uint64_t base = samples(Rhp::limits{}, 100); // checks every 1000 instructions
+    CHECK(base > 1000);
+    const std::uint64_t slow = samples(Rhp::limits{}, 5000); // longer than the check interval
+    CHECK(slow > 0);
+    CHECK(slow * 25 <= base);
+    CHECK(slow * 75 >= base);
+    const std::uint64_t sparse = samples(Rhp::limits{.cancel_check_instructions = 100'000}, 100); // shorter than it
+    CHECK(sparse * 2 >= base);
+    CHECK(sparse <= base * 2);
+    const std::uint64_t unchecked = samples(Rhp::limits{.cancel_checks = Rhp::cancel_scope::kNone}, 100);
+    CHECK(unchecked * 2 >= base);
+    CHECK(unchecked <= base * 2);
+}
+
+TEST_CASE("instruction limits hold with a profile interval longer than the check interval", "[script][profile]") {
+    sandbox box{sandbox_options{.limits = Rhp::limits{.instructions = 50'000}}};
+    REQUIRE(box.start_profile({.interval = 5000}));
+    CHECK(*box.exec("local s = 0 for i = 1, 100 do s = s + i end return s") == value_list{value{5050}});
+    CHECK(box.exec("local s = 0 for i = 1, 1000000 do s = s + i end return s").error().code == errc::kBudgetExceeded);
+}
+
+TEST_CASE("a coroutine made before profiling starts is sampled and keeps its budget", "[script][profile]") {
+    sandbox box{sandbox_options{.limits = Rhp::limits{.instructions = 200'000}}};
+    constexpr std::string_view kSource = "co = coroutine.create(function()\n local s = 0\n while true do\n s = s + 1\n if s % 100 == 0 then coroutine.yield(s) end\n end\n end)\n"
+                                         "function step(n)\n local v\n for i = 1, n do\n local _, got = coroutine.resume(co)\n v = got\n end\n return v\n end";
+    const auto mod = box.load("prof.co", kSource);
+    const auto later = box.load("prof.later", kSource); // its coroutine runs only after the profiler stops
+    REQUIRE(mod.has_value());
+    REQUIRE(later.has_value());
+    REQUIRE(box.start_profile({.interval = 100}));
+    const auto ten = box.call(*mod, "step", 10);
+    REQUIRE(ten.has_value());
+    CHECK(*ten == value_list{value{1000}});
+    CHECK(box.call(*mod, "step", 100'000).error().code == errc::kBudgetExceeded); // the coroutine's instructions count
+    const auto report = box.stop_profile();
+    CHECK(report.samples > 0);
+    CHECK(std::ranges::any_of(report.stacks, [](const auto& st) { return st.stack.find("prof.co:1") != std::string::npos; })); // the coroutine's function
+    // With the profiler stopped, a coroutine made before it started still runs under the limit.
+    REQUIRE(box.call(*later, "step", 10));
+    CHECK(box.call(*later, "step", 100'000).error().code == errc::kBudgetExceeded);
+}
+
 // ---- debugger --------------------------------------------------------------------------------------
 
 TEST_CASE("a breakpoint pauses a request until it is resumed", "[script][debug]") {
@@ -379,4 +433,127 @@ TEST_CASE("a paused request that is cancelled leaves the debugger", "[script][de
     CHECK(d.box.paused().empty());
     CHECK_FALSE(d.box.pending(req));
     CHECK(d.box.debug_stack(req).error().code == errc::kNotFound);
+}
+
+TEST_CASE("breakpoints are found across modules and after a caught error", "[script][debug]") {
+    debug_box d;
+    REQUIRE(d.box.load("dbg.b", "local M = {}\nfunction M.f(v)\n  local w = v * 3\n  return w\nend\nfunction M.boom()\n  error('x')\nend\nreturn M"));
+    const auto a = d.box.load("dbg.a",
+                              "local b = require('dbg.b')\nfunction run()\n  local x = b.f(1)\n  local y = x + 1\n  local ok = pcall(b.boom)\n  local z = ok\n  return y\nend");
+    REQUIRE(a.has_value());
+    // Line events are on only inside functions of a source with breakpoints: calls, returns and the
+    // return of a pcall that caught an error switch them.
+    REQUIRE(d.box.set_breakpoints("dbg.b", std::vector<std::uint32_t>{3}));
+    REQUIRE(d.box.set_breakpoints("dbg.a", std::vector<std::uint32_t>{4, 6}));
+    REQUIRE(d.box.call(*a, "run"));
+    const Rhp::request_id req = d.box.last_request();
+    const auto at = [&] {
+        const auto p = d.box.paused();
+        return p.empty() ? std::string{} : std::format("{}:{}", p.front().source, p.front().line);
+    };
+    CHECK(at() == "dbg.b:3");
+    REQUIRE(d.box.debug_resume(req));
+    d.box.pump();
+    CHECK(at() == "dbg.a:4"); // back in dbg.a after the return
+    REQUIRE(d.box.debug_resume(req));
+    d.box.pump();
+    CHECK(at() == "dbg.a:6"); // after pcall caught an error raised in dbg.b
+    REQUIRE(d.box.debug_resume(req));
+    d.box.pump();
+    REQUIRE(d.results.size() == 1);
+    CHECK(*d.results[0].second == value_list{value{4}});
+}
+
+TEST_CASE("evaluate reads no metamethods but a lib's", "[script][debug]") {
+    debug_box d;
+    // dbg.meta's exports read every missing field through __index, which records the key.
+    REQUIRE(d.box.load("dbg.meta", "local seen = {}\nlocal M = setmetatable({seen = seen}, {__index = function(_, k) seen.key = k return 1 end})\nreturn M"));
+    const auto mod = d.box.load("dbg.meta2",
+                                "local m = require('dbg.meta')\nlocal t = setmetatable({}, {__index = function(_, k) touched = k return 2 end})\n"
+                                "function run()\n  local x = (m ~= nil and t ~= nil) and 1 or 0\n  return x\nend\nfunction probe() return touched, m.seen.key end");
+    REQUIRE(mod.has_value());
+    const auto before = d.box.call(*mod, "probe"); // what loading read (the loader looks up on_load and the like)
+    REQUIRE(before.has_value());
+    REQUIRE(d.box.set_breakpoints("dbg.meta2", std::vector<std::uint32_t>{5}));
+    REQUIRE(d.box.call(*mod, "run"));
+    const Rhp::request_id req = d.box.last_request();
+    REQUIRE(d.box.paused().size() == 1);
+    const auto m = d.box.debug_evaluate(req, 0, "m"); // an upvalue of run
+    REQUIRE(m.has_value());
+    CHECK(m->type == "module"); // a userdata named by its metatable
+    const auto t = d.box.debug_evaluate(req, 0, "t");
+    REQUIRE(t.has_value());
+    CHECK(t->type == "table");
+    const auto through_module = d.box.debug_evaluate(req, 0, "m.anything");
+    REQUIRE_FALSE(through_module.has_value());
+    CHECK(through_module.error().code == errc::kNotFound); // a module proxy: not read through
+    const auto raw = d.box.debug_evaluate(req, 0, "t.anything");
+    REQUIRE(raw.has_value());
+    CHECK(raw->text == "nil"); // read raw: the table's __index isn't called
+    d.box.debug_reset();
+    d.box.pump();
+    REQUIRE(d.results.size() == 1);
+    CHECK(*d.results[0].second == value_list{value{1}});
+    const auto touched = d.box.call(*mod, "probe");
+    REQUIRE(touched.has_value());
+    CHECK(*touched == *before); // the debugger ran no metamethod
+}
+
+TEST_CASE("at most 32 requests wait at breakpoints and the rest run through", "[script][debug]") {
+    debug_box d;
+    const auto mod = d.box.load("dbg.many", "function run(n)\n  local v = n + 1\n  return v\nend");
+    REQUIRE(mod.has_value());
+    REQUIRE(d.box.set_breakpoints("dbg.many", std::vector<std::uint32_t>{2}));
+    for (int i = 0; i < 32; ++i) {
+        const auto r = d.box.call(*mod, "run", i);
+        REQUIRE(r.has_value());
+        CHECK(r->empty()); // paused
+    }
+    CHECK(d.box.paused().size() == 32);
+    const auto extra = d.box.call(*mod, "run", 100);
+    REQUIRE(extra.has_value());
+    CHECK(*extra == value_list{value{101}}); // ran through, reported as a hit
+    d.box.pump();
+    CHECK(std::ranges::count_if(d.events, [](const value& e) { return e.find("kind") != nullptr && *e.find("kind") == value{"hit"}; }) == 1);
+    CHECK(d.box.paused().size() == 32);
+    d.box.debug_reset();
+    d.box.pump();
+    CHECK(d.results.size() == 32);
+    CHECK(d.box.paused().empty());
+}
+
+TEST_CASE("rhp.debug events go to C++ only", "[script][debug]") {
+    debug_box d;
+    const auto ears = d.box.load("dbg.ears", "seen = 0\nrhp.on('rhp.debug', function() seen = seen + 1 end)\nfunction count() return seen end");
+    REQUIRE(ears.has_value());
+    const auto mod = d.box.load("dbg.loud", "function run()\n  local a = 1\n  return a\nend");
+    REQUIRE(mod.has_value());
+    REQUIRE(d.box.set_breakpoints("dbg.loud", std::vector<std::uint32_t>{2}));
+    REQUIRE(d.box.call(*mod, "run"));
+    const Rhp::request_id req = d.box.last_request();
+    d.box.pump();
+    REQUIRE(d.box.debug_resume(req));
+    d.box.pump();
+    d.box.pump();
+    CHECK(d.events.size() == 1);
+    CHECK(d.results.size() == 1);
+    CHECK(*d.box.call(*ears, "count") == value_list{value{0}}); // the script's listener never heard it
+}
+
+TEST_CASE("instruction limits stop a tight loop while the debugger watches lines", "[script][debug]") {
+    debug_box d{sandbox_options{.limits = Rhp::limits{.instructions = 100'000}}};
+    REQUIRE(d.box.load("dbg.elsewhere", "function f()\n  return 1\nend"));
+    REQUIRE(d.box.set_breakpoints("dbg.elsewhere", std::vector<std::uint32_t>{2}));
+    CHECK(d.box.exec("local s = 0\nfor i = 1, 10000000 do s = s + math.abs(i) end\nreturn s").error().code == errc::kBudgetExceeded);
+    REQUIRE(d.box.set_breakpoints("exec", std::vector<std::uint32_t>{99}));
+    CHECK(d.box.exec("local s = 0\nfor i = 1, 10000000 do s = s + math.abs(i) end\nreturn s").error().code == errc::kBudgetExceeded);
+    d.box.debug_pause(); // stops the next line: a pause, then the limit once resumed
+    const auto paused = d.box.exec("local s = 0\nfor i = 1, 10000000 do s = s + math.abs(i) end\nreturn s");
+    REQUIRE(paused.has_value());
+    CHECK(paused->empty());
+    const Rhp::request_id req = d.box.last_request();
+    REQUIRE(d.box.debug_resume(req));
+    d.box.pump();
+    REQUIRE(d.results.size() == 1);
+    CHECK(d.results[0].second.error().code == errc::kBudgetExceeded);
 }
