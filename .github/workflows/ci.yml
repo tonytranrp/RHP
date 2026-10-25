@@ -40,9 +40,10 @@ jobs:
           # TSan needs the default address-space layout.
           sudo sysctl vm.mmap_rnd_bits=28
       # linux-clang builds as unity files (RHP_UNITY_BUILD): faster, and it keeps that mode working;
-      # the sanitizer presets build file by file.
+      # the sanitizer presets build file by file, and ASan without the shared precompiled header
+      # (RHP_PCH), so a source that forgets an #include still fails somewhere.
       - name: Configure
-        run: cmake --preset ${{ matrix.preset }} -DCMAKE_C_COMPILER=clang-21 -DCMAKE_CXX_COMPILER=clang++-21 ${{ matrix.preset == 'linux-clang' && '-DRHP_UNITY_BUILD=ON' || '' }}
+        run: cmake --preset ${{ matrix.preset }} -DCMAKE_C_COMPILER=clang-21 -DCMAKE_CXX_COMPILER=clang++-21 ${{ matrix.preset == 'linux-clang' && '-DRHP_UNITY_BUILD=ON' || (matrix.preset == 'linux-clang-asan' && '-DRHP_PCH=OFF' || '') }}
       - name: Build
         run: cmake --build --preset ${{ matrix.preset }}
       - name: Test
