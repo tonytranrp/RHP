@@ -59,3 +59,7 @@ rhp_add_module(net
 if(RHP_ENABLE AND RHP_PLATFORM STREQUAL "WINDOWS")
     target_link_libraries(rhp_net PRIVATE dnsapi advapi32 iphlpapi)
 endif()
+
+# RHP_UNITY_BUILD: these keep their own translation unit (file-local helpers named like ones in the
+# sources batched with them).
+set_source_files_properties(local/local.cpp mdns/wire.cpp udp_reliable/udp_reliable.cpp websocket/websocket.cpp PROPERTIES SKIP_UNITY_BUILD_INCLUSION ON)
