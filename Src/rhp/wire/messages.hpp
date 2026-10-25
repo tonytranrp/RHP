@@ -161,7 +161,8 @@ struct release_apply_request {
 // release_confirm and release_deactivate.
 struct release_channel_request {
     std::string channel;
-    bool hold = false; // deactivate: run nothing until a new release arrives
+    bool hold = false;    // deactivate: run nothing until a new release arrives
+    value::bytes release; // 32 bytes: only if that release is the candidate (confirm) or runs (deactivate); empty: whatever it is
 
     [[nodiscard]] bool operator==(const release_channel_request&) const = default;
 };
@@ -227,7 +228,7 @@ struct release_status_reply {
 //   status                module_status
 //   describe              string (LuaLS stubs)
 //   release_apply         release_apply_reply
-//   release_confirm, release_deactivate   nil
+//   release_confirm, release_deactivate   bytes (the id of the release confirmed / stopped)
 //   release_status        release_status_reply
 //   revoke                integer (channels that changed)
 // kError carries an Rhp::error; kOutput a string; kEmit an emit_message; kEvent an event_message.

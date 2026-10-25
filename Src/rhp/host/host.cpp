@@ -310,6 +310,7 @@ public:
 
     // The network is stopped (or never ran on another thread) when this runs.
     ~engine() {
+        release_events_.reset(); // a manager that outlives the host never calls into it again
         for (const auto& [name, state] : program_attached_) {
             state->detach(this); // a game thread may still fire: never after this
         }
@@ -398,7 +399,7 @@ public:
         }
         releases_ = std::move(bridge);
         if (releases_.on_event) {
-            releases_.on_event([this](event::release_changed e) {
+            release_events_ = releases_.on_event([this](event::release_changed e) {
                 if (wants<event::release_changed>()) {
                     publish(std::move(e));
                 }
@@ -2223,6 +2224,7 @@ private:
     std::map<session_id, pump_session> pump_sessions_;
     std::map<std::string, identity_runtime, std::less<>> identities_;
     std::vector<script::async_leftovers> async_leftovers_; // of identities that went (teardown)
+    Rhp::subscription release_events_;                     // to the served manager's events
     release_bridge releases_;                              // host.serve: the release manager, if any
     std::map<std::string, blob_sink, std::less<>> blob_sinks_;
     std::deque<outbound> outbox_backlog_;

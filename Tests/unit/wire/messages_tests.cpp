@@ -212,7 +212,7 @@ TEST_CASE("messages: release ops need admin to change and observe to read", "[wi
 TEST_CASE("messages: release messages round-trip", "[wire][messages][stage10]") {
     const wire::release_apply_request apply{Rhp::value::bytes{std::byte{1}, std::byte{2}}, "health"};
     CHECK(*Rhp::from_value<wire::release_apply_request>(Rhp::to_value(apply)) == apply);
-    const wire::release_channel_request channel{"game.balance", true};
+    const wire::release_channel_request channel{"game.balance", true, Rhp::value::bytes(32, std::byte{7})};
     CHECK(*Rhp::from_value<wire::release_channel_request>(Rhp::to_value(channel)) == channel);
     wire::channel_status_message c;
     c.channel = "game.balance";

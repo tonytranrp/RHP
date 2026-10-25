@@ -102,11 +102,11 @@ result<apply_result> manager::apply(std::span<const std::byte>, confirm_mode) {
     return std::unexpected{disabled("release.manager")};
 }
 
-result<void> manager::confirm(std::string_view) {
+result<release_id> manager::confirm(std::string_view, std::optional<release_id>) {
     return std::unexpected{disabled("release.manager")};
 }
 
-result<void> manager::deactivate(std::string_view, bool) {
+result<release_id> manager::deactivate(std::string_view, bool, std::optional<release_id>) {
     return std::unexpected{disabled("release.manager")};
 }
 
@@ -122,9 +122,16 @@ std::uint64_t manager::revocation_seq() const noexcept {
     return 0;
 }
 
+const std::optional<restore_report>& manager::last_restore() const noexcept {
+    static const std::optional<restore_report> kNone;
+    return kNone;
+}
+
 void manager::pump() {}
 
-void manager::on_event(std::function<void(const release_event&)>) {}
+Rhp::subscription manager::on_event(std::function<void(const release_event&)>) {
+    return {};
+}
 
 script::sandbox* manager::sandbox(std::string_view) noexcept {
     return nullptr;

@@ -1,4 +1,6 @@
+#include <atomic>
 #include <cerrno>
+#include <cstdint>
 #include <cstddef>
 #include <cstdio>
 #include <filesystem>
@@ -15,9 +17,18 @@
 #include <rhp/core/result.hpp>
 #include <rhp/platform/files.hpp>
 #include <rhp/platform/os.hpp>
+#include <rhp/platform/random.hpp>
 
 #if defined(RHP_PLATFORM_WINDOWS)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <io.h>
+#include <process.h>
+#include <windows.h>
 #else
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -44,6 +55,44 @@ bool flush_to_device(std::FILE* f) noexcept {
 #endif
 }
 
+unsigned long process_id() noexcept {
+#if defined(RHP_PLATFORM_WINDOWS)
+    return static_cast<unsigned long>(_getpid());
+#else
+    return static_cast<unsigned long>(::getpid());
+#endif
+}
+
+// A new file only its owner can read, opened for writing; nullptr when it can't be made (or exists).
+std::FILE* create_private(const std::filesystem::path& path) noexcept {
+#if defined(RHP_PLATFORM_WINDOWS)
+    std::FILE* f = nullptr;
+    if (_wfopen_s(&f, path.c_str(), L"wbx") != 0) {
+        return nullptr;
+    }
+    return f;
+#else
+    const int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_TRUNC | O_CLOEXEC, S_IRUSR | S_IWUSR);
+    if (fd < 0) {
+        return nullptr;
+    }
+    std::FILE* f = ::fdopen(fd, "wb");
+    if (f == nullptr) {
+        (void)::close(fd);
+    }
+    return f;
+#endif
+}
+
+// Renames `from` over `to`; on Windows the rename itself is written through to the disk.
+bool move_over(const std::filesystem::path& from, const std::filesystem::path& to) noexcept {
+#if defined(RHP_PLATFORM_WINDOWS)
+    return ::MoveFileExW(from.c_str(), to.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+#else
+    return ::rename(from.c_str(), to.c_str()) == 0;
+#endif
+}
+
 void sync_directory([[maybe_unused]] const std::filesystem::path& dir) noexcept {
 #if !defined(RHP_PLATFORM_WINDOWS)
     const int fd = ::open(dir.c_str(), O_RDONLY);
@@ -58,7 +107,11 @@ void sync_directory([[maybe_unused]] const std::filesystem::path& dir) noexcept 
 
 result<std::vector<std::byte>> read_file(const std::filesystem::path& path) {
     std::error_code ec;
-    if (!std::filesystem::exists(path, ec)) {
+    const bool there = std::filesystem::exists(path, ec);
+    if (ec) { // can't even look (permissions, I/O): not the same as missing
+        return std::unexpected{file_error(errc::kRuntime, path, ec.message())};
+    }
+    if (!there) {
         return std::unexpected{file_error(errc::kNotFound, path, "no such file")};
     }
     std::ifstream in{path, std::ios::binary};
@@ -77,16 +130,18 @@ result<std::vector<std::byte>> read_file(const std::filesystem::path& path) {
 }
 
 result<void> replace_file(const std::filesystem::path& path, std::span<const std::byte> bytes) {
-    std::filesystem::path temp = path;
-    temp += ".tmp";
-#if defined(RHP_PLATFORM_WINDOWS)
+    // Named for this process, a random tag and the write: two writers of one folder (or a process that
+    // got the pid of one that crashed mid-write) never share a temporary file.
+    static std::atomic<std::uint64_t> writes{0};
+    std::filesystem::path temp;
     std::FILE* f = nullptr;
-    if (_wfopen_s(&f, temp.c_str(), L"wb") != 0) {
-        f = nullptr;
+    for (int attempt = 0; attempt < 4 && f == nullptr; ++attempt) {
+        std::uint32_t tag = 0;
+        (void)random_bytes(std::as_writable_bytes(std::span{&tag, 1}));
+        temp = path;
+        temp += std::format(".{}.{:08x}.{}.tmp", process_id(), tag, writes.fetch_add(1, std::memory_order_relaxed));
+        f = create_private(temp);
     }
-#else
-    std::FILE* f = std::fopen(temp.c_str(), "wb");
-#endif
     if (f == nullptr) {
         return std::unexpected{file_error(errc::kRuntime, temp, "can't create")};
     }
@@ -98,8 +153,7 @@ result<void> replace_file(const std::filesystem::path& path, std::span<const std
         std::filesystem::remove(temp, ec);
         return std::unexpected{file_error(errc::kRuntime, temp, "write failed")};
     }
-    std::filesystem::rename(temp, path, ec); // replaces an existing file (MoveFileExW REPLACE_EXISTING / rename(2))
-    if (ec) {
+    if (!move_over(temp, path)) {
         std::filesystem::remove(temp, ec);
         return std::unexpected{file_error(errc::kRuntime, path, "can't replace")};
     }
@@ -112,12 +166,22 @@ result<void> make_private_directory(const std::filesystem::path& path) {
     if (std::filesystem::is_directory(path, ec)) {
         return {};
     }
+    // Every directory made here (not only the last) is its owner's.
+    std::vector<std::filesystem::path> made;
+    for (std::filesystem::path p = path; !p.empty() && !std::filesystem::exists(p, ec); p = p.parent_path()) {
+        made.push_back(p);
+        if (p == p.parent_path()) {
+            break;
+        }
+    }
     std::filesystem::create_directories(path, ec);
     if (ec) {
         return std::unexpected{file_error(errc::kRuntime, path, ec.message())};
     }
 #if !defined(RHP_PLATFORM_WINDOWS)
-    std::filesystem::permissions(path, std::filesystem::perms::owner_all, std::filesystem::perm_options::replace, ec);
+    for (const std::filesystem::path& p : made) {
+        std::filesystem::permissions(p, std::filesystem::perms::owner_all, std::filesystem::perm_options::replace, ec);
+    }
 #endif
     return {};
 }

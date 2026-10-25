@@ -14,6 +14,7 @@
 #include <rhp/core/limits.hpp>
 #include <rhp/core/log.hpp>
 #include <rhp/core/result.hpp>
+#include <rhp/core/subscription.hpp>
 #include <rhp/core/role.hpp>
 #include <rhp/core/value.hpp>
 #include <rhp/event/hub.hpp>
@@ -98,8 +99,9 @@ using installer = result<void> (*)(script::sandbox& box);
 struct release_bridge {
     std::function<result<value>(wire::op code, const value& body)> handle;
     std::function<void()> pump;
-    // The manager's events, set by the engine when it starts serving (publishes release_changed).
-    std::function<void(std::function<void(event::release_changed)>)> on_event;
+    // Subscribes to the manager's events when the engine starts serving (publishes release_changed);
+    // the engine drops the subscription before it goes.
+    std::function<Rhp::subscription(std::function<void(event::release_changed)>)> on_event;
 };
 
 template <script::installable L>

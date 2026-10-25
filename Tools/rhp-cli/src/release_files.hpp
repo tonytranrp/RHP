@@ -7,9 +7,13 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <optional>
+#include <span>
+#include <string_view>
 #include <string>
 #include <vector>
 
+#include <rhp/client/rollout.hpp>
 #include <rhp/core/result.hpp>
 #include <rhp/release/release.hpp>
 #include <rhp/wire/messages.hpp>
@@ -19,7 +23,7 @@ namespace rhp_cli {
 // What `rhp-cli release build` takes.
 struct release_spec {
     std::string channel;
-    std::string seq = "auto"; // a number, or "auto": the current Unix time (always above the last)
+    std::string seq = "auto"; // a number, or "auto": the current Unix time in seconds
     std::string label;
     std::string app;
     std::vector<std::string> builds;
@@ -45,6 +49,13 @@ struct revocation_spec {
 };
 
 [[nodiscard]] Rhp::result<Rhp::release::signed_revocations> build_revocations(const revocation_spec& spec, std::chrono::system_clock::time_point now);
+
+// The "rhp" tag of a MessagePack document ("release-envelope", ...); empty when it has none.
+[[nodiscard]] std::string document_tag(std::span<const std::byte> bytes);
+
+// "fraction:observe_ms" (observe_ms optional) for rhp-cli rollout --stage; the whole text must
+// parse and the fraction lie in [0, 1].
+[[nodiscard]] std::optional<Rhp::rollout_stage> parse_stage(std::string_view text);
 
 [[nodiscard]] Rhp::result<std::vector<std::byte>> read_binary_file(const std::filesystem::path& path);
 [[nodiscard]] Rhp::result<void> write_binary_file(const std::filesystem::path& path, const std::vector<std::byte>& bytes);

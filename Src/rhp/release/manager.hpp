@@ -14,6 +14,7 @@
 #include <rhp/core/limits.hpp>
 #include <rhp/core/result.hpp>
 #include <rhp/core/role.hpp>
+#include <rhp/core/subscription.hpp>
 #include <rhp/platform/os.hpp>
 #include <rhp/release/manifest.hpp>
 #include <rhp/release/release.hpp>
@@ -49,7 +50,7 @@ struct manager_options {
     role max_role = role::kPatch;                                                  // releases asking to run as more are refused
     std::chrono::seconds clock_skew{300};                                          // allowance on not_before / not_after
     bool expire_running = true;                                                    // a running release past not_after is deactivated
-    std::uint32_t max_boot_attempts = 2;                                           // a candidate that didn't get confirmed after this many restarts is quarantined
+    std::uint32_t max_boot_attempts = 2;                                           // restarts a candidate may run through unconfirmed before it is quarantined (above 1000: never)
     std::chrono::milliseconds health_window{60'000};                               // kHealth: confirmed after this long without a failure
     std::uint64_t max_seq_jump = std::uint64_t{1} << 32;                           // seq may grow by at most this much at once
     Rhp::limits limits{};                                                          // the channels' sandboxes (wall_ms 10 s when 0)
@@ -91,7 +92,7 @@ struct channel_status {
     bool held = false;          // deactivated with hold: nothing runs until a new release is applied
     std::uint32_t attempts = 0; // restarts the candidate has run through
     confirm_mode confirm = confirm_mode::kNow;
-    std::uint64_t handler_failures = 0; // while the candidate is watched
+    std::uint64_t handler_failures = 0; // while a health-watched candidate runs
     std::vector<std::string> modules;   // loaded right now
 };
 
@@ -107,8 +108,9 @@ struct apply_result {
 
 struct restore_report {
     std::vector<std::string> restored;                           // channels running again
-    std::vector<std::pair<std::string, error>> failed;           // channels that couldn't (they run their fallback, or nothing)
-    std::vector<std::pair<std::string, release_id>> quarantined; // candidates given up on (too many restarts unconfirmed)
+    std::vector<std::pair<std::string, error>> failed;           // releases given up on (their channel runs its fallback, or nothing); "*": the stored revocation list or the state
+    std::vector<std::pair<std::string, error>> deferred;         // channels that run nothing this time but keep their releases (an unreadable file, a lib installed after restore(), a clock outside the validity window, a load out of time or memory): tried again at the next restore
+    std::vector<std::pair<std::string, release_id>> quarantined; // candidates given up on (too many restarts unconfirmed, or they failed to load)
 };
 
 // What a manager reports as it works (manager::on_event).
@@ -145,10 +147,19 @@ class manager_impl;
 //                                  Rhp::release::directory_store{"save/releases"}};
 //   releases.install<game_lib>();
 //   releases.restore();
-//   while (running) { releases.pump(); game::update(); }   // or host.attach(releases): host.pump() pumps it
+//   while (running) { releases.pump(); game::update(); }   // or host.serve(releases): host.pump() pumps it
 //
-// Single-threaded: use it from one thread (the pump thread). With RHP_ENABLE=0 it is inert: every
-// operation reports kDisabled.
+// Revocation lists only add up: once a release, a key or a seq floor is revoked it stays revoked,
+// whatever later lists say. The store's state is checksummed against torn and corrupted writes, not
+// against someone who can write the store (they can lower floors; only signed releases ever run).
+//
+// A change (apply, confirm, deactivate) needs the last state saved: while a save keeps failing they
+// fail too (pump() retries the save), so what runs never drifts from what a restart brings back.
+// A revocation list takes effect even when it can't be saved.
+//
+// Single-threaded: use it from one thread (the pump thread), not from a channel's own scripts (that
+// is refused) nor from a listener that throws. Don't move a manager a host serves. With
+// RHP_ENABLE=0 it is inert: every operation reports kDisabled.
 class manager {
 public:
     explicit manager(trust keys, manager_options options = {}, any_store store = memory_store{});
@@ -164,32 +175,40 @@ public:
         return install_lib(L::name, [](script::sandbox& box) { return box.install<L>(); });
     }
 
-    // Brings back what the store says ran (once, before the first apply).
+    // Brings back what the store says ran (once). apply / confirm / deactivate / revoke call it when it
+    // hasn't run; until it succeeds (the store reads and its state checks out) they fail too, so a
+    // store that can't be read is never overwritten.
     result<restore_report> restore();
 
     // Checks and runs a release envelope. A release with the seq of the running one and the same
     // id is `already`; otherwise seq must be above the channel's floor.
     result<apply_result> apply(std::span<const std::byte> envelope, confirm_mode mode = confirm_mode::kNow);
 
-    // The candidate becomes active.
-    result<void> confirm(std::string_view channel);
+    // The running candidate becomes active; returns its id. With `expected`, kSuperseded unless that
+    // is the candidate (a rollout confirms only what it applied).
+    result<release_id> confirm(std::string_view channel, std::optional<release_id> expected = std::nullopt);
 
-    // Stops what runs: a candidate falls back to the active release, an active one to the
-    // previous; with `hold` the channel runs nothing until a new release arrives.
-    result<void> deactivate(std::string_view channel, bool hold = false);
+    // Stops what runs; returns its id. A candidate falls back to the active release (then the
+    // previous), an active one to the previous; with `hold` the channel runs nothing until a new
+    // release arrives. With `expected`, kSuperseded unless that release runs.
+    result<release_id> deactivate(std::string_view channel, bool hold = false, std::optional<release_id> expected = std::nullopt);
 
-    // Applies a signed revocation list (newer than any applied before): revoked releases and
-    // releases signed only by revoked keys stop, floors rise. Returns how many channels changed.
+    // Applies a signed revocation list newer than any applied before, signed by keys no list revoked:
+    // revoked releases, releases at or below a revoked floor and releases signed only by revoked keys
+    // stop (and are never fallen back to), floors rise. Returns how many channels changed.
     result<std::size_t> revoke(std::span<const std::byte> envelope);
 
     [[nodiscard]] std::vector<channel_status> status() const;
     [[nodiscard]] std::uint64_t revocation_seq() const noexcept;
+    // The report of the restore that ran (explicitly, or by the first change), if one did.
+    [[nodiscard]] const std::optional<restore_report>& last_restore() const noexcept;
 
     // Pumps every channel's sandbox, watches candidates' health and validity windows.
     void pump();
 
-    // Called for every release_event, on the pump thread.
-    void on_event(std::function<void(const release_event&)> fn);
+    // Calls fn for every release_event, on the pump thread, while the subscription lives (it may
+    // outlive the manager).
+    [[nodiscard]] Rhp::subscription on_event(std::function<void(const release_event&)> fn);
 
     // The channel's sandbox (nullptr when nothing runs there): for tests and inspection.
     [[nodiscard]] script::sandbox* sandbox(std::string_view channel) noexcept;

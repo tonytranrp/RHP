@@ -2,11 +2,17 @@
 
 #include <algorithm>
 #include <charconv>
+#include <cctype>
+#include <cmath>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <format>
+#include <locale>
+#include <optional>
+#include <span>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -22,6 +28,8 @@
 #include <rhp/release/manifest.hpp>
 #include <rhp/release/release.hpp>
 #include <rhp/security/ed25519.hpp>
+#include <rhp/utils/byte_buffer.hpp>
+#include <rhp/wire/codec/msgpack.hpp>
 #include <rhp/security/identity_file.hpp>
 
 namespace rhp_cli {
@@ -33,7 +41,7 @@ Rhp::error usage(std::string message) {
 }
 
 Rhp::result<std::uint64_t> parse_seq(const std::string& text, std::chrono::system_clock::time_point now) {
-    if (text == "auto") {
+    if (text == "auto") { // Unix seconds: two builds in one second share a seq
         const auto s = std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
         return static_cast<std::uint64_t>(std::max<std::int64_t>(s, 1));
     }
@@ -139,6 +147,34 @@ Rhp::result<Rhp::release::signed_revocations> build_revocations(const revocation
         list.floors.push_back(Rhp::release::seq_floor{floor.substr(0, eq), n});
     }
     return Rhp::release::make_revocations(std::move(list));
+}
+
+std::string document_tag(std::span<const std::byte> bytes) {
+    auto v = Rhp::wire::msgpack::decode(Rhp::utils::bytes_view{bytes.data(), bytes.size()});
+    const Rhp::value* tag = v ? v->find("rhp") : nullptr;
+    return tag != nullptr && tag->get_if<std::string>() != nullptr ? *tag->get_if<std::string>() : std::string{};
+}
+
+std::optional<Rhp::rollout_stage> parse_stage(std::string_view text) {
+    const auto colon = text.find(':');
+    const std::string_view fraction_text = text.substr(0, colon);
+    const std::string_view ms_text = colon == std::string_view::npos ? std::string_view{} : text.substr(colon + 1);
+    // Not std::from_chars: Apple's libc++ only has the floating-point overload from macOS 26.
+    double fraction = 0;
+    std::istringstream number{std::string{fraction_text}};
+    number.imbue(std::locale::classic());
+    if (fraction_text.empty() || std::isspace(static_cast<unsigned char>(fraction_text.front())) != 0 || !(number >> std::noskipws >> fraction) || number.peek() != std::char_traits<char>::eof() || !std::isfinite(fraction) || fraction < 0.0 ||
+        fraction > 1.0) {
+        return std::nullopt;
+    }
+    std::uint64_t ms = 0;
+    if (colon != std::string_view::npos) {
+        const auto [mend, mec] = std::from_chars(ms_text.data(), ms_text.data() + ms_text.size(), ms);
+        if (ms_text.empty() || mec != std::errc{} || mend != ms_text.data() + ms_text.size() || ms > 86'400'000ull * 30) {
+            return std::nullopt;
+        }
+    }
+    return Rhp::rollout_stage{fraction, std::chrono::milliseconds{static_cast<std::int64_t>(ms)}};
 }
 
 Rhp::result<std::vector<std::byte>> read_binary_file(const std::filesystem::path& path) {

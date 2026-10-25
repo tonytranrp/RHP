@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cstddef>
+#include <exception>
 #include <filesystem>
 #include <format>
 #include <mutex>
@@ -20,13 +21,36 @@ namespace {
 
 constexpr std::string_view kExtension = ".rhp";
 
+// Names Windows reserves for devices, whatever the extension ("nul.rhp" is the null device).
+bool reserved_name(std::string_view segment) {
+    const std::string_view stem = segment.substr(0, segment.find('.'));
+    for (const std::string_view name : {"con", "prn", "aux", "nul"}) {
+        if (stem == name) {
+            return true;
+        }
+    }
+    return stem.size() == 4 && (stem.starts_with("com") || stem.starts_with("lpt")) && stem[3] >= '0' && stem[3] <= '9';
+}
+
+// Lowercase segments separated by '/': no empty, "." or ".." segment, none ending in '.' (Windows
+// drops the dot, so "a." would alias "a"), no device name.
 bool valid_key(std::string_view key) {
-    if (key.empty() || key.size() > 200 || key.front() == '/' || key.back() == '/' || key.find("..") != std::string_view::npos) {
+    if (key.empty() || key.size() > 200) {
         return false;
     }
-    return std::ranges::all_of(key, [](char c) {
-        return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-' || c == '/';
-    });
+    if (!std::ranges::all_of(key, [](char c) { return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-' || c == '/'; })) {
+        return false;
+    }
+    std::size_t start = 0;
+    while (start <= key.size()) {
+        const std::size_t end = std::min(key.find('/', start), key.size());
+        const std::string_view segment = key.substr(start, end - start);
+        if (segment.empty() || segment.back() == '.' || segment.find("..") != std::string_view::npos || reserved_name(segment)) {
+            return false;
+        }
+        start = end + 1;
+    }
+    return true;
 }
 
 error bad_key(std::string_view key) {
@@ -38,6 +62,9 @@ error bad_key(std::string_view key) {
 // ---- memory_store ---------------------------------------------------------------------------------
 
 result<std::vector<std::byte>> memory_store::read(std::string_view key) {
+    if (!valid_key(key)) {
+        return std::unexpected{bad_key(key)};
+    }
     const std::scoped_lock lock{data_->mutex};
     const auto it = data_->values.find(key);
     if (it == data_->values.end()) {
@@ -56,6 +83,9 @@ result<void> memory_store::write(std::string_view key, std::span<const std::byte
 }
 
 result<void> memory_store::remove(std::string_view key) {
+    if (!valid_key(key)) {
+        return std::unexpected{bad_key(key)};
+    }
     const std::scoped_lock lock{data_->mutex};
     if (const auto it = data_->values.find(key); it != data_->values.end()) {
         data_->values.erase(it);
@@ -121,14 +151,27 @@ result<std::vector<std::string>> directory_store::keys() {
     if (!std::filesystem::is_directory(dir_, ec)) {
         return out;
     }
-    for (auto it = std::filesystem::recursive_directory_iterator{dir_, ec}; !ec && it != std::filesystem::recursive_directory_iterator{}; it.increment(ec)) {
-        if (!it->is_regular_file(ec) || it->path().extension() != kExtension) {
-            continue;
-        }
-        std::string key = std::filesystem::relative(it->path(), dir_, ec).generic_string();
-        key.resize(key.size() - kExtension.size());
-        if (valid_key(key)) {
-            out.push_back(std::move(key));
+    const auto options = std::filesystem::directory_options::skip_permission_denied;
+    for (auto it = std::filesystem::recursive_directory_iterator{dir_, options, ec}; !ec && it != std::filesystem::recursive_directory_iterator{};
+         it.increment(ec)) {
+        try { // one stray entry (a name the code page can't hold) is skipped, not the listing
+            std::error_code entry_ec;
+            if (!it->is_regular_file(entry_ec) || it->path().extension() != kExtension) {
+                continue;
+            }
+            const std::filesystem::path relative = std::filesystem::relative(it->path(), dir_, entry_ec);
+            if (entry_ec) {
+                continue;
+            }
+            std::string key = relative.generic_string();
+            if (key.size() <= kExtension.size()) {
+                continue;
+            }
+            key.resize(key.size() - kExtension.size());
+            if (valid_key(key)) {
+                out.push_back(std::move(key));
+            }
+        } catch (const std::exception&) {
         }
     }
     if (ec) {

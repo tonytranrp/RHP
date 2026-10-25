@@ -171,14 +171,18 @@ public:
             send(wire::op::kReleaseApply, wire::release_apply_request{value::bytes(envelope.begin(), envelope.end()), std::string{confirm}})));
     }
 
-    // Admin: the channel's candidate becomes active.
-    return_t<void> release_confirm(std::string_view channel) {
-        return finish(nothing(send(wire::op::kReleaseConfirm, wire::release_channel_request{std::string{channel}, false})));
+    // Admin: the channel's running candidate becomes active; returns its id. With `expected` (a
+    // release id), kSuperseded unless that is the candidate.
+    return_t<value::bytes> release_confirm(std::string_view channel, std::span<const std::byte> expected = {}) {
+        return finish(as<value::bytes>(
+            send(wire::op::kReleaseConfirm, wire::release_channel_request{std::string{channel}, false, value::bytes(expected.begin(), expected.end())})));
     }
 
-    // Admin: the channel stops what runs (falling back), or with `hold` runs nothing until a new release.
-    return_t<void> release_deactivate(std::string_view channel, bool hold = false) {
-        return finish(nothing(send(wire::op::kReleaseDeactivate, wire::release_channel_request{std::string{channel}, hold})));
+    // Admin: the channel stops what runs (falling back), or with `hold` runs nothing until a new
+    // release; returns the id of what stopped. With `expected`, kSuperseded unless that release runs.
+    return_t<value::bytes> release_deactivate(std::string_view channel, bool hold = false, std::span<const std::byte> expected = {}) {
+        return finish(as<value::bytes>(
+            send(wire::op::kReleaseDeactivate, wire::release_channel_request{std::string{channel}, hold, value::bytes(expected.begin(), expected.end())})));
     }
 
     // The host's channels and what they run.

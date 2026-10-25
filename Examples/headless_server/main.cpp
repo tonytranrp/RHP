@@ -344,6 +344,12 @@ int main(int argc, char** argv) {
         for (const auto& [channel, err] : restored->failed) {
             std::println(stderr, "releases: {}: {}", channel, err);
         }
+        for (const auto& [channel, err] : restored->deferred) {
+            std::println(stderr, "releases: {} runs nothing until the next start: {}", channel, err);
+        }
+        for (const auto& [channel, id] : restored->quarantined) {
+            std::println(stderr, "releases: {}: candidate {} quarantined", channel, Rhp::release::short_id(id));
+        }
     }
     // Declared before the host so it outlives it: the reverts the host does when it shuts down are logged too.
     Rhp::event::subscription audit;

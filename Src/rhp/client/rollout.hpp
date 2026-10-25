@@ -26,7 +26,7 @@ struct rollout_plan {
     std::vector<rollout_stage> stages{{0.1, std::chrono::seconds{30}}, {0.5, std::chrono::seconds{30}}, {1.0, std::chrono::milliseconds{0}}};
     std::chrono::milliseconds poll{500};                 // status checks while observing
     std::size_t max_failures = 0;                        // hosts that may fail (refuse, roll back, stop answering) before the rollout stops
-    bool rollback_on_failure = true;                     // a stopped rollout deactivates the release wherever it went
+    bool rollback_on_failure = true;                     // a stopped rollout deactivates the release on the hosts it applied it to
     std::function<void(std::string_view)> on_progress{}; // one line per step, on the calling thread
 };
 
@@ -36,8 +36,8 @@ struct rollout_host {
         kPending,    // its stage wasn't reached
         kConfirmed,  // runs the release, confirmed
         kAlready,    // ran it already
-        kSkipped,    // not meant for it (another app, build or platform) or superseded there
-        kFailed,     // refused it, rolled it back, or stopped answering
+        kSkipped,    // not meant for it (another app, build or platform), or it runs a newer release in the channel
+        kFailed,     // refused it (also: rolled back or quarantined there before), rolled it back, or stopped answering
         kRolledBack, // the rollout stopped and deactivated it there
     };
     net::service_record host;
@@ -58,12 +58,12 @@ struct rollout_host {
 }
 
 struct rollout_report {
-    bool completed = false; // every stage passed
+    bool completed = false; // every stage passed and at least one host runs the release
     std::size_t stages_done = 0;
     std::string channel;
     std::string release;             // hex id
     std::vector<rollout_host> hosts; // member order
-    std::optional<error> err{};      // why it stopped (or couldn't start)
+    std::optional<error> err{};      // why it stopped (or couldn't start: a fraction outside [0, 1], an unknown canary)
 };
 
 } // namespace Rhp

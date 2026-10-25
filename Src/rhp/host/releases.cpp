@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <chrono>
 #include <format>
 #include <functional>
@@ -70,11 +71,19 @@ result<value> handle(release::manager& m, wire::op code, const value& body) {
         if (!req) {
             return std::unexpected{std::move(req).error()};
         }
-        auto r = code == wire::op::kReleaseConfirm ? m.confirm(req->channel) : m.deactivate(req->channel, req->hold);
+        std::optional<release::release_id> expected;
+        if (!req->release.empty()) {
+            if (req->release.size() != release::release_id{}.size()) {
+                return fail(errc::kInvalidArgument, "release is a 32-byte release id", "release_channel");
+            }
+            expected.emplace();
+            std::ranges::copy(req->release, expected->begin());
+        }
+        auto r = code == wire::op::kReleaseConfirm ? m.confirm(req->channel, expected) : m.deactivate(req->channel, req->hold, expected);
         if (!r) {
             return std::unexpected{std::move(r).error()};
         }
-        return value{};
+        return value{id_bytes(*r)};
     }
     case wire::op::kReleaseStatus: return Rhp::to_value(to_message(m));
     case wire::op::kRevoke: {
@@ -123,7 +132,7 @@ release_bridge bridge(release::manager& m) {
     b.handle = [&m](wire::op code, const value& body) { return handle(m, code, body); };
     b.pump = [&m] { m.pump(); };
     b.on_event = [&m](std::function<void(event::release_changed)> publish) {
-        m.on_event([publish = std::move(publish)](const release::release_event& e) {
+        return m.on_event([publish = std::move(publish)](const release::release_event& e) {
             event::release_changed out;
             out.time = std::chrono::system_clock::now();
             out.kind = std::string{kind_name(e.what)};

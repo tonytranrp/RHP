@@ -46,7 +46,8 @@ struct release {
 
 // ---- revocation lists ----------------------------------------------------------------------------
 
-// A channel's anti-rollback floor: releases with this seq or a lower one are refused.
+// A channel's revoked floor: releases with this seq or a lower one are revoked (refused, stopped if
+// they run, never fallen back to).
 struct seq_floor {
     std::string channel;
     std::uint64_t seq = 0;
@@ -54,8 +55,9 @@ struct seq_floor {
     [[nodiscard]] bool operator==(const seq_floor&) const = default;
 };
 
-// Releases and keys a host must stop trusting, and floors it must raise. Lists are cumulative: a
-// newer list (higher seq) replaces an older one and should repeat what that one revoked.
+// Releases and keys a host must stop trusting, and floors it must raise. A host adds every list it
+// accepts to what it already revoked: a newer list (higher seq) can't take a revocation back, and a
+// key any list revoked can't sign a later one. Repeating older entries is harmless.
 struct revocation_list {
     std::uint64_t seq = 0;       // >= 1, increasing
     std::uint64_t issued_at = 0; // Unix seconds (informational)

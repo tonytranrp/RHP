@@ -32,9 +32,10 @@ namespace {
 using clock = std::chrono::steady_clock;
 using host_state = rollout_host::state;
 
-// What the rollout needs of the envelope (the hosts check everything else): its channel and id.
+// What the rollout needs of the envelope (the hosts check everything else): its channel, seq and id.
 struct peeked {
     std::string channel;
+    std::uint64_t seq = 0;
     security::digest256 id{};
 };
 
@@ -52,7 +53,11 @@ result<peeked> peek(std::span<const std::byte> envelope) {
     if (channel == nullptr || channel->get_if<std::string>() == nullptr) {
         return fail(errc::kProtocol, "the release body names no channel", "fleet.rollout");
     }
-    return peeked{*channel->get_if<std::string>(), security::blake2b_256(bytes)};
+    const value* seq = m->find("seq");
+    if (seq == nullptr || seq->get_if<std::int64_t>() == nullptr || *seq->get_if<std::int64_t>() < 1) {
+        return fail(errc::kProtocol, "the release body has no seq", "fleet.rollout");
+    }
+    return peeked{*channel->get_if<std::string>(), static_cast<std::uint64_t>(*seq->get_if<std::int64_t>()), security::blake2b_256(bytes)};
 }
 
 bool same_id(const value::bytes& a, const security::digest256& b) {
@@ -65,9 +70,31 @@ bool runs(const wire::release_status_reply& status, std::string_view channel, co
         if (c.channel != channel) {
             continue;
         }
-        return (c.candidate && same_id(c.candidate->id, id)) || (c.active && same_id(c.active->id, id) && c.running != "empty");
+        if (c.running == "candidate") {
+            return c.candidate && same_id(c.candidate->id, id);
+        }
+        return c.running == "active" && c.active && same_id(c.active->id, id);
     }
     return false;
+}
+
+// The seq of what the host runs in the channel (0: nothing).
+std::uint64_t running_seq(const wire::release_status_reply& status, std::string_view channel) {
+    for (const auto& c : status.channels) {
+        if (c.channel == channel) {
+            if (c.running == "candidate" && c.candidate) {
+                return c.candidate->seq;
+            }
+            if (c.running == "active" && c.active) {
+                return c.active->seq;
+            }
+        }
+    }
+    return 0;
+}
+
+value::bytes id_bytes(const security::digest256& id) {
+    return value::bytes(id.begin(), id.end());
 }
 
 class rollout_run {
@@ -90,6 +117,11 @@ public:
             report_.err = make_error(errc::kNotFound, "the fleet has no members", "fleet.rollout");
             return report_;
         }
+        if (auto valid = validate(); !valid) {
+            report_.err = std::move(valid).error();
+            return report_;
+        }
+        touched_.assign(report_.hosts.size(), false);
         const std::vector<planned_stage> stages = plan_stages();
         for (std::size_t index = 0; index < stages.size(); ++index) {
             progress(std::format("stage {}: {} host(s)", index + 1, stages[index].hosts.size()));
@@ -99,12 +131,34 @@ public:
             }
             ++report_.stages_done;
         }
+        const auto running = std::ranges::count_if(report_.hosts, [](const rollout_host& h) {
+            return h.status == host_state::kConfirmed || h.status == host_state::kAlready;
+        });
+        if (running == 0) {
+            report_.err = make_error(errc::kNotFound, "no host runs the release (every host skipped it)", "fleet.rollout");
+            progress("rollout complete, but no host runs the release");
+            return report_;
+        }
         report_.completed = true;
         progress("rollout complete");
         return report_;
     }
 
 private:
+    result<void> validate() const {
+        for (const rollout_stage& s : plan_.stages) {
+            if (!std::isfinite(s.fraction) || s.fraction < 0.0 || s.fraction > 1.0) {
+                return fail(errc::kInvalidArgument, std::format("a stage's fraction is {}: it lies in [0, 1]", s.fraction), "fleet.rollout");
+            }
+        }
+        for (const std::string& name : plan_.canaries) {
+            if (std::ranges::none_of(report_.hosts, [&](const rollout_host& h) { return h.host.name == name; })) {
+                return fail(errc::kNotFound, std::format("canary '{}' isn't a member of the fleet", name), "fleet.rollout");
+            }
+        }
+        return {};
+    }
+
     struct planned_stage {
         std::vector<std::size_t> hosts; // member indices
         std::chrono::milliseconds observe{0};
@@ -132,7 +186,7 @@ private:
         }
         std::size_t taken = 0;
         for (const rollout_stage& s : plan_.stages) {
-            const auto wanted = std::ceil(std::clamp(s.fraction, 0.0, 1.0) * static_cast<double>(rest.size()));
+            const auto wanted = std::ceil(s.fraction * static_cast<double>(rest.size())); // validated: in [0, 1]
             const auto target = std::min(rest.size(), static_cast<std::size_t>(wanted));
             if (target > taken) {
                 out.push_back(planned_stage{{rest.begin() + static_cast<std::ptrdiff_t>(taken), rest.begin() + static_cast<std::ptrdiff_t>(target)}, s.observe});
@@ -149,19 +203,42 @@ private:
         // Apply, health-watched: a host that sees the release fail rolls it back by itself.
         const value body = Rhp::to_value(wire::release_apply_request{value::bytes(envelope_.begin(), envelope_.end()), "health"});
         std::vector<std::size_t> applied;
+        std::vector<std::size_t> superseded;
         const auto outcomes = send(e_, wire::op::kReleaseApply, body, stage);
         for (std::size_t k = 0; k < outcomes.size(); ++k) {
             const outcome& o = outcomes[k];
             rollout_host& h = report_.hosts[stage[k]];
             if (o.body) {
                 auto reply = Rhp::from_value<wire::release_apply_reply>(*o.body);
-                h.status = reply && reply->already ? host_state::kAlready : host_state::kPending;
+                const bool already = reply && reply->already;
+                h.status = already ? host_state::kAlready : host_state::kPending;
+                touched_[stage[k]] = !already; // a host that ran it before this run keeps it, whatever happens
                 applied.push_back(stage[k]);
-            } else if (o.body.error().code == errc::kOutOfScope || o.body.error().code == errc::kSuperseded) {
+            } else if (o.body.error().code == errc::kOutOfScope) {
                 h.status = host_state::kSkipped;
                 h.err = o.body.error();
+            } else if (o.body.error().code == errc::kSuperseded) {
+                h.err = o.body.error();
+                superseded.push_back(stage[k]);
             } else {
+                // A host that may have got the apply although its answer didn't arrive is checked
+                // (and deactivated) like one that took it.
+                const errc code = o.body.error().code;
+                touched_[stage[k]] = code == errc::kTimeout || code == errc::kTransport || code == errc::kCancelled;
                 fail_host(h, o.body.error());
+            }
+        }
+        // Superseded is a skip only where something newer runs; else the host's floor is past it (it
+        // was rolled back there before, or a newer release was and nothing newer runs now).
+        const auto newer = send(e_, wire::op::kReleaseStatus, value{}, superseded);
+        for (std::size_t k = 0; k < superseded.size(); ++k) {
+            rollout_host& h = report_.hosts[superseded[k]];
+            auto status = newer[k].body ? Rhp::from_value<wire::release_status_reply>(*newer[k].body)
+                                        : result<wire::release_status_reply>{std::unexpected{newer[k].body.error()}};
+            if (status && running_seq(*status, peek_.channel) > peek_.seq) {
+                h.status = host_state::kSkipped;
+            } else {
+                fail_host(h, *h.err);
             }
         }
         if (over_budget()) {
@@ -176,8 +253,8 @@ private:
                 return false;
             }
         }
-        // Confirm what is still a candidate (a host that confirmed itself answers kNotFound).
-        const value confirm = Rhp::to_value(wire::release_channel_request{peek_.channel, false});
+        // Confirm what is still this release's candidate (a host that confirmed itself answers kNotFound).
+        const value confirm = Rhp::to_value(wire::release_channel_request{peek_.channel, false, id_bytes(peek_.id)});
         const auto confirmed = send(e_, wire::op::kReleaseConfirm, confirm, applied);
         for (std::size_t k = 0; k < applied.size(); ++k) {
             rollout_host& h = report_.hosts[applied[k]];
@@ -218,7 +295,7 @@ private:
         }
     }
 
-    // Deactivates the release wherever it still runs.
+    // Deactivates the release on the hosts this run applied it to, where it still runs.
     void stop() {
         progress(std::format("rollout stopped after {} stage(s): {} host(s) failed", report_.stages_done, failures_));
         if (!report_.err) {
@@ -229,8 +306,7 @@ private:
         }
         std::vector<std::size_t> touched;
         for (std::size_t i = 0; i < report_.hosts.size(); ++i) {
-            const auto s = report_.hosts[i].status;
-            if (s == host_state::kConfirmed || s == host_state::kPending || s == host_state::kFailed) {
+            if (touched_[i]) {
                 touched.push_back(i);
             }
         }
@@ -242,13 +318,14 @@ private:
                 running.push_back(touched[k]);
             }
         }
-        const value body = Rhp::to_value(wire::release_channel_request{peek_.channel, false});
+        // Bound to the release: a host that rolled it back meanwhile keeps what it runs now.
+        const value body = Rhp::to_value(wire::release_channel_request{peek_.channel, false, id_bytes(peek_.id)});
         const auto out = send(e_, wire::op::kReleaseDeactivate, body, running);
         for (std::size_t k = 0; k < running.size(); ++k) {
             rollout_host& h = report_.hosts[running[k]];
             if (out[k].body) {
                 h.status = host_state::kRolledBack;
-            } else {
+            } else if (out[k].body.error().code != errc::kSuperseded && out[k].body.error().code != errc::kNotFound) {
                 h.err = out[k].body.error();
             }
         }
@@ -266,7 +343,7 @@ private:
     [[nodiscard]] bool over_budget() const noexcept { return failures_ > plan_.max_failures; }
 
     void wait(std::chrono::milliseconds d) {
-        const auto until = clock::now() + d;
+        const auto until = clock::now() + std::max(d, std::chrono::milliseconds{10}); // poll == 0 must not spin
         while (clock::now() < until) {
             poll(e_);
             std::this_thread::sleep_for(std::min(std::chrono::milliseconds{10}, std::chrono::ceil<std::chrono::milliseconds>(until - clock::now())));
@@ -284,6 +361,7 @@ private:
     const rollout_plan& plan_;
     peeked peek_;
     rollout_report report_;
+    std::vector<bool> touched_; // applied to by this run
     std::size_t failures_ = 0;
 };
 

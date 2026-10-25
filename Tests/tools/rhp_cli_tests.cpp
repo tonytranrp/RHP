@@ -16,6 +16,7 @@
 #include <utility>
 #include <vector>
 
+#include "release_files.hpp"
 #include "shell.hpp"
 #include "text.hpp"
 #if !defined(_WIN32)
@@ -157,6 +158,17 @@ TEST_CASE("rhp-cli: endpoints", "[cli][text]") {
     CHECK_FALSE(rhp_cli::parse_endpoint("localhost:http", false, false));
     CHECK_FALSE(rhp_cli::parse_endpoint("::1:80", false, false));
     CHECK_FALSE(rhp_cli::parse_endpoint("host:70000", false, false));
+}
+
+TEST_CASE("rhp-cli: rollout stages parse whole", "[cli][text]") {
+    const auto stage = rhp_cli::parse_stage("0.25:3000");
+    REQUIRE(stage.has_value());
+    CHECK(stage->fraction == 0.25);
+    CHECK(stage->observe == std::chrono::milliseconds{3000});
+    CHECK(rhp_cli::parse_stage("1")->observe == std::chrono::milliseconds{0});
+    for (const char* bad : {"", "0.5abc:30", "0.5:30x", "nan:10", "inf", "1.5:0", "-0.1:0", ":10", "0.5:"}) {
+        CHECK_FALSE(rhp_cli::parse_stage(bad).has_value());
+    }
 }
 
 TEST_CASE("rhp-cli: unfinished Lua keeps the REPL reading", "[cli][text]") {

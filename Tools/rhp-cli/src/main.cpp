@@ -434,8 +434,12 @@ int revoke_build(const rhp_cli::revocation_spec& spec, const std::vector<std::st
     for (const std::string& identity : identities) {
         auto id = Rhp::security::identity_file::load(identity);
         auto key = id ? id->signer_key() : std::nullopt;
-        if (!key || !Rhp::release::sign(*r, *key)) {
+        if (!key) {
             std::println(stderr, "{}: no signing key", identity);
+            return 1;
+        }
+        if (auto ok = Rhp::release::sign(*r, *key); !ok) {
+            std::println(stderr, "{}", ok.error());
             return 1;
         }
     }
@@ -456,17 +460,20 @@ int inspect(const std::string& path) {
         std::println(stderr, "can't read {}", path);
         return 1;
     }
-    if (auto r = Rhp::release::decode_release(*bytes)) {
-        std::print("{}", rhp_cli::describe(*r));
+    auto release = Rhp::release::decode_release(*bytes);
+    if (release) {
+        std::print("{}", rhp_cli::describe(*release));
         return 0;
     }
-    if (auto r = Rhp::release::decode_revocations(*bytes)) {
-        std::print("{}", rhp_cli::describe(*r));
+    auto revocations = Rhp::release::decode_revocations(*bytes);
+    if (revocations) {
+        std::print("{}", rhp_cli::describe(*revocations));
         return 0;
-    } else {
-        std::println(stderr, "{}: {}", path, r.error());
-        return 1;
     }
+    // The error of the kind of document the file says it is.
+    const bool says_revocations = rhp_cli::document_tag(*bytes) == "revocations-envelope";
+    std::println(stderr, "{}: {}", path, says_revocations ? revocations.error() : release.error());
+    return 1;
 }
 
 } // namespace
@@ -616,11 +623,11 @@ int main(int argc, char** argv) {
     auto* revoke_cmd = app.add_subcommand("revoke", "build, sign and send revocation lists");
     revoke_cmd->require_subcommand(1);
     rhp_cli::revocation_spec revocations;
-    auto* vbuild_cmd = revoke_cmd->add_subcommand("build", "make a .rhprev (cumulative: list everything still revoked)");
-    vbuild_cmd->add_option("--seq", revocations.seq, "sequence number, or auto (default)");
+    auto* vbuild_cmd = revoke_cmd->add_subcommand("build", "make a .rhprev (hosts add it to what they revoked already)");
+    vbuild_cmd->add_option("--seq", revocations.seq, "sequence number, or auto (default: Unix seconds; pass a number to make two in one second)");
     vbuild_cmd->add_option("--release", revocations.releases, "a release id to revoke, hex (repeat)");
     vbuild_cmd->add_option("--key", revocations.keys, "a signing key to stop trusting, base64 (repeat)");
-    vbuild_cmd->add_option("--floor", revocations.floors, "channel=seq: refuse that channel's releases up to seq (repeat)");
+    vbuild_cmd->add_option("--floor", revocations.floors, "channel=seq: revoke that channel's releases up to seq (repeat)");
     vbuild_cmd->add_option("-i,--identity", sign_with, "sign with this identity (repeat)");
     vbuild_cmd->add_option("-o,--out", out_path, "file to write (default revocations.<seq>.rhprev)");
     auto* vsign_cmd = revoke_cmd->add_subcommand("sign", "add a signature to a .rhprev");
@@ -775,15 +782,12 @@ int main(int argc, char** argv) {
         if (!stage_specs.empty()) {
             plan.stages.clear();
             for (const std::string& stage_spec : stage_specs) {
-                const auto colon = stage_spec.find(':');
-                try {
-                    const double fraction = std::stod(stage_spec.substr(0, colon));
-                    const long long ms = colon == std::string::npos ? 0 : std::stoll(stage_spec.substr(colon + 1));
-                    plan.stages.push_back({fraction, std::chrono::milliseconds{ms}});
-                } catch (const std::exception&) {
-                    std::println(stderr, "--stage is fraction:observe_ms (got '{}')", stage_spec);
+                const auto stage = rhp_cli::parse_stage(stage_spec);
+                if (!stage) {
+                    std::println(stderr, "--stage is fraction:observe_ms with a fraction in [0, 1] (got '{}')", stage_spec);
                     return 2;
                 }
+                plan.stages.push_back(*stage);
             }
         }
         plan.on_progress = [](std::string_view line) { std::println("{}", line); };

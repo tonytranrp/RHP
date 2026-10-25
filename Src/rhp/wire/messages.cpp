@@ -503,7 +503,7 @@ result<release_apply_request> Rhp::convert<release_apply_request>::from_value(co
 }
 
 value Rhp::convert<release_channel_request>::to_value(const release_channel_request& m) {
-    return map_builder{}.set("channel", m.channel).set("hold", m.hold).done();
+    return map_builder{}.set("channel", m.channel).set("hold", m.hold).set("release", value{m.release}).done();
 }
 
 result<release_channel_request> Rhp::convert<release_channel_request>::from_value(const value& v) {
@@ -512,7 +512,8 @@ result<release_channel_request> Rhp::convert<release_channel_request>::from_valu
     }
     RHP_WIRE_READ(channel, field<std::string>(v, "channel", "release_channel"));
     RHP_WIRE_READ(hold, field_or<bool>(v, "hold", "release_channel", false));
-    return release_channel_request{std::move(*channel), *hold};
+    RHP_WIRE_READ(release, field_or<value::bytes>(v, "release", "release_channel", {}));
+    return release_channel_request{std::move(*channel), *hold, std::move(*release)};
 }
 
 value Rhp::convert<revoke_request>::to_value(const revoke_request& m) {

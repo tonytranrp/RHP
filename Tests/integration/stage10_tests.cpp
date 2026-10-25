@@ -2,6 +2,7 @@
 #include <chrono>
 #include <cstddef>
 #include <functional>
+#include <limits>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -273,6 +274,8 @@ TEST_CASE("stage10: a manual candidate is confirmed or deactivated remotely", "[
     CHECK(status->channels[0].running == "active");
     CHECK(status->channels[0].active->seq == 3);
     CHECK(admin.release_confirm("game.balance").error().code == errc::kNotFound);
+    const std::vector<std::byte> short_id(3);
+    CHECK(admin.release_deactivate("game.balance", false, short_id).error().code == errc::kInvalidArgument);
     REQUIRE(admin.release_deactivate("game.balance", true));
     CHECK(speed_of(admin) == 1);
 }
@@ -391,6 +394,31 @@ TEST_CASE("stage10: a rollout spreads a release over a fleet stage by stage", "[
     }
 }
 
+TEST_CASE("stage10: a rerun that stops leaves hosts that already ran the release alone", "[stage10][rollout]") {
+    keys k;
+    const signer dev{"dev"};
+    fleet_host a{"a", k, dev, true};
+    fleet_host b{"b", k, dev, true};
+    Rhp::fleet<tcp_cfg> group{Rhp::security::psk_identity{"admin", k.admin}, k.signer()};
+    REQUIRE(group.add(a.record()));
+    REQUIRE(group.add(b.record()));
+    Rhp::rollout_plan plan;
+    plan.stages = {{1.0, 20ms}};
+    plan.poll = 10ms;
+    REQUIRE(group.rollout(lib_release(dev, 1), plan).completed);
+    fleet_host c{"c", k, dev, false}; // joins without the lib: it refuses the release
+    REQUIRE(group.add(c.record()));
+    const auto rerun = group.rollout(lib_release(dev, 1), plan);
+    CHECK_FALSE(rerun.completed);
+    for (const auto& s : group.release_status()) {
+        REQUIRE(s.outcome.has_value());
+        if (s.host.name != "c") {
+            REQUIRE(s.outcome->channels.size() == 1);
+            CHECK(s.outcome->channels[0].running == "active");
+        }
+    }
+}
+
 TEST_CASE("stage10: a failing canary stops the rollout and nothing is left running", "[stage10][rollout]") {
     keys k;
     const signer dev{"dev"};
@@ -426,8 +454,18 @@ TEST_CASE("stage10: a failing canary stops the rollout and nothing is left runni
             CHECK(ch.running == "empty");
         }
     }
-    // Allowed to fail once: the rollout goes through the others.
+    // The same release again: good1 rolled it back, so it fails there instead of counting as skipped.
     plan.max_failures = 1;
+    const auto rerun = group.rollout(lib_release(dev, 1), plan);
+    CHECK_FALSE(rerun.completed);
+    for (const auto& h : rerun.hosts) {
+        if (h.host.name == "good1") {
+            CHECK(h.status == Rhp::rollout_host::state::kFailed);
+            REQUIRE(h.err.has_value());
+            CHECK(h.err->code == errc::kSuperseded);
+        }
+    }
+    // Allowed to fail once: the rollout goes through the others.
     const auto tolerant = group.rollout(lib_release(dev, 2), plan);
     CHECK(tolerant.completed);
 }
@@ -443,4 +481,15 @@ TEST_CASE("stage10: a rollout refuses what isn't a release envelope", "[stage10]
     CHECK_FALSE(report.completed);
     REQUIRE(report.err.has_value());
     CHECK(report.err->code == errc::kProtocol);
+    // Plans that can't mean anything are refused before any host is touched.
+    Rhp::rollout_plan unknown;
+    unknown.canaries = {"nobody"};
+    CHECK(group.rollout(lib_release(dev, 1), unknown).err->code == errc::kNotFound);
+    Rhp::rollout_plan nan;
+    nan.stages = {{std::numeric_limits<double>::quiet_NaN(), 0ms}};
+    CHECK(group.rollout(lib_release(dev, 1), nan).err->code == errc::kInvalidArgument);
+    for (const auto& s : group.release_status()) {
+        REQUIRE(s.outcome.has_value());
+        CHECK(s.outcome->channels.empty());
+    }
 }
