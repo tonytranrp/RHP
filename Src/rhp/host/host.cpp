@@ -219,8 +219,17 @@ struct outbound {
 }
 
 // Requests the audit log reports (event::script_executed): everything that runs code or changes
-// state. Introspection, cancel and blobs (event::blob_received) are left out.
-[[nodiscard]] bool audited(wire::op code) noexcept {
+// state. Introspection, cancel and blobs (event::blob_received) are left out; of the debugger, the
+// actions that change what scripts do (breakpoints, pause, resume, steps, reset).
+[[nodiscard]] bool audited(wire::op code, const value& body) noexcept {
+    if (code == wire::op::kDebug) {
+        const value* action = body.find("action");
+        const auto* name = action != nullptr ? action->get_if<std::string>() : nullptr;
+        if (name == nullptr) {
+            return true;
+        }
+        return *name != "paused" && *name != "stack" && *name != "variables" && *name != "evaluate";
+    }
     switch (code) {
     case wire::op::kList:
     case wire::op::kStatus:
@@ -231,8 +240,7 @@ struct outbound {
     case wire::op::kUnsubscribe:
     case wire::op::kReleaseStatus:
     case wire::op::kTunables:
-    case wire::op::kProfile:
-    case wire::op::kDebug: return false;
+    case wire::op::kProfile: return false;
     default: return true;
     }
 }
@@ -248,15 +256,23 @@ struct outbound {
     }
 }
 
-[[nodiscard]] wire::profile_reply profile_message(const script::profile_report& r) {
+// The report as one reply: stacks (most samples first) up to about a quarter of the frame limit,
+// the rest counted as truncated.
+[[nodiscard]] wire::profile_reply profile_message(const script::profile_report& r, std::uint32_t max_frame) {
     wire::profile_reply out;
     out.running = r.running;
     out.interval = r.interval;
     out.samples = r.samples;
     out.dropped = r.dropped;
     out.elapsed_us = static_cast<std::uint64_t>(r.elapsed.count());
-    out.stacks.reserve(r.stacks.size());
+    const std::size_t budget = std::max<std::size_t>(max_frame / 4, 4096);
+    std::size_t used = 0;
     for (const script::profile_stack& s : r.stacks) {
+        used += s.stack.size() + 16;
+        if (used > budget) {
+            out.truncated = r.stacks.size() - out.stacks.size();
+            break;
+        }
         out.stacks.push_back(wire::profile_stack_message{s.stack, s.samples});
     }
     return out;
@@ -758,8 +774,8 @@ private:
         std::uint64_t current_req = 0;
         std::set<module_id> pinned; // kept when the last session ends
         Rhp::subscription script_listener; // the sandbox's script events → host.on_script_event and clients
-        session_id debugger;  // set breakpoints / pause last: its end resets the debugger
-        session_id profiler;  // started the profiler: its end stops it
+        std::set<session_id> debuggers; // sessions that set breakpoints or paused: the last one's end resets the debugger
+        session_id profiler;            // started the profiler: its end stops it
     };
 
     // A blob arriving on one session (one at a time).
@@ -1321,8 +1337,7 @@ private:
         identity_runtime& rt = it->second;
         rt.sessions.erase(in.session);
         std::erase_if(rt.waiting, [&](const auto& entry) { return entry.second.session == in.session; });
-        if (rt.debugger == in.session) { // its breakpoints go, and what they paused runs on
-            rt.debugger = session_id{};
+        if (rt.debuggers.erase(in.session) != 0 && rt.debuggers.empty()) { // the last debugging session: its breakpoints go, paused scripts run on
             rt.box->debug_reset();
         }
         if (rt.profiler == in.session) {
@@ -1773,7 +1788,7 @@ private:
         // The audit record of this request, reported when request() returns (reply_error fills in
         // the outcome; a suspended request reports how it started).
         std::optional<event::script_executed> audit;
-        if (audited(in.code) && wants<event::script_executed>()) {
+        if (audited(in.code, in.body) && wants<event::script_executed>()) {
             audit.emplace();
             audit->time = now();
             audit->session = in.session;
@@ -2122,14 +2137,14 @@ private:
                     return bad_request(r.error());
                 }
                 rt.profiler = in.session;
-                return reply(in.session, in.req, Rhp::to_value(profile_message(box.profile())));
+                return reply(in.session, in.req, Rhp::to_value(profile_message(box.profile(), setup_.limits.max_frame)));
             }
             if (m->action == "read") {
-                return reply(in.session, in.req, Rhp::to_value(profile_message(box.profile())));
+                return reply(in.session, in.req, Rhp::to_value(profile_message(box.profile(), setup_.limits.max_frame)));
             }
             if (m->action == "stop") {
                 rt.profiler = session_id{};
-                return reply(in.session, in.req, Rhp::to_value(profile_message(box.stop_profile())));
+                return reply(in.session, in.req, Rhp::to_value(profile_message(box.stop_profile(), setup_.limits.max_frame)));
             }
             return bad_request(make_error(errc::kInvalidArgument, std::format("profile action is start, read or stop, not '{}'", m->action), "profile"));
         }
@@ -2160,10 +2175,10 @@ private:
                 return std::unexpected{std::move(lines).error()};
             }
             out.lines = std::move(*lines);
-            rt.debugger = session;
+            rt.debuggers.insert(session);
         } else if (action == "pause") {
             box.debug_pause();
-            rt.debugger = session;
+            rt.debuggers.insert(session);
         } else if (action == "continue" || action == "into" || action == "over" || action == "out") {
             const script::step_mode mode = action == "into"   ? script::step_mode::kInto
                                            : action == "over" ? script::step_mode::kOver
@@ -2204,7 +2219,7 @@ private:
             out.variables.push_back(variable_message(*v));
         } else if (action == "reset") {
             box.debug_reset();
-            rt.debugger = session_id{};
+            rt.debuggers.clear();
         } else {
             return fail(errc::kInvalidArgument, std::format("'{}' is not a debug action", m.action), "debug");
         }

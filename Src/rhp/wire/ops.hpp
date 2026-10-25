@@ -12,7 +12,8 @@ namespace Rhp::wire {
 // The protocol revision both ends must agree on in hello. A plain integer, bumped on any change to
 // the frame layout, the handshake or a message schema.
 // 2: signatures, pin / unpin, blobs (Stage 4); 3: resume, CRC-less TLS frames (Stage 5);
-// 4: subscribe / unsubscribe / event (Stage 7); 5: releases and revocation lists (Stage 10).
+// 4: subscribe / unsubscribe / event (Stage 7); 5: releases and revocation lists (Stage 10);
+// 6: tunables, the profiler and the debugger (Stage 11).
 inline constexpr std::uint8_t kProtocolRevision = 6;
 
 // What a frame carries (the header's `op`, 16 bits on the wire).

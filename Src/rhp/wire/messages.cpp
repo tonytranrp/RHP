@@ -801,6 +801,7 @@ value Rhp::convert<profile_reply>::to_value(const profile_reply& m) {
         .set("dropped", m.dropped)
         .set("elapsed_us", m.elapsed_us)
         .set("stacks", message_array(m.stacks))
+        .set("truncated", m.truncated)
         .done();
 }
 
@@ -814,7 +815,8 @@ result<profile_reply> Rhp::convert<profile_reply>::from_value(const value& v) {
     RHP_WIRE_READ(dropped, field_or<std::uint64_t>(v, "dropped", "profile reply", 0));
     RHP_WIRE_READ(elapsed, field_or<std::uint64_t>(v, "elapsed_us", "profile reply", 0));
     RHP_WIRE_READ(stacks, message_list<profile_stack_message>(v, "stacks", "profile reply"));
-    return profile_reply{*running, *interval, *samples, *dropped, *elapsed, std::move(*stacks)};
+    RHP_WIRE_READ(truncated, field_or<std::uint64_t>(v, "truncated", "profile reply", 0));
+    return profile_reply{*running, *interval, *samples, *dropped, *elapsed, std::move(*stacks), *truncated};
 }
 
 value Rhp::convert<debug_request>::to_value(const debug_request& m) {

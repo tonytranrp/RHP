@@ -267,6 +267,7 @@ struct profile_reply {
     std::uint64_t dropped = 0;
     std::uint64_t elapsed_us = 0;
     std::vector<profile_stack_message> stacks;
+    std::uint64_t truncated = 0; // stacks with the fewest samples left out to fit one reply
 
     [[nodiscard]] bool operator==(const profile_reply&) const = default;
 };
