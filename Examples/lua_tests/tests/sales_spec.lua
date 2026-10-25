@@ -1,0 +1,31 @@
+-- Timers, events and patch points with the fake clock: no real time passes.
+local rules = require("shop.rules")
+
+describe("happy hours", function()
+    it("discount every hour for ten minutes", function()
+        rules.happy_hours(60 * 60 * 1000, 10 * 60 * 1000, 0.25)
+        test.advance(60 * 60 * 1000)
+        assert.equals(0.25, shop.discount)
+        test.advance(10 * 60 * 1000)
+        assert.equals(0, shop.discount)
+    end)
+
+    it("leaves nothing running after the test", function()
+        assert.is_nil(test.next_due())
+        assert.equals(0, shop.discount)
+    end)
+end)
+
+describe("the game's events and points", function()
+    it("greets when the shop opens", function()
+        test.fire("shop.opened", 3)
+        test.frames(1)
+        assert.same({ "the shop opens, day 3" }, test.output())
+    end)
+
+    it("taxes through the patch point", function()
+        assert.equals(12, test.call_point("shop.tax", 120))
+        rhp.patch("shop.tax", function(original, amount) return original(amount) * 2 end)
+        assert.equals(24, test.call_point("shop.tax", 120))
+    end)
+end)

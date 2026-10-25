@@ -113,6 +113,23 @@ describe("clock", function()
         assert.matches("handler broke", f[1].message)
     end)
 
+    describe("an event published as a test ends", function()
+        local heard = {}
+        setup(function()
+            rhp.on("game.late", function(n) heard[#heard + 1] = n end) -- lasts for the file
+        end)
+
+        it("is delivered within that test (ok)", function()
+            rhp.publish("game.late", 1)
+        end)
+
+        it("and doesn't reach the next one (ok)", function()
+            assert.same({ 1 }, heard)
+            test.frames(2)
+            assert.same({ 1 }, heard)
+        end)
+    end)
+
     it("an endless timer loop is reported by run_all (fails)", function()
         rhp.every(10, function() end)
         test.run_all({ limit = 5 })

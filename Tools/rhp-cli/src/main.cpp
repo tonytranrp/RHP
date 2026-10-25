@@ -23,6 +23,7 @@
 #include <mutex>
 #include <optional>
 #include <print>
+#include <span>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -35,15 +36,18 @@
 #include <unistd.h>
 #endif
 
-#include "release_files.hpp"
 #include "dap.hpp"
+#include "release_files.hpp"
 #include "shell.hpp"
 #include "text.hpp"
 #include <CLI/CLI.hpp>
 #include <replxx.hxx>
 
+#include <rhp/core/json.hpp>
 #include <rhp/platform/files.hpp>
+#include <rhp/platform/process.hpp>
 #include <rhp/rhp.hpp>
+#include <rhp/test/cli.hpp>
 
 namespace {
 
@@ -458,6 +462,93 @@ int revoke_build(const rhp_cli::revocation_spec& spec, const std::vector<std::st
     return 0;
 }
 
+// rhp-cli test [--exe PROGRAM] [--api-from HOST:PORT -i ID [--tls ...]] <test runner arguments>
+//   --exe PROGRAM   run the program's own test executable (Rhp::test::main, its real libs) with the
+//                   remaining arguments; its exit status is rhp-cli's
+//   --api-from      fetch the API description of a running host (rhp.api()) and fake its libs
+//   otherwise       run the tests here with the `rhp` API only, or the fakes of --api FILE.json
+int test_command(std::vector<std::string> args) {
+    std::string exe;
+    connection_options conn;
+    std::vector<std::string> rest;
+    const auto take = [&](std::size_t& i, std::string& into) {
+        if (i + 1 >= args.size()) {
+            std::println(stderr, "rhp-cli test: {} expects a value", args[i]);
+            return false;
+        }
+        into = args[++i];
+        return true;
+    };
+    for (std::size_t i = 0; i < args.size(); ++i) {
+        const std::string& a = args[i];
+        bool ok = true;
+        if (a == "--exe") {
+            ok = take(i, exe);
+        } else if (a == "--api-from") {
+            ok = take(i, conn.address);
+        } else if (a == "-i" || a == "--identity") {
+            ok = take(i, conn.identity);
+        } else if (a == "--ca") {
+            ok = take(i, conn.ca);
+        } else if (a == "--server-name") {
+            ok = take(i, conn.server_name);
+        } else if (a == "--tls") {
+            conn.tls = true;
+        } else if (a == "--insecure-lan") {
+            conn.insecure_lan = true;
+        } else {
+            rest.push_back(a);
+        }
+        if (!ok) {
+            return 2;
+        }
+    }
+    if (std::ranges::find(rest, "--help") != rest.end() || std::ranges::find(rest, "-h") != rest.end()) {
+        std::print("rhp-cli test also takes:\n"
+                   "      --exe PROGRAM          run a program's own test executable (its real libs) with the other arguments\n"
+                   "      --api-from HOST:PORT   fake the libs of a running host (with -i/--identity, --tls, --ca, --server-name, --insecure-lan)\n\n");
+    }
+    if (!exe.empty()) {
+        auto status = Rhp::platform::run_process(exe, rest);
+        if (!status) {
+            std::println(stderr, "rhp-cli test: {}", status.error());
+            return 2;
+        }
+        return *status;
+    }
+    std::filesystem::path api_file;
+    if (!conn.address.empty()) {
+        if (conn.identity.empty()) {
+            conn.identity = env("RHP_IDENTITY");
+        }
+        auto c = open(conn, nullptr, true);
+        if (!c) {
+            return 2;
+        }
+        auto api = c->client->exec("return rhp.api()", "rhp-cli test");
+        if (!api || api->empty()) {
+            std::println(stderr, "rhp-cli test: the host didn't describe its API: {}", api ? std::string{"no value"} : std::format("{}", api.error()));
+            return 2;
+        }
+        api_file = std::filesystem::temp_directory_path() /
+                   std::format("rhp-api-{}.json", std::chrono::steady_clock::now().time_since_epoch().count());
+        const std::string text = Rhp::json::to_text(api->front(), 2) + "\n";
+        if (!Rhp::platform::replace_file(api_file, std::span<const std::byte>{reinterpret_cast<const std::byte*>(text.data()), text.size()})) {
+            std::println(stderr, "rhp-cli test: can't write {}", api_file.generic_string());
+            return 2;
+        }
+        rest.emplace_back("--api");
+        rest.push_back(api_file.string());
+    }
+    std::vector<std::string_view> views{rest.begin(), rest.end()};
+    const int status = Rhp::test::run_cli(views, {}, "rhp-cli test");
+    if (!api_file.empty()) {
+        std::error_code ec;
+        std::filesystem::remove(api_file, ec);
+    }
+    return status;
+}
+
 int inspect(const std::string& path) {
     auto bytes = rhp_cli::read_binary_file(path);
     if (!bytes) {
@@ -662,11 +753,18 @@ int main(int argc, char** argv) {
     vapply_cmd->add_option("file", file, "the .rhprev file")->required();
     add_connection_options(*vapply_cmd, conn, false);
 
+    auto* test_cmd = app.add_subcommand("test", "run Lua test files offline (`rhp-cli test --help`; --exe runs a program's own test executable)");
+    test_cmd->prefix_command(); // everything after `test` belongs to the test runner
+    test_cmd->set_help_flag();
+
     try {
         app.parse(argc, argv);
     } catch (const CLI::ParseError& e) {
         // Prints the help text or the usage error; usage errors exit 2 like the rest of rhp-cli.
         return app.exit(e) == 0 ? 0 : 2;
+    }
+    if (test_cmd->parsed()) {
+        return test_command(test_cmd->remaining());
     }
     std::signal(SIGINT, on_interrupt);
 
@@ -839,10 +937,10 @@ int main(int argc, char** argv) {
         }
         std::mutex write_mutex;
         rhp_cli::dap_server<cli_cfg> server{*dc->client, dap_root, [&](std::string_view bytes) {
-            const std::scoped_lock lock{write_mutex};
-            std::fwrite(bytes.data(), 1, bytes.size(), stdout);
-            std::fflush(stdout);
-        }};
+                                                const std::scoped_lock lock{write_mutex};
+                                                std::fwrite(bytes.data(), 1, bytes.size(), stdout);
+                                                std::fflush(stdout);
+                                            }};
         return server.run([] { return rhp_cli::read_dap_message(stdin); });
     }
 

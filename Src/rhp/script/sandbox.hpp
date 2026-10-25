@@ -22,12 +22,12 @@
 #include <rhp/core/role.hpp>
 #include <rhp/core/subscription.hpp>
 #include <rhp/core/value.hpp>
+#include <rhp/script/api.hpp>
 #include <rhp/script/debug.hpp>
 #include <rhp/script/detail/lib_builder.hpp>
 #include <rhp/script/ledger.hpp>
 #include <rhp/script/lib.hpp>
 #include <rhp/script/stack.hpp>
-#include <rhp/script/api.hpp>
 #include <rhp/script/stubs.hpp>
 #include <rhp/script/testing.hpp>
 #include <rhp/script/tunables.hpp>
@@ -255,7 +255,8 @@ public:
         return install_lib(L::name, &detail::install_lib_tree<L>, &::Rhp::script::stubs::generate<L>, &detail::collect_tunables<L>,
                            &::Rhp::script::api::describe<L>);
 #else
-        return fail(errc::kDisabled, "RHP is compiled out (RHP_ENABLE=0)", std::string{L::name});
+        // Refused (kDisabled), but the lib is still described by api() (api::describe needs no Lua).
+        return install_lib(L::name, nullptr, nullptr, nullptr, &::Rhp::script::api::describe<L>);
 #endif
     }
 

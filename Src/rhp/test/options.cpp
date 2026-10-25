@@ -79,7 +79,7 @@ offline. Folders are searched for *_spec.lua, *.spec.lua, *_test.lua and test_*.
       --max-frames N         pump() calls one test may take (default 10000)
       --instructions N       instruction limit of each test request
       --memory BYTES         memory limit of each test sandbox
-  -r, --reporter KIND[:FILE] text (default), tap, junit, json, github; repeatable
+  -r, --reporter KIND[:FILE] text, tap, junit, json, github; repeatable (stdout gets text unless one has no FILE)
   -v, --verbose              every test's line with its costs
       --coverage KIND[:FILE] summary, lcov, cobertura; repeatable
       --coverage-tests       count the test files' own lines too

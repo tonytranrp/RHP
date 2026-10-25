@@ -58,17 +58,21 @@ value recorded(const T& v) {
     }
 }
 
-template <class T>
-T default_value() {
-    if constexpr (std::default_initializable<T>) {
-        return T{};
-    } else {
-        static_assert(std::default_initializable<T>, "Rhp::test::fake: a result type the fake can't make (it isn't default-constructible)");
-    }
-}
-
 [[noreturn]] inline void raise(errc code, std::string message, std::string_view path) {
     throw Rhp::exception{make_error(code, std::move(message), std::string{path})};
+}
+
+// T when nothing was configured: its default, or (a type that only converts from a value) an
+// error asking for fake.returns. A type that does neither can't be faked.
+template <class T>
+T default_value(std::string_view path) {
+    if constexpr (std::default_initializable<T>) {
+        return T{};
+    } else if constexpr (from_value_convertible<T>) {
+        raise(errc::kTypeMismatch, std::format("{} returns a type with no default: give it one with fake.returns", path), path);
+    } else {
+        static_assert(std::default_initializable<T>, "Rhp::test::fake: a result type the fake can't make (no default constructor, no Rhp::convert from_value)");
+    }
 }
 
 // One value as T: from the configured values (`vals[i]`), else T's default.
@@ -82,7 +86,7 @@ T one_value(const std::vector<value>& vals, std::size_t i, std::string_view path
         }
         return std::move(*converted);
     } else {
-        return default_value<U>();
+        return default_value<U>(path);
     }
 }
 
@@ -102,14 +106,14 @@ R make_return(const std::vector<value>* vals, std::string_view path) {
         if constexpr (std::is_void_v<T>) {
             return U::completed(result<void>{});
         } else {
-            return U::completed(result<T>{vals != nullptr ? make_return<T>(vals, path) : default_value<T>()});
+            return U::completed(result<T>{vals != nullptr ? make_return<T>(vals, path) : default_value<T>(path)});
         }
     } else if constexpr (is_result_v<U>) {
         using T = typename U::value_type;
         if constexpr (std::is_void_v<T>) {
             return U{};
         } else {
-            return U{vals != nullptr ? make_return<T>(vals, path) : default_value<T>()};
+            return U{vals != nullptr ? make_return<T>(vals, path) : default_value<T>(path)};
         }
     } else if constexpr (is_tuple<U>::value) {
         return [&]<std::size_t... I>(std::index_sequence<I...>) {
@@ -117,7 +121,7 @@ R make_return(const std::vector<value>* vals, std::string_view path) {
         }(std::make_index_sequence<std::tuple_size_v<U>>{});
     } else {
         if (vals == nullptr) {
-            return default_value<U>();
+            return default_value<U>(path);
         }
         return one_value<U>(v, 0, path);
     }
@@ -187,7 +191,8 @@ T initial_value() {
     if constexpr (Meta::has_range) {
         return static_cast<T>(Meta::range_tag::min);
     } else {
-        return default_value<T>();
+        static_assert(std::default_initializable<T>, "Rhp::test::fake: a variable type the fake can't store (it isn't default-constructible)");
+        return T{};
     }
 }
 

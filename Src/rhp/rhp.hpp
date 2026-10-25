@@ -14,6 +14,7 @@
 #include <rhp/core/error.hpp>
 #include <rhp/core/errors_mode.hpp>
 #include <rhp/core/ids.hpp>
+#include <rhp/core/json.hpp>
 #include <rhp/core/limits.hpp>
 #include <rhp/core/log.hpp>
 #include <rhp/core/result.hpp>
@@ -37,12 +38,14 @@
 #include <rhp/net/websocket/websocket.hpp>
 #include <rhp/platform/files.hpp>
 #include <rhp/platform/os.hpp>
+#include <rhp/platform/process.hpp>
 #include <rhp/platform/random.hpp>
 #include <rhp/release/manager.hpp>
 #include <rhp/release/manifest.hpp>
 #include <rhp/release/release.hpp>
 #include <rhp/release/store.hpp>
 #include <rhp/release/trust.hpp>
+#include <rhp/script/api.hpp>
 #include <rhp/script/ledger.hpp>
 #include <rhp/script/lib.hpp>
 #include <rhp/script/lua_event.hpp>
@@ -51,6 +54,7 @@
 #include <rhp/script/sandbox.hpp>
 #include <rhp/script/stack.hpp>
 #include <rhp/script/stubs.hpp>
+#include <rhp/script/testing.hpp>
 #include <rhp/security/authenticator.hpp>
 #include <rhp/security/ed25519.hpp>
 #include <rhp/security/hash.hpp>
@@ -76,6 +80,7 @@
 #include <rhp/utils/spsc_ring.hpp>
 #include <rhp/utils/type_list.hpp>
 #include <rhp/utils/units.hpp>
+#include <rhp/test/test.hpp>
 #include <rhp/wire/codec.hpp>
 #include <rhp/wire/codec/msgpack.hpp>
 #include <rhp/wire/frame.hpp>

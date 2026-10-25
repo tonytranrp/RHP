@@ -140,8 +140,10 @@ int run_cli(std::span<const std::string_view> args, const install_fn& install, s
         files.push_back(std::move(f));
         return files.back().get();
     };
-    if (o.reports.empty()) {
-        o.reports.push_back(report_spec{});
+    // Standard output gets the text report unless a reporter was given for it (reports written to
+    // files come on top).
+    if (std::ranges::none_of(o.reports, [](const report_spec& s) { return s.path.empty(); })) {
+        o.reports.insert(o.reports.begin(), report_spec{});
     }
     for (const report_spec& spec : o.reports) {
         std::ostream* s = stream_for(spec.path);

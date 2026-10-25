@@ -72,6 +72,7 @@ configure_file("${PROJECT_SOURCE_DIR}/cmake/rhp-config-version.cmake.in" "${PROJ
 install(FILES
     "${PROJECT_BINARY_DIR}/package/rhp-config.cmake"
     "${PROJECT_BINARY_DIR}/package/rhp-config-version.cmake"
+    "${PROJECT_SOURCE_DIR}/cmake/RhpLuaTests.cmake"
     DESTINATION "${RHP_INSTALL_CMAKEDIR}"
     COMPONENT development
 )

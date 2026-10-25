@@ -8,9 +8,11 @@ rhp_add_module(platform
     HEADERS
         files.hpp
         os.hpp
+        process.hpp
         random.hpp
     SOURCES
         files.cpp
+        process.cpp
         random.cpp
     DEPS
         Rhp::core

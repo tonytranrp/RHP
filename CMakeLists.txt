@@ -23,6 +23,7 @@ include(RhpSanitizers)
 include(CPM)
 include(Dependencies)
 include(RhpBuildConfig)
+include(RhpLuaTests)
 
 add_subdirectory(Src)
 
