@@ -28,8 +28,9 @@ elseif(RHP_PLATFORM STREQUAL "WINDOWS")
 endif()
 
 # Coroutine yields jump instead of throwing (cmake/lua/lua_cxx.cpp), except with the MSVC ABI,
-# whose longjmp unwinds like an exception.
-if(RHP_LUA_JUMP_YIELDS AND NOT MSVC)
+# whose longjmp unwinds like an exception, and under ThreadSanitizer: its shadow call stack doesn't
+# follow those jumps, and a request that yields some thousands of times crashes it.
+if(RHP_LUA_JUMP_YIELDS AND NOT MSVC AND NOT "thread" IN_LIST RHP_SANITIZE)
     target_compile_definitions(rhp_lua PRIVATE RHP_LUA_JUMP_YIELDS)
 endif()
 
