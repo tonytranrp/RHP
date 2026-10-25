@@ -201,18 +201,33 @@ RHP_TARGET_SSE42 std::uint32_t three_blocks(const std::byte*& p, std::size_t& n,
     return crc;
 }
 
-RHP_TARGET_SSE42 std::uint32_t crc32c_hw(const std::byte* p, std::size_t n, std::uint32_t crc) noexcept {
-    if (n >= 3 * kShortBlock) { // a small frame goes straight to the single stream below
-        crc = three_blocks<kLongBlock>(p, n, crc, kShiftLong);
-        crc = three_blocks<kShortBlock>(p, n, crc, kShiftShort);
+// One stream: what a small frame needs, and the tail of a large one.
+RHP_TARGET_SSE42 std::uint32_t single_stream(const std::byte* p, std::size_t n, std::uint32_t crc) noexcept {
+#if defined(RHP_CRC32C_X86)
+    std::uint64_t c = crc; // the 64-bit instruction keeps its register 64 bits wide between steps
+    for (; n >= 8; p += 8, n -= 8) {
+        std::uint64_t v = 0;
+        std::memcpy(&v, p, 8);
+        c = _mm_crc32_u64(c, v);
     }
+    crc = static_cast<std::uint32_t>(c);
+#else
     for (; n >= 8; p += 8, n -= 8) {
         crc = step64(crc, p);
     }
+#endif
     while (n-- > 0) {
         crc = step8(crc, *p++);
     }
     return crc;
+}
+
+RHP_TARGET_SSE42 std::uint32_t crc32c_hw(const std::byte* p, std::size_t n, std::uint32_t crc) noexcept {
+    if (n >= 3 * kShortBlock) { // a small frame goes straight to the single stream
+        crc = three_blocks<kLongBlock>(p, n, crc, kShiftLong);
+        crc = three_blocks<kShortBlock>(p, n, crc, kShiftShort);
+    }
+    return single_stream(p, n, crc);
 }
 
 #endif
