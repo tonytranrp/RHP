@@ -1,5 +1,9 @@
 #include <algorithm>
 #include <chrono>
+#include <cstdint>
+#include <string>
+#include <utility>
+#include <vector>
 
 #include <catch2/catch_test_macros.hpp>
 #include <rhp_test/net_support.hpp>
@@ -39,6 +43,18 @@ TEST_CASE("mdns: DNS records round trip and malformed names are refused", "[net]
     for (std::size_t n = 0; n < bytes->size(); ++n) {
         CHECK_FALSE(Rhp::net::detail::read_dns(bytes->view().first(n)));
     }
+    // An answer to a query: the asked record in the answer section, the rest additional.
+    const std::vector<std::pair<std::string, std::uint16_t>> asked{{"dns-parser._rhp._tcp.local", std::uint16_t{33}}};
+    auto answer = Rhp::net::detail::dns_service_packet(record, 120, false, asked);
+    REQUIRE(answer);
+    const auto counts = answer->view().subspan(6, 6);
+    CHECK(counts[1] == std::byte{1}); // answers
+    CHECK(counts[5] == std::byte{3}); // additional
+    auto answered = Rhp::net::detail::read_dns(answer->view());
+    REQUIRE(answered);
+    REQUIRE(answered->records.size() == 4);
+    CHECK(answered->records[0].port == 7777);
+    CHECK(answered->records[1].target == "dns-parser._rhp._tcp.local");
     record.host = std::string(64, 'x') + ".local";
     CHECK_FALSE(Rhp::net::detail::dns_service_packet(record, 120));
     record.host = "a..local";

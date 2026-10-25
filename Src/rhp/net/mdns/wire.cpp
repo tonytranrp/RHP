@@ -326,7 +326,7 @@ public:
         const auto instance = detail::instance_domain(*record_);
         const auto type = detail::service_domain(record_->transport);
         if (std::ranges::any_of(message.questions, [&](const auto& q) { return q.first == type || q.first == instance || q.first == record_->host; })) {
-            announce(kTtl);
+            send_records(kTtl, false, message.questions);
         }
     }
 
@@ -440,8 +440,8 @@ private:
         published_ = false;
     }
 
-    void send_records(std::uint32_t ttl, bool probe) {
-        auto packet = detail::dns_service_packet(*record_, ttl, probe);
+    void send_records(std::uint32_t ttl, bool probe, std::span<const std::pair<std::string, std::uint16_t>> asked = {}) {
+        auto packet = detail::dns_service_packet(*record_, ttl, probe, asked);
         if (!packet) {
             set_failure(std::move(packet).error());
             return;

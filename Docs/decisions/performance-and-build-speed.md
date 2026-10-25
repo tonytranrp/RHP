@@ -63,6 +63,15 @@ signatures found valid, keyed by the public key, the signature and the source's 
 repeated signed exec sign and verify once. Both are facts about bytes, so a verifier still checks
 that it trusts the signer before it looks; a different key, signature or source misses.
 
+**mDNS answers.** The wire responder answers a query with the records it asked for in the answer
+section and the rest in the additional section (RFC 6763 §12), as Windows' own responder does;
+announcements keep every record in the answer section. Windows' `DnsServiceResolve` did not take an
+SRV or TXT that arrived among unasked answers: it re-asked about 40 times a second and the responder
+answered each (1,667 responses in one run), so resolving a record published by RHP took 24-41 s.
+Now it takes 2.7 s, with 42 responses. Ruled out on the way, each measured: legacy unicast and QU
+queries, the `127.0.0.1` address, answering on every IPv4 interface, a single-label host name, NSEC
+records, and moving every non-PTR record to the additional section (Windows then never resolved).
+
 ## Build
 
 Measured on a clean MSVC Debug build (16 threads, 16 GB): the time went to parsing standard headers
