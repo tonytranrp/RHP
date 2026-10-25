@@ -18,7 +18,7 @@ set(RHP_SANITIZE "" CACHE STRING "Sanitizers to enable: 'address;undefined', 'ad
 
 # The stage this tree implements, recorded in the installed package (rhp_STAGE). RHP has no
 # release numbers; the wire protocol has its own revision (wire/ops.hpp).
-set(RHP_STAGE "stage-10")
+set(RHP_STAGE "stage-11")
 
 # Everything below is directory-scoped: it applies to RHP's own targets (and the dependencies it
 # builds), never to the project that includes RHP, and a value that project already set wins.
