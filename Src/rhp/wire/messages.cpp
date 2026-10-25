@@ -183,14 +183,34 @@ result<resume> Rhp::convert<resume>::from_value(const value& v) {
 
 // ---- envelope and requests -----------------------------------------------------------------------
 
-value Rhp::convert<envelope>::to_value(const envelope& m) {
+value Rhp::wire::envelope_value(std::uint64_t req, std::uint64_t idem, value body) {
     map_builder b;
-    b.set("req", m.req);
-    if (m.idem != 0) {
-        b.set("idem", m.idem);
+    b.set("req", req);
+    if (idem != 0) {
+        b.set("idem", idem);
     }
-    b.set("body", m.body);
+    b.set("body", std::move(body));
     return b.done();
+}
+
+value Rhp::convert<envelope>::to_value(const envelope& m) {
+    return envelope_value(m.req, m.idem, m.body);
+}
+
+result<envelope> Rhp::wire::take_envelope(value v) {
+    if (!v.is_map()) {
+        return not_a_map("envelope", v);
+    }
+    RHP_WIRE_READ(req, field_or<std::uint64_t>(v, "req", "envelope", 0));
+    RHP_WIRE_READ(idem, field_or<std::uint64_t>(v, "idem", "envelope", 0));
+    envelope out{*req, *idem, value{}};
+    for (auto& [key, field] : *v.get_if<value::map>()) {
+        if (const auto* name = key.get_if<std::string>(); name != nullptr && *name == "body") {
+            out.body = std::move(field);
+            break;
+        }
+    }
+    return out;
 }
 
 result<envelope> Rhp::convert<envelope>::from_value(const value& v) {

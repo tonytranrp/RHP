@@ -14,6 +14,9 @@ set_property(CACHE RHP_TLS_OPENSSL PROPERTY STRINGS AUTO ON OFF)
 option(RHP_TLS_MBEDTLS "Build the Mbed TLS backend (fetched; the mobile backend and the fallback without OpenSSL)" ON)
 option(RHP_LUA_JUMP_YIELDS "Coroutine yields jump (_longjmp) instead of throwing; errors still throw. Ignored with the MSVC ABI outside x64 and under ThreadSanitizer" ON)
 option(RHP_FUZZ "Build Tests/fuzz as libFuzzer executables (Clang only); without it they are ctest replay drivers" OFF)
+# Clean builds (CI) compile RHP's own targets as unity files, 16 sources each: about a third less wall
+# time; an edit then recompiles its whole batch, so it is off for everyday work.
+option(RHP_UNITY_BUILD "Compile RHP's libraries, tests and tools as unity files (clean builds)" OFF)
 set(RHP_SANITIZE "" CACHE STRING "Sanitizers to enable: 'address;undefined', 'address' (MSVC) or 'thread'")
 
 # The stage this tree implements, recorded in the installed package (rhp_STAGE). RHP has no
@@ -50,6 +53,21 @@ endif()
 # Debug and release archives install side by side (rhp_cored.lib next to rhp_core.lib).
 if(NOT DEFINED CMAKE_DEBUG_POSTFIX)
     set(CMAKE_DEBUG_POSTFIX d)
+endif()
+
+# Ninja, RHP built on its own: links share a pool sized by the machine's memory. A Debug test
+# executable's link takes 1-2 s and up to 1 GB alone, but 13-22 s when every core links at once and
+# the machine runs out of memory.
+if(RHP_IS_TOP_LEVEL AND CMAKE_GENERATOR MATCHES "Ninja" AND NOT DEFINED CMAKE_JOB_POOL_LINK)
+    cmake_host_system_information(RESULT _rhp_memory_mb QUERY TOTAL_PHYSICAL_MEMORY)
+    math(EXPR _rhp_links "${_rhp_memory_mb} / 3072")
+    if(_rhp_links LESS 2)
+        set(_rhp_links 2)
+    elseif(_rhp_links GREATER 8)
+        set(_rhp_links 8)
+    endif()
+    set_property(GLOBAL APPEND PROPERTY JOB_POOLS rhp_link=${_rhp_links})
+    set(CMAKE_JOB_POOL_LINK rhp_link)
 endif()
 
 # MSVC: debug information inside the objects (/Z7), so an installed static library needs no PDBs.

@@ -721,6 +721,7 @@ private:
                 orphans_.push_back(identity->second.relay);
                 io_identities_.erase(identity);
             }
+            arm_enforce();
         }
         inbound in;
         in.what = inbound::kind::kClosed;
@@ -1019,7 +1020,7 @@ private:
             s.close(make_error(errc::kProtocol, std::format("a client may not send {}", code), "host"));
             return;
         }
-        auto env = Rhp::from_value<wire::envelope>(body);
+        auto env = wire::take_envelope(std::move(body));
         if (!env) {
             s.close(std::move(env).error());
             return;
@@ -1097,6 +1098,7 @@ private:
                     orphans_.push_back(ident->second.relay);
                     io_identities_.erase(ident);
                 }
+                arm_enforce();
             }
             inbound in;
             in.what = inbound::kind::kClosed;
@@ -1131,22 +1133,41 @@ private:
         if (ident == io_identities_.end()) {
             return;
         }
-        const std::scoped_lock lock{ident->second.relay->mutex};
-        ident->second.relay->cancel(s.id(), request->target, arrival);
+        {
+            const std::scoped_lock lock{ident->second.relay->mutex};
+            ident->second.relay->cancel(s.id(), request->target, arrival);
+        }
+        arm_enforce();
     }
 
-    // Re-applies recorded cancels to whatever runs inside pump() right now (see enforce()).
+    // Re-applies recorded cancels to whatever runs inside pump() right now (see enforce()), every
+    // kEnforceInterval while a cancel is recorded or an orphaned relay still has its sandbox: an idle
+    // host doesn't wake up for it.
     void enforce_cancels() {
+        enforce_armed_ = false;
+        bool recorded = false;
         for (auto& [name, ident] : io_identities_) {
             const std::scoped_lock lock{ident.relay->mutex};
             ident.relay->enforce(false);
+            recorded = recorded || !ident.relay->cancels.empty();
         }
         std::erase_if(orphans_, [](const std::shared_ptr<cancel_relay>& relay) {
             const std::scoped_lock lock{relay->mutex};
             relay->enforce(false);
             return relay->box == nullptr;
         });
-        enforce_timer_.start(kEnforceInterval, [this] { enforce_cancels(); });
+        if (recorded || !orphans_.empty()) {
+            arm_enforce();
+        }
+    }
+
+    // A cancel was recorded or a session ended: enforce_cancels() runs again shortly (pump() clears
+    // the records once the requests they cover are dealt with).
+    void arm_enforce() {
+        if (!enforce_armed_) {
+            enforce_armed_ = true;
+            enforce_timer_.start(kEnforceInterval, [this] { enforce_cancels(); });
+        }
     }
 
     // False when the backlog is full (the caller drops the session that is flooding it).
@@ -1224,10 +1245,10 @@ private:
     }
 
     bool send_reply(io_session& rec, wire::op code, std::uint64_t req, const value& body) {
-        auto sent = rec.s->send(code, Rhp::to_value(wire::envelope{req, 0, body}));
+        auto sent = rec.s->send(code, wire::envelope_value(req, 0, body));
         if (!sent && sent.error().code == errc::kLimitExceeded && final_reply(code, req)) {
             // Too big for one frame: the request still gets an answer.
-            (void)rec.s->send(wire::op::kError, Rhp::to_value(wire::envelope{req, 0, Rhp::to_value(sent.error())}));
+            (void)rec.s->send(wire::op::kError, wire::envelope_value(req, 0, Rhp::to_value(sent.error())));
         }
         return sent.has_value();
     }
@@ -1881,7 +1902,7 @@ private:
                 if (!r) {
                     return std::unexpected{std::move(r).error()};
                 }
-                return value{value::array(r->begin(), r->end())};
+                return value{std::move(*r)}; // a value_list is a value::array
             });
             return;
         }
@@ -2384,6 +2405,7 @@ private:
     std::atomic<bool> inbox_backlog_waiting_{false};     // read by pump() to decide whether to wake us
     std::vector<std::shared_ptr<cancel_relay>> orphans_; // identities whose last session ended
     net::io_context::timer enforce_timer_{io_};
+    bool enforce_armed_ = false; // network thread
     std::atomic<std::size_t> ready_sessions_{0};
     // Reverse mode: the one outgoing session, and when to dial again.
     bool reverse_ = false;

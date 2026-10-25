@@ -17,9 +17,9 @@
 #include <rhp/client/client.hpp>
 #include <rhp/config/config.hpp>
 #include <rhp/core/error.hpp>
+#include <rhp/core/limits.hpp>
 #include <rhp/core/log.hpp>
 #include <rhp/core/role.hpp>
-#include <rhp/core/limits.hpp>
 #include <rhp/core/value.hpp>
 #include <rhp/event/events.hpp>
 #include <rhp/host/host.hpp>
@@ -267,7 +267,7 @@ TEST_CASE("stage11: breakpoints stay while another session still debugs", "[stag
     other.source = "s11.elsewhere";
     other.lines = {1};
     REQUIRE(second->debug(other)); // the second session debugs too
-    first.reset(); // one of two debugging sessions ends: the breakpoint stays
+    first.reset();                 // one of two debugging sessions ends: the breakpoint stays
     auto call = runner.async().call("s11.two", "go");
     REQUIRE(eventually([&] {
         const auto p = second->debug(action("paused"));
@@ -320,7 +320,7 @@ TEST_CASE("stage11: a profile too big for one reply is truncated", "[stage11][pr
     // 400 functions on lines of their own: their distinct stacks need more than a quarter of 64 KiB.
     std::string source = "fns = {}\n";
     for (int i = 0; i < 400; ++i) {
-        source += "fns[#fns + 1] = function() local s = 0 for i = 1, 3000 do s = s + i end return s end\n";
+        source += "fns[#fns + 1] = function() local s = 0 for i = 1, 300 do s = s + i end return s end\n"; // ~15 samples each at 100
     }
     source += "function all() for _, f in ipairs(fns) do f() end end\n";
     REQUIRE(c.load("s11.trunc", source));

@@ -25,6 +25,12 @@ include(Dependencies)
 include(RhpBuildConfig)
 include(RhpLuaTests)
 
+# After the dependencies: they keep their own settings (Catch2 is a unity build anyway).
+if(RHP_UNITY_BUILD)
+    set(CMAKE_UNITY_BUILD ON)
+    set(CMAKE_UNITY_BUILD_BATCH_SIZE 16)
+endif()
+
 add_subdirectory(Src)
 
 if(RHP_INSTALL)
