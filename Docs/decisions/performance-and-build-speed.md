@@ -35,7 +35,10 @@ trivially copyable types are read with an atomic load (RHP's writes store atomic
 `std::atomic_ref` reads keep the lock); a reverted variable write finds its layer from the newest end
 (reverts were O(n^2)). *Not done:* resetting `request_record` field by field (about 10% of a frame
 callback, but it would break "reset() resets every field" with no portable compile-time guard); a
-lock-free patch-point fast path (no layer-lifetime guarantee).
+lock-free patch-point fast path. A layer found for a thread can only be removed by that thread, so
+a per-thread cache of the top layer, checked against a version that every push and remove bumps, is
+safe; measured, it made no difference to a call into a Lua handler (79-85 ns either way: the
+uncontended lock is a small part of it, the handler's request and pcall the rest), so it isn't in.
 
 **The debugger with breakpoints only** runs line events in the functions whose lines hold one
 (`scope_lines`, debug.cpp): call and return events switch them, keeping the instruction countdown
