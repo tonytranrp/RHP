@@ -401,6 +401,9 @@ void sandbox_impl::stop_waiting(request_record& req) noexcept {
     } else if (req.waiting == wait_kind::kAsync) {
         drop_async(std::exchange(req.async, nullptr));
         req.waiting = wait_kind::kNone;
+    } else if (req.waiting == wait_kind::kDebug) {
+        forget_paused(req.id);
+        req.waiting = wait_kind::kNone;
     }
     req.woken = false;
 }
@@ -457,6 +460,8 @@ sandbox_stats sandbox_impl::stats() const {
     for (const auto& [id, req] : requests_) {
         if (req->waiting == wait_kind::kAsync) {
             ++out.async_waiting;
+        } else if (req->waiting == wait_kind::kDebug) {
+            ++out.paused;
         } else if (req->waiting != wait_kind::kNone) {
             ++out.waiting;
         }

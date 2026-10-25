@@ -167,15 +167,31 @@ struct lib_writer<Handles, lib<Name, Entries...>> {
     }
 
 private:
+    // " [0, 10] m/s: what it is for" from a variable's tags (empty without any).
+    template <class Meta>
+    static std::string described() {
+        std::string out;
+        if constexpr (Meta::has_range) {
+            out += std::format(" [{}, {}]", *Meta::lower(), *Meta::upper());
+        }
+        if (!Meta::unit().empty()) {
+            out += std::format(" {}", Meta::unit());
+        }
+        if (!Meta::doc().empty()) {
+            out += std::format("{} {}", out.empty() ? "" : ":", Meta::doc());
+        }
+        return out;
+    }
+
     template <class Entry>
     static void field(std::string& out, std::string_view path, role caller) {
         using script::detail::entry_kind;
         if constexpr (Entry::kind == entry_kind::kVar) {
             // Writes need kPatch; below that the variable is effectively read-only.
             const std::string_view suffix = allows(caller, role::kPatch) ? "" : " read-only";
-            out += std::format("---@field {} {}{}\n", Entry::name, type_name<Handles, typename Entry::value_type>(), suffix);
+            out += std::format("---@field {} {}{}{}\n", Entry::name, type_name<Handles, typename Entry::value_type>(), suffix, described<typename Entry::meta>());
         } else if constexpr (Entry::kind == entry_kind::kRo) {
-            out += std::format("---@field {} {} read-only\n", Entry::name, type_name<Handles, typename Entry::value_type>());
+            out += std::format("---@field {} {} read-only{}\n", Entry::name, type_name<Handles, typename Entry::value_type>(), described<typename Entry::meta>());
         } else if constexpr (Entry::kind == entry_kind::kSub) {
             out += std::format("---@field {} {}.{}\n", Entry::name, path, Entry::name);
         }
@@ -363,6 +379,11 @@ function rhp.tasks() end
 ---@return rhp.stats
 function rhp.stats() end
 
+---The variables the installed libs expose, with their values and tags (all, or those under `prefix`).
+---@param prefix? string a lib or a path ("game", "game.speed")
+---@return rhp.tunable[]
+function rhp.tunables(prefix) end
+
 ---Streams a value to the host while the script keeps running.
 ---@param value any
 function rhp.emit(value) end
@@ -408,6 +429,17 @@ function require(name) end
 ---@field message string
 ---@field where string
 ---@field traceback string
+
+---@class rhp.tunable
+---@field path string
+---@field type string
+---@field value any
+---@field writable boolean
+---@field min? number
+---@field max? number
+---@field step? number
+---@field unit? string
+---@field doc? string
 
 ---@class rhp.stats
 ---@field dropped_events integer

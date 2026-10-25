@@ -150,6 +150,7 @@ if(RHP_ENABLE)
             script/script_event_tests.cpp
             script/stubs_tests.cpp
             script/task_tests.cpp
+            script/tools_tests.cpp
         LINKS
             Rhp::script
     )

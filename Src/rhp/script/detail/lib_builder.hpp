@@ -253,6 +253,10 @@ int push_return(stack& s, std::string_view label, R& r) {
     return make_error(errc::kForbidden, std::format("needs role {}", need), std::string{label});
 }
 
+[[nodiscard]] inline error out_of_range(std::string_view label, double min, double max) {
+    return make_error(errc::kOutOfRange, std::format("must lie in [{}, {}]", min, max), std::string{label});
+}
+
 // `position` counts from 1; a method's first parameter is its handle ("(self)"), and the
 // arguments after it count from 1 as the script wrote them.
 [[nodiscard]] inline error arg_error(error err, std::string_view label, std::size_t position, bool method = false) {
@@ -512,7 +516,7 @@ int start_async(stack& s, context& ctx, std::string_view label, std::index_seque
     std::shared_ptr<async_wait> op;
     if constexpr (keep_args) {
         op = std::make_shared<async_call<Handles, Entry, capture_t<utils::at_t<args, Is>>...>>(std::string{label}, std::move(*out),
-                                                                                                *std::get<Is>(pulled)...);
+                                                                                               *std::get<Is>(pulled)...);
     } else {
         op = std::make_shared<async_call<Handles, Entry>>(std::string{label}, std::move(*out));
     }
@@ -566,6 +570,11 @@ int set_var(lua_State* L) {
     auto incoming = pull_arg<Handles, T>(s, 1);
     if (!incoming) {
         s.raise(arg_error(std::move(incoming).error(), label, 1));
+    }
+    if constexpr (Entry::meta::has_range) {
+        if (!Entry::meta::in_range(*incoming)) {
+            s.raise(out_of_range(label, *Entry::meta::lower(), *Entry::meta::upper()));
+        }
     }
     auto fx = var_layers<Entry::pointer>::assign(std::move(*incoming));
     ctx.record_effect(std::string{label}, std::move(fx));
@@ -740,14 +749,14 @@ template <utils::fixed_string N, auto F, class... Tags, class Handles>
 struct entry_installable<property_entry<N, F, Tags...>, Handles>
     : std::bool_constant<entry_installable<fn_entry<N, F, Tags...>, Handles>::value && is_handle_v<Handles, self_t<F>>> {};
 
-template <utils::fixed_string N, auto Ptr, class Handles>
-struct entry_installable<var_entry<N, Ptr>, Handles>
-    : std::bool_constant<arg_traits<Handles, typename var_entry<N, Ptr>::value_type>::pull_ok &&
-                         arg_traits<Handles, typename var_entry<N, Ptr>::value_type>::push_ok> {};
+template <utils::fixed_string N, auto Ptr, class... Tags, class Handles>
+struct entry_installable<var_entry<N, Ptr, Tags...>, Handles>
+    : std::bool_constant<arg_traits<Handles, typename var_entry<N, Ptr, Tags...>::value_type>::pull_ok &&
+                         arg_traits<Handles, typename var_entry<N, Ptr, Tags...>::value_type>::push_ok> {};
 
-template <utils::fixed_string N, auto Ptr, class Handles>
-struct entry_installable<ro_entry<N, Ptr>, Handles>
-    : std::bool_constant<arg_traits<Handles, typename ro_entry<N, Ptr>::value_type>::push_ok> {};
+template <utils::fixed_string N, auto Ptr, class... Tags, class Handles>
+struct entry_installable<ro_entry<N, Ptr, Tags...>, Handles>
+    : std::bool_constant<arg_traits<Handles, typename ro_entry<N, Ptr, Tags...>::value_type>::push_ok> {};
 
 template <class Lib, class Handles>
 struct lib_installable;

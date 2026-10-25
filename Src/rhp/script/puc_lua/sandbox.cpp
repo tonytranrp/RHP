@@ -31,6 +31,7 @@
 #include <rhp/script/detail/patch_registry.hpp>
 #include <rhp/script/puc_lua/builtins.hpp>
 #include <rhp/script/puc_lua/sandbox_impl.hpp>
+#include <rhp/script/puc_lua/tools.hpp>
 #include <rhp/script/sandbox.hpp>
 #include <rhp/script/stubs.hpp>
 #include <rhp/utils/byte_buffer.hpp>
@@ -374,7 +375,7 @@ struct sandbox_impl::active_scope {
         }
         if (self.running_.empty() && self.hook_dirty_) {
             self.hook_dirty_ = false;
-            self.reset_hook();
+            self.rearm_all(); // every coroutine, in case the profiler or the debugger changed the hook meanwhile
         }
     }
 };
@@ -566,6 +567,7 @@ void sandbox_impl::open_libraries() {
         {"stats", &lua_rhp_stats},
         {"spawn", &lua_rhp_spawn},
         {"tasks", &lua_rhp_tasks},
+        {"tunables", &lua_rhp_tunables},
     };
     lua_createtable(L, 0, static_cast<int>(std::size(builtins)) + 1);
     for (const auto& [name, fn] : builtins) {
@@ -634,12 +636,48 @@ bool sandbox_impl::hook_everywhere() const noexcept {
     return l.instructions != 0 || l.wall_ms != 0 || l.slice_us != 0 || l.cancel_checks == cancel_scope::kEverything;
 }
 
+std::uint32_t sandbox_impl::hook_count() const noexcept {
+    return profiler_ ? std::min(check_interval(), profiler_->options.interval) : check_interval();
+}
+
+// `armed`: the run checks for cancels and limits. The profiler counts everywhere; the debugger adds
+// line events.
 void sandbox_impl::arm_hook(lua_State* L, bool armed) noexcept {
-    if (armed) {
-        lua_sethook(L, &sandbox_impl::count_hook, LUA_MASKCOUNT, static_cast<int>(check_interval()));
-    } else {
-        lua_sethook(L, nullptr, 0, 0);
+    int mask = armed || profiler_ ? LUA_MASKCOUNT : 0;
+    if (debugger_ && debugger_->wants_lines()) {
+        mask |= LUA_MASKLINE;
     }
+    if (mask == 0) {
+        lua_sethook(L, nullptr, 0, 0);
+    } else {
+        lua_sethook(L, &sandbox_impl::count_hook, mask, static_cast<int>(hook_count()));
+    }
+}
+
+void sandbox_impl::rearm_all() noexcept {
+    if (hook_dirty_) {
+        return; // a stop fires on every instruction until the outermost run ends; that rearms
+    }
+    reset_hook();
+    for (const auto& [id, req] : requests_) {
+        if (req->thread != nullptr) {
+            arm_hook(req->thread, hook_everywhere() || (checks_requests() && (checked_kind(req->kind) || checked_depth_ != 0)));
+        }
+    }
+}
+
+bool sandbox_impl::checked_now() const noexcept {
+    if (hook_everywhere()) {
+        return true;
+    }
+    if (!checks_requests()) {
+        return false;
+    }
+    if (checked_depth_ != 0) {
+        return true;
+    }
+    const active_run& top = running_.back();
+    return top.request != nullptr && checked_kind(top.request->kind);
 }
 
 bool sandbox_impl::checks_requests() const noexcept {
@@ -760,10 +798,20 @@ bool sandbox_impl::take_cancel(request_id id) {
     return true;
 }
 
-void sandbox_impl::count_hook(lua_State* L, lua_Debug*) {
+void sandbox_impl::count_hook(lua_State* L, lua_Debug* ar) {
     auto& self = impl_of(L);
+    if (ar->event == LUA_HOOKLINE) {
+        self.line_event(L, ar);
+        return;
+    }
     if (self.running_.empty()) {
         return; // a handler called from game code runs inside run_handler, so this is GC / setup code
+    }
+    if (self.profiler_ && !self.hook_dirty_) {
+        self.profile_sample(L);
+        if (!self.checked_now()) {
+            return; // armed for the profiler only
+        }
     }
     self.check_cancels();
     const auto& limits = self.options_.limits;
@@ -776,7 +824,7 @@ void sandbox_impl::count_hook(lua_State* L, lua_Debug*) {
         }
         run_budget& budget = *run.budget;
         if (budget.sticky == sticky_stop::kNone) {
-            if (limits.instructions != 0 && (budget.instructions += self.check_interval()) > limits.instructions) {
+            if (limits.instructions != 0 && (budget.instructions += self.hook_count()) > limits.instructions) {
                 budget.sticky = sticky_stop::kBudget;
             } else if (limits.wall_ms != 0 && budget.active + (now - run.started) > std::chrono::milliseconds{limits.wall_ms}) {
                 budget.sticky = sticky_stop::kWall;
@@ -1717,7 +1765,7 @@ void sandbox_impl::resume_ready() {
 
 // ---- operations ----------------------------------------------------------------------------------
 
-result<void> sandbox_impl::install_lib(std::string_view name, c_function build, std::string (*describe)(role)) {
+result<void> sandbox_impl::install_lib(std::string_view name, c_function build, std::string (*describe)(role), tunables_fn collect) {
     drain();
     result<void> out{};
     auto glue = protect(state_, [&] {
@@ -1740,7 +1788,63 @@ result<void> sandbox_impl::install_lib(std::string_view name, c_function build, 
     }
     if (out) {
         describers_.push_back(describe);
+        collect(tunables_);
     }
+    return out;
+}
+
+result<std::vector<tunable_info>> sandbox_impl::tunables(std::string_view prefix) {
+    std::vector<tunable_info> out;
+    for (const tunable_info& t : tunables_) {
+        if (path_matches(t.path, prefix)) {
+            out.push_back(t);
+            out.back().writable = t.writable && allows(options_.caller_role, role::kPatch);
+        }
+    }
+    if (out.empty() && !prefix.empty()) {
+        return fail(errc::kNotFound, std::format("no variable is or starts with '{}'", prefix), "tunables");
+    }
+    auto read = protect(state_, [&] {
+        lua_State* L = state_;
+        for (tunable_info& t : out) {
+            push_lib_path(L, t.path);
+            auto v = stack{L}.to_value(-1);
+            t.current = v ? std::move(*v) : value{}; // a value with no wire form (a handle): nil
+            lua_pop(L, 1);
+        }
+    });
+    if (!read) {
+        return std::unexpected{std::move(read).error()};
+    }
+    return out;
+}
+
+result<void> sandbox_impl::tune(std::string_view path, const value& v) {
+    const auto known = std::ranges::find(tunables_, path, &tunable_info::path);
+    if (known == tunables_.end()) {
+        return fail(errc::kNotFound, std::format("no variable '{}'", path), "tune");
+    }
+    if (!known->writable) {
+        return fail(errc::kForbidden, "read-only", std::string{path});
+    }
+    const operation_scope operation{*this};
+    drain();
+    result<void> out{};
+    auto glue = protect(state_, [&] {
+        lua_State* L = state_;
+        const slice_scope slice{*this};
+        lua_pushcfunction(L, &lua_tune_thunk);
+        stack{L}.push_string(path);
+        stack{L}.push_value(v);
+        request_record& req = start_request(request_kind::kExec, effect_owner{scratch_}, "tune", 2, true);
+        if (auto done = step(req, 2); done && !*done) {
+            out = std::unexpected{std::move(*done).error()};
+        }
+    });
+    if (!glue) {
+        out = std::unexpected{std::move(glue).error()};
+    }
+    drain();
     return out;
 }
 
@@ -2209,8 +2313,60 @@ sandbox::~sandbox() = default;
 sandbox::sandbox(sandbox&&) noexcept = default;
 sandbox& sandbox::operator=(sandbox&&) noexcept = default;
 
-result<void> sandbox::install_lib(std::string_view name, c_function build, stub_fn describe) {
-    return impl_->install_lib(name, build, describe);
+result<void> sandbox::install_lib(std::string_view name, c_function build, stub_fn describe, detail::tunables_fn collect) {
+    return impl_->install_lib(name, build, describe, collect);
+}
+
+result<std::vector<tunable_info>> sandbox::tunables(std::string_view prefix) {
+    return impl_->tunables(prefix);
+}
+
+result<void> sandbox::tune(std::string_view path, const value& v) {
+    return impl_->tune(path, v);
+}
+
+result<std::vector<std::uint32_t>> sandbox::set_breakpoints(std::string_view source, std::span<const std::uint32_t> lines) {
+    return impl_->set_breakpoints(source, lines);
+}
+
+void sandbox::debug_pause() {
+    impl_->debug_pause();
+}
+
+void sandbox::debug_reset() {
+    impl_->debug_reset();
+}
+
+std::vector<debug_stop> sandbox::paused() const {
+    return impl_->paused();
+}
+
+result<void> sandbox::debug_resume(request_id request, step_mode mode) {
+    return impl_->debug_resume(request, mode);
+}
+
+result<std::vector<debug_frame>> sandbox::debug_stack(request_id request) {
+    return impl_->debug_stack(request);
+}
+
+result<std::vector<debug_variable>> sandbox::debug_variables(request_id request, std::uint32_t frame, debug_scope scope, std::span<const std::string> path) {
+    return impl_->debug_variables(request, frame, scope, path);
+}
+
+result<debug_variable> sandbox::debug_evaluate(request_id request, std::uint32_t frame, std::string_view expression) {
+    return impl_->debug_evaluate(request, frame, expression);
+}
+
+result<void> sandbox::start_profile(profile_options options) {
+    return impl_->start_profile(options);
+}
+
+profile_report sandbox::profile() const {
+    return impl_->profile();
+}
+
+profile_report sandbox::stop_profile() {
+    return impl_->stop_profile();
 }
 
 result<value_list> sandbox::exec(std::string_view source, std::string_view chunk_name) {

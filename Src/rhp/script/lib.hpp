@@ -39,7 +39,184 @@ struct requires_role {
     static constexpr role value = R;
 };
 
+// ---- variable tags (tunables) --------------------------------------------------------------------
+
+// Every write to the variable (a script's, or a tune over the wire) lies in [Min, Max]; anything
+// else raises kOutOfRange. Numbers only.
+template <auto Min, auto Max>
+struct range {
+    static constexpr auto min = Min;
+    static constexpr auto max = Max;
+};
+
+// The step a tool's slider moves by (a hint; writes aren't rounded). Numbers only.
+template <auto Step>
+struct step {
+    static constexpr auto value = Step;
+};
+
+// The unit tools show next to the value ("m/s").
+template <utils::fixed_string Text>
+struct unit {
+    static constexpr utils::fixed_string text = Text;
+};
+
+// What the variable is for, shown by tools and in the LuaLS stubs.
+template <utils::fixed_string Text>
+struct doc {
+    static constexpr utils::fixed_string text = Text;
+};
+
 namespace detail {
+
+// 1 range, 2 step, 3 unit, 4 doc, 0 anything else.
+template <class T>
+inline constexpr int var_tag_kind_v = 0;
+
+template <auto A, auto B>
+inline constexpr int var_tag_kind_v<range<A, B>> = 1;
+
+template <auto S>
+inline constexpr int var_tag_kind_v<step<S>> = 2;
+
+template <utils::fixed_string T>
+inline constexpr int var_tag_kind_v<unit<T>> = 3;
+
+template <utils::fixed_string T>
+inline constexpr int var_tag_kind_v<doc<T>> = 4;
+
+template <class T>
+concept var_tag = var_tag_kind_v<T> != 0;
+
+template <class T>
+concept ro_tag = var_tag_kind_v<T> == 3 || var_tag_kind_v<T> == 4;
+
+// The tag of kind K among Tags (void when none).
+template <int K, class... Tags>
+struct var_tag_find {
+    using type = void;
+};
+
+template <int K, class T, class... Rest>
+struct var_tag_find<K, T, Rest...> {
+    using type = std::conditional_t<var_tag_kind_v<T> == K, T, typename var_tag_find<K, Rest...>::type>;
+};
+
+template <int K, class... Tags>
+inline constexpr std::size_t var_tag_count_v = (std::size_t{0} + ... + (var_tag_kind_v<Tags> == K ? 1u : 0u));
+
+template <class T>
+concept tunable_number = std::is_arithmetic_v<T> && !std::same_as<T, bool>;
+
+template <class A>
+concept tag_number = tunable_number<std::remove_cv_t<A>>;
+
+// A bound fits the variable: integers exactly (no wrap, no truncation), floating point anyhow.
+template <class T, auto B>
+consteval bool bound_fits() {
+    if constexpr (!tag_number<decltype(B)>) {
+        return false;
+    } else if constexpr (std::integral<T>) {
+        if constexpr (std::floating_point<decltype(B)>) {
+            return static_cast<long double>(static_cast<T>(B)) == static_cast<long double>(B);
+        } else {
+            return std::in_range<T>(B);
+        }
+    } else {
+        return true;
+    }
+}
+
+template <class T, class Range>
+consteval bool range_fits() {
+    if constexpr (std::is_void_v<Range>) {
+        return true;
+    } else if constexpr (!tunable_number<T> || !bound_fits<T, Range::min>() || !bound_fits<T, Range::max>()) {
+        return false;
+    } else {
+        return static_cast<T>(Range::min) <= static_cast<T>(Range::max);
+    }
+}
+
+template <class T, class Step>
+consteval bool step_fits() {
+    if constexpr (std::is_void_v<Step>) {
+        return true;
+    } else if constexpr (!tunable_number<T> || !tag_number<decltype(Step::value)>) {
+        return false;
+    } else {
+        return Step::value > 0;
+    }
+}
+
+// At most one tag of each kind; range and step only on numbers, with bounds that fit and min <= max.
+template <class T, class... Tags>
+concept valid_var_tags = (var_tag_count_v<1, Tags...> <= 1) && (var_tag_count_v<2, Tags...> <= 1) && (var_tag_count_v<3, Tags...> <= 1) &&
+                         (var_tag_count_v<4, Tags...> <= 1) && range_fits<T, typename var_tag_find<1, Tags...>::type>() &&
+                         step_fits<T, typename var_tag_find<2, Tags...>::type>();
+
+template <class... Tags>
+concept valid_ro_tags = (var_tag_count_v<3, Tags...> <= 1) && (var_tag_count_v<4, Tags...> <= 1);
+
+// The metadata a variable's tags carry, as tools see it.
+template <class T, class... Tags>
+struct var_meta {
+    using range_tag = typename var_tag_find<1, Tags...>::type;
+    using step_tag = typename var_tag_find<2, Tags...>::type;
+    using unit_tag = typename var_tag_find<3, Tags...>::type;
+    using doc_tag = typename var_tag_find<4, Tags...>::type;
+    static constexpr bool has_range = !std::is_void_v<range_tag>;
+    static constexpr bool has_step = !std::is_void_v<step_tag>;
+
+    // NaN is outside every range.
+    [[nodiscard]] static constexpr bool in_range([[maybe_unused]] const T& v) noexcept {
+        if constexpr (has_range) {
+            return v >= static_cast<T>(range_tag::min) && v <= static_cast<T>(range_tag::max);
+        } else {
+            return true;
+        }
+    }
+
+    [[nodiscard]] static constexpr std::optional<double> lower() noexcept {
+        if constexpr (has_range) {
+            return static_cast<double>(range_tag::min);
+        } else {
+            return std::nullopt;
+        }
+    }
+
+    [[nodiscard]] static constexpr std::optional<double> upper() noexcept {
+        if constexpr (has_range) {
+            return static_cast<double>(range_tag::max);
+        } else {
+            return std::nullopt;
+        }
+    }
+
+    [[nodiscard]] static constexpr std::optional<double> step() noexcept {
+        if constexpr (has_step) {
+            return static_cast<double>(step_tag::value);
+        } else {
+            return std::nullopt;
+        }
+    }
+
+    [[nodiscard]] static constexpr std::string_view unit() noexcept {
+        if constexpr (std::is_void_v<unit_tag>) {
+            return {};
+        } else {
+            return unit_tag::text.view();
+        }
+    }
+
+    [[nodiscard]] static constexpr std::string_view doc() noexcept {
+        if constexpr (std::is_void_v<doc_tag>) {
+            return {};
+        } else {
+            return doc_tag::text.view();
+        }
+    }
+};
 
 template <class T>
 inline constexpr bool is_undo_v = false;
@@ -225,22 +402,24 @@ template <auto Ptr>
 concept writable_variable = object_pointer<Ptr> && !std::is_const_v<std::remove_pointer_t<decltype(Ptr)>> &&
                             std::copyable<std::remove_pointer_t<decltype(Ptr)>>;
 
-template <utils::fixed_string Name, auto Ptr>
+template <utils::fixed_string Name, auto Ptr, class... Tags>
 struct var_entry {
     static constexpr entry_kind kind = entry_kind::kVar;
     static constexpr utils::fixed_string fixed_name = Name;
     static constexpr std::string_view name = fixed_name.view();
     static constexpr auto pointer = Ptr;
     using value_type = std::remove_pointer_t<decltype(Ptr)>;
+    using meta = var_meta<value_type, Tags...>;
 };
 
-template <utils::fixed_string Name, auto Ptr>
+template <utils::fixed_string Name, auto Ptr, class... Tags>
 struct ro_entry {
     static constexpr entry_kind kind = entry_kind::kRo;
     static constexpr utils::fixed_string fixed_name = Name;
     static constexpr std::string_view name = fixed_name.view();
     static constexpr auto pointer = Ptr;
     using value_type = std::remove_cv_t<std::remove_pointer_t<decltype(Ptr)>>;
+    using meta = var_meta<value_type, Tags...>;
 };
 
 // ---- opaque handles ------------------------------------------------------------------------------
@@ -362,6 +541,7 @@ consteval bool member_free(std::string_view name) {
 //       ::fn <"wipe",    &game::wipe,    Rhp::requires_role<Rhp::role::kAdmin>>
 //       ::fn <"load",    &game::load_texture>                          // returns Rhp::async<T>: the script waits
 //       ::var<"gravity", &game::g_gravity>                             // read kObserve, write kPatch (journaled)
+//       ::var<"speed", &game::g_speed, Rhp::range<0.0, 10.0>, Rhp::unit<"m/s">> // a tunable: writes outside raise kOutOfRange
 //       ::ro <"tick",    &game::g_tick>
 //       ::handle<"entity", game::entity_id, &game::is_alive>           // opaque userdata + validity check
 //       ::method<"move", &game::move>                                  // e:move(dx, dy): first parameter is the entity
@@ -385,13 +565,18 @@ struct lib {
                     detail::valid_fn_tags<F, Tags...> && detail::async_binding_ok<F>
     using fn = lib<Name, Entries..., detail::fn_entry<N, F, Tags...>>;
 
-    template <utils::fixed_string N, auto Ptr>
-        requires(utils::is_identifier(N.view()) && detail::name_free<Entries...>(N.view())) && detail::writable_variable<Ptr>
-    using var = lib<Name, Entries..., detail::var_entry<N, Ptr>>;
+    // A variable scripts read and (kPatch) write, journaled. Tags make it a described tunable:
+    // Rhp::range<Min, Max> (enforced), Rhp::step<S>, Rhp::unit<"m/s">, Rhp::doc<"...">.
+    template <utils::fixed_string N, auto Ptr, detail::var_tag... Tags>
+        requires(utils::is_identifier(N.view()) && detail::name_free<Entries...>(N.view())) && detail::writable_variable<Ptr> &&
+                    detail::valid_var_tags<std::remove_pointer_t<decltype(Ptr)>, Tags...>
+    using var = lib<Name, Entries..., detail::var_entry<N, Ptr, Tags...>>;
 
-    template <utils::fixed_string N, auto Ptr>
-        requires(utils::is_identifier(N.view()) && detail::name_free<Entries...>(N.view())) && detail::object_pointer<Ptr>
-    using ro = lib<Name, Entries..., detail::ro_entry<N, Ptr>>;
+    // A read-only variable; takes Rhp::unit<> and Rhp::doc<>.
+    template <utils::fixed_string N, auto Ptr, detail::ro_tag... Tags>
+        requires(utils::is_identifier(N.view()) && detail::name_free<Entries...>(N.view())) && detail::object_pointer<Ptr> &&
+                    detail::valid_ro_tags<Tags...>
+    using ro = lib<Name, Entries..., detail::ro_entry<N, Ptr, Tags...>>;
 
     template <utils::fixed_string N, class H, auto IsAlive>
         requires(utils::is_identifier(N.view()) && detail::name_free<Entries...>(N.view())) && detail::handle_value<H> &&
@@ -433,9 +618,13 @@ concept lib_type = detail::is_lib_v<T>;
 
 namespace Rhp {
 
+using script::doc;
 using script::irreversible;
 using script::lib;
+using script::range;
 using script::requires_role;
+using script::step;
 using script::undo;
+using script::unit;
 
 } // namespace Rhp

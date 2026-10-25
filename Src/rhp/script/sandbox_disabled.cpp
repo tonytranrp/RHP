@@ -38,7 +38,7 @@ sandbox::~sandbox() = default;
 sandbox::sandbox(sandbox&&) noexcept = default;
 sandbox& sandbox::operator=(sandbox&&) noexcept = default;
 
-result<void> sandbox::install_lib(std::string_view, c_function, stub_fn) {
+result<void> sandbox::install_lib(std::string_view, c_function, stub_fn, detail::tunables_fn) {
     return disabled();
 }
 
@@ -162,5 +162,61 @@ std::size_t async_leftovers::pump() {
 }
 
 void async_leftovers::close() noexcept {}
+
+} // namespace Rhp::script
+
+namespace Rhp::script {
+
+result<std::vector<tunable_info>> sandbox::tunables(std::string_view) {
+    return fail(errc::kDisabled, "RHP is compiled out (RHP_ENABLE=0)", "sandbox");
+}
+
+result<void> sandbox::tune(std::string_view, const value&) {
+    return fail(errc::kDisabled, "RHP is compiled out (RHP_ENABLE=0)", "sandbox");
+}
+
+} // namespace Rhp::script
+
+namespace Rhp::script {
+
+result<std::vector<std::uint32_t>> sandbox::set_breakpoints(std::string_view, std::span<const std::uint32_t>) {
+    return fail(errc::kDisabled, "RHP is compiled out (RHP_ENABLE=0)", "sandbox");
+}
+
+void sandbox::debug_pause() {}
+
+void sandbox::debug_reset() {}
+
+std::vector<debug_stop> sandbox::paused() const {
+    return {};
+}
+
+result<void> sandbox::debug_resume(request_id, step_mode) {
+    return fail(errc::kDisabled, "RHP is compiled out (RHP_ENABLE=0)", "sandbox");
+}
+
+result<std::vector<debug_frame>> sandbox::debug_stack(request_id) {
+    return fail(errc::kDisabled, "RHP is compiled out (RHP_ENABLE=0)", "sandbox");
+}
+
+result<std::vector<debug_variable>> sandbox::debug_variables(request_id, std::uint32_t, debug_scope, std::span<const std::string>) {
+    return fail(errc::kDisabled, "RHP is compiled out (RHP_ENABLE=0)", "sandbox");
+}
+
+result<debug_variable> sandbox::debug_evaluate(request_id, std::uint32_t, std::string_view) {
+    return fail(errc::kDisabled, "RHP is compiled out (RHP_ENABLE=0)", "sandbox");
+}
+
+result<void> sandbox::start_profile(profile_options) {
+    return fail(errc::kDisabled, "RHP is compiled out (RHP_ENABLE=0)", "sandbox");
+}
+
+profile_report sandbox::profile() const {
+    return {};
+}
+
+profile_report sandbox::stop_profile() {
+    return {};
+}
 
 } // namespace Rhp::script

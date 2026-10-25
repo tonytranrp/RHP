@@ -28,6 +28,7 @@
 #include <rhp/core/result.hpp>
 #include <rhp/core/role.hpp>
 #include <rhp/core/subscription.hpp>
+#include <rhp/script/debug.hpp>
 #include <rhp/script/detail/context.hpp>
 #include <rhp/script/detail/event_registry.hpp>
 #include <rhp/script/ledger.hpp>
@@ -121,7 +122,8 @@ enum class wait_kind : std::uint8_t {
     kNone,
     kEvent, // rhp.wait_event: resumed by a delivery (woken) or its timeout (wake_time)
     kTask,  // task:join(): resumed when the task ends (woken)
-    kAsync  // an asynchronous binding: resumed when its result arrives (woken) or limits.async_ms (wake_time)
+    kAsync, // an asynchronous binding: resumed when its result arrives (woken) or limits.async_ms (wake_time)
+    kDebug  // paused by the debugger: resumed by debug_resume (woken) or debug_reset
 };
 
 // One script request: a coroutine the scheduler runs, suspends and resumes.
@@ -295,6 +297,9 @@ struct handler_opts {
     std::optional<handler_error_policy> on_error{};
 };
 
+struct profiler_state;
+struct debugger_state;
+
 class sandbox_impl final : public context, public event_listener {
 public:
     explicit sandbox_impl(sandbox_options options);
@@ -320,8 +325,25 @@ public:
     void enqueue(std::string_view event, const event_args& args) noexcept override;
 
     // ---- sandbox operations ------------------------------------------------------------------
-    result<void> install_lib(std::string_view name, c_function build, std::string (*describe)(role));
+    result<void> install_lib(std::string_view name, c_function build, std::string (*describe)(role), tunables_fn collect);
     result<value_list> exec(std::string_view source, std::string_view chunk_name);
+    result<std::vector<tunable_info>> tunables(std::string_view prefix);
+    result<void> tune(std::string_view path, const value& v);
+    // Every variable of the installed libs, without values (rhp.tunables reads them).
+    [[nodiscard]] const std::vector<tunable_info>& tunable_list() const noexcept { return tunables_; }
+
+    // ---- debugger (debug.cpp) and profiler (profile.cpp) ------------------------------------------
+    result<std::vector<std::uint32_t>> set_breakpoints(std::string_view source, std::span<const std::uint32_t> lines);
+    void debug_pause();
+    void debug_reset();
+    [[nodiscard]] std::vector<debug_stop> paused() const;
+    result<void> debug_resume(request_id id, step_mode mode);
+    result<std::vector<debug_frame>> debug_stack(request_id id);
+    result<std::vector<debug_variable>> debug_variables(request_id id, std::uint32_t frame, debug_scope scope, std::span<const std::string> path);
+    result<debug_variable> debug_evaluate(request_id id, std::uint32_t frame, std::string_view expression);
+    result<void> start_profile(const profile_options& options);
+    [[nodiscard]] profile_report profile() const;
+    profile_report stop_profile();
     result<module_id> load(std::string_view name, std::string_view source);
     result<revision_id> reload(module_id mod, std::string_view source);
     result<revision_id> rollback(module_id mod, std::size_t steps);
@@ -409,6 +431,8 @@ public:
     void unsubscribe(const std::string& event, std::uint64_t key) noexcept;
 
     static void* allocate(void* ud, void* ptr, std::size_t old_size, std::size_t new_size) noexcept;
+    // The hook: count events (limits, cancels, time slices, profiler samples) and, while the debugger
+    // needs them, line events.
     static void count_hook(lua_State* L, lua_Debug* ar);
 
 private:
@@ -426,6 +450,25 @@ private:
 
     void open_libraries();
     void open_stage7_libraries(); // the task metatable (tasks.cpp)
+    // The debugger's line hook: breakpoints, steps and pause() (debug.cpp).
+    void line_event(lua_State* L, lua_Debug* ar);
+    // One profiler sample of L's stack (profile.cpp).
+    void profile_sample(lua_State* L) noexcept;
+    // The hook's count and mask changed (the profiler or the debugger started or stopped): every
+    // request coroutine and the main thread get the new one.
+    void rearm_all() noexcept;
+    // Whether the run on top would be checked (cancels, limits) if the profiler weren't arming the
+    // hook everywhere.
+    [[nodiscard]] bool checked_now() const noexcept;
+    // The coroutine of a request the debugger paused (kNotFound otherwise).
+    [[nodiscard]] result<lua_State*> paused_thread(request_id id) const;
+    void publish_debug_event(std::string_view kind, const debug_stop& stop);
+    // The name of a request's outermost function, which Lua doesn't know (C++ called it): the
+    // exported function's name for a call, "(timer)", "(event x)", ... for handlers, "?" otherwise.
+    [[nodiscard]] static std::string outer_name(const request_record& req);
+    // The registry ref of the environment of a request's module (kNoRef when it has none).
+    [[nodiscard]] int env_of(const request_record& req) const noexcept;
+    void forget_paused(request_id id) noexcept; // a paused request ended (stop_waiting)
     // The hook: armed on every run when hook_everywhere() (a limit needs it, or cancel_checks is
     // kEverything), else on request coroutines and, while an operation runs, the main thread.
     void reset_hook() noexcept;
@@ -437,6 +480,8 @@ private:
         return k == request_kind::kExec || k == request_kind::kLoad || k == request_kind::kCall || k == request_kind::kTask;
     }
     [[nodiscard]] std::uint32_t check_interval() const noexcept;
+    // Instructions between count events: check_interval(), or the profiler's interval when lower.
+    [[nodiscard]] std::uint32_t hook_count() const noexcept;
     struct operation_scope;
     // An operation or a checked request run starts / ends: while any is active the main thread (patch
     // handlers, on_save / on_restore) and handler coroutines started meanwhile check too.
@@ -549,6 +594,7 @@ private:
     std::map<module_id, module_record> modules_;
     std::map<std::string, std::uint64_t, std::less<>> checkpoints_;
     std::vector<std::string (*)(role)> describers_;
+    std::vector<tunable_info> tunables_; // every ::var and ::ro of the installed libs
     id_generator<module_id> ids_;
     module_id scratch_;
     effect_owner current_;
@@ -604,6 +650,8 @@ private:
     std::vector<active_run> running_;
     std::optional<steady::time_point> slice_deadline_;
     bool hook_dirty_ = false;
+    std::unique_ptr<profiler_state> profiler_;  // while profiling
+    std::unique_ptr<debugger_state> debugger_;  // breakpoints, steps, paused requests (created on first use)
 
     // Shared with other threads.
     std::atomic<std::thread::id> thread_;

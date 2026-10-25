@@ -15,7 +15,10 @@ if(RHP_ENABLE)
         puc_lua/schedule.cpp
         puc_lua/script_events.cpp
         puc_lua/stack.cpp
+        puc_lua/debug.cpp
+        puc_lua/profile.cpp
         puc_lua/tasks.cpp
+        puc_lua/tools.cpp
     )
     list(APPEND rhp_script_private_deps Rhp::lua)
 else()
@@ -31,7 +34,9 @@ rhp_add_module(script
         patch_point.hpp
         sandbox.hpp
         stack.hpp
+        debug.hpp
         stubs.hpp
+        tunables.hpp
         detail/context.hpp
         detail/event_registry.hpp
         detail/lib_builder.hpp

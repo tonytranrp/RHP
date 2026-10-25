@@ -27,6 +27,8 @@
 #include <rhp/script/lib.hpp>
 #include <rhp/script/stack.hpp>
 #include <rhp/script/stubs.hpp>
+#include <rhp/script/debug.hpp>
+#include <rhp/script/tunables.hpp>
 
 namespace Rhp::script {
 
@@ -135,6 +137,7 @@ struct sandbox_stats {
     // irreversible) dropped, the effect staying.
     std::uint64_t async_compensated = 0;
     std::uint64_t async_dropped = 0;
+    std::size_t paused = 0; // requests the debugger paused
 };
 
 namespace detail {
@@ -247,7 +250,7 @@ public:
     template <installable L>
     result<void> install() {
 #if RHP_ENABLE
-        return install_lib(L::name, &detail::install_lib_tree<L>, &::Rhp::script::stubs::generate<L>);
+        return install_lib(L::name, &detail::install_lib_tree<L>, &::Rhp::script::stubs::generate<L>, &detail::collect_tunables<L>);
 #else
         return fail(errc::kDisabled, "RHP is compiled out (RHP_ENABLE=0)", std::string{L::name});
 #endif
@@ -356,10 +359,50 @@ public:
     // filtered by caller_role().
     [[nodiscard]] std::string stubs() const;
 
+    // Every variable the installed libs expose (::var and ::ro) with its value now: what tools tune.
+    // `prefix` keeps one lib or one path ("game", "game.speed"). Pump thread.
+    [[nodiscard]] result<std::vector<tunable_info>> tunables(std::string_view prefix = {});
+
+    // Writes a ::var as a script would (`game.speed = v`): needs kPatch, honours Rhp::range<>, and is
+    // journaled in the scratch module like an exec() (revert_all or the identity's last session
+    // ending undo it). kNotFound for an unknown path, kForbidden for a ::ro.
+    result<void> tune(std::string_view path, const value& v);
+
+    // ---- debugger (see debug.hpp) ---------------------------------------------------------------
+    // Pump thread. A paused request is published as the script event "rhp.debug" ({kind = "paused",
+    // request, reason, source, line, label}); a breakpoint it can't pause at as {kind = "hit", ...}.
+
+    // Replaces the breakpoints of one source (a module name, or an exec chunk name); returns the
+    // lines kept (sorted, unique, above 0). An empty list clears that source.
+    result<std::vector<std::uint32_t>> set_breakpoints(std::string_view source, std::span<const std::uint32_t> lines);
+    // The next line any request runs (that can pause) pauses, reason "pause".
+    void debug_pause();
+    // Clears every breakpoint, step and pause, and resumes every paused request.
+    void debug_reset();
+    [[nodiscard]] std::vector<debug_stop> paused() const;
+    // Resumes a paused request (at the next pump()), running on or stepping.
+    result<void> debug_resume(request_id request, step_mode mode = step_mode::kContinue);
+    result<std::vector<debug_frame>> debug_stack(request_id request);
+    // The variables of a paused request's frame (0: innermost). `path` descends into tables: the
+    // variable's name, then field names ("[1]" for an integer key).
+    result<std::vector<debug_variable>> debug_variables(request_id request, std::uint32_t frame, debug_scope scope,
+                                                        std::span<const std::string> path = {});
+    // A dotted path ("player.pos.x", "list[2]") looked up in the frame's locals, upvalues, module
+    // globals, then libs. Runs no Lua: no calls, no metamethods.
+    result<debug_variable> debug_evaluate(request_id request, std::uint32_t frame, std::string_view expression);
+
+    // ---- profiler (see debug.hpp) ---------------------------------------------------------------
+    // Pump thread. Starts sampling (kAlreadyLoaded while it runs).
+    result<void> start_profile(profile_options options = {});
+    // What was sampled so far (running or not).
+    [[nodiscard]] profile_report profile() const;
+    // Stops sampling and returns the report (an empty one if it wasn't running).
+    profile_report stop_profile();
+
 private:
     using stub_fn = std::string (*)(role);
 
-    result<void> install_lib(std::string_view name, c_function build, stub_fn describe);
+    result<void> install_lib(std::string_view name, c_function build, stub_fn describe, detail::tunables_fn collect);
 
     std::unique_ptr<detail::sandbox_impl> impl_;
 };
