@@ -36,6 +36,10 @@ using wire::revert_summary;
 using wire::release_apply_reply;
 using wire::release_status_reply;
 using wire::channel_status_message;
+using wire::debug_reply;
+using wire::debug_request;
+using wire::profile_reply;
+using wire::tunable_message;
 
 // Talks to an Rhp::host: authenticates with a credential (a key name + secret for psk_keyring),
 // signs every script it sends with its signing key (Ed25519 by default), then sends requests and
@@ -192,6 +196,30 @@ public:
     return_t<std::uint64_t> revoke(std::span<const std::byte> envelope) {
         return finish(as<std::uint64_t>(send(wire::op::kRevoke, wire::revoke_request{value::bytes(envelope.begin(), envelope.end())})));
     }
+
+    // ---- tools: this identity's own sandbox on the host (Stage 11) ----------------------------------
+
+    // The variables the host's libs expose (::var and ::ro), with values and tags; `prefix` keeps one
+    // lib or path.
+    return_t<std::vector<tunable_message>> tunables(std::string_view prefix = {}) {
+        return finish(as<std::vector<tunable_message>>(send(wire::op::kTunables, wire::tunables_request{std::string{prefix}})));
+    }
+
+    // Patch: writes a ::var as a script would (its range checked, journaled like an exec).
+    return_t<void> tune(std::string_view path, value to) {
+        return finish(nothing(send(wire::op::kTune, wire::tune_request{std::string{path}, std::move(to)})));
+    }
+
+    // The sampling profiler: "start" (every `interval` instructions), "read" or "stop" (which
+    // returns the report). It stops by itself when this session ends.
+    return_t<profile_reply> profile(std::string_view action, std::uint32_t interval = 1000) {
+        return finish(as<profile_reply>(send(wire::op::kProfile, wire::profile_request{std::string{action}, interval, 64, 10'000})));
+    }
+
+    // Patch: the debugger (breakpoints, steps, stacks, variables; see wire::debug_request). A script
+    // that pauses publishes "rhp.debug" ({kind = "paused", request, reason, source, line, label}):
+    // subscribe with on("rhp.debug", ...). Breakpoints go when the session that set them ends.
+    return_t<debug_reply> debug(const debug_request& request) { return finish(as<debug_reply>(send(wire::op::kDebug, request))); }
 
     // Pushes bytes to a host blob sink (host.on_blob), in chunks, and returns the sink's verdict.
     // `name` is passed to the sink (a file name, free-form).

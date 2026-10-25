@@ -198,7 +198,7 @@ TEST_CASE("messages: event fields default when missing", "[wire][messages][stage
 }
 
 TEST_CASE("messages: release ops need admin to change and observe to read", "[wire][messages][stage10]") {
-    CHECK(wire::kProtocolRevision == 5);
+    CHECK(wire::kProtocolRevision == 6);
     for (const auto code : {wire::op::kReleaseApply, wire::op::kReleaseConfirm, wire::op::kReleaseDeactivate}) {
         CHECK(wire::required_role(code) == Rhp::role::kAdmin);
         CHECK(wire::is_request(code));
@@ -239,4 +239,43 @@ TEST_CASE("messages: subscribe ops need observe and event is a reply", "[wire][m
     CHECK(wire::is_sequenced(wire::op::kEvent));
     CHECK(wire::to_string(wire::op::kEvent) == "event");
     CHECK(wire::is_known(static_cast<std::uint16_t>(wire::op::kUnsubscribe)));
+}
+
+TEST_CASE("messages: tool ops and their messages round-trip", "[wire][messages][stage11]") {
+    CHECK(wire::required_role(wire::op::kTunables) == Rhp::role::kObserve);
+    CHECK(wire::required_role(wire::op::kProfile) == Rhp::role::kObserve);
+    CHECK(wire::required_role(wire::op::kTune) == Rhp::role::kPatch);
+    CHECK(wire::required_role(wire::op::kDebug) == Rhp::role::kPatch);
+    for (const auto code : {wire::op::kTunables, wire::op::kTune, wire::op::kProfile, wire::op::kDebug}) {
+        CHECK(wire::is_request(code));
+        CHECK(wire::is_known(static_cast<std::uint16_t>(code)));
+    }
+    const wire::tunable_message t{"game.speed", "number", value{2.5}, true, 0.0, 10.0, 0.5, "m/s", "how fast"};
+    CHECK(*Rhp::from_value<wire::tunable_message>(Rhp::to_value(t)) == t);
+    const wire::tunable_message bare{"game.flag", "boolean", value{true}, false, std::nullopt, std::nullopt, std::nullopt, "", ""};
+    CHECK(*Rhp::from_value<wire::tunable_message>(Rhp::to_value(bare)) == bare);
+    const wire::tune_request tune{"game.speed", value{3}};
+    CHECK(*Rhp::from_value<wire::tune_request>(Rhp::to_value(tune)) == tune);
+    value::map no_value;
+    no_value.emplace_back(value{"path"}, value{"game.speed"});
+    CHECK(Rhp::from_value<wire::tune_request>(value{no_value}).error().code == errc::kProtocol);
+    CHECK(Rhp::from_value<wire::tunables_request>(value{})->prefix.empty());
+    const wire::profile_request p{"start", 250, 32, 100};
+    CHECK(*Rhp::from_value<wire::profile_request>(Rhp::to_value(p)) == p);
+    const wire::profile_reply reply{true, 250, 40, 1, 1234, {{"a;b", 30}, {"a", 10}}};
+    CHECK(*Rhp::from_value<wire::profile_reply>(Rhp::to_value(reply)) == reply);
+    wire::debug_request d;
+    d.action = "variables";
+    d.request = 7;
+    d.frame = 1;
+    d.scope = "upvalues";
+    d.path = {"t", "[2]"};
+    CHECK(*Rhp::from_value<wire::debug_request>(Rhp::to_value(d)) == d);
+    wire::debug_reply dr;
+    dr.lines = {3, 9};
+    dr.paused = {{7, "game.boost", "breakpoint", "game.boost", 3, 2}};
+    dr.frames = {{0, "boost", "Lua", "game.boost", 3, 1}};
+    dr.variables = {{"t", "table", "{...} (2 fields)", true}};
+    CHECK(*Rhp::from_value<wire::debug_reply>(Rhp::to_value(dr)) == dr);
+    CHECK_FALSE(Rhp::from_value<wire::debug_request>(value{value::map{}}).has_value()); // no action
 }

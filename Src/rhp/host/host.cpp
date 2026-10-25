@@ -229,7 +229,10 @@ struct outbound {
     case wire::op::kBlob:
     case wire::op::kSubscribe:
     case wire::op::kUnsubscribe:
-    case wire::op::kReleaseStatus: return false;
+    case wire::op::kReleaseStatus:
+    case wire::op::kTunables:
+    case wire::op::kProfile:
+    case wire::op::kDebug: return false;
     default: return true;
     }
 }
@@ -243,6 +246,33 @@ struct outbound {
     case wire::op::kRevoke: return true;
     default: return false;
     }
+}
+
+[[nodiscard]] wire::profile_reply profile_message(const script::profile_report& r) {
+    wire::profile_reply out;
+    out.running = r.running;
+    out.interval = r.interval;
+    out.samples = r.samples;
+    out.dropped = r.dropped;
+    out.elapsed_us = static_cast<std::uint64_t>(r.elapsed.count());
+    out.stacks.reserve(r.stacks.size());
+    for (const script::profile_stack& s : r.stacks) {
+        out.stacks.push_back(wire::profile_stack_message{s.stack, s.samples});
+    }
+    return out;
+}
+
+[[nodiscard]] std::optional<script::debug_scope> parse_scope(std::string_view text) noexcept {
+    for (const auto s : {script::debug_scope::kLocals, script::debug_scope::kUpvalues, script::debug_scope::kGlobals}) {
+        if (script::to_string(s) == text) {
+            return s;
+        }
+    }
+    return std::nullopt;
+}
+
+[[nodiscard]] wire::debug_variable_message variable_message(const script::debug_variable& v) {
+    return wire::debug_variable_message{v.name, v.type, v.text, v.expandable};
 }
 
 [[nodiscard]] std::string ref_text(const wire::module_ref& ref) {
@@ -728,6 +758,8 @@ private:
         std::uint64_t current_req = 0;
         std::set<module_id> pinned; // kept when the last session ends
         Rhp::subscription script_listener; // the sandbox's script events → host.on_script_event and clients
+        session_id debugger;  // set breakpoints / pause last: its end resets the debugger
+        session_id profiler;  // started the profiler: its end stops it
     };
 
     // A blob arriving on one session (one at a time).
@@ -1289,6 +1321,14 @@ private:
         identity_runtime& rt = it->second;
         rt.sessions.erase(in.session);
         std::erase_if(rt.waiting, [&](const auto& entry) { return entry.second.session == in.session; });
+        if (rt.debugger == in.session) { // its breakpoints go, and what they paused runs on
+            rt.debugger = session_id{};
+            rt.box->debug_reset();
+        }
+        if (rt.profiler == in.session) {
+            rt.profiler = session_id{};
+            (void)rt.box->stop_profile();
+        }
         {
             // Every request of this session that was queued before its close has been processed.
             const std::scoped_lock lock{rt.relay->mutex};
@@ -2044,9 +2084,131 @@ private:
             return reply(in.session, in.req, value{std::move(modules)});
         }
         case wire::op::kDescribe: return reply(in.session, in.req, value{box.stubs()});
+        case wire::op::kTunables: {
+            auto m = Rhp::from_value<wire::tunables_request>(in.body);
+            if (!m) {
+                return bad_request(m.error());
+            }
+            auto list = box.tunables(m->prefix);
+            if (!list) {
+                return bad_request(list.error());
+            }
+            value::array out;
+            out.reserve(list->size());
+            for (script::tunable_info& t : *list) {
+                out.push_back(Rhp::to_value(wire::tunable_message{std::move(t.path), std::move(t.type), std::move(t.current), t.writable, t.min, t.max, t.step,
+                                                                  std::move(t.unit), std::move(t.doc)}));
+            }
+            return reply(in.session, in.req, value{std::move(out)});
+        }
+        case wire::op::kTune: {
+            auto m = Rhp::from_value<wire::tune_request>(in.body);
+            if (!m) {
+                return bad_request(m.error());
+            }
+            if (auto r = box.tune(m->path, m->to); !r) {
+                return bad_request(r.error());
+            }
+            return reply(in.session, in.req, value{});
+        }
+        case wire::op::kProfile: {
+            auto m = Rhp::from_value<wire::profile_request>(in.body);
+            if (!m) {
+                return bad_request(m.error());
+            }
+            if (m->action == "start") {
+                const script::profile_options options{m->interval, static_cast<std::size_t>(m->max_depth), static_cast<std::size_t>(m->max_stacks)};
+                if (auto r = box.start_profile(options); !r) {
+                    return bad_request(r.error());
+                }
+                rt.profiler = in.session;
+                return reply(in.session, in.req, Rhp::to_value(profile_message(box.profile())));
+            }
+            if (m->action == "read") {
+                return reply(in.session, in.req, Rhp::to_value(profile_message(box.profile())));
+            }
+            if (m->action == "stop") {
+                rt.profiler = session_id{};
+                return reply(in.session, in.req, Rhp::to_value(profile_message(box.stop_profile())));
+            }
+            return bad_request(make_error(errc::kInvalidArgument, std::format("profile action is start, read or stop, not '{}'", m->action), "profile"));
+        }
+        case wire::op::kDebug: {
+            auto m = Rhp::from_value<wire::debug_request>(in.body);
+            if (!m) {
+                return bad_request(m.error());
+            }
+            auto r = debug(rt, box, in.session, *m);
+            if (!r) {
+                return bad_request(r.error());
+            }
+            return reply(in.session, in.req, Rhp::to_value(*r));
+        }
         default:
             return bad_request(make_error(errc::kInvalidArgument, std::format("{} is not supported by this host", in.code), std::string{wire::to_string(in.code)}));
         }
+    }
+
+    // One debug request of `session` against its identity's sandbox.
+    result<wire::debug_reply> debug(identity_runtime& rt, script::sandbox& box, session_id session, const wire::debug_request& m) {
+        wire::debug_reply out;
+        const request_id req{m.request};
+        const std::string_view action = m.action;
+        if (action == "break") {
+            auto lines = box.set_breakpoints(m.source, m.lines);
+            if (!lines) {
+                return std::unexpected{std::move(lines).error()};
+            }
+            out.lines = std::move(*lines);
+            rt.debugger = session;
+        } else if (action == "pause") {
+            box.debug_pause();
+            rt.debugger = session;
+        } else if (action == "continue" || action == "into" || action == "over" || action == "out") {
+            const script::step_mode mode = action == "into"   ? script::step_mode::kInto
+                                           : action == "over" ? script::step_mode::kOver
+                                           : action == "out"  ? script::step_mode::kOut
+                                                              : script::step_mode::kContinue;
+            if (auto r = box.debug_resume(req, mode); !r) {
+                return std::unexpected{std::move(r).error()};
+            }
+        } else if (action == "paused") {
+            for (const script::debug_stop& p : box.paused()) {
+                out.paused.push_back(wire::debug_stop_message{p.request.value(), p.label, p.reason, p.source, p.line, p.module.value()});
+            }
+        } else if (action == "stack") {
+            auto frames = box.debug_stack(req);
+            if (!frames) {
+                return std::unexpected{std::move(frames).error()};
+            }
+            for (script::debug_frame& f : *frames) {
+                out.frames.push_back(wire::debug_frame_message{f.level, std::move(f.name), std::move(f.what), std::move(f.source), f.line, f.defined});
+            }
+        } else if (action == "variables") {
+            const auto scope = parse_scope(m.scope);
+            if (!scope) {
+                return fail(errc::kInvalidArgument, std::format("scope is locals, upvalues or globals, not '{}'", m.scope), "debug");
+            }
+            auto vars = box.debug_variables(req, m.frame, *scope, m.path);
+            if (!vars) {
+                return std::unexpected{std::move(vars).error()};
+            }
+            for (const script::debug_variable& v : *vars) {
+                out.variables.push_back(variable_message(v));
+            }
+        } else if (action == "evaluate") {
+            auto v = box.debug_evaluate(req, m.frame, m.expression);
+            if (!v) {
+                return std::unexpected{std::move(v).error()};
+            }
+            out.variables.push_back(variable_message(*v));
+        } else if (action == "reset") {
+            box.debug_reset();
+            rt.debugger = session_id{};
+        } else {
+            return fail(errc::kInvalidArgument, std::format("'{}' is not a debug action", m.action), "debug");
+        }
+        return out;
     }
 
     // A blob chunk answered before it reached blob() (cancelled, host disabled): its transfer can't

@@ -664,4 +664,268 @@ result<release_status_reply> Rhp::convert<release_status_reply>::from_value(cons
     return out;
 }
 
+// ---- Stage 11: tunables, profiler, debugger ----------------------------------------------------------
+
+namespace {
+
+// An array field of messages (missing or nil: empty).
+template <class T>
+result<std::vector<T>> message_list(const value& m, std::string_view key, std::string_view what) {
+    std::vector<T> out;
+    const value* v = m.find(key);
+    if (v == nullptr || v->is_nil()) {
+        return out;
+    }
+    const auto* items = v->get_if<value::array>();
+    if (items == nullptr) {
+        return Rhp::fail(Rhp::errc::kProtocol, std::format("{}.{} must be an array", what, key), "wire");
+    }
+    for (const value& item : *items) {
+        auto one = Rhp::from_value<T>(item);
+        if (!one) {
+            return std::unexpected{std::move(one).error()};
+        }
+        out.push_back(std::move(*one));
+    }
+    return out;
+}
+
+template <class T>
+value message_array(const std::vector<T>& items) {
+    value::array out;
+    out.reserve(items.size());
+    for (const T& item : items) {
+        out.push_back(Rhp::to_value(item));
+    }
+    return value{std::move(out)};
+}
+
+} // namespace
+
+value Rhp::convert<tunables_request>::to_value(const tunables_request& m) {
+    return map_builder{}.set("prefix", m.prefix).done();
+}
+
+result<tunables_request> Rhp::convert<tunables_request>::from_value(const value& v) {
+    if (v.is_nil()) {
+        return tunables_request{};
+    }
+    if (!v.is_map()) {
+        return not_a_map("tunables", v);
+    }
+    RHP_WIRE_READ(prefix, field_or<std::string>(v, "prefix", "tunables", {}));
+    return tunables_request{std::move(*prefix)};
+}
+
+value Rhp::convert<tunable_message>::to_value(const tunable_message& m) {
+    return map_builder{}
+        .set("path", m.path)
+        .set("type", m.type)
+        .set("value", m.current)
+        .set("writable", m.writable)
+        .set("min", m.min)
+        .set("max", m.max)
+        .set("step", m.step)
+        .set("unit", m.unit)
+        .set("doc", m.doc)
+        .done();
+}
+
+result<tunable_message> Rhp::convert<tunable_message>::from_value(const value& v) {
+    if (!v.is_map()) {
+        return not_a_map("tunable", v);
+    }
+    RHP_WIRE_READ(path, field<std::string>(v, "path", "tunable"));
+    RHP_WIRE_READ(type, field_or<std::string>(v, "type", "tunable", "any"));
+    RHP_WIRE_READ(writable, field_or<bool>(v, "writable", "tunable", false));
+    RHP_WIRE_READ(min, field_or<std::optional<double>>(v, "min", "tunable", std::nullopt));
+    RHP_WIRE_READ(max, field_or<std::optional<double>>(v, "max", "tunable", std::nullopt));
+    RHP_WIRE_READ(step, field_or<std::optional<double>>(v, "step", "tunable", std::nullopt));
+    RHP_WIRE_READ(unit, field_or<std::string>(v, "unit", "tunable", {}));
+    RHP_WIRE_READ(doc, field_or<std::string>(v, "doc", "tunable", {}));
+    return tunable_message{std::move(*path), std::move(*type), field_value(v, "value"), *writable, *min, *max, *step, std::move(*unit), std::move(*doc)};
+}
+
+value Rhp::convert<tune_request>::to_value(const tune_request& m) {
+    return map_builder{}.set("path", m.path).set("value", m.to).done();
+}
+
+result<tune_request> Rhp::convert<tune_request>::from_value(const value& v) {
+    if (!v.is_map()) {
+        return not_a_map("tune", v);
+    }
+    RHP_WIRE_READ(path, field<std::string>(v, "path", "tune"));
+    if (v.find("value") == nullptr) {
+        return Rhp::fail(Rhp::errc::kProtocol, "tune has no 'value'", "wire");
+    }
+    return tune_request{std::move(*path), field_value(v, "value")};
+}
+
+value Rhp::convert<profile_request>::to_value(const profile_request& m) {
+    return map_builder{}.set("action", m.action).set("interval", m.interval).set("max_depth", m.max_depth).set("max_stacks", m.max_stacks).done();
+}
+
+result<profile_request> Rhp::convert<profile_request>::from_value(const value& v) {
+    if (!v.is_map()) {
+        return not_a_map("profile", v);
+    }
+    RHP_WIRE_READ(action, field_or<std::string>(v, "action", "profile", "read"));
+    RHP_WIRE_READ(interval, field_or<std::uint32_t>(v, "interval", "profile", 1000));
+    RHP_WIRE_READ(depth, field_or<std::uint64_t>(v, "max_depth", "profile", 64));
+    RHP_WIRE_READ(stacks, field_or<std::uint64_t>(v, "max_stacks", "profile", 10'000));
+    return profile_request{std::move(*action), *interval, *depth, *stacks};
+}
+
+value Rhp::convert<profile_stack_message>::to_value(const profile_stack_message& m) {
+    return value{value::array{value{m.stack}, value{m.samples}}}; // [stack, samples]: a report holds thousands
+}
+
+result<profile_stack_message> Rhp::convert<profile_stack_message>::from_value(const value& v) {
+    const auto* pair = v.get_if<value::array>();
+    if (pair == nullptr || pair->size() != 2) {
+        return Rhp::fail(Rhp::errc::kProtocol, "a profile stack is [stack, samples]", "wire");
+    }
+    auto stack = Rhp::from_value<std::string>((*pair)[0]);
+    auto samples = Rhp::from_value<std::uint64_t>((*pair)[1]);
+    if (!stack || !samples) {
+        return Rhp::fail(Rhp::errc::kProtocol, "a profile stack is [stack, samples]", "wire");
+    }
+    return profile_stack_message{std::move(*stack), *samples};
+}
+
+value Rhp::convert<profile_reply>::to_value(const profile_reply& m) {
+    return map_builder{}
+        .set("running", m.running)
+        .set("interval", m.interval)
+        .set("samples", m.samples)
+        .set("dropped", m.dropped)
+        .set("elapsed_us", m.elapsed_us)
+        .set("stacks", message_array(m.stacks))
+        .done();
+}
+
+result<profile_reply> Rhp::convert<profile_reply>::from_value(const value& v) {
+    if (!v.is_map()) {
+        return not_a_map("profile reply", v);
+    }
+    RHP_WIRE_READ(running, field_or<bool>(v, "running", "profile reply", false));
+    RHP_WIRE_READ(interval, field_or<std::uint32_t>(v, "interval", "profile reply", 0));
+    RHP_WIRE_READ(samples, field_or<std::uint64_t>(v, "samples", "profile reply", 0));
+    RHP_WIRE_READ(dropped, field_or<std::uint64_t>(v, "dropped", "profile reply", 0));
+    RHP_WIRE_READ(elapsed, field_or<std::uint64_t>(v, "elapsed_us", "profile reply", 0));
+    RHP_WIRE_READ(stacks, message_list<profile_stack_message>(v, "stacks", "profile reply"));
+    return profile_reply{*running, *interval, *samples, *dropped, *elapsed, std::move(*stacks)};
+}
+
+value Rhp::convert<debug_request>::to_value(const debug_request& m) {
+    return map_builder{}
+        .set("action", m.action)
+        .set("source", m.source)
+        .set("lines", m.lines)
+        .set("request", m.request)
+        .set("frame", m.frame)
+        .set("scope", m.scope)
+        .set("path", m.path)
+        .set("expression", m.expression)
+        .done();
+}
+
+result<debug_request> Rhp::convert<debug_request>::from_value(const value& v) {
+    if (!v.is_map()) {
+        return not_a_map("debug", v);
+    }
+    RHP_WIRE_READ(action, field<std::string>(v, "action", "debug"));
+    RHP_WIRE_READ(source, field_or<std::string>(v, "source", "debug", {}));
+    RHP_WIRE_READ(lines, field_or<std::vector<std::uint32_t>>(v, "lines", "debug", {}));
+    RHP_WIRE_READ(request, field_or<std::uint64_t>(v, "request", "debug", 0));
+    RHP_WIRE_READ(frame, field_or<std::uint32_t>(v, "frame", "debug", 0));
+    RHP_WIRE_READ(scope, field_or<std::string>(v, "scope", "debug", "locals"));
+    RHP_WIRE_READ(path, field_or<std::vector<std::string>>(v, "path", "debug", {}));
+    RHP_WIRE_READ(expression, field_or<std::string>(v, "expression", "debug", {}));
+    return debug_request{std::move(*action), std::move(*source), std::move(*lines), *request, *frame, std::move(*scope), std::move(*path), std::move(*expression)};
+}
+
+value Rhp::convert<debug_stop_message>::to_value(const debug_stop_message& m) {
+    return map_builder{}
+        .set("request", m.request)
+        .set("label", m.label)
+        .set("reason", m.reason)
+        .set("source", m.source)
+        .set("line", m.line)
+        .set("module", m.module)
+        .done();
+}
+
+result<debug_stop_message> Rhp::convert<debug_stop_message>::from_value(const value& v) {
+    if (!v.is_map()) {
+        return not_a_map("debug stop", v);
+    }
+    RHP_WIRE_READ(request, field<std::uint64_t>(v, "request", "debug stop"));
+    RHP_WIRE_READ(label, field_or<std::string>(v, "label", "debug stop", {}));
+    RHP_WIRE_READ(reason, field_or<std::string>(v, "reason", "debug stop", {}));
+    RHP_WIRE_READ(source, field_or<std::string>(v, "source", "debug stop", {}));
+    RHP_WIRE_READ(line, field_or<std::uint32_t>(v, "line", "debug stop", 0));
+    RHP_WIRE_READ(module, field_or<std::uint64_t>(v, "module", "debug stop", 0));
+    return debug_stop_message{*request, std::move(*label), std::move(*reason), std::move(*source), *line, *module};
+}
+
+value Rhp::convert<debug_frame_message>::to_value(const debug_frame_message& m) {
+    return map_builder{}
+        .set("level", m.level)
+        .set("name", m.name)
+        .set("what", m.what)
+        .set("source", m.source)
+        .set("line", m.line)
+        .set("defined", m.defined)
+        .done();
+}
+
+result<debug_frame_message> Rhp::convert<debug_frame_message>::from_value(const value& v) {
+    if (!v.is_map()) {
+        return not_a_map("debug frame", v);
+    }
+    RHP_WIRE_READ(level, field_or<std::uint32_t>(v, "level", "debug frame", 0));
+    RHP_WIRE_READ(name, field_or<std::string>(v, "name", "debug frame", "?"));
+    RHP_WIRE_READ(what, field_or<std::string>(v, "what", "debug frame", {}));
+    RHP_WIRE_READ(source, field_or<std::string>(v, "source", "debug frame", {}));
+    RHP_WIRE_READ(line, field_or<std::uint32_t>(v, "line", "debug frame", 0));
+    RHP_WIRE_READ(defined, field_or<std::uint32_t>(v, "defined", "debug frame", 0));
+    return debug_frame_message{*level, std::move(*name), std::move(*what), std::move(*source), *line, *defined};
+}
+
+value Rhp::convert<debug_variable_message>::to_value(const debug_variable_message& m) {
+    return map_builder{}.set("name", m.name).set("type", m.type).set("text", m.text).set("expandable", m.expandable).done();
+}
+
+result<debug_variable_message> Rhp::convert<debug_variable_message>::from_value(const value& v) {
+    if (!v.is_map()) {
+        return not_a_map("debug variable", v);
+    }
+    RHP_WIRE_READ(name, field_or<std::string>(v, "name", "debug variable", {}));
+    RHP_WIRE_READ(type, field_or<std::string>(v, "type", "debug variable", {}));
+    RHP_WIRE_READ(text, field_or<std::string>(v, "text", "debug variable", {}));
+    RHP_WIRE_READ(expandable, field_or<bool>(v, "expandable", "debug variable", false));
+    return debug_variable_message{std::move(*name), std::move(*type), std::move(*text), *expandable};
+}
+
+value Rhp::convert<debug_reply>::to_value(const debug_reply& m) {
+    return map_builder{}
+        .set("lines", m.lines)
+        .set("paused", message_array(m.paused))
+        .set("frames", message_array(m.frames))
+        .set("variables", message_array(m.variables))
+        .done();
+}
+
+result<debug_reply> Rhp::convert<debug_reply>::from_value(const value& v) {
+    if (!v.is_map()) {
+        return not_a_map("debug reply", v);
+    }
+    RHP_WIRE_READ(lines, field_or<std::vector<std::uint32_t>>(v, "lines", "debug reply", {}));
+    RHP_WIRE_READ(paused, message_list<debug_stop_message>(v, "paused", "debug reply"));
+    RHP_WIRE_READ(frames, message_list<debug_frame_message>(v, "frames", "debug reply"));
+    RHP_WIRE_READ(variables, message_list<debug_variable_message>(v, "variables", "debug reply"));
+    return debug_reply{std::move(*lines), std::move(*paused), std::move(*frames), std::move(*variables)};
+}
+
 #undef RHP_WIRE_READ

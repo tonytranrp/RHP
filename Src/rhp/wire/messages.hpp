@@ -218,6 +218,116 @@ struct release_status_reply {
     [[nodiscard]] bool operator==(const release_status_reply&) const = default;
 };
 
+// Tunables, profiler and debugger (Stage 11): the requesting identity's own sandbox.
+struct tunables_request {
+    std::string prefix; // a lib or a path; empty: everything
+};
+
+struct tunable_message {
+    std::string path;
+    std::string type;
+    value current;
+    bool writable = false;
+    std::optional<double> min;
+    std::optional<double> max;
+    std::optional<double> step;
+    std::string unit;
+    std::string doc;
+
+    [[nodiscard]] bool operator==(const tunable_message&) const = default;
+};
+
+struct tune_request {
+    std::string path;
+    value to;
+
+    [[nodiscard]] bool operator==(const tune_request&) const = default;
+};
+
+struct profile_request {
+    std::string action = "read"; // "start", "read" or "stop"
+    std::uint32_t interval = 1000;
+    std::uint64_t max_depth = 64;
+    std::uint64_t max_stacks = 10'000;
+
+    [[nodiscard]] bool operator==(const profile_request&) const = default;
+};
+
+struct profile_stack_message {
+    std::string stack; // outermost frame first, ';'-separated (folded)
+    std::uint64_t samples = 0;
+
+    [[nodiscard]] bool operator==(const profile_stack_message&) const = default;
+};
+
+struct profile_reply {
+    bool running = false;
+    std::uint32_t interval = 0;
+    std::uint64_t samples = 0;
+    std::uint64_t dropped = 0;
+    std::uint64_t elapsed_us = 0;
+    std::vector<profile_stack_message> stacks;
+
+    [[nodiscard]] bool operator==(const profile_reply&) const = default;
+};
+
+// action: "break" (source, lines), "pause", "continue" / "into" / "over" / "out" (request),
+// "paused", "stack" (request), "variables" (request, frame, scope, path), "evaluate" (request,
+// frame, expression), "reset".
+struct debug_request {
+    std::string action;
+    std::string source;
+    std::vector<std::uint32_t> lines;
+    std::uint64_t request = 0;
+    std::uint32_t frame = 0;
+    std::string scope = "locals"; // "locals", "upvalues" or "globals"
+    std::vector<std::string> path;
+    std::string expression;
+
+    [[nodiscard]] bool operator==(const debug_request&) const = default;
+};
+
+struct debug_stop_message {
+    std::uint64_t request = 0;
+    std::string label;
+    std::string reason;
+    std::string source;
+    std::uint32_t line = 0;
+    std::uint64_t module = 0;
+
+    [[nodiscard]] bool operator==(const debug_stop_message&) const = default;
+};
+
+struct debug_frame_message {
+    std::uint32_t level = 0;
+    std::string name;
+    std::string what;
+    std::string source;
+    std::uint32_t line = 0;
+    std::uint32_t defined = 0;
+
+    [[nodiscard]] bool operator==(const debug_frame_message&) const = default;
+};
+
+struct debug_variable_message {
+    std::string name;
+    std::string type;
+    std::string text;
+    bool expandable = false;
+
+    [[nodiscard]] bool operator==(const debug_variable_message&) const = default;
+};
+
+// What a debug request answers: the parts its action fills in.
+struct debug_reply {
+    std::vector<std::uint32_t> lines;          // break
+    std::vector<debug_stop_message> paused;    // paused
+    std::vector<debug_frame_message> frames;   // stack
+    std::vector<debug_variable_message> variables; // variables, evaluate (one)
+
+    [[nodiscard]] bool operator==(const debug_reply&) const = default;
+};
+
 // Reply bodies (kResult):
 //   exec, call            array of returned values
 //   load                  module id
@@ -231,6 +341,10 @@ struct release_status_reply {
 //   release_confirm, release_deactivate   bytes (the id of the release confirmed / stopped)
 //   release_status        release_status_reply
 //   revoke                integer (channels that changed)
+//   tunables              array of tunable_message
+//   tune                  nil
+//   profile               profile_reply
+//   debug                 debug_reply
 // kError carries an Rhp::error; kOutput a string; kEmit an emit_message; kEvent an event_message.
 
 struct revert_summary {
@@ -307,6 +421,17 @@ RHP_WIRE_MESSAGE_CONVERT(Rhp::wire::release_info_message);
 RHP_WIRE_MESSAGE_CONVERT(Rhp::wire::release_apply_reply);
 RHP_WIRE_MESSAGE_CONVERT(Rhp::wire::channel_status_message);
 RHP_WIRE_MESSAGE_CONVERT(Rhp::wire::release_status_reply);
+RHP_WIRE_MESSAGE_CONVERT(Rhp::wire::tunables_request);
+RHP_WIRE_MESSAGE_CONVERT(Rhp::wire::tunable_message);
+RHP_WIRE_MESSAGE_CONVERT(Rhp::wire::tune_request);
+RHP_WIRE_MESSAGE_CONVERT(Rhp::wire::profile_request);
+RHP_WIRE_MESSAGE_CONVERT(Rhp::wire::profile_stack_message);
+RHP_WIRE_MESSAGE_CONVERT(Rhp::wire::profile_reply);
+RHP_WIRE_MESSAGE_CONVERT(Rhp::wire::debug_request);
+RHP_WIRE_MESSAGE_CONVERT(Rhp::wire::debug_stop_message);
+RHP_WIRE_MESSAGE_CONVERT(Rhp::wire::debug_frame_message);
+RHP_WIRE_MESSAGE_CONVERT(Rhp::wire::debug_variable_message);
+RHP_WIRE_MESSAGE_CONVERT(Rhp::wire::debug_reply);
 RHP_WIRE_MESSAGE_CONVERT(Rhp::wire::revert_summary);
 RHP_WIRE_MESSAGE_CONVERT(Rhp::wire::module_status);
 RHP_WIRE_MESSAGE_CONVERT(Rhp::wire::emit_message);

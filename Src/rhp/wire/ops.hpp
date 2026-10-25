@@ -13,7 +13,7 @@ namespace Rhp::wire {
 // the frame layout, the handshake or a message schema.
 // 2: signatures, pin / unpin, blobs (Stage 4); 3: resume, CRC-less TLS frames (Stage 5);
 // 4: subscribe / unsubscribe / event (Stage 7); 5: releases and revocation lists (Stage 10).
-inline constexpr std::uint8_t kProtocolRevision = 5;
+inline constexpr std::uint8_t kProtocolRevision = 6;
 
 // What a frame carries (the header's `op`, 16 bits on the wire).
 //
@@ -52,6 +52,10 @@ enum class op : std::uint16_t {
     kReleaseDeactivate, // a channel stops what runs (falls back, or holds)
     kReleaseStatus,     // the channels and what they run
     kRevoke,            // apply a signed revocation list
+    kTunables,          // the variables the identity's libs expose, with values and tags
+    kTune,              // write one of them (journaled like an exec)
+    kProfile,           // start / read / stop the sampling profiler of the identity's sandbox
+    kDebug,             // the debugger of the identity's sandbox (breakpoints, steps, inspection)
 
     kOutput = 48, // print() line
     kEmit,        // rhp.emit(value)
@@ -96,6 +100,10 @@ enum class op : std::uint16_t {
     case op::kReleaseDeactivate: return "release_deactivate";
     case op::kReleaseStatus: return "release_status";
     case op::kRevoke: return "revoke";
+    case op::kTunables: return "tunables";
+    case op::kTune: return "tune";
+    case op::kProfile: return "profile";
+    case op::kDebug: return "debug";
     case op::kOutput: return "output";
     case op::kEmit: return "emit";
     case op::kResult: return "result";
@@ -144,6 +152,8 @@ enum class op : std::uint16_t {
     case op::kSubscribe:
     case op::kUnsubscribe:
     case op::kReleaseStatus:
+    case op::kTunables:
+    case op::kProfile: // the identity's own sandbox
     case op::kRevoke: return role::kObserve; // a revocation list carries its own signatures
     case op::kLoad:
     case op::kReload:
@@ -151,7 +161,9 @@ enum class op : std::uint16_t {
     case op::kUnload:
     case op::kRevert:
     case op::kRevertTo:
-    case op::kCheckpoint: return role::kPatch;
+    case op::kCheckpoint:
+    case op::kTune:   // each variable's setter checks kPatch too
+    case op::kDebug: return role::kPatch; // pausing a script changes what it does
     case op::kBlob: return role::kObserve; // each sink checks its own role (admin by default)
     case op::kRevertAll:
     case op::kPin:
