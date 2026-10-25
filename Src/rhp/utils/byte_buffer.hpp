@@ -3,6 +3,7 @@
 #include <bit>
 #include <concepts>
 #include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <memory_resource>
 #include <optional>
@@ -50,12 +51,28 @@ public:
     void reserve(std::size_t n) { bytes_.reserve(n); }
     void resize(std::size_t n) { bytes_.resize(n); }
 
-    void append(bytes_view data) { bytes_.insert(bytes_.end(), data.begin(), data.end()); }
+    // One memcpy (a pmr vector's insert copies element by element through the allocator on some
+    // standard libraries). `data` may be a view of this buffer.
+    void append(bytes_view data) {
+        if (data.empty()) {
+            return;
+        }
+        const std::size_t at = bytes_.size();
+        const std::byte* from = data.data();
+        const auto from_addr = reinterpret_cast<std::uintptr_t>(from);
+        const auto own_addr = reinterpret_cast<std::uintptr_t>(bytes_.data());
+        const bool inside = !bytes_.empty() && from_addr >= own_addr && from_addr < own_addr + at;
+        const std::size_t offset = inside ? static_cast<std::size_t>(from - bytes_.data()) : 0;
+        make_room(at + data.size());
+        bytes_.resize(at + data.size());
+        std::memcpy(bytes_.data() + at, inside ? bytes_.data() + offset : from, data.size());
+    }
     void append(std::string_view text) { append(as_bytes(text)); }
 
     template <std::unsigned_integral T>
     void append_le(T value) {
         const std::size_t at = bytes_.size();
+        make_room(at + sizeof(T));
         bytes_.resize(at + sizeof(T));
         store_le<T>(std::span<std::byte, sizeof(T)>{bytes_.data() + at, sizeof(T)}, value);
     }
@@ -75,6 +92,18 @@ public:
     }
 
 private:
+    // Small writes (an encoder appending a few bytes at a time) start from 64 bytes and double, instead
+    // of reallocating at 1, 2, 3, 4, 6, 9, ... bytes.
+    static constexpr std::size_t kFirstCapacity = 64;
+
+    void make_room(std::size_t total) {
+        if (total > bytes_.capacity()) {
+            std::size_t grown = bytes_.capacity() * 2;
+            grown = grown < kFirstCapacity ? kFirstCapacity : grown;
+            bytes_.reserve(total > grown ? total : grown);
+        }
+    }
+
     std::pmr::vector<std::byte> bytes_;
 };
 
