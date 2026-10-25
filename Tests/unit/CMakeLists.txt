@@ -153,10 +153,17 @@ if(RHP_ENABLE)
             script/task_tests.cpp
             script/testing_tests.cpp
             script/tools_tests.cpp
+            script/yield_tests.cpp
         LINKS
             Rhp::script
             Rhp::lua # testing_tests compares the meter with a plain Lua state
     )
+    # x64 MSVC: the yield tests again in an executable linked /CETCOMPAT. On a CPU with CET the
+    # process runs with a shadow stack, where coroutine yields must throw instead of jumping.
+    if(MSVC AND CMAKE_CXX_COMPILER_ARCHITECTURE_ID MATCHES "^(x64|X64|AMD64|x86_64)$" AND NOT RHP_SANITIZE)
+        rhp_add_test_suite(rhp_script_cet_tests SOURCES script/yield_tests.cpp LINKS Rhp::script)
+        target_link_options(rhp_script_cet_tests PRIVATE /CETCOMPAT)
+    endif()
 else()
     # RHP_ENABLE=OFF: no Lua; checks the inert sandbox and direct-call patch points instead.
     rhp_add_test_suite(rhp_script_tests

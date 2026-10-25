@@ -27,10 +27,14 @@ elseif(RHP_PLATFORM STREQUAL "WINDOWS")
     target_compile_definitions(rhp_lua PRIVATE _CRT_SECURE_NO_WARNINGS)
 endif()
 
-# Coroutine yields jump instead of throwing (cmake/lua/lua_cxx.cpp), except with the MSVC ABI,
-# whose longjmp unwinds like an exception, and under ThreadSanitizer: its shadow call stack doesn't
-# follow those jumps, and a request that yields some thousands of times crashes it.
-if(RHP_LUA_JUMP_YIELDS AND NOT MSVC AND NOT "thread" IN_LIST RHP_SANITIZE)
+# Coroutine yields jump instead of throwing (cmake/lua/lua_cxx.cpp). With the MSVC ABI only on x64,
+# where the CRT's longjmp can skip unwinding; not under ThreadSanitizer: its shadow call stack
+# doesn't follow those jumps, and a request that yields some thousands of times crashes it.
+set(_rhp_lua_jumps_here TRUE)
+if(MSVC AND NOT CMAKE_CXX_COMPILER_ARCHITECTURE_ID MATCHES "^(x64|X64|AMD64|x86_64)$")
+    set(_rhp_lua_jumps_here FALSE)
+endif()
+if(RHP_LUA_JUMP_YIELDS AND _rhp_lua_jumps_here AND NOT "thread" IN_LIST RHP_SANITIZE)
     target_compile_definitions(rhp_lua PRIVATE RHP_LUA_JUMP_YIELDS)
 endif()
 

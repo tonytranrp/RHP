@@ -4,7 +4,7 @@
 
 **Why**
 - Lua 5.4.9 (Aug 2026) is the final 5.4 release; 5.5 is the maintained line.
-- Stage 8: coroutine yields jump (`_longjmp`) instead of throwing on every toolchain but the MSVC ABI (`RHP_LUA_JUMP_YIELDS`), errors still throw. ThreadSanitizer builds keep throwing yields (Stage 12): TSan's shadow call stack doesn't follow the jumps, and a request yielding some thousands of times crashed it. A yield cost 2-3 us as an exception; C functions that yield must hold no C++ object with a destructor at that point. See [Stage 8 decisions](stage8-packaging-performance.md#coroutine-yields).
+- Stage 8: coroutine yields jump (`_longjmp`) instead of throwing on every toolchain but the MSVC ABI (`RHP_LUA_JUMP_YIELDS`), errors still throw. ThreadSanitizer builds keep throwing yields (Stage 12): TSan's shadow call stack doesn't follow the jumps, and a request yielding some thousands of times crashed it. A yield cost 2-3 us as an exception; C functions that yield must hold no C++ object with a destructor at that point. See [Stage 8 decisions](stage8-packaging-performance.md#coroutine-yields). x64 MSVC and clang-cl jump too (the overall optimization pass): the CRT's longjmp skips unwinding when the buffer's frame is cleared after setjmp. A process with a CET shadow stack (an executable linked `/CETCOMPAT` on a CPU with CET) can't take that jump, so there yields still throw; `RDSSP` tells the two apart once per process, and `rhp_script_cet_tests` runs the yield tests linked `/CETCOMPAT`.
 - Plain portable C: no JIT question on iOS, every hook we need (`load` mode `"t"`, count hooks that may `lua_yield`, `lua_Alloc`, `_ENV`).
 - Compiled as C++, `lua_error` unwinds with exceptions, so RAII in binding trampolines stays correct.
 
