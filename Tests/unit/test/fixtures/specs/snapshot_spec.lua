@@ -1,0 +1,13 @@
+-- Snapshots. VALUE is replaced by the C++ test between runs.
+local combat = require("game.combat")
+
+describe("snapshot", function()
+    it("a table (ok)", function()
+        assert.snapshot({ list = combat.big_list(2), total = combat.sum(4), note = "line one\nline two" })
+    end)
+
+    it("named snapshots and expect (ok)", function()
+        expect(VALUE).to.match_snapshot("value")
+        assert.snapshot(combat.damage(10, 3), "damage")
+    end)
+end)

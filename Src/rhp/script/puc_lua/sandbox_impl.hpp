@@ -361,6 +361,7 @@ public:
     coverage_report stop_coverage();
     result<void> enable_testing(testing_options options);
     [[nodiscard]] std::optional<steady::time_point> next_due() const;
+    [[nodiscard]] std::vector<steady::time_point> due_times() const; // every timer and sleeping request, sorted
     result<value_list> call_point(std::string_view id, std::span<const value> args);
     result<void> fire_event(std::string_view name, std::span<const value> args);
     [[nodiscard]] bool metering() const noexcept { return metering_; }

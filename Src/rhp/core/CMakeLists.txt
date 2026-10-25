@@ -5,6 +5,7 @@ rhp_add_module(core
         error.hpp
         errors_mode.hpp
         ids.hpp
+        json.hpp
         limits.hpp
         listener_table.hpp
         log.hpp
@@ -15,6 +16,7 @@ rhp_add_module(core
     GENERATED_HEADERS
         rhp/build_config.hpp
     SOURCES
+        json.cpp
         log.cpp
         value.cpp
     DEPS

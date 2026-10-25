@@ -169,3 +169,13 @@ else()
             Rhp::script
     )
 endif()
+
+if(RHP_ENABLE)
+    rhp_add_test_suite(rhp_test_tests
+        SOURCES
+            test/runner_tests.cpp
+        LINKS
+            Rhp::test
+    )
+    target_compile_definitions(rhp_test_tests PRIVATE RHP_TEST_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures")
+endif()

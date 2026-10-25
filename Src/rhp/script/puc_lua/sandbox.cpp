@@ -1691,7 +1691,7 @@ void sandbox_impl::fault(const effect_owner& owner, error err) {
     if (mod->scratch) {
         // Scratch code faults only its own request's effects (earlier exec effects stay).
         if (owner.request) {
-            abandon_requests([&](const request_record& r) { return r.id == owner.request; }, "the script faulted");
+            abandon_requests([&](const request_record& r) { return r.id == owner.request; }, std::format("the script faulted: {}", err));
             (void)ledger_.revert_request(scratch_, owner.request);
         } else {
             (void)ledger_.revert(scratch_);

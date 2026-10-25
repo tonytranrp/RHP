@@ -1,0 +1,11 @@
+-- Selection by name, pattern and tag; order; repeats.
+describe("alpha", function()
+    it("one #fast", function() end)
+    it("two #slow", function() end)
+    it("three #fast #net", function() end)
+end)
+describe("beta", function()
+    it("four", function() end)
+    it("five fails", function() error("five") end)
+    it("six", function() end)
+end)

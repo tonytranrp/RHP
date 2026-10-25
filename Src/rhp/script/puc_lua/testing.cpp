@@ -276,7 +276,12 @@ int bridge_meter(lua_State* L) {
     auto& impl = impl_of(L);
     impl.credit_hook_progress(L); // the instructions this thread ran so far
     const run_meter m = impl.meter();
-    lua_createtable(L, 0, 8);
+    // meter([t]): fills t (reused by test.measure: once its fields exist, no allocation) or a new table.
+    if (lua_istable(L, 1)) {
+        lua_settop(L, 1);
+    } else {
+        lua_createtable(L, 0, 8);
+    }
     const auto set_int = [L](const char* name, std::uint64_t v) {
         lua_pushinteger(L, static_cast<lua_Integer>(std::min<std::uint64_t>(v, static_cast<std::uint64_t>((std::numeric_limits<lua_Integer>::max)()))));
         lua_setfield(L, -2, name);
@@ -289,13 +294,19 @@ int bridge_meter(lua_State* L) {
     set_int("bytes", m.bytes_allocated);
     set_int("memory", m.memory);
     set_int("peak", m.peak);
-    lua_createtable(L, 0, static_cast<int>(kAllocKinds));
+    if (lua_getfield(L, -1, "objects") != LUA_TTABLE) {
+        lua_pop(L, 1);
+        lua_createtable(L, 0, static_cast<int>(kAllocKinds));
+        lua_pushvalue(L, -1);
+        lua_setfield(L, -3, "objects");
+    }
     for (std::size_t i = 0; i < kAllocKinds; ++i) {
         const std::string_view name = to_string(static_cast<alloc_kind>(i));
+        lua_pushlstring(L, name.data(), name.size());
         lua_pushinteger(L, static_cast<lua_Integer>(m.objects[i]));
-        lua_setfield(L, -2, std::string{name}.c_str());
+        lua_rawset(L, -3);
     }
-    lua_setfield(L, -2, "objects");
+    lua_pop(L, 1); // objects
     lua_pushboolean(L, impl.metering() ? 1 : 0);
     lua_setfield(L, -2, "metering");
     return 1;
@@ -506,6 +517,58 @@ int bridge_call_point(lua_State* L) {
         s.raise(*failure);
     }
     return pushed;
+}
+
+// frames([level]) -> {{source, line, name, what}...}: the running thread's stack from `level` (1: the
+// caller of frames), innermost first; source without its chunk marker ("tests/x_spec.lua").
+int bridge_frames(lua_State* L) {
+    const lua_Integer first = luaL_optinteger(L, 1, 1);
+    lua_newtable(L);
+    lua_Debug ar{};
+    int out = 0;
+    for (int level = static_cast<int>(std::max<lua_Integer>(first, 1)); lua_getstack(L, level, &ar) != 0 && out < 256; ++level) {
+        if (lua_getinfo(L, "Sln", &ar) == 0) {
+            break;
+        }
+        lua_createtable(L, 0, 4);
+        std::string_view source = ar.source != nullptr ? std::string_view{ar.source, ar.srclen} : std::string_view{};
+        if (!source.empty() && (source.front() == '@' || source.front() == '=')) {
+            source.remove_prefix(1);
+        }
+        lua_pushlstring(L, source.data(), source.size());
+        lua_setfield(L, -2, "source");
+        lua_pushinteger(L, ar.currentline);
+        lua_setfield(L, -2, "line");
+        lua_pushstring(L, ar.name != nullptr ? ar.name : "?");
+        lua_setfield(L, -2, "name");
+        lua_pushstring(L, ar.what != nullptr ? ar.what : "?");
+        lua_setfield(L, -2, "what");
+        lua_rawseti(L, -2, ++out);
+    }
+    return 1;
+}
+
+// set_global(name, value): sets a global every module sees (the shared base table), for fakes.
+int bridge_set_global(lua_State* L) {
+    luaL_checkstring(L, 1);
+    lua_settop(L, 2);
+    lua_rawgeti(L, LUA_REGISTRYINDEX, LUA_RIDX_GLOBALS);
+    lua_insert(L, 1);
+    lua_rawset(L, 1);
+    return 0;
+}
+
+// due() -> sorted milliseconds from now of every timer and sleeping request
+int bridge_due(lua_State* L) {
+    auto& impl = impl_of(L);
+    const std::vector<steady::time_point> all = impl.due_times();
+    const steady::time_point now = impl.script_now();
+    lua_createtable(L, static_cast<int>(all.size()), 0);
+    for (std::size_t i = 0; i < all.size(); ++i) {
+        lua_pushnumber(L, std::max(0.0, milliseconds_of(all[i] - now)));
+        lua_rawseti(L, -2, static_cast<lua_Integer>(i + 1));
+    }
+    return 1;
 }
 
 // coverage() -> distinct (chunk, line) pairs that ran so far (0 while coverage is off)
@@ -823,6 +886,9 @@ result<void> sandbox_impl::enable_testing(testing_options options) {
             {"fire", &bridge_fire},
             {"call_point", &bridge_call_point},
             {"coverage", &bridge_coverage},
+            {"frames", &bridge_frames},
+            {"set_global", &bridge_set_global},
+            {"due", &bridge_due},
         };
         lua_createtable(L, 0, static_cast<int>(std::size(functions)));
         for (const auto& [name, fn] : functions) {
@@ -870,6 +936,22 @@ std::optional<steady::time_point> sandbox_impl::next_due() const {
         }
     }
     return due;
+}
+
+std::vector<steady::time_point> sandbox_impl::due_times() const {
+    std::vector<steady::time_point> out;
+    for (const auto& [key, entry] : schedule_) {
+        if (entry.kind == schedule_kind::kTimer && !entry.paused) {
+            out.push_back(entry.due);
+        }
+    }
+    for (const auto& [id, req] : requests_) {
+        if (req->wake_time && req->waiting != wait_kind::kDebug && !req->running) {
+            out.push_back(*req->wake_time);
+        }
+    }
+    std::ranges::sort(out);
+    return out;
 }
 
 result<value_list> sandbox_impl::call_point(std::string_view id, std::span<const value> args) {
