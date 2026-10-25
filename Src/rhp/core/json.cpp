@@ -1,5 +1,3 @@
-#include "json.hpp"
-
 #include <charconv>
 #include <cmath>
 #include <cstddef>
@@ -14,9 +12,10 @@
 #include <system_error>
 #include <utility>
 
+#include <rhp/core/json.hpp>
 #include <rhp/core/value.hpp>
 
-namespace rhp_cli {
+namespace Rhp::json {
 
 namespace {
 
@@ -284,7 +283,14 @@ void write_string(std::string& out, std::string_view s) {
     out += '"';
 }
 
-void write(std::string& out, const Rhp::value& v) {
+void newline(std::string& out, int indent, int depth) {
+    if (indent >= 0) {
+        out += '\n';
+        out.append(static_cast<std::size_t>(indent * depth), ' ');
+    }
+}
+
+void write(std::string& out, const Rhp::value& v, int indent, int depth) {
     if (v.is_nil()) {
         out += "null";
     } else if (const auto* b = v.get_if<bool>()) {
@@ -315,7 +321,11 @@ void write(std::string& out, const Rhp::value& v) {
             if (k != 0) {
                 out += ',';
             }
-            write(out, (*a)[k]);
+            newline(out, indent, depth + 1);
+            write(out, (*a)[k], indent, depth + 1);
+        }
+        if (!a->empty()) {
+            newline(out, indent, depth);
         }
         out += ']';
     } else if (const auto* m = v.get_if<Rhp::value::map>()) {
@@ -326,13 +336,17 @@ void write(std::string& out, const Rhp::value& v) {
                 out += ',';
             }
             first = false;
+            newline(out, indent, depth + 1);
             if (const auto* k = key.get_if<std::string>()) {
                 write_string(out, *k);
             } else {
-                write_string(out, to_json(key));
+                write_string(out, to_text(key));
             }
-            out += ':';
-            write(out, item);
+            out += indent >= 0 ? ": " : ":";
+            write(out, item, indent, depth + 1);
+        }
+        if (!m->empty()) {
+            newline(out, indent, depth);
         }
         out += '}';
     }
@@ -340,14 +354,14 @@ void write(std::string& out, const Rhp::value& v) {
 
 } // namespace
 
-std::optional<Rhp::value> parse_json(std::string_view text) {
+std::optional<Rhp::value> parse(std::string_view text) {
     return reader{text}.document();
 }
 
-std::string to_json(const Rhp::value& v) {
+std::string to_text(const Rhp::value& v, int indent) {
     std::string out;
-    write(out, v);
+    write(out, v, indent, 0);
     return out;
 }
 
-} // namespace rhp_cli
+} // namespace Rhp::json

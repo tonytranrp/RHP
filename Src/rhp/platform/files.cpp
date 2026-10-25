@@ -194,4 +194,28 @@ void binary_stdio() noexcept {
 #endif
 }
 
+bool stdout_is_terminal() noexcept {
+#if defined(RHP_PLATFORM_WINDOWS)
+    return _isatty(_fileno(stdout)) != 0;
+#else
+    return isatty(STDOUT_FILENO) != 0;
+#endif
+}
+
+bool enable_ansi_colors() noexcept {
+    if (!stdout_is_terminal()) {
+        return false;
+    }
+#if defined(RHP_PLATFORM_WINDOWS)
+    HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
+    DWORD mode = 0;
+    if (out == INVALID_HANDLE_VALUE || GetConsoleMode(out, &mode) == 0) {
+        return false;
+    }
+    return SetConsoleMode(out, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING) != 0;
+#else
+    return true;
+#endif
+}
+
 } // namespace Rhp::platform

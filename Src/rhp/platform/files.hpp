@@ -22,6 +22,13 @@ namespace Rhp::platform {
 // Creates `path` (and its parents) if missing; on POSIX every directory it creates is its owner's only.
 [[nodiscard]] result<void> make_private_directory(const std::filesystem::path& path);
 
+// Standard output is a terminal (not a file or a pipe).
+[[nodiscard]] bool stdout_is_terminal() noexcept;
+
+// Lets the terminal on standard output show ANSI colors (turns them on in a Windows console); false
+// when it can't.
+[[nodiscard]] bool enable_ansi_colors() noexcept;
+
 // Makes standard input and output binary (no newline translation on Windows; nothing elsewhere):
 // for byte-counted protocols over stdio (rhp-cli dap).
 void binary_stdio() noexcept;
