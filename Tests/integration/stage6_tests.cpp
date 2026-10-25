@@ -821,7 +821,7 @@ TEST_CASE("stage6: fleet preserves errors deadlines and terminal recovery", "[in
     record.port = *live.host.port();
     record.protocol_revision = Rhp::wire::kProtocolRevision;
     Rhp::fleet_options options;
-    options.timeout = std::chrono::milliseconds{3000};
+    options.timeout = std::chrono::milliseconds{1500}; // the last broadcast waits it out
     Rhp::fleet<cfg> fleet{key.identity(), key.signing(), options};
     REQUIRE(fleet.add(record));
     // A held address that drops connections makes the dial fail; later it leads to a real host.

@@ -67,6 +67,11 @@ struct envelope {
     value body;
 };
 
+// to_value(envelope{req, idem, body}) with the body moved in rather than copied twice.
+[[nodiscard]] value envelope_value(std::uint64_t req, std::uint64_t idem, value body);
+// from_value<envelope>(v) that moves the body out of `v` instead of copying it.
+[[nodiscard]] result<envelope> take_envelope(value v);
+
 // A module by id, or by name when the id is 0. Converts from either.
 struct module_ref {
     module_ref() = default;

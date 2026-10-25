@@ -735,8 +735,10 @@ TEST_CASE("stage6: the CLI discovers separate hosts and broadcasts a signed scri
     }};
     REQUIRE(eventually([&] { return !dir.read(first_name + ".port").empty() && !dir.read(second_name + ".port").empty(); }));
     bool found = false;
-    for (int attempt = 0; attempt < 5 && !found; ++attempt) {
-        REQUIRE(run(std::format("{} discover --app {} --wait 2000 > {} 2>&1", kCli, app, q(dir.path / "discover.txt"))) == 0);
+    for (int attempt = 0; attempt < 10 && !found; ++attempt) {
+        // Short waits, tried again (10 s in all): on loopback the answers come at once; a wildcard
+        // listener's arrive on the network interfaces, some seconds later.
+        REQUIRE(run(std::format("{} discover --app {} --wait 1000 > {} 2>&1", kCli, app, q(dir.path / "discover.txt"))) == 0);
         const auto text = dir.read("discover.txt");
         found = text.find(first_name) != std::string::npos && text.find(second_name) != std::string::npos;
     }

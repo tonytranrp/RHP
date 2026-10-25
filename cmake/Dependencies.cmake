@@ -55,6 +55,9 @@ if(RHP_BUILD_TESTS)
     )
     rhp_verify_git_pin(Catch2 08092139210881f01a34e60c5f2fd6afa0ea4024)
     list(APPEND CMAKE_MODULE_PATH "${Catch2_SOURCE_DIR}/extras")
+    # Catch2's ~100 sources compiled as a handful of unity files: built once per tree, so only the
+    # clean build sees it (MSVC Debug: about 450 s of compile time down to about 110).
+    set_target_properties(Catch2 Catch2WithMain PROPERTIES UNITY_BUILD ON)
 endif()
 
 # Lua is only needed for the live engine; RHP_ENABLE=OFF builds never fetch or link it.

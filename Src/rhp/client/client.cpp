@@ -183,8 +183,7 @@ public:
         std::unique_lock lock{mutex_};
         const std::uint64_t req = ++last_req_;
         pending_[req];
-        const wire::envelope env{req, next_key(), std::move(body)};
-        post([this, code, message = Rhp::to_value(env), req] { send_or_queue(code, message, req); });
+        post([this, code, message = wire::envelope_value(req, next_key(), std::move(body)), req] { send_or_queue(code, message, req); });
         const bool timed = setup_.options.request_timeout.count() > 0;
         const auto deadline = timed ? clock::now() + setup_.options.request_timeout : clock::time_point::max();
         wait(lock, deadline, [this, req] { return pending_.at(req).done.has_value(); });
@@ -280,8 +279,7 @@ public:
         pending_[req].callback = std::move(done);
         start(lock);
         lock.unlock();
-        const wire::envelope env{req, next_key(), std::move(body)};
-        post([this, code, message = Rhp::to_value(env), req] {
+        post([this, code, message = wire::envelope_value(req, next_key(), std::move(body)), req] {
             if (setup_.options.request_timeout.count() > 0) {
                 auto& t = timers_[req];
                 t = std::make_unique<net::io_context::timer>(io_);
@@ -529,7 +527,7 @@ private:
                 const std::scoped_lock lock{mutex_};
                 req = ++last_req_;
             }
-            (void)session_->send(wire::op::kCancel, Rhp::to_value(wire::envelope{req, 0, Rhp::to_value(wire::cancel_request{target})}));
+            (void)session_->send(wire::op::kCancel, wire::envelope_value(req, 0, Rhp::to_value(wire::cancel_request{target})));
         }
     }
 
@@ -780,7 +778,7 @@ private:
     }
 
     void on_message(session::session&, wire::op code, value body) override {
-        auto env = Rhp::from_value<wire::envelope>(body);
+        auto env = wire::take_envelope(std::move(body));
         if (!env) {
             return;
         }
