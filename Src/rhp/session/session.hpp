@@ -39,6 +39,10 @@ struct options {
     wire::decode_limits decode{};
     std::string platform;                      // this side's OS name, sent in the handshake
     std::size_t max_unacked_bytes = 64u << 20; // a peer that stops acking past this is dropped
+    // A standalone ack waits this long for an outgoing frame to carry it (a reply usually does), so
+    // a call and its reply are two frames instead of four. 0 acks every read at once. Acks still go
+    // at once for the 8th unacknowledged frame, a frame that asks for one, and a duplicate.
+    std::uint32_t ack_delay_ms = 5;
     // A lost link (or a dead heartbeat) detaches the session for limits.resume_ms instead of ending
     // it. The side that dialed brings a new link (resume()); the other side waits for it to arrive
     // (handler::resume_target).
@@ -254,6 +258,9 @@ private:
 
     net::io_context::timer handshake_timer_;
     net::io_context::timer heartbeat_timer_;
+    net::io_context::timer ack_timer_;
+    bool ack_now_ = false;       // the next send_ack_if_due acks at once (requested, or a duplicate)
+    bool ack_timer_armed_ = false;
     net::io_context::timer resume_timer_;
     bool heard_since_tick_ = false;
     std::uint32_t misses_ = 0;

@@ -75,6 +75,7 @@ session::session(net::io_context& io, std::unique_ptr<net::link> link, std::uniq
       decoder_(kHandshakeMaxFrame < opts_.limits.max_frame ? kHandshakeMaxFrame : opts_.limits.max_frame),
       handshake_timer_(io),
       heartbeat_timer_(io),
+      ack_timer_(io),
       resume_timer_(io) {
     port_->owner = this;
 }
@@ -91,6 +92,7 @@ session::session(net::io_context& io, std::unique_ptr<net::link> link, std::uniq
       decoder_(kHandshakeMaxFrame < opts_.limits.max_frame ? kHandshakeMaxFrame : opts_.limits.max_frame),
       handshake_timer_(io),
       heartbeat_timer_(io),
+      ack_timer_(io),
       resume_timer_(io) {
     port_->owner = this;
 }
@@ -99,6 +101,7 @@ session::~session() {
     *alive_ = false;
     handshake_timer_.cancel();
     heartbeat_timer_.cancel();
+    ack_timer_.cancel();
     resume_timer_.cancel();
     link_.reset(); // aborts: no callbacks after this
     retired_.clear();
@@ -239,6 +242,7 @@ void session::handle(const wire::frame_view& frame) {
     }
     if (wire::has(frame.header.flags, wire::frame_flag::kAckRequested)) {
         ack_sent_ = 0; // forces an ack at the end of this read
+        ack_now_ = true;
     }
     if (!wire::is_sequenced(code)) {
         // Control frames carry their own counter in `seq`: a replayed one (say, a captured nack
@@ -266,6 +270,7 @@ void session::handle(const wire::frame_view& frame) {
     if (frame.header.seq < expected_) {
         ++stats_.duplicates;
         ack_sent_ = 0; // our ack may have been lost: repeat it
+        ack_now_ = true;
         return;
     }
     if (frame.header.seq > expected_) {
@@ -620,6 +625,8 @@ void session::detach(error why) {
     state_ = state::kDetached;
     resuming_ = false;
     heartbeat_timer_.cancel();
+    ack_timer_.cancel();
+    ack_timer_armed_ = false;
     retire_link();
     resume_timer_.start(ms(opts_.limits.resume_ms), [this, why] {
         if (state_ == state::kDetached && !closed_) {
@@ -784,8 +791,24 @@ void session::resend_after(std::uint64_t ack) {
 }
 
 void session::send_ack_if_due() {
-    if (state_ == state::kReady && !closed_ && expected_ - 1 != ack_sent_) {
+    if (state_ != state::kReady || closed_ || expected_ - 1 == ack_sent_) {
+        return;
+    }
+    constexpr std::uint64_t kAckEvery = 8; // frames received without telling the peer
+    if (ack_now_ || opts_.ack_delay_ms == 0 || expected_ - 1 - ack_sent_ >= kAckEvery) {
+        ack_now_ = false;
         write_control(wire::op::kAck);
+        return;
+    }
+    // Every frame we send carries the ack: when the timer fires, there is usually nothing left to do.
+    if (!ack_timer_armed_) {
+        ack_timer_armed_ = true;
+        ack_timer_.start(ms(opts_.ack_delay_ms), [this] {
+            ack_timer_armed_ = false;
+            if (state_ == state::kReady && !closed_ && expected_ - 1 != ack_sent_) {
+                write_control(wire::op::kAck);
+            }
+        });
     }
 }
 
@@ -876,6 +899,8 @@ void session::shutdown(error why) {
     resume_pending_ = false;
     handshake_timer_.cancel();
     heartbeat_timer_.cancel();
+    ack_timer_.cancel();
+    ack_timer_armed_ = false;
     resume_timer_.cancel();
     if (link_ != nullptr) {
         link_->close(); // writes what is queued (the error frame), then closes

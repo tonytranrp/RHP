@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -183,6 +184,36 @@ TEST_CASE("session: messages arrive once and in order both ways", "[session]") {
     }
     CHECK(d.client->stats().sent == 50);
     CHECK(d.host->stats().received == 50);
+}
+
+TEST_CASE("session: standalone acks wait for a frame to carry them", "[session]") {
+    // The host acks a burst of 20 frames: at once for every 8th, the rest after ack_delay_ms (no
+    // reply carries them here). Before delayed acks it sent one per read.
+    int acks = 0;
+    std::uint64_t acked = 0;
+    auto count_acks = [&](Rhp::utils::byte_buffer& b, int) {
+        const auto h = header_of(b);
+        if (h.code == op::kAck) {
+            ++acks;
+        }
+        acked = std::max<std::uint64_t>(acked, h.ack);
+    };
+    duo d{"session_tests.delayed_acks", test_limits(), {}, count_acks};
+    REQUIRE(d.handshake());
+    const int before = acks;
+    for (int i = 1; i <= 20; ++i) {
+        REQUIRE(d.client->send(op::kExec, envelope(static_cast<std::uint64_t>(i), value{i})));
+    }
+    REQUIRE(d.poll([&] { return d.host_events.messages.size() == 20 && acked >= 20; }));
+    CHECK(acks - before <= 4);
+
+    // A reply sent before the delay runs out carries the ack: no standalone one.
+    const int quiet = acks;
+    REQUIRE(d.client->send(op::kExec, envelope(21, value{21})));
+    REQUIRE(d.poll([&] { return d.host_events.messages.size() == 21; }));
+    REQUIRE(d.host->send(op::kResult, envelope(21, value{"ok"})));
+    REQUIRE(d.poll([&] { return d.client_events.messages.size() == 1 && acked >= 21; }));
+    CHECK(acks - quiet <= 1); // 0 unless the poll above took longer than the delay
 }
 
 TEST_CASE("session: only sequenced ops go through send; only when ready", "[session]") {
