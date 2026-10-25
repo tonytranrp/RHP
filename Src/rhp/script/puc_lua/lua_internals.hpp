@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 struct lua_State;
@@ -26,6 +27,16 @@ namespace Rhp::script::detail::internals {
 
 // The chunk name a prototype was compiled under ("@game.combat", "=exec"), as stored.
 [[nodiscard]] std::string_view proto_source(const void* proto) noexcept;
+
+// The first and last line of a prototype's function (0 and 0 for a chunk's main function).
+[[nodiscard]] std::pair<int, int> proto_lines(const void* proto) noexcept;
+
+// The prototype of the Lua function `level` frames up L's stack (0: the running one), or nullptr.
+[[nodiscard]] const void* proto_at(lua_State* L, int level) noexcept;
+
+// Turns L's line events on or off, keeping its hook, count and the countdown in progress (lua_sethook
+// would restart it: a loop of calls would then never reach a count event).
+void set_line_events(lua_State* L, bool on) noexcept;
 
 // Every line of `proto` and of every function nested in it that has an instruction a line hook can
 // stop at (what debug.getinfo(f, "L").activelines reports, for the whole tree), sorted and unique.

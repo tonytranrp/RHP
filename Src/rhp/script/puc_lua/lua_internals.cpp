@@ -107,6 +107,30 @@ std::string_view proto_source(const void* proto) noexcept {
     return std::string_view{getstr(p->source), tsslen(p->source)};
 }
 
+std::pair<int, int> proto_lines(const void* proto) noexcept {
+    const Proto* p = as_proto(proto);
+    return p != nullptr ? std::pair<int, int>{p->linedefined, p->lastlinedefined} : std::pair<int, int>{0, 0};
+}
+
+const void* proto_at(lua_State* L, int level) noexcept {
+    lua_Debug ar{};
+    if (lua_getstack(L, level, &ar) == 0) {
+        return nullptr;
+    }
+    return proto_of(&ar);
+}
+
+void set_line_events(lua_State* L, bool on) noexcept {
+    const int mask = L->hookmask;
+    const int wanted = on ? (mask | LUA_MASKLINE) : (mask & ~LUA_MASKLINE);
+    if (wanted == mask || L->hook == nullptr) {
+        return;
+    }
+    const int left = L->hookcount;
+    lua_sethook(L, L->hook, wanted, L->basehookcount);
+    L->hookcount = left;
+}
+
 std::vector<std::uint32_t> executable_lines(const void* proto, std::vector<const void*>& protos) {
     std::vector<std::uint32_t> lines;
     if (proto != nullptr) {

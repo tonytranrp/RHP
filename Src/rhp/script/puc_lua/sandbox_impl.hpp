@@ -493,8 +493,14 @@ private:
     void coverage_compiled(lua_State* L, std::string_view chunk) noexcept;
     // The hook counts instructions on every run (the profiler or the meter is on).
     [[nodiscard]] bool counts_everywhere() const noexcept { return profiler_ != nullptr || metering_; }
-    // The hook needs line events (coverage, or the debugger's breakpoints, steps and pause).
-    [[nodiscard]] bool wants_line_events() const noexcept;
+    // What line events the hook needs: none; on every line (coverage, the debugger's step or pause);
+    // or by function (breakpoints only: call and return events turn them on in functions that have
+    // one, scope_lines).
+    enum class line_mode : std::uint8_t { kNone, kEverywhere, kByFunction };
+    [[nodiscard]] line_mode lines_wanted() const noexcept;
+    [[nodiscard]] int line_mask() const noexcept;
+    // A call or return event in kByFunction: line events on in the function now running (debug.cpp).
+    void scope_lines(lua_State* L, lua_Debug* ar) noexcept;
     // The debugger's line hook: breakpoints, steps and pause() (debug.cpp).
     void line_event(lua_State* L, lua_Debug* ar);
     // One profiler sample of L's stack (profile.cpp).

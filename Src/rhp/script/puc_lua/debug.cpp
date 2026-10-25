@@ -25,6 +25,7 @@
 #include <rhp/core/result.hpp>
 #include <rhp/core/value.hpp>
 #include <rhp/script/debug.hpp>
+#include <rhp/script/puc_lua/lua_internals.hpp>
 #include <rhp/script/puc_lua/sandbox_impl.hpp>
 #include <rhp/script/puc_lua/tools.hpp>
 #include <rhp/script/stack.hpp>
@@ -36,9 +37,9 @@ namespace {
 constexpr const char* kDebugEvent = "rhp.debug";
 constexpr std::size_t kMaxText = 120;           // characters of a rendered string
 constexpr std::size_t kMaxFields = 200;         // fields listed per table
-constexpr std::size_t kMaxCount = 1'000; // fields counted per table (shown as "1000+")
+constexpr std::size_t kMaxCount = 1'000;        // fields counted per table (shown as "1000+")
 constexpr std::size_t kMaxBreakpoints = 10'000; // lines per source
-constexpr std::size_t kMaxPaused = 32; // requests paused at once; more breakpoint stops are reported as hits
+constexpr std::size_t kMaxPaused = 32;          // requests paused at once; more breakpoint stops are reported as hits
 
 template <class F>
 result<void> protect(lua_State* L, F&& fn) {
@@ -82,7 +83,10 @@ bool is_identifier(std::string_view s) noexcept {
 // Length of the valid UTF-8 sequence at s[i] (0: not one).
 std::size_t utf8_length(std::string_view s, std::size_t i) noexcept {
     const auto c = static_cast<unsigned char>(s[i]);
-    const std::size_t n = c < 0x80 ? 1 : (c >> 5) == 0x6 ? 2 : (c >> 4) == 0xE ? 3 : (c >> 3) == 0x1E ? 4 : 0;
+    const std::size_t n = c < 0x80 ? 1 : (c >> 5) == 0x6 ? 2
+                                     : (c >> 4) == 0xE   ? 3
+                                     : (c >> 3) == 0x1E  ? 4
+                                                         : 0;
     if (n == 0 || i + n > s.size()) {
         return 0;
     }
@@ -480,6 +484,37 @@ std::optional<std::vector<std::string>> parse_path(std::string_view text) {
 } // namespace
 
 // ---- the line hook ---------------------------------------------------------------------------------
+
+// With breakpoints only, line events run in the functions whose lines hold one: a breakpoint set
+// elsewhere doesn't slow every loop down (a line hook costs 4-5x). Called on every call and return
+// event; the function that runs next is the one called, or the one returned to. A C function runs no
+// Lua lines (the Lua it calls gets its own call event, and returning to Lua a return event); a chunk
+// named without '@' / '=' keeps lines on, as does anything this can't tell.
+void sandbox_impl::scope_lines(lua_State* L, lua_Debug* ar) noexcept {
+    if (lines_wanted() != line_mode::kByFunction) {
+        if (!running_.empty() && !closing_lua_) {
+            sync_hook(L, checked_now()); // armed while breakpoints existed: call and return events stop
+        }
+        return;
+    }
+    const void* proto = ar->event == LUA_HOOKRET ? internals::proto_at(L, 1) : internals::proto_of(ar);
+    bool on = false;
+    if (proto != nullptr) {
+        on = true;
+        std::string_view source = internals::proto_source(proto);
+        if (!source.empty() && (source.front() == '@' || source.front() == '=')) {
+            const auto [first, last] = internals::proto_lines(proto);
+            debugger_state::scope_answer& seen = debugger_->last_scope;
+            if (seen.source == source.data() && seen.first == first && seen.last == last) {
+                on = seen.on; // the same function again (a loop of calls, a recursion)
+            } else {
+                on = debugger_->has_breakpoint(source.substr(1), first, last);
+                seen = {source.data(), first, last, on};
+            }
+        }
+    }
+    internals::set_line_events(L, on);
+}
 
 void sandbox_impl::line_event(lua_State* L, lua_Debug* ar) {
     if (running_.empty() || closing_lua_) {

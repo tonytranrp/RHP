@@ -196,6 +196,9 @@ Measured on 2026-10-25 on the same laptop (MSVC Release, pinned to one core at h
 | wire rhp: decode a frame of 64 KiB | 8.52 us | 3.94 us | -54% |
 | wire rhp: crc32c of 4 KiB / 64 KiB | 336 ns / 5.72 us | 185 ns / 2.84 us | -45% / -50% |
 | testing: 10k `assert.equals` / `expect().to.equal` in one test | 12.9 / 18.8 ms | 10.6 / 16.2 ms | -18% / -14% |
+| debug-armed rhp: 100k loop, a breakpoint in another module | 4.32 ms | 1.0 ms | -77% |
+| debug-inside rhp: 100k loop, a breakpoint elsewhere in the same module | 4.62 ms | 1.01 ms | -78% |
+| debug-armed / debug-inside rhp: fib(22) (a call and a return event per call) | 4.4 / 4.34 ms | 3.99 / 3.86 ms | ~ |
 
 Rows not listed moved by less than about 10% (within this machine's noise), apart from three. Two raw twins moved, whose code didn't change: noise. `tunables rhp: write one variable` journals every write of the benchmark into one sandbox, so its mean measures the journal's reallocations (its standard deviation is larger than its mean on both sides; the lower bounds agree). Windows yields jump now (an x64 process without a CET shadow stack); on Linux they already did.
 

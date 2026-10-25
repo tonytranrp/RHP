@@ -35,9 +35,15 @@ trivially copyable types are read with an atomic load (RHP's writes store atomic
 `std::atomic_ref` reads keep the lock); a reverted variable write finds its layer from the newest end
 (reverts were O(n^2)). *Not done:* resetting `request_record` field by field (about 10% of a frame
 callback, but it would break "reset() resets every field" with no portable compile-time guard); a
-lock-free patch-point fast path (no layer-lifetime guarantee); arming the debugger's line hook per
-function (5.6x -> about 1.3x with a breakpoint set elsewhere, medium risk: a stale mask after an
-error can miss a breakpoint).
+lock-free patch-point fast path (no layer-lifetime guarantee).
+
+**The debugger with breakpoints only** runs line events in the functions whose lines hold one
+(`scope_lines`, debug.cpp): call and return events switch them, keeping the instruction countdown
+(`internals::set_line_events`), and the last answer is cached by source and line range. A C function
+runs no Lua lines; returning from one (pcall after a caught error, a coroutine's yield when it
+resumes) is a return event, so the Lua function returned to gets its lines back; anything that
+can't be told (a chunk named without '@' / '=') keeps them on. A step, a pause or coverage still
+watch every line. A loop with a breakpoint elsewhere: 4.4 ms -> 1.0 ms (raw Lua 0.8 ms).
 
 **Wire and session.** `byte_buffer::append` is one `memcpy` (a pmr vector's `insert` copied element
 by element on MSVC) and small buffers start at 64 bytes; CRC32C with the CPU instruction runs three

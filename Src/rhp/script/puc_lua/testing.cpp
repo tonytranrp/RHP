@@ -788,8 +788,20 @@ result<void> sandbox_impl::set_gc_mode(gc_mode mode) {
 
 // ---- coverage --------------------------------------------------------------------------------------
 
-bool sandbox_impl::wants_line_events() const noexcept {
-    return coverage_ != nullptr || (debugger_ && debugger_->wants_lines());
+sandbox_impl::line_mode sandbox_impl::lines_wanted() const noexcept {
+    if (coverage_ != nullptr || (debugger_ && debugger_->wants_every_line())) {
+        return line_mode::kEverywhere;
+    }
+    return debugger_ && debugger_->wants_lines() ? line_mode::kByFunction : line_mode::kNone;
+}
+
+int sandbox_impl::line_mask() const noexcept {
+    switch (lines_wanted()) {
+    case line_mode::kNone: return 0;
+    case line_mode::kEverywhere: return LUA_MASKLINE;
+    case line_mode::kByFunction: return LUA_MASKLINE | LUA_MASKCALL | LUA_MASKRET; // lines until the next call or return decides
+    }
+    return 0;
 }
 
 result<void> sandbox_impl::start_coverage() {

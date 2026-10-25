@@ -374,6 +374,54 @@ TEST_CASE("a breakpoint where a request can't pause is reported once as a hit", 
     CHECK(d.events.size() == 1); // once per place
 }
 
+TEST_CASE("line events follow calls returns and resumes into functions with breakpoints", "[script][debug]") {
+    // Breakpoints only: line events run in the functions that hold one. A coroutine resumed after a
+    // yield (it continues inside its function: the yield's return event turns them on again), a
+    // function reached after many calls without one, and a tail call all still stop.
+    debug_box d;
+    const auto mod = d.box.load("dbg.scope", "local function plain(x)\n"                // 1
+                                             "  return x + 1\n"                         // 2
+                                             "end\n"                                    // 3
+                                             "local function marked(x)\n"               // 4
+                                             "  local m = x * 2\n"                      // 5
+                                             "  return m\n"                             // 6
+                                             "end\n"                                    // 7
+                                             "local function tail(x)\n"                 // 8
+                                             "  return marked(x)\n"                     // 9
+                                             "end\n"                                    // 10
+                                             "function run()\n"                         // 11
+                                             "  local s = 0\n"                          // 12
+                                             "  for i = 1, 1000 do s = plain(s) end\n"  // 13
+                                             "  local co = coroutine.wrap(function()\n" // 14
+                                             "    coroutine.yield(1)\n"                 // 15
+                                             "    local after = 2\n"                    // 16
+                                             "    return after\n"                       // 17
+                                             "  end)\n"                                 // 18
+                                             "  co()\n"                                 // 19
+                                             "  local resumed = co()\n"                 // 20
+                                             "  return s + tail(resumed)\n"             // 21
+                                             "end\n");
+    REQUIRE(mod.has_value());
+    REQUIRE(d.box.set_breakpoints("dbg.scope", std::vector<std::uint32_t>{5, 16}));
+    REQUIRE(d.box.call(*mod, "run"));
+    const Rhp::request_id req = d.box.last_request();
+    d.box.pump();
+    // Line 16 runs in a coroutine the script made: it can't pause there, so it is reported as a hit.
+    std::vector<std::string> kinds;
+    for (std::size_t i = 0; i < d.events.size(); ++i) {
+        kinds.push_back(d.event_kind(i));
+    }
+    CAPTURE(kinds);
+    REQUIRE(std::ranges::count(kinds, std::string{"hit"}) == 1);
+    const auto paused = d.box.paused();
+    REQUIRE(paused.size() == 1); // then the tail call into marked() pauses at line 5
+    CHECK(paused[0].line == 5);
+    REQUIRE(d.box.debug_resume(req));
+    d.box.pump();
+    REQUIRE(d.results.size() == 1);
+    CHECK(*d.results[0].second == value_list{value{1004}});
+}
+
 TEST_CASE("inspecting tables upvalues globals and lib variables", "[script][debug]") {
     fx::reset();
     debug_box d;
