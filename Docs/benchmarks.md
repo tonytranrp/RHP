@@ -199,6 +199,7 @@ Measured on 2026-10-25 on the same laptop (MSVC Release, pinned to one core at h
 | debug-armed rhp: 100k loop, a breakpoint in another module | 4.32 ms | 1.0 ms | -77% |
 | debug-inside rhp: 100k loop, a breakpoint elsewhere in the same module | 4.62 ms | 1.01 ms | -78% |
 | debug-armed / debug-inside rhp: fib(22) (a call and a return event per call) | 4.4 / 4.34 ms | 3.99 / 3.86 ms | ~ |
+| mDNS: Windows resolves a record RHP's responder publishes (`mdns: the native provider ...`, Debug) | 24-41 s | 2.7 s | -90% |
 
 Rows not listed moved by less than about 10% (within this machine's noise), apart from three. Two raw twins moved, whose code didn't change: noise. `tunables rhp: write one variable` journals every write of the benchmark into one sandbox, so its mean measures the journal's reallocations (its standard deviation is larger than its mean on both sides; the lower bounds agree). Windows yields jump now (an x64 process without a CET shadow stack); on Linux they already did.
 

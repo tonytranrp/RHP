@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -47,8 +48,12 @@ struct dns_message {
 
 [[nodiscard]] result<dns_message> read_dns(utils::bytes_view packet);
 // An announcement (PTR, SRV, TXT, A/AAAA) or, with `probe`, the RFC 6762 section 8.1 probe for the
-// instance and host names. `record.address` must be a literal.
-[[nodiscard]] result<utils::byte_buffer> dns_service_packet(const service_record& record, std::uint32_t ttl, bool probe = false);
+// instance and host names. `record.address` must be a literal. With `asked` (a query's questions),
+// the records answering them go in the answer section and the rest in the additional section
+// (RFC 6763 section 12): Windows' resolver keeps re-asking for an SRV or TXT it is answered
+// alongside unasked records.
+[[nodiscard]] result<utils::byte_buffer> dns_service_packet(const service_record& record, std::uint32_t ttl, bool probe = false,
+                                                            std::span<const std::pair<std::string, std::uint16_t>> asked = {});
 // A one-question query; ".local" is appended to `owner` when missing.
 [[nodiscard]] utils::byte_buffer dns_query(std::string_view owner, rr_type type = rr_type::kPtr);
 

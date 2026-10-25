@@ -215,7 +215,8 @@ utils::byte_buffer dns_query(std::string_view owner, rr_type type) {
     return out;
 }
 
-result<utils::byte_buffer> dns_service_packet(const service_record& service, std::uint32_t ttl, bool probe) {
+result<utils::byte_buffer> dns_service_packet(const service_record& service, std::uint32_t ttl, bool probe,
+                                              std::span<const std::pair<std::string, std::uint16_t>> asked) {
     auto txt = service_txt(service);
     if (!txt) {
         return std::unexpected{std::move(txt).error()};
@@ -239,36 +240,31 @@ result<utils::byte_buffer> dns_service_packet(const service_record& service, std
     }
     const auto type = service_domain(service.transport);
     const auto instance = instance_domain(service);
-    utils::byte_buffer out;
-    put(out, 0, 2);
-    put(out, probe ? 0 : 0x8400, 2);
-    put(out, probe ? 2 : 0, 2);
-    put(out, probe ? 0 : 4, 2);
-    put(out, probe ? 3 : 0, 2);
-    put(out, 0, 2);
-    if (probe) {
-        for (const auto& owner : {instance, service.host}) {
-            name(out, owner);
-            put(out, code(rr_type::kAny), 2);
-            put(out, kClassIn, 2);
-        }
-    } else {
+    // Every record's owner, type and data; the probe leaves out the PTR (its questions come first).
+    struct entry {
+        std::string_view owner;
+        rr_type type;
+        utils::byte_buffer data;
+    };
+    std::vector<entry> records;
+    records.reserve(4);
+    if (!probe) {
         utils::byte_buffer ptr;
         name(ptr, instance);
-        record(out, type, rr_type::kPtr, ttl, ptr);
+        records.push_back({type, rr_type::kPtr, std::move(ptr)});
     }
     utils::byte_buffer srv;
     put(srv, 0, 4);
     put(srv, service.port, 2);
     name(srv, service.host);
-    record(out, instance, rr_type::kSrv, ttl, srv);
+    records.push_back({instance, rr_type::kSrv, std::move(srv)});
     utils::byte_buffer text;
     for (const auto& [key, value] : *txt) {
         const auto field = key + "=" + value;
         put(text, field.size(), 1);
         text.append(field);
     }
-    record(out, instance, rr_type::kTxt, ttl, text);
+    records.push_back({instance, rr_type::kTxt, std::move(text)});
     utils::byte_buffer ip;
     if (address.is_v4()) {
         const auto bytes = address.to_v4().to_bytes();
@@ -277,7 +273,38 @@ result<utils::byte_buffer> dns_service_packet(const service_record& service, std
         const auto bytes = address.to_v6().to_bytes();
         ip.append(std::as_bytes(std::span{bytes}));
     }
-    record(out, service.host, address.is_v4() ? rr_type::kA : rr_type::kAaaa, ttl, ip);
+    records.push_back({service.host, address.is_v4() ? rr_type::kA : rr_type::kAaaa, std::move(ip)});
+
+    // Without questions every record is an answer (announcements, probes' authority section).
+    const auto answers = [&](const entry& e) {
+        return asked.empty() || std::ranges::any_of(asked, [&](const auto& q) {
+                   return q.first == e.owner && (q.second == code(e.type) || q.second == code(rr_type::kAny));
+               });
+    };
+    const auto answered = static_cast<std::size_t>(std::ranges::count_if(records, answers));
+    utils::byte_buffer out;
+    put(out, 0, 2);
+    put(out, probe ? 0 : 0x8400, 2);
+    put(out, probe ? 2 : 0, 2);
+    put(out, probe ? 0 : answered, 2);
+    put(out, probe ? records.size() : 0, 2);
+    put(out, probe ? 0 : records.size() - answered, 2);
+    if (probe) {
+        for (const auto& owner : {instance, service.host}) {
+            name(out, owner);
+            put(out, code(rr_type::kAny), 2);
+            put(out, kClassIn, 2);
+        }
+    }
+    for (const bool answer : {true, false}) {
+        for (const auto& e : records) {
+            if (probe || answers(e) == answer) {
+                if (!probe || answer) {
+                    record(out, e.owner, e.type, ttl, e.data);
+                }
+            }
+        }
+    }
     return out;
 }
 
