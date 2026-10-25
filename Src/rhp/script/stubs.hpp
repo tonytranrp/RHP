@@ -388,6 +388,10 @@ function rhp.stats() end
 ---@return rhp.tunable[]
 function rhp.tunables(prefix) end
 
+---Everything this identity can use: the installed libs, C++ events and patch points, described as tables.
+---@return table
+function rhp.api() end
+
 ---Streams a value to the host while the script keeps running.
 ---@param value any
 function rhp.emit(value) end

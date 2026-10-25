@@ -22,12 +22,14 @@
 #include <rhp/core/role.hpp>
 #include <rhp/core/subscription.hpp>
 #include <rhp/core/value.hpp>
+#include <rhp/script/debug.hpp>
 #include <rhp/script/detail/lib_builder.hpp>
 #include <rhp/script/ledger.hpp>
 #include <rhp/script/lib.hpp>
 #include <rhp/script/stack.hpp>
+#include <rhp/script/api.hpp>
 #include <rhp/script/stubs.hpp>
-#include <rhp/script/debug.hpp>
+#include <rhp/script/testing.hpp>
 #include <rhp/script/tunables.hpp>
 
 namespace Rhp::script {
@@ -106,8 +108,8 @@ struct handler_failure {
     module_id module{};
     std::string module_name{};
     handler_kind kind = handler_kind::kTimer;
-    std::string source{};   // the event name, or "timer" / "frame" / "task"
-    std::uint64_t handler = 0; // the id the script holds (rhp.off), 0 if none
+    std::string source{};                                        // the event name, or "timer" / "frame" / "task"
+    std::uint64_t handler = 0;                                   // the id the script holds (rhp.off), 0 if none
     handler_error_policy action = handler_error_policy::kReport; // what was done
     error err{};
 };
@@ -250,7 +252,8 @@ public:
     template <installable L>
     result<void> install() {
 #if RHP_ENABLE
-        return install_lib(L::name, &detail::install_lib_tree<L>, &::Rhp::script::stubs::generate<L>, &detail::collect_tunables<L>);
+        return install_lib(L::name, &detail::install_lib_tree<L>, &::Rhp::script::stubs::generate<L>, &detail::collect_tunables<L>,
+                           &::Rhp::script::api::describe<L>);
 #else
         return fail(errc::kDisabled, "RHP is compiled out (RHP_ENABLE=0)", std::string{L::name});
 #endif
@@ -359,6 +362,11 @@ public:
     // filtered by caller_role().
     [[nodiscard]] std::string stubs() const;
 
+    // Everything this identity's scripts can use, as a value tree (rhp.api() in Lua): {libs = {<api::describe>...},
+    // events = {{name, arity}...}, points = {{id, arity, callable}...}} (events and patch points: every one this
+    // program registered), filtered by caller_role().
+    [[nodiscard]] value api() const;
+
     // Every variable the installed libs expose (::var and ::ro) with its value now: what tools tune.
     // `prefix` keeps one lib or one path ("game", "game.speed"). Pump thread.
     [[nodiscard]] result<std::vector<tunable_info>> tunables(std::string_view prefix = {});
@@ -399,10 +407,41 @@ public:
     // Stops sampling and returns the report (an empty one if it wasn't running).
     profile_report stop_profile();
 
+    // ---- testing (testing.hpp) --------------------------------------------------------------------
+    // Pump thread. What test runners (Rhp::test) measure and drive; every one is harmless in a live
+    // program, but they cost while on.
+
+    // From now on count VM instructions exactly and time the Lua that runs (the count hook is armed
+    // on every run, like the profiler's). Allocation counters always run.
+    void start_metering();
+    void stop_metering();
+    // The counters now (it folds in the instructions threads ran since their last hook tick).
+    [[nodiscard]] run_meter meter();
+    // The peak starts over from what is in use now.
+    void reset_peak() noexcept;
+    // A full garbage collection, twice (objects with finalizers go in the second).
+    result<void> collect_garbage();
+    result<void> set_gc_mode(gc_mode mode);
+    // Records which lines run: every chunk compiled from now on is known with all its executable
+    // lines; lines of code compiled before (or by load()) are reported as `extra`.
+    result<void> start_coverage();
+    [[nodiscard]] coverage_report coverage() const;
+    coverage_report stop_coverage();
+    // Installs `__rhp_test` (the bridge the Lua test framework uses) in the scratch module's
+    // environment, and os.time / os.clock on the script clock when asked. Once per sandbox.
+    result<void> enable_testing(testing_options options = {});
+    // The earliest script time a timer or a sleeping request is due; nullopt when none waits for time.
+    [[nodiscard]] std::optional<std::chrono::steady_clock::time_point> next_due() const;
+    // Calls a patch point by id with values, as C++ code would (overrides included).
+    result<value_list> call_point(std::string_view id, std::span<const value> args);
+    // Fires a C++ event by name with values, as its Rhp::lua_event::fire would.
+    result<void> fire_event(std::string_view name, std::span<const value> args);
+
 private:
     using stub_fn = std::string (*)(role);
+    using api_fn = value (*)(role);
 
-    result<void> install_lib(std::string_view name, c_function build, stub_fn describe, detail::tunables_fn collect);
+    result<void> install_lib(std::string_view name, c_function build, stub_fn describe, detail::tunables_fn collect, api_fn api);
 
     std::unique_ptr<detail::sandbox_impl> impl_;
 };

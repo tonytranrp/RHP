@@ -18,6 +18,8 @@ if(RHP_ENABLE)
         puc_lua/debug.cpp
         puc_lua/profile.cpp
         puc_lua/tasks.cpp
+        puc_lua/testing.cpp
+        puc_lua/lua_internals.cpp
         puc_lua/tools.cpp
     )
     list(APPEND rhp_script_private_deps Rhp::lua)
@@ -27,6 +29,7 @@ endif()
 
 rhp_add_module(script
     HEADERS
+        api.hpp
         ledger.hpp
         lib.hpp
         lua_event.hpp
@@ -36,6 +39,7 @@ rhp_add_module(script
         stack.hpp
         debug.hpp
         stubs.hpp
+        testing.hpp
         tunables.hpp
         detail/context.hpp
         detail/event_registry.hpp

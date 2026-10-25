@@ -66,6 +66,20 @@ double checked_ms(lua_State* L, int index, std::string_view where) {
 namespace {
 
 constexpr std::size_t kAlignment = alignof(std::max_align_t);
+
+// The alloc_kind of a new block from the tag Lua passes as its old size (the object's basic type).
+constexpr std::size_t alloc_kind_of(std::size_t tag) noexcept {
+    switch (tag) {
+    case LUA_TSTRING: return static_cast<std::size_t>(alloc_kind::kString);
+    case LUA_TTABLE: return static_cast<std::size_t>(alloc_kind::kTable);
+    case LUA_TFUNCTION: return static_cast<std::size_t>(alloc_kind::kFunction);
+    case LUA_TUSERDATA: return static_cast<std::size_t>(alloc_kind::kUserdata);
+    case LUA_TTHREAD: return static_cast<std::size_t>(alloc_kind::kThread);
+    case LUA_NUMTYPES: return static_cast<std::size_t>(alloc_kind::kUpvalue);     // LUA_TUPVAL
+    case LUA_NUMTYPES + 1: return static_cast<std::size_t>(alloc_kind::kPrototype); // LUA_TPROTO
+    default: return static_cast<std::size_t>(alloc_kind::kOther);
+    }
+}
 constexpr std::uint32_t kDefaultCheckInterval = 1'000;
 // Finished requests whose map node, record and coroutine wait for reuse: enough for a frame's worth
 // of handler calls without holding on to a burst.
@@ -173,9 +187,13 @@ int lua_guarded_coroutine(lua_State* L) {
             stack{L}.raise(make_error(errc::kInvalidArgument, "this coroutine is a script request; only the scheduler resumes it"));
         }
     }
+    lua_State* co = lua_tothread(L, 1);
     lua_pushvalue(L, lua_upvalueindex(1));
     lua_insert(L, 1);
     lua_call(L, lua_gettop(L) - 1, LUA_MULTRET);
+    if (co != nullptr) {
+        impl_of(L).credit_hook_progress(co); // the instructions it ran since its last hook tick
+    }
     return lua_gettop(L);
 }
 
@@ -352,6 +370,9 @@ struct sandbox_impl::active_scope {
             self.cancel_running_.store(false, std::memory_order_release);
         }
         const bool checked = request != nullptr && checked_kind(request->kind);
+        if (self.metering_ && self.running_.empty()) {
+            self.meter_run_started_ = steady::now();
+        }
         self.running_.push_back(active_run{budget, thread, request, self.timed_ ? steady::now() : steady::time_point{}, checked});
         self.current_ = owner;
         if (checked) {
@@ -370,6 +391,10 @@ struct sandbox_impl::active_scope {
         const bool checked = top.checked;
         self.running_.pop_back();
         self.current_ = previous;
+        if (self.metering_ && self.running_.empty()) {
+            self.credit_hook_progress(self.state_);
+            self.meter_active_ += steady::now() - self.meter_run_started_;
+        }
         if (checked) {
             self.leave_checked();
         }
@@ -536,6 +561,8 @@ void sandbox_impl::open_libraries() {
         lua_pushcclosure(L, &lua_guarded_coroutine, 1);
         lua_setfield(L, -2, name);
     }
+    lua_pushcfunction(L, &lua_coroutine_wrap);
+    lua_setfield(L, -2, "wrap");
     lua_pop(L, 1);
 
     struct builtin {
@@ -568,6 +595,7 @@ void sandbox_impl::open_libraries() {
         {"spawn", &lua_rhp_spawn},
         {"tasks", &lua_rhp_tasks},
         {"tunables", &lua_rhp_tunables},
+        {"api", &lua_rhp_api},
     };
     lua_createtable(L, 0, static_cast<int>(std::size(builtins)) + 1);
     for (const auto& [name, fn] : builtins) {
@@ -643,8 +671,8 @@ std::uint32_t sandbox_impl::hook_count() const noexcept {
 // `armed`: the run checks for cancels and limits. The profiler counts everywhere; the debugger adds
 // line events.
 void sandbox_impl::arm_hook(lua_State* L, bool armed) noexcept {
-    int mask = armed || profiler_ ? LUA_MASKCOUNT : 0;
-    if (debugger_ && debugger_->wants_lines()) {
+    int mask = armed || counts_everywhere() ? LUA_MASKCOUNT : 0;
+    if (wants_line_events()) {
         // Every line, with a bitmap check first. (Switching line events per function on calls and
         // returns would be cheaper for loops, but lua_sethook restarts the instruction countdown:
         // a loop of calls would never reach a count event, so limits and cancels would stop working.)
@@ -684,8 +712,8 @@ bool sandbox_impl::checked_now() const noexcept {
 }
 
 void sandbox_impl::sync_hook(lua_State* L, bool checked) noexcept {
-    int mask = checked || profiler_ ? LUA_MASKCOUNT : 0;
-    if (debugger_ && debugger_->wants_lines()) {
+    int mask = checked || counts_everywhere() ? LUA_MASKCOUNT : 0;
+    if (wants_line_events()) {
         mask |= LUA_MASKLINE;
     }
     const int count = static_cast<int>(hook_count());
@@ -723,6 +751,7 @@ void sandbox_impl::leave_checked() noexcept {
 
 void* sandbox_impl::allocate(void* ud, void* ptr, std::size_t old_size, std::size_t new_size) noexcept {
     auto& self = *static_cast<sandbox_impl*>(ud);
+    const std::size_t old_tag = old_size;
     if (ptr == nullptr) {
         old_size = 0; // Lua passes the object type here for new blocks
     }
@@ -734,9 +763,11 @@ void* sandbox_impl::allocate(void* ud, void* ptr, std::size_t old_size, std::siz
                 self.memory_->deallocate(ptr, old_size, kAlignment);
             }
             self.memory_used_ -= old_size;
+            ++self.frees_;
         }
         return nullptr;
     }
+    const std::size_t kind = ptr == nullptr ? alloc_kind_of(old_tag) : kAllocKinds;
     if (new_size > old_size) {
         const std::uint64_t limit = self.options_.limits.memory;
         run_budget* budget = nullptr; // innermost run with its own budget
@@ -772,6 +803,14 @@ void* sandbox_impl::allocate(void* ud, void* ptr, std::size_t old_size, std::siz
         }
     }
     self.memory_used_ = self.memory_used_ - old_size + new_size;
+    if (new_size > old_size) {
+        self.bytes_allocated_ += new_size - old_size;
+        self.peak_ = std::max(self.peak_, self.memory_used_);
+    }
+    if (kind != kAllocKinds) {
+        ++self.allocations_;
+        ++self.objects_[kind];
+    }
     return block;
 }
 
@@ -829,6 +868,9 @@ void sandbox_impl::count_hook(lua_State* L, lua_Debug* ar) {
     // The instructions since this thread's last count event: its own count, which may be older than
     // hook_count() (a thread armed before the profiler started or stopped).
     const auto elapsed = static_cast<std::uint64_t>(lua_gethookcount(L));
+    if (self.metering_) {
+        self.meter_instructions_ += elapsed;
+    }
     if (!self.hook_dirty_) { // after a stop the hook fires on every instruction until the run ends
         const bool checked = self.checked_now();
         if (self.profiler_) {
@@ -1112,6 +1154,11 @@ void sandbox_impl::push_required(lua_State* L, std::string_view name) {
     lua_remove(L, -2);
 }
 
+const module_record* sandbox_impl::module_of_proxy(lua_State* L, int index) const noexcept {
+    const auto* proxy = static_cast<const module_proxy*>(luaL_testudata(L, index, kModuleProxyKey));
+    return proxy != nullptr ? record(module_id{proxy->id}) : nullptr;
+}
+
 void sandbox_impl::forget_proxy(module_id mod) noexcept {
     lua_getfield(state_, LUA_REGISTRYINDEX, kModuleProxiesKey);
     lua_pushnil(state_);
@@ -1143,6 +1190,9 @@ result<void> sandbox_impl::compile(std::string_view source, const std::string& c
     }
     lua_rawgeti(L, LUA_REGISTRYINDEX, env_ref);
     lua_setupvalue(L, -2, 1); // a main chunk's first upvalue is _ENV
+    if (coverage_) {
+        coverage_compiled(L, std::string_view{chunk_name}.substr(1));
+    }
     return {};
 }
 
@@ -1290,6 +1340,7 @@ std::optional<result<value_list>> sandbox_impl::step(request_record& req, int na
     {
         const active_scope scope{*this, &req.budget, req.thread, &req, req.owner};
         status = lua_resume(req.thread, from, nargs, &nresults);
+        credit_hook_progress(req.thread);
     }
     req.running = false;
     requests_dirty_ = true; // suspended with a new wake, or done
@@ -1796,7 +1847,7 @@ void sandbox_impl::resume_ready() {
 
 // ---- operations ----------------------------------------------------------------------------------
 
-result<void> sandbox_impl::install_lib(std::string_view name, c_function build, std::string (*describe)(role), tunables_fn collect) {
+result<void> sandbox_impl::install_lib(std::string_view name, c_function build, std::string (*describe)(role), tunables_fn collect, value (*api)(role)) {
     drain();
     result<void> out{};
     auto glue = protect(state_, [&] {
@@ -1819,6 +1870,7 @@ result<void> sandbox_impl::install_lib(std::string_view name, c_function build, 
     }
     if (out) {
         describers_.push_back(describe);
+        api_describers_.push_back(api);
         collect(tunables_);
     }
     return out;
@@ -2344,8 +2396,8 @@ sandbox::~sandbox() = default;
 sandbox::sandbox(sandbox&&) noexcept = default;
 sandbox& sandbox::operator=(sandbox&&) noexcept = default;
 
-result<void> sandbox::install_lib(std::string_view name, c_function build, stub_fn describe, detail::tunables_fn collect) {
-    return impl_->install_lib(name, build, describe, collect);
+result<void> sandbox::install_lib(std::string_view name, c_function build, stub_fn describe, detail::tunables_fn collect, api_fn api) {
+    return impl_->install_lib(name, build, describe, collect, api);
 }
 
 result<std::vector<tunable_info>> sandbox::tunables(std::string_view prefix) {
@@ -2398,6 +2450,58 @@ profile_report sandbox::profile() const {
 
 profile_report sandbox::stop_profile() {
     return impl_->stop_profile();
+}
+
+void sandbox::start_metering() {
+    impl_->start_metering();
+}
+
+void sandbox::stop_metering() {
+    impl_->stop_metering();
+}
+
+run_meter sandbox::meter() {
+    return impl_->meter();
+}
+
+void sandbox::reset_peak() noexcept {
+    impl_->reset_peak();
+}
+
+result<void> sandbox::collect_garbage() {
+    return impl_->collect_garbage();
+}
+
+result<void> sandbox::set_gc_mode(gc_mode mode) {
+    return impl_->set_gc_mode(mode);
+}
+
+result<void> sandbox::start_coverage() {
+    return impl_->start_coverage();
+}
+
+coverage_report sandbox::coverage() const {
+    return impl_->coverage();
+}
+
+coverage_report sandbox::stop_coverage() {
+    return impl_->stop_coverage();
+}
+
+result<void> sandbox::enable_testing(testing_options options) {
+    return impl_->enable_testing(std::move(options));
+}
+
+std::optional<std::chrono::steady_clock::time_point> sandbox::next_due() const {
+    return impl_->next_due();
+}
+
+result<value_list> sandbox::call_point(std::string_view id, std::span<const value> args) {
+    return impl_->call_point(id, args);
+}
+
+result<void> sandbox::fire_event(std::string_view name, std::span<const value> args) {
+    return impl_->fire_event(name, args);
 }
 
 result<value_list> sandbox::exec(std::string_view source, std::string_view chunk_name) {
@@ -2498,6 +2602,10 @@ std::size_t sandbox::memory_used() const noexcept {
 
 const ledger& sandbox::effects() const noexcept {
     return impl_->effects();
+}
+
+value sandbox::api() const {
+    return impl_->api();
 }
 
 std::string sandbox::stubs() const {

@@ -151,9 +151,11 @@ if(RHP_ENABLE)
             script/script_event_tests.cpp
             script/stubs_tests.cpp
             script/task_tests.cpp
+            script/testing_tests.cpp
             script/tools_tests.cpp
         LINKS
             Rhp::script
+            Rhp::lua # testing_tests compares the meter with a plain Lua state
     )
 else()
     # RHP_ENABLE=OFF: no Lua; checks the inert sandbox and direct-call patch points instead.
