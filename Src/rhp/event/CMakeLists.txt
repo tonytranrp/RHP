@@ -6,6 +6,7 @@ rhp_add_module(event
         hub.hpp
     SOURCES
         events.cpp
+        hub.cpp
     DEPS
         Rhp::core
 )
