@@ -18,11 +18,11 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <rhp/core/error.hpp>
+#include <rhp/core/json.hpp>
 #include <rhp/script/lib.hpp>
 #include <rhp/script/lua_event.hpp>
 #include <rhp/script/patch_point.hpp>
 #include <rhp/script/sandbox.hpp>
-#include <rhp/core/json.hpp>
 #include <rhp/test/test.hpp>
 
 namespace fs = std::filesystem;
@@ -711,7 +711,10 @@ std::string normalized(std::string text) {
     std::string out;
     std::istringstream lines{text};
     for (std::string line; std::getline(lines, line);) {
-        out += std::regex_replace(line, ranking, "    <n>  ") + "\n";
+        if (std::regex_search(line, ranking)) {
+            continue; // the "most instructions / memory" rows: their order follows the figures
+        }
+        out += line + "\n";
     }
     return out;
 }
@@ -883,8 +886,7 @@ TEST_CASE("arguments parse into options", "[test][cli]") {
     CHECK(parse({"-r", "C:/reports/x.txt"}).error().message.find("unknown reporter") != std::string::npos);
     CHECK(parse({"-r", "junit:C:/reports/x.xml"})->run.reports[0].path == fs::path{"C:/reports/x.xml"});
     for (const auto& bad : std::vector<std::vector<std::string_view>>{
-             {"--bogus"}, {"--seed", "x"}, {"--seed"}, {"--repeat", "0"}, {"--isolation", "module"}, {"--role", "root"}, {"--timeout", "0"},
-             {"-r", "html"}, {"--coverage", "gcov"}, {"--profile=x"}, {"--property-runs", "0"}, {"--max-frames", "-1"}}) {
+             {"--bogus"}, {"--seed", "x"}, {"--seed"}, {"--repeat", "0"}, {"--isolation", "module"}, {"--role", "root"}, {"--timeout", "0"}, {"-r", "html"}, {"--coverage", "gcov"}, {"--profile=x"}, {"--property-runs", "0"}, {"--max-frames", "-1"}}) {
         INFO(bad[0]);
         const auto r = parse(bad);
         REQUIRE_FALSE(r);

@@ -463,7 +463,7 @@ struct runner::impl {
             (void)box->start_coverage();
         }
         for (const detail::lua_source& part : detail::framework_sources()) {
-            if (auto ran = box->exec(part.text, part.name); !ran) {
+            if (auto ran = box->exec_cached(part.text, part.name); !ran) {
                 errors.push_back(file_error{std::format("the test framework didn't load ({}): {}", part.name, ran.error()), current_file, 0, ran.error().traceback});
                 return box;
             }
@@ -979,7 +979,7 @@ struct runner::impl {
         if (!errors.empty()) {
             return box;
         }
-        if (auto ran = box->exec(source, current_file); !ran) {
+        if (auto ran = box->exec_cached(source, current_file); !ran) { // with --isolation test it runs once per test
             const error& e = ran.error();
             errors.push_back(file_error{std::format("the test file failed to load: {}", e), current_file, 0, e.traceback});
         }
@@ -1031,7 +1031,7 @@ struct runner::impl {
             before_vars = std::move(*vars);
         }
         if (options.measure) {
-            (void)box.collect_garbage();
+            (void)box.collect_garbage(1);
         }
         box.reset_peak();
         const script::run_meter m0 = box.meter();
@@ -1050,7 +1050,7 @@ struct runner::impl {
             }
         }
         if (options.measure) {
-            (void)box.collect_garbage();
+            (void)box.collect_garbage(1);
         }
         const script::run_meter m2 = box.meter();
         r.cost.instructions = m1.instructions - m0.instructions;
