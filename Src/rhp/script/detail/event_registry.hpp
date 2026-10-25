@@ -83,6 +83,7 @@ private:
         // Deliveries in progress: which listener, on which thread.
         std::vector<std::pair<const event_listener*, std::thread::id>> delivering;
         std::condition_variable idle;
+        std::size_t waiting = 0; // detach() calls waiting on `idle`: a delivery's end notifies only then
     };
 
     // Marks `listener` as being delivered to on this thread, if it is still attached.

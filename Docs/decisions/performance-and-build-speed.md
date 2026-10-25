@@ -84,7 +84,8 @@ memory when every test executable linked at once.
   own file; Catch2 with `CATCH_CONFIG_FAST_COMPILE`; MSVC `/Zc:inline /Gw`, Clang
   `-ffunction-sections -fdata-sections`; clang-cl gets the interpreter's computed-goto dispatch.
 
-*Not done:* LTO by default (measured under 5% on most rows, and it ties a static library's objects to
-one toolchain version); Asio separate compilation (the eight Asio files save about 2 s together, and
+*Not done:* LTO by default (measured under 5% on script work, 10-35% on binding calls, variable and property reads
+and handle methods, and it ties a static library's objects to one toolchain version: `RHP_LTO` turns it
+on); Asio separate compilation (the eight Asio files save about 2 s together, and
 an extra file compiles Asio's implementation); `/DEBUG:FASTLINK` (slower here); removing
 `<chrono>`, `<filesystem>` and `<future>` from headers whose API uses them.
