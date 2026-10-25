@@ -38,11 +38,17 @@ if(RHP_LUA_JUMP_YIELDS AND _rhp_lua_jumps_here AND NOT "thread" IN_LIST RHP_SANI
     target_compile_definitions(rhp_lua PRIVATE RHP_LUA_JUMP_YIELDS)
 endif()
 
+# The interpreter's computed-goto dispatch: upstream enables it for __GNUC__ only, which clang-cl
+# doesn't define although it supports labels as values.
+if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang" OR CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang" OR CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    target_compile_definitions(rhp_lua PRIVATE LUA_USE_JUMPTABLE=1)
+endif()
+
 # API misuse asserts in Debug: a broken trampoline aborts loudly instead of corrupting the VM.
 target_compile_definitions(rhp_lua PUBLIC $<$<CONFIG:Debug>:LUA_USE_APICHECK>)
 
 if(MSVC)
-    target_compile_options(rhp_lua PRIVATE /utf-8 /W0)
+    target_compile_options(rhp_lua PRIVATE /utf-8 /W0 /Zc:inline /Gw)
 else()
-    target_compile_options(rhp_lua PRIVATE -w)
+    target_compile_options(rhp_lua PRIVATE -w -ffunction-sections -fdata-sections)
 endif()

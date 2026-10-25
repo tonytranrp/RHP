@@ -80,5 +80,99 @@ bool rhp_lua_plain_jumps() noexcept {
     } while (0)
 #endif
 
-#define MAKE_LIB
-#include "onelua.c"
+// upstream onelua.c with MAKE_LIB, spelled out so that one function can be put between ldebug.c and
+// lvm.c (keep this list, in this order, in step with onelua.c when Lua is updated).
+// clang-format off
+#include "lprefix.h"
+
+#include <assert.h>
+#include <ctype.h>
+#include <errno.h>
+#include <float.h>
+#include <limits.h>
+#include <locale.h>
+#include <math.h>
+#include <setjmp.h>
+#include <signal.h>
+#include <stdarg.h>
+#include <stddef.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+
+#define LUA_CORE
+#define LUA_LIB
+
+#include "luaconf.h"
+
+#undef LUAI_FUNC
+#undef LUAI_DDEC
+#undef LUAI_DDEF
+#define LUAI_FUNC static
+#define LUAI_DDEC(def) /* empty */
+#define LUAI_DDEF static
+
+#include "lzio.c"
+#include "lctype.c"
+#include "lopcodes.c"
+#include "lmem.c"
+#include "lundump.c"
+#include "ldump.c"
+#include "lstate.c"
+#include "lgc.c"
+#include "llex.c"
+#include "lcode.c"
+#include "lparser.c"
+#include "ldebug.c"
+// clang-format on
+
+#if LUA_VERSION_RELEASE_NUM != 50501
+#error "Lua was updated: check onelua.c's include list and luaG_traceexec against rhp_lua_traceexec"
+#endif
+
+// While any hook is set (RHP's cancel / limit / slice hook counts instructions), the VM calls
+// luaG_traceexec before every instruction; for a count hook that isn't due it only counts down (and
+// stores the pc, which nothing reads until a hook runs or an instruction that may raise saves it
+// itself, as it does without hooks). Counting down inline here makes the not-due case a decrement
+// instead of a call: loops with RHP's default cancel checks run at about 1.25x raw Lua instead of 2x.
+// Everything else (a due count, line events, a hook that yielded) goes through upstream's function.
+#if defined(_MSC_VER) && !defined(__clang__)
+#define RHP_LUA_FORCE_INLINE __forceinline
+#else
+#define RHP_LUA_FORCE_INLINE inline __attribute__((always_inline))
+#endif
+static RHP_LUA_FORCE_INLINE int rhp_lua_traceexec(lua_State* L, const Instruction* pc) {
+    if ((L->hookmask & (LUA_MASKLINE | LUA_MASKCOUNT)) == LUA_MASKCOUNT && L->hookcount > 1) {
+        --L->hookcount;
+        return 1;
+    }
+    return luaG_traceexec(L, pc);
+}
+
+// clang-format off
+#include "lfunc.c"
+#include "lobject.c"
+#include "ltm.c"
+#include "lstring.c"
+#include "ltable.c"
+#include "ldo.c"
+#define luaG_traceexec rhp_lua_traceexec // lvm.c's vmfetch calls it
+#include "lvm.c"
+#undef luaG_traceexec
+#include "lapi.c"
+
+#include "lauxlib.c"
+
+#include "lbaselib.c"
+#include "lcorolib.c"
+#include "ldblib.c"
+#include "liolib.c"
+#include "lmathlib.c"
+#include "loadlib.c"
+#include "loslib.c"
+#include "lstrlib.c"
+#include "ltablib.c"
+#include "lutf8lib.c"
+#include "linit.c"
+// clang-format on

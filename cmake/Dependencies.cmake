@@ -43,6 +43,9 @@ function(rhp_verify_git_pin name commit)
 endfunction()
 
 if(RHP_BUILD_TESTS)
+    # Assertion macros without their own try/catch (an exception still fails the test): about a fifth
+    # less compile time per assertion. Forced so that existing build trees pick it up too.
+    set(CATCH_CONFIG_FAST_COMPILE ON CACHE BOOL "Catch2: no try/catch per assertion (set by RHP)" FORCE)
     CPMAddPackage(
         NAME Catch2
         GITHUB_REPOSITORY catchorg/Catch2
