@@ -67,6 +67,26 @@ if(RHP_ENABLE AND RHP_BUILD_EXAMPLES AND NOT CMAKE_CROSSCOMPILING)
     endif()
 endif()
 
+# The VS Code extension (clients/vscode), when Node.js is available: its protocol and glue code
+# (against a stand-in vscode module), then the protocol against the lua_tests example's runner.
+if(NOT CMAKE_CROSSCOMPILING)
+    find_program(RHP_NODE node)
+    if(RHP_NODE)
+        add_test(NAME vscode.unit
+            COMMAND "${RHP_NODE}" --test test/protocol.test.js test/extension.test.js
+            WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}/clients/vscode")
+        set_tests_properties(vscode.unit PROPERTIES LABELS "vscode;process" TIMEOUT 120)
+        if(RHP_ENABLE AND RHP_BUILD_EXAMPLES)
+            add_test(NAME vscode.protocol
+                COMMAND "${RHP_NODE}" --test test/runner.test.js
+                WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}/clients/vscode")
+            set_tests_properties(vscode.protocol PROPERTIES
+                ENVIRONMENT "RHP_TEST_RUNNER=$<TARGET_FILE:lua_tests_example>;RHP_TEST_EXAMPLE=${PROJECT_SOURCE_DIR}/Examples/lua_tests"
+                LABELS "vscode;process" TIMEOUT 120)
+        endif()
+    endif()
+endif()
+
 # Public headers stay ASCII: a compiler reading them in another code page (MSVC without /utf-8 on
 # a CJK system, with /WX) must not trip over a comment.
 add_test(NAME hygiene.ascii_headers

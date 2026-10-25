@@ -1,5 +1,6 @@
 # rhp CMake package: find_package(rhp CONFIG REQUIRED), then link Rhp::rhp (everything) or single
-# modules (Rhp::host, Rhp::client, Rhp::script, ...).
+# modules (Rhp::host, Rhp::client, Rhp::script, Rhp::test, ...). rhp_add_lua_tests() runs Lua test
+# files as ctest tests (cmake/RhpLuaTests.cmake).
 #
 #   rhp_STAGE               the stage this RHP implements (RHP has no release numbers)
 #   rhp_PROTOCOL_REVISION   the wire protocol revision its hosts and clients speak
@@ -30,6 +31,7 @@ if(rhp_TLS_HAS_OPENSSL)
 endif()
 
 include("${CMAKE_CURRENT_LIST_DIR}/RhpTargets.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/RhpLuaTests.cmake") # rhp_add_lua_tests()
 
 # MSVC: a debug and a release runtime don't link together, so a configuration only ever maps to an
 # installed configuration with the same runtime (a Debug consumer needs a Debug RHP installed).

@@ -170,12 +170,17 @@ else()
     )
 endif()
 
+# Rhp::test: Lua fixture specs with known outcomes through the runner (with RHP_ENABLE=OFF, what
+# still works without Lua).
 if(RHP_ENABLE)
-    rhp_add_test_suite(rhp_test_tests
-        SOURCES
-            test/runner_tests.cpp
-        LINKS
-            Rhp::test
-    )
-    target_compile_definitions(rhp_test_tests PRIVATE RHP_TEST_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures")
+    set(rhp_test_test_sources test/runner_tests.cpp)
+else()
+    set(rhp_test_test_sources test/disabled_tests.cpp)
 endif()
+rhp_add_test_suite(rhp_test_tests
+    SOURCES
+        ${rhp_test_test_sources}
+    LINKS
+        Rhp::test
+)
+target_compile_definitions(rhp_test_tests PRIVATE RHP_TEST_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures")

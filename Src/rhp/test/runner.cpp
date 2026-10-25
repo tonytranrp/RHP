@@ -22,6 +22,7 @@
 #include <utility>
 #include <vector>
 
+#include <rhp/build_config.hpp>
 #include <rhp/core/error.hpp>
 #include <rhp/core/result.hpp>
 #include <rhp/core/value.hpp>
@@ -29,9 +30,9 @@
 #include <rhp/script/sandbox.hpp>
 #include <rhp/test/detail/framework.hpp>
 #include <rhp/test/fake_registry.hpp>
-#include <rhp/utils/scope_guard.hpp>
 #include <rhp/test/runner.hpp>
 #include <rhp/utils/crc32c.hpp>
+#include <rhp/utils/scope_guard.hpp>
 
 namespace Rhp::test {
 
@@ -41,6 +42,8 @@ using script::value_list;
 using steady = std::chrono::steady_clock;
 
 namespace {
+
+constexpr bool kLuaEnabled = RHP_ENABLE != 0;
 
 // ---- small value helpers ----------------------------------------------------------------------------
 
@@ -1152,6 +1155,12 @@ struct runner::impl {
             }
         }
 
+        // Events the test published that are still queued reach their handlers now (within this
+        // test, whose revert follows), not in the next test.
+        for (int round = 0; round < 4 && box.stats().queued_events != 0; ++round) {
+            pump(box, r.cost.frames);
+        }
+
         // Undo it, and check that everything it did is gone.
         const bool strict = options.strict_undo || std::ranges::find(r.notes, std::string{"strict-undo"}) != r.notes.end();
         std::erase(r.notes, std::string{"strict-undo"});
@@ -1214,6 +1223,21 @@ struct runner::impl {
     }
 
     file_result run_file(const fs::path& path, reporter& out, bool& stop) {
+        if constexpr (kLuaEnabled) {
+            return run_lua_file(path, out, stop);
+        } else {
+            (void)stop;
+            file_result fr;
+            current_file = relative(path);
+            fr.file = current_file;
+            fr.errors.push_back(file_error{"this build has no Lua (RHP_ENABLE=OFF): Lua tests can't run", current_file, 0, {}});
+            out.file_started(current_file, {});
+            out.file_finished(fr);
+            return fr;
+        }
+    }
+
+    file_result run_lua_file(const fs::path& path, reporter& out, bool& stop) {
         file_result fr;
         current_file = relative(path);
         fr.file = current_file;
@@ -1375,7 +1399,8 @@ std::vector<std::pair<file_result, std::vector<test_info>>> runner::list() {
 result<value> describe_api(const install_fn& install, role caller) {
     sandbox box{script::sandbox_options{.caller_role = caller}};
     if (install) {
-        if (auto installed = install(box); !installed) {
+        // With RHP_ENABLE=OFF installing is refused, but the libs are still described.
+        if (auto installed = install(box); !installed && installed.error().code != errc::kDisabled) {
             return std::unexpected{std::move(installed).error()};
         }
     }

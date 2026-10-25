@@ -21,6 +21,7 @@ public:
 
     sandbox_options options_;
     ledger effects_;
+    std::vector<value (*)(role)> apis_; // the libs' descriptions still work without Lua (sandbox::api)
 };
 
 } // namespace detail
@@ -38,7 +39,10 @@ sandbox::~sandbox() = default;
 sandbox::sandbox(sandbox&&) noexcept = default;
 sandbox& sandbox::operator=(sandbox&&) noexcept = default;
 
-result<void> sandbox::install_lib(std::string_view, c_function, stub_fn, detail::tunables_fn, api_fn) {
+result<void> sandbox::install_lib(std::string_view, c_function, stub_fn, detail::tunables_fn, api_fn api) {
+    if (api != nullptr) {
+        impl_->apis_.push_back(api);
+    }
     return disabled();
 }
 
@@ -137,7 +141,15 @@ const ledger& sandbox::effects() const noexcept {
 }
 
 value sandbox::api() const {
-    return value{value::map{}};
+    value::array libs;
+    for (const auto describe : impl_->apis_) {
+        libs.push_back(describe(impl_->options_.caller_role));
+    }
+    value::map out;
+    out.emplace_back(value{"libs"}, value{std::move(libs)});
+    out.emplace_back(value{"events"}, value{value::array{}});
+    out.emplace_back(value{"points"}, value{value::array{}});
+    return value{std::move(out)};
 }
 
 std::string sandbox::stubs() const {

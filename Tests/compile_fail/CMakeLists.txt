@@ -30,3 +30,7 @@ rhp_add_compile_fail(transport_without_network SOURCE transport_without_network.
 rhp_add_compile_fail(transport_network_not_constant SOURCE transport_network_not_constant.cpp LINKS Rhp::config)
 rhp_add_compile_fail(build_config_enable_mismatch SOURCE build_config_enable_mismatch.cpp LINKS Rhp::core)
 rhp_add_compile_fail(build_config_platform_mismatch SOURCE build_config_platform_mismatch.cpp LINKS Rhp::core)
+if(RHP_ENABLE)
+    rhp_add_compile_fail(fake_not_a_lib SOURCE fake_not_a_lib.cpp LINKS Rhp::test)
+    rhp_add_compile_fail(fake_result_not_default SOURCE fake_result_not_default.cpp LINKS Rhp::test)
+endif()

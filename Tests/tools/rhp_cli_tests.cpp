@@ -594,6 +594,45 @@ TEST_CASE("rhp-cli: the full lifecycle against a headless_server process", "[cli
     CHECK(audit.find(R"("pinned":1)") != std::string::npos);
 }
 
+TEST_CASE("rhp-cli: test runs Lua tests offline and with a host's API faked", "[cli][process]") {
+    scratch_dir dir;
+    const auto id = dir.path / "dev.rhpid";
+    REQUIRE(run(std::format("{} keygen dev --out {} > {}", kCli, q(id), q(dir.path / "keygen.txt"))) == 0);
+    REQUIRE(run(std::format("{} pubkey -i {} --role admin > {}", kCli, q(id), q(dir.path / "lines.txt"))) == 0);
+    const std::string lines = dir.read("lines.txt");
+    const auto nl = lines.find('\n');
+    REQUIRE(nl != std::string::npos);
+    dir.write("keys.txt", lines.substr(0, nl + 1));
+    dir.write("signers.pub", lines.substr(nl + 1));
+    dir.write("game_spec.lua", "it('gravity is a number', function()\n"
+                                     "    assert.is_number(game.gravity)\n"
+                                     "    game.gravity = 2\n"
+                                     "    assert.equals(2, game.gravity)\n"
+                                     "end)\n");
+
+    // Offline with nothing faked: `game` doesn't exist.
+    CHECK(run(std::format("{} test {} --no-color > {} 2>&1", kCli, q(dir.path / "game_spec.lua"), q(dir.path / "offline.txt"))) == 1);
+    CHECK(dir.read("offline.txt").find("1 error") != std::string::npos);
+    CHECK(run(std::format("{} test --bogus > {} 2>&1", kCli, q(dir.path / "bogus.txt"))) == 2);
+
+    std::jthread server{[&] {
+        (void)run(std::format("{} --port 0 --keys {} --signers {} --port-file {} --stop-file {} --seconds 120 > {} 2>&1", kHost, q(dir.path / "keys.txt"),
+                              q(dir.path / "signers.pub"), q(dir.path / "port.txt"), q(dir.path / "stop"), q(dir.path / "server.log")));
+    }};
+    REQUIRE(eventually([&] { return fs::exists(dir.path / "port.txt") && !dir.read("port.txt").empty(); }));
+    const std::string at = "127.0.0.1:" + std::to_string(std::stoi(dir.read("port.txt")));
+
+    // The host describes its libs; the tests run here against fakes of them.
+    CHECK(run(std::format("{} test {} --api-from {} -i {} --no-color -r junit:{} > {} 2>&1", kCli, q(dir.path / "game_spec.lua"), at, q(id),
+                          q(dir.path / "junit.xml"), q(dir.path / "faked.txt"))) == 0);
+    INFO(dir.read("faked.txt"));
+    CHECK(dir.read("faked.txt").find("1 passed") != std::string::npos);
+    CHECK(dir.read("junit.xml").find("gravity is a number") != std::string::npos);
+
+    dir.write("stop", "");
+    server.join();
+}
+
 TEST_CASE("rhp-cli: reverse mode: rhp-cli listens / the server dials in", "[cli][process]") {
     scratch_dir dir;
     const auto id = dir.path / "dev.rhpid";

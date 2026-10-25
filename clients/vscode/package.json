@@ -1,0 +1,56 @@
+{
+  "name": "rhp-lua-tests",
+  "displayName": "RHP Lua tests",
+  "description": "Runs Rhp::test Lua test files (busted / Jest style) in the Test Explorer: failures in place, diffs, output, costs and line coverage.",
+  "publisher": "rhp",
+  "license": "Apache-2.0",
+  "engines": {
+    "vscode": "^1.88.0"
+  },
+  "categories": ["Testing"],
+  "main": "./extension.js",
+  "activationEvents": [
+    "workspaceContains:**/*_spec.lua",
+    "workspaceContains:**/*.spec.lua",
+    "workspaceContains:**/*_test.lua",
+    "workspaceContains:**/test_*.lua"
+  ],
+  "contributes": {
+    "configuration": {
+      "title": "RHP Lua tests",
+      "properties": {
+        "rhpTests.command": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": ["rhp-cli", "test"],
+          "markdownDescription": "The runner and its leading arguments: a program's own test executable (`[\"build/lua_tests\"]`, its real libs) or `[\"rhp-cli\", \"test\"]` (the `rhp` API, or fakes with `--api`)."
+        },
+        "rhpTests.args": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "markdownDescription": "More runner arguments, such as `[\"-s\", \"scripts\"]` (module folders) or `[\"--isolation\", \"test\"]`."
+        },
+        "rhpTests.include": {
+          "type": "string",
+          "default": "**/{*_spec,*.spec,*_test,test_*}.lua",
+          "description": "Test files, relative to the workspace folder."
+        },
+        "rhpTests.exclude": {
+          "type": "string",
+          "default": "**/{node_modules,build,out,.git}/**",
+          "description": "Folders never searched for test files."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "rhpTests.updateSnapshots",
+        "title": "RHP: Run Lua tests and update snapshots"
+      }
+    ]
+  },
+  "scripts": {
+    "test": "node --test test/protocol.test.js test/extension.test.js test/runner.test.js"
+  }
+}
