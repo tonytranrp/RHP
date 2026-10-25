@@ -11,6 +11,7 @@ using game_lib = Rhp::lib<"game">                                               
     ::fn<"explode", &game::explode, Rhp::irreversible>                                                 // allowed, but counted in revert reports
     ::fn<"wipe", &game::wipe, Rhp::requires_role<Rhp::role::kAdmin>>                                  // admin only
     ::var<"gravity", &game::g_gravity>                                                                // read: observe, write: patch (journaled)
+    ::var<"speed", &game::g_speed, Rhp::range<0.0, 10.0>, Rhp::unit<"m/s">>                             // a tunable: writes outside [0, 10] raise kOutOfRange
     ::ro<"tick", &game::g_tick>                                                                        // read only
     ::handle<"entity", game::entity_id, &game::is_alive>                                               // opaque userdata + validity check
     ::sub<Rhp::lib<"debug">::fn<"dump", &game::dump_state>>;                                           // game.debug.dump()
@@ -21,8 +22,8 @@ host.install<game_lib>(); // or sandbox.install<game_lib>()
 | Entry | Meaning |
 |---|---|
 | `fn<"name", &f, tags...>` | a free function (not a member function). Arguments and result cross through `Rhp::convert` |
-| `var<"name", &v>` | a writable global variable. Writes are recorded in the undo ledger |
-| `ro<"name", &v>` | a read-only variable (a `const` object is fine) |
+| `var<"name", &v, tags...>` | a writable global variable. Writes are recorded in the undo ledger. Tags make it a described tunable ([tools](tools.md#tunables)): `Rhp::range<Min, Max>` (every write must lie in it, else `kOutOfRange`), `Rhp::step<S>`, `Rhp::unit<"m/s">`, `Rhp::doc<"...">` |
+| `ro<"name", &v, tags...>` | a read-only variable (a `const` object is fine); takes `Rhp::unit<>` and `Rhp::doc<>` |
 | `handle<"name", H, &is_alive>` | `H` is a trivially copyable, equality-comparable, non-arithmetic type (a strong id). Lua gets opaque userdata. A stale handle raises `kStaleHandle` instead of returning nil |
 | `sub<Lib>` | nests another lib under this one |
 

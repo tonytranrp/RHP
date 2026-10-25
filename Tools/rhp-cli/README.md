@@ -39,6 +39,20 @@ rhp> watch scripts
 | `watch <folder>` / `unwatch` | reload `<folder>/*.lua` whenever one is saved |
 | `subscribe <event>` / `unsubscribe <event>` | print each delivery of a host C++ event, or of an `rhp.publish` of your identity (`*`: every publish) |
 
+Tunables, the profiler and the debugger ([guide](../../Docs/guide/tools.md)):
+
+| Command | What |
+|---|---|
+| `tunables [prefix]` / `tune <path> <value>` | list the host's variables with their tags / set one (journaled) |
+| `profile start [interval]`, `profile show`, `profile stop [file.folded]` | sample your scripts; print the top functions; write folded stacks |
+| `break <module> [line ...]`, `pause`, `paused` | set (or clear) breakpoints, pause the next line, list paused scripts |
+| `continue [req]`, `step [into\|over\|out] [req]` | resume or step a paused script |
+| `stack`, `locals [frame] [path]`, `upvalues`, `globals`, `print <name.path> [frame]` | inspect a paused script (no Lua runs) |
+
+A script that pauses at a breakpoint (an expression, `call`, `load` or `reload`) goes to the background: the prompt stays free for `stack`, `locals` and `continue`, and its result prints when it finishes.
+
+`rhp-cli tune -c host -i id [path [value]]` and `rhp-cli profile -c host -i id --seconds N [--interval I] [-o out.folded]` do the same in one shot; `rhp-cli dap -c host -i id [--root folder]` is a Debug Adapter Protocol server on stdin / stdout for editors.
+
 Releases ([guide](../../Docs/guide/releases.md)) have subcommands of their own:
 
 | Command | What |

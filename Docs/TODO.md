@@ -1,6 +1,18 @@
 # Status and TODO
 
-Last updated 2026-10-24. Stages 0–7 are implemented and released (tag `stage-7`). Stage 8 (packaging, hardening and performance) is implemented on branch `stage-8-packaging-hardening` (PR #8), awaiting review and merge (tag `stage-8` then). Stage 9 (asynchronous bindings and methods on handles) is implemented on branch `stage-9-async-methods` (PR #9), stacked on Stage 8. Stage 10 (release manifests, persistence and rollout) is implemented on branch `stage-10-releases`, stacked on Stage 9. Progress is tracked as "Stage N" only (no `v1` / `v2` naming anywhere). Known limits are in [the guide's limitations page](guide/limitations.md).
+Last updated 2026-10-24. Stages 0–7 are implemented and released (tag `stage-7`). Stage 8 (packaging, hardening and performance) is implemented on branch `stage-8-packaging-hardening` (PR #8), awaiting review and merge (tag `stage-8` then). Stage 9 (asynchronous bindings and methods on handles) is implemented on branch `stage-9-async-methods` (PR #9), stacked on Stage 8. Stage 10 (release manifests, persistence and rollout) is implemented on branch `stage-10-releases` (PR #10), stacked on Stage 9. Stage 11 (debugger, profiler and tunables) is implemented on branch `stage-11-debug-profile-tune`, stacked on Stage 10. Progress is tracked as "Stage N" only (no `v1` / `v2` naming anywhere). Known limits are in [the guide's limitations page](guide/limitations.md).
+
+## Stage 11 — debugger, profiler and tunables
+
+Done when: *a developer can see and change a running program's tunables, see where its scripts spend their instructions, and stop one script at a breakpoint and inspect it while the program keeps running, from rhp-cli and an editor.* Decisions: [Stage 11](decisions/stage11-tools.md), ARCHITECTURE §37. Usage: [Tools](guide/tools.md).
+
+- [x] Tunables: `Rhp::range` (enforced) / `step` / `unit` / `doc` tags on lib variables; `sandbox::tunables` / `tune` (journaled); `rhp.tunables()`; described stubs
+- [x] Sampling profiler in the count hook (folded stacks, request-named outer frames), limits and cancels unchanged
+- [x] Debugger: breakpoints, pause, step into / over / out by suspending the request coroutine from the line hook; stacks, locals, upvalues, module globals, path evaluation without running Lua; hits where a script can't pause; `rhp.debug` events
+- [x] Wire revision 6 (`tunables`, `tune`, `profile`, `debug`), host routing per identity, owner session resets, client calls
+- [x] rhp-cli: `tune`, `profile`, shell debugger commands, `dap` (Debug Adapter Protocol)
+- [x] Tests: sandbox tools, wire messages, host/client integration, CLI shell and DAP; benchmarks of an armed debugger and the profiler
+- Stage 11 follow-ups: conditional breakpoints; setting variables from the debugger; tools for release channels over the wire; a packaged VS Code extension for `rhp-cli dap`.
 
 ## Stage 10 — release manifests, persistence and rollout
 

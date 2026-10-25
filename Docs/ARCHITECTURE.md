@@ -1405,3 +1405,19 @@ Taken without a questionnaire: the user asked for Stage 10 (release manifests, p
 | AI8 | Persistence | A checksummed state document and the envelopes it names in a `storage` (memory or directory, synced renames); boot attempts counted before a candidate loads, quarantine after `max_boot_attempts`. |
 | AI9 | Revocation | Cumulative signed lists of ids, keys and floors; applied over the wire (any identity), in an envelope or locally. |
 | AI10 | Rollout | `fleet::rollout`: canaries, cumulative fractions in a release-fixed order, health-watched apply, observed stages, confirm, rollback on more than `max_failures`. Protocol revision 5 adds the release ops; `release_changed` host event. |
+
+## 37. Decision log (round 13, Stage 11)
+
+Taken without a questionnaire: the user asked for Stage 11 (debugger, profiler and tunables). Per-topic reasoning: [Stage 11 decisions](decisions/stage11-tools.md); usage: [Tools](guide/tools.md).
+
+| # | Topic | Decision |
+|---|---|---|
+| AJ1 | Tunables | Lib variables with compile-time tags `Rhp::range` (enforced in the setter, NaN refused), `step`, `unit`, `doc`; `sandbox::tune` writes through the setter in a scratch request (journaled). |
+| AJ2 | Profiler | Instruction sampling in the count hook: interned frames, folded stacks, request-named outer frames, `max_depth` / `max_stacks`, drops counted. |
+| AJ3 | Semantics | Profiling arms the count hook everywhere at the lower interval; requests remember whether they are checked; unchecked runs skip cancels and limits on those ticks; stale thread hooks re-arm on their next call; ticks accumulate to the profile interval; budgets count the real interval. |
+| AJ4 | Pausing | The line hook yields the request coroutine (`wait_kind::kDebug`); the program keeps pumping; steps by one stack probe; line events for every function while breakpoints / a step / a pause exist (no call/return gating: `lua_sethook` restarts the instruction countdown), a line bitmap first; at most 32 paused. |
+| AJ5 | Can't pause | Game-code handlers, script coroutines and code under C calls report a `hit` once per place; pause and steps wait for a pausable line. |
+| AJ6 | Inspection | Raw reads only (`lua_getlocal`, `lua_getupvalue`, raw tables, no `__tostring`); evaluation of dotted paths through locals, upvalues, module environment, libs; only lib proxies (`__rhp_lib`) are read through. |
+| AJ7 | Events | Pauses publish the script event `rhp.debug` (identity-scoped; `on_script_event`, `client.on`), to C++ listeners only, after the operation. |
+| AJ8 | Wire | Revision 6: `tunables`, `profile` (observe), `tune`, `debug` (patch) on the caller's own sandbox; the last debugging session's end resets the debugger, the profiling session's end stops the profiler; debugger control actions audited; profile replies truncated to a quarter of `max_frame`. |
+| AJ9 | Front ends | rhp-cli shell commands (a paused expression, `call`, `load` or `reload` goes to the background), `rhp-cli tune` / `profile`, and `rhp-cli dap` (Debug Adapter Protocol over stdio, sources mapped to modules by `--root`). |

@@ -22,7 +22,7 @@ build/bench/Tests/bench/Release/rhp_bench "[bench]" --benchmark-samples 50 --ben
 python Tools/bench/summarize.py bench.xml
 ```
 
-`Tools/bench/compare.py before.xml after.xml` diffs two runs and reports a change only when the confidence intervals don't overlap and the means differ by more than 5% (`--threshold`). The `unchecked` side runs the same work with `limits.cancel_checks = kNone`. Groups can be run alone: `"[lua]"`, `"[bindings]"`, `"[patch]"`, `"[events]"`, `"[scheduler]"`, `"[requests]"`, `"[wire]"`, `"[security]"`, `"[e2e]"`.
+`Tools/bench/compare.py before.xml after.xml` diffs two runs and reports a change only when the confidence intervals don't overlap and the means differ by more than 5% (`--threshold`). The `unchecked` side runs the same work with `limits.cancel_checks = kNone`. Groups can be run alone: `"[lua]"`, `"[bindings]"`, `"[patch]"`, `"[events]"`, `"[scheduler]"`, `"[requests]"`, `"[wire]"`, `"[security]"`, `"[e2e]"`, `"[tools]"`.
 
 Always benchmark a Release build (`RelWithDebInfo` on MSVC inlines less). On a laptop or a hybrid-core CPU, pin the process to one performance core and keep the machine idle; even then, treat differences under 10% as noise unless they repeat. ctest only runs a two-sample smoke pass (`bench.smoke`) so the suite keeps compiling and running.
 
@@ -39,6 +39,7 @@ Always benchmark a Release build (`RelWithDebInfo` on MSVC inlines less). On a l
 | `wire` | MessagePack encode / decode, value copy, CRC32C, frame encode / decode at 64 B, 4 KiB, 64 KiB | `memcpy` of the same bytes |
 | `security` | BLAKE2b-256, Ed25519 sign and verify of 4 KiB | |
 | `e2e` | a signed `exec` and a `call` from a client to a host over loopback, both on one thread (`io<zero_threads>`) | the same `exec` on a sandbox directly (`e2e local`) |
+| `tools` (Stage 11) | the same loop and `fib(22)` with no tool, with a breakpoint armed elsewhere / on a line number the loop runs / inside the module, and with the profiler sampling every 1000 and 100 instructions; a tunable read and a `tune` write | the same Lua on a plain `lua_State`; a plain global read and write |
 
 ## Results
 
@@ -112,3 +113,24 @@ Rows under a few nanoseconds (an unpatched point, an event fired with nobody lis
 | `events`: deliver to 1 handlers | 24.2 ns | 315 ns | 13.02x | - | 43.5 ns | 213 ns | 4.90x | - |
 | `events`: deliver to 100 handlers | 2.18 us | 12.4 us | 5.67x | - | 1.29 us | 13.7 us | 10.57x | - |
 | `scheduler`: resume 1000 tasks | 2.65 ms | 2.72 ms | 1.03x | - | 98.5 us | 148 us | 1.50x | - |
+
+## Stage 11 tools
+
+Measured on 2026-10-24 on the same laptop (Windows 11, MSVC Release, pinned to one core at high priority, 60 samples), after the Stage 11 review fixes. Each row is against its raw twin in the same run; `tools-off` is the sandbox with no tool (what the default cancel hook costs, about 2x on this loop-heavy code).
+
+| Work | No tool | Breakpoint elsewhere | Breakpoint on a line number it runs | Breakpoint in the module | Profile every 1000 | Profile every 100 |
+|---|---:|---:|---:|---:|---:|---:|
+| 100k arithmetic loop | 1.91 ms (2.10x) | 5.02 ms (5.24x) | 7.05 ms (7.48x) | 4.66 ms (5.03x) | 1.93 ms (2.06x) | 2.54 ms (2.97x) |
+| fib(22) | 2.66 ms (1.99x) | 5.51 ms (4.12x) | - | 5.39 ms (4.14x) | 3.00 ms (2.22x) | 6.24 ms (4.78x) |
+
+| Work | Raw | RHP |
+|---|---:|---:|
+| read one tunable (`tunables("x.y")`) vs a global read | 13.5 ns | 418 ns |
+| write one tunable (`tune`, journaled) vs a global write | 8.51 ns | 3.14 us (noisy: 0.75-12.5 us) |
+
+What the numbers say:
+
+- **No breakpoint, no cost.** Without breakpoints, a step or a pause, the line hook isn't armed; the `tools-off` rows are the plain sandbox.
+- **An armed debugger costs about 2-2.5x on top of the sandbox** for line-dense code: every line runs the hook, and the line bitmap rejects it. A line number that has a breakpoint in any source adds a `lua_getinfo` and a source lookup (`debug-line`). Gating line events on call / return per source was tried and dropped: re-arming the hook restarts Lua's instruction countdown, which starved instruction limits and cancels. Clear breakpoints when you stop debugging (`set_breakpoints(source, {})`, `debug_reset()`, or end the debugging session).
+- **The profiler at its default interval (1000) is close to free** on loops (2.06x vs 2.10x) and costs about 10% on call-heavy code. At 100 the stack walks show, most on deep recursion (`fib`: 4.8x). Sample at 1000 unless short scripts need more resolution.
+- **Tunables are for tools, not hot paths.** Listing one tunable builds its description (tags, current value); a `tune` runs a journaled scratch request. Both are per command, not per frame.
