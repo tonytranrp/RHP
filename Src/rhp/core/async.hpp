@@ -16,14 +16,18 @@ namespace Rhp {
 //
 //   Rhp::async<texture> load_texture(std::string path) {
 //       auto [later, done] = Rhp::make_async<texture>();
-//       std::thread{[done, path] { done.complete(read_texture(path)); }}.detach();
-//       return std::move(later);
+//       std::thread{[done, path] {
+//           if (!done.complete(read_texture(path))) {
+//               // nobody receives it any more (the script went away): free what was made
+//           }
+//       }}.detach();
+//       return std::move(later); // a structured binding is not moved implicitly
 //   }
 //   using game_lib = Rhp::lib<"game">::fn<"load_texture", &load_texture>;
 //
 // A script calling game.load_texture(path) suspends until complete() is called (from any thread),
 // then gets the value, or the error raised. promise is copyable; the first completion wins and the
-// rest are ignored. When the reader goes away first (the script was cancelled, its module unloaded,
+// rest return false. When the reader goes away first (the script was cancelled, its module unloaded,
 // limits.async_ms ran out) stop_requested() turns true: long work may check it and give up. When the
 // last promise copy is dropped without completing, the reader gets an error.
 template <class T>
@@ -37,6 +41,7 @@ template <class T>
 struct state {
     std::mutex mutex;
     bool done = false;
+    bool taken = false;
     bool reader_gone = false;
     std::optional<result<T>> outcome;
     std::function<void()> waker; // armed by the reader; called once, on the completing thread, outside the lock
@@ -47,22 +52,20 @@ struct state {
 template <class T>
 bool complete(state<T>& s, result<T>&& r) {
     std::function<void()> wake;
-    bool reader = false;
     {
         const std::scoped_lock lock{s.mutex};
-        if (s.done) {
+        if (s.done || s.reader_gone) {
             return false;
         }
         s.done = true;
         s.outcome.emplace(std::move(r));
         wake = std::move(s.waker);
         s.waker = nullptr;
-        reader = !s.reader_gone;
     }
     if (wake) {
         wake();
     }
-    return reader;
+    return true;
 }
 
 // Shared by every copy of one promise: the last copy to go completes the operation if nobody did.
@@ -90,7 +93,7 @@ public:
     using value_type = T;
 
     // An operation that is already over (a cache hit, an argument error): the script doesn't suspend.
-    [[nodiscard]] static async ready(result<T> r) {
+    [[nodiscard]] static async completed(result<T> r) {
         async a{std::make_shared<async_detail::state<T>>()};
         a.s_->done = true;
         a.s_->outcome.emplace(std::move(r));
@@ -109,6 +112,7 @@ public:
     async& operator=(const async&) = delete;
     ~async() { release(); }
 
+    // The outcome is there (or this async was moved from / abandoned).
     [[nodiscard]] bool ready() const {
         if (!s_) {
             return true;
@@ -117,15 +121,19 @@ public:
         return s_->done;
     }
 
-    // The outcome, once ready() (kInvalidArgument before, or after it was taken).
+    // The outcome, once ready(): kInvalidArgument before, and after it was taken or abandoned.
     [[nodiscard]] result<T> take() {
         if (!s_) {
-            return fail(errc::kInvalidArgument, "this async result was already taken", "async");
+            return fail(errc::kInvalidArgument, "this async was moved from or abandoned", "async");
         }
         const std::scoped_lock lock{s_->mutex};
-        if (!s_->done || !s_->outcome) {
+        if (s_->taken) {
+            return fail(errc::kInvalidArgument, "the async result was already taken", "async");
+        }
+        if (!s_->done) {
             return fail(errc::kInvalidArgument, "the async result isn't ready", "async");
         }
+        s_->taken = true;
         result<T> out = std::move(*s_->outcome);
         s_->outcome.reset();
         return out;
@@ -136,6 +144,28 @@ public:
         if (s_) {
             s_->stop.request_stop();
         }
+    }
+
+    // Stops reading, atomically: afterwards complete() returns false, and the outcome that already
+    // arrived (if any, untaken) is handed back so whoever abandons it can undo it. Requests a stop.
+    [[nodiscard]] std::optional<result<T>> abandon() {
+        if (!s_) {
+            return std::nullopt;
+        }
+        std::optional<result<T>> left;
+        {
+            const std::scoped_lock lock{s_->mutex};
+            s_->reader_gone = true;
+            s_->waker = nullptr;
+            if (s_->done && !s_->taken && s_->outcome) {
+                s_->taken = true;
+                left = std::move(s_->outcome);
+                s_->outcome.reset();
+            }
+        }
+        s_->stop.request_stop();
+        s_.reset();
+        return left;
     }
 
     // For the script engine: calls `wake` once, on the completing thread, when the outcome arrives.
@@ -177,18 +207,20 @@ private:
 template <class T>
 class promise {
 public:
-    // Delivers the outcome; the first completion wins. Returns true when a reader may still take it
-    // (false: it was already completed, or the reader went away). Any thread.
-    bool complete(result<T> r) const { return async_detail::complete(*a_->s, std::move(r)); }
+    // Delivers the outcome; the first completion wins. Returns true when a reader will receive it;
+    // false when it was already completed or nobody reads any more (the script went away): then
+    // whatever the work made is the caller's to clean up. Any thread.
+    [[nodiscard]] bool complete(result<T> r) const { return a_ != nullptr && async_detail::complete(*a_->s, std::move(r)); }
 
-    bool complete() const
+    [[nodiscard]] bool complete() const
         requires std::is_void_v<T>
     {
         return complete(result<void>{});
     }
 
-    [[nodiscard]] std::stop_token stop_token() const noexcept { return a_->s->stop.get_token(); }
-    [[nodiscard]] bool stop_requested() const noexcept { return a_->s->stop.stop_requested(); }
+    // A moved-from promise has no operation: its stop token never stops, complete() returns false.
+    [[nodiscard]] std::stop_token stop_token() const noexcept { return a_ != nullptr ? a_->s->stop.get_token() : std::stop_token{}; }
+    [[nodiscard]] bool stop_requested() const noexcept { return a_ != nullptr && a_->s->stop.stop_requested(); }
 
 private:
     template <class U>

@@ -7,7 +7,9 @@
 #include <functional>
 #include <optional>
 #include <string_view>
+#include <tuple>
 #include <type_traits>
+#include <utility>
 
 #include <rhp/core/async.hpp>
 #include <rhp/core/result.hpp>
@@ -112,6 +114,12 @@ inline constexpr bool borrowed_v = std::same_as<T, std::string_view> || std::sam
 template <class T>
 inline constexpr bool borrowed_v<std::optional<T>> = borrowed_v<T>;
 
+template <class... Ts>
+inline constexpr bool borrowed_v<std::tuple<Ts...>> = (borrowed_v<std::remove_cvref_t<Ts>> || ...);
+
+template <class A, class B>
+inline constexpr bool borrowed_v<std::pair<A, B>> = borrowed_v<std::remove_cvref_t<A>> || borrowed_v<std::remove_cvref_t<B>>;
+
 template <class List>
 inline constexpr bool owning_params_v = false;
 
@@ -121,7 +129,7 @@ inline constexpr bool owning_params_v<utils::type_list<Args...>> = (!borrowed_v<
 // A binding returning Rhp::async<T> finishes after the call returns, so nothing it is given or
 // gives back may view a Lua string (std::string, not std::string_view), and T is a plain value:
 // not another async, not a Rhp::result (async<T> already carries an error). Rhp::result<async<T>>
-// is refused too: an async that fails at once is Rhp::async<T>::ready(error).
+// is refused too: an async that fails at once is Rhp::async<T>::completed(error).
 template <auto F>
 consteval bool async_ok() {
     using R = std::remove_cvref_t<utils::return_type_t<decltype(F)>>;
@@ -291,12 +299,27 @@ concept method_function = bindable_function<F> && (utils::function_traits<declty
                           (!std::is_reference_v<typename first_arg<utils::args_t<decltype(F)>>::type> ||
                            std::is_const_v<std::remove_reference_t<typename first_arg<utils::args_t<decltype(F)>>::type>>);
 
-// A property reads one value of its handle: one parameter (the handle), a result, nothing to undo,
-// no waiting.
+template <class T>
+inline constexpr bool is_tuple_like_v = false;
+
+template <class... Ts>
+inline constexpr bool is_tuple_like_v<std::tuple<Ts...>> = true;
+
+template <class A, class B>
+inline constexpr bool is_tuple_like_v<std::pair<A, B>> = true;
+
+// A property reads exactly one value of its handle: one parameter (the handle), one Lua value
+// back (not void, not a tuple, not an async; a Rhp::result of one value is fine), nothing to
+// undo, no waiting.
+template <auto F>
+consteval bool one_value_result() {
+    using R = std::remove_cvref_t<utils::return_type_t<decltype(F)>>;
+    using V = typename unwrap_result<R>::type;
+    return !std::is_void_v<V> && !is_tuple_like_v<std::remove_cvref_t<V>> && !is_async_v<R> && !is_async_v<std::remove_cvref_t<V>>;
+}
+
 template <auto F, class... Tags>
-concept property_function = method_function<F> && (utils::function_traits<decltype(F)>::arity == 1) &&
-                            !std::is_void_v<utils::return_type_t<decltype(F)>> &&
-                            !is_async_v<std::remove_cvref_t<utils::return_type_t<decltype(F)>>> &&
+concept property_function = method_function<F> && (utils::function_traits<decltype(F)>::arity == 1) && one_value_result<F>() &&
                             (undo_count_v<Tags...> + count_tag_v<irreversible, Tags...> == 0) && (role_count_v<Tags...> <= 1);
 
 template <utils::fixed_string Name, auto F, class... Tags>

@@ -384,11 +384,20 @@ public:
     async_call(std::string label, async_type later, A&&... captured)
         : label_(std::move(label)), later_(std::move(later)), captured_(Captured(std::forward<A>(captured))...) {}
 
+    async_call(const async_call&) = delete;
+    async_call& operator=(const async_call&) = delete;
+    ~async_call() override {
+        if (!settled_) {
+            (void)settle();
+        }
+    }
+
     [[nodiscard]] bool ready() const override { return later_.ready(); }
     [[nodiscard]] bool arm(std::function<void()> wake) override { return later_.arm(std::move(wake)); }
     void request_stop() noexcept override { later_.request_stop(); }
 
     int finish(stack& s, context& ctx) override {
+        settled_ = true;
         result<value_type> r = later_.take();
         if (!r) {
             error err = std::move(r).error();
@@ -416,29 +425,37 @@ public:
         }
     }
 
-    bool compensate() noexcept override {
-        if (!later_.ready()) {
-            return false;
-        }
-        result<value_type> r = later_.take();
-        if (!r) {
-            return false;
-        }
+    async_settled settle() noexcept override {
+        settled_ = true;
+        std::optional<result<value_type>> r;
         try {
-            if constexpr (Entry::feed == undo_feed::kResult) {
-                std::invoke(Entry::undo_tag::function, *r);
-            } else if constexpr (Entry::feed == undo_feed::kArgs) {
-                std::apply(Entry::undo_tag::function, captured_);
-            }
-        } catch (...) { // an undo that throws is dropped, as when a revert runs it
+            r = later_.abandon();
+        } catch (...) { // only a failing mutex lock: nothing arrived that we could see
+            return async_settled::kNothing;
         }
-        return true;
+        if (!r || !*r) {
+            return async_settled::kNothing;
+        }
+        if constexpr (Entry::feed == undo_feed::kNone) {
+            return async_settled::kDropped;
+        } else {
+            try {
+                if constexpr (Entry::feed == undo_feed::kResult) {
+                    std::invoke(Entry::undo_tag::function, **r);
+                } else {
+                    std::apply(Entry::undo_tag::function, captured_);
+                }
+            } catch (...) { // an undo that throws is dropped, as when a revert runs it
+            }
+            return async_settled::kUndone;
+        }
     }
 
 private:
     std::string label_;
     async_type later_;
     std::tuple<Captured...> captured_;
+    bool settled_ = false; // finished or settled: the destructor has nothing to do
 };
 
 [[nodiscard]] inline error not_suspendable(std::string_view label) {
@@ -519,7 +536,7 @@ int call_fn(lua_State* L) {
         if (results >= 0) {
             return results;
         }
-        s.yield_async(); // nothing here has a destructor: the yield may jump
+        yield_async(L); // nothing here has a destructor: the yield may jump
     } else {
         return invoke_fn<Handles, Entry>(s, ctx, label, std::make_index_sequence<Entry::traits::arity>{});
     }

@@ -33,7 +33,23 @@ std::uint32_t unit_number(unit_id u) {
     return u.v;
 }
 Rhp::async<int> ready_add(int a, int b) {
-    return Rhp::async<int>::ready(a + b);
+    return Rhp::async<int>::completed(a + b);
+}
+
+// A handle with methods only: its __index is the methods table (one with a property too uses a C
+// __index over methods and getters).
+struct tag_id {
+    std::uint32_t v = 0;
+    [[nodiscard]] bool operator==(const tag_id&) const = default;
+};
+bool tag_alive(const tag_id& t) {
+    return t.v != 0;
+}
+tag_id first_tag() {
+    return tag_id{7};
+}
+std::uint32_t tag_number(tag_id t) {
+    return t.v;
 }
 
 using bench_lib = Rhp::lib<"bench">        //
@@ -43,7 +59,9 @@ using bench_lib = Rhp::lib<"bench">        //
     ::fn<"first_unit", &first_unit>::fn<"unit_number", &unit_number>
     ::method<"number", &unit_number>  //
     ::property<"id", &unit_number>    //
-    ::fn<"ready_add", &ready_add>;
+    ::fn<"ready_add", &ready_add>     //
+    ::handle<"tag", tag_id, &tag_alive>
+    ::fn<"first_tag", &first_tag>::method<"number", &tag_number>;
 
 // The raw twin of a handle: a userdata holding the id, a methods table as __index; the property
 // version looks the key up in a C __index.
@@ -94,7 +112,8 @@ function M.add_local() local add = bench.add local s = 0 for i = 1, 10000 do s =
 function M.read_var() local s = 0 for i = 1, 10000 do s = s + bench.speed end return s end
 function M.write_var() for i = 1, 10000 do bench.speed = i end return 0 end
 function M.handles() local s = 0 for i = 1, 10000 do s = s + bench.unit_number(bench.first_unit()) end return s end
-function M.method() local u = bench.first_unit() local s = 0 for i = 1, 10000 do s = s + u:number() end return s end
+function M.method() local t = bench.first_tag() local s = 0 for i = 1, 10000 do s = s + t:number() end return s end
+function M.method_with_properties() local u = bench.first_unit() local s = 0 for i = 1, 10000 do s = s + u:number() end return s end
 function M.property() local u = bench.first_unit() local s = 0 for i = 1, 10000 do s = s + u.id end return s end
 function M.ready() local s = 0 for i = 1, 10000 do s = bench.ready_add(s, 1) end return s end
 return M
@@ -107,6 +126,7 @@ function M.add_local() local add = bench.add local s = 0 for i = 1, 10000 do s =
 function M.read_var() local s = 0 for i = 1, 10000 do s = s + bench.speed end return s end
 function M.method() local u = bench.first_unit() local s = 0 for i = 1, 10000 do s = s + u:number() end return s end
 function M.property() local u = bench.first_prop_unit() local s = 0 for i = 1, 10000 do s = s + u.id end return s end
+function M.ready() local s = 0 for i = 1, 10000 do s = bench.add(s, 1) end return s end
 return M
 )";
 
@@ -181,13 +201,20 @@ TEST_CASE("bench bindings: Rhp::lib calls next to hand-written C functions", "[b
     BENCHMARK("bindings rhp: 10k method calls on a handle") {
         return call_box("method");
     };
+    BENCHMARK("bindings rhp: 10k method calls on a handle with properties") {
+        return call_box("method_with_properties");
+    };
     BENCHMARK("bindings raw: 10k property reads on a handle") {
         return call_raw("property");
     };
     BENCHMARK("bindings rhp: 10k property reads on a handle") {
         return call_box("property");
     };
-    BENCHMARK("bindings rhp: 10k async calls already ready") {
+    // The twin is the same call done synchronously (a plain C function).
+    BENCHMARK("bindings raw: 10k ready async calls") {
+        return call_raw("ready");
+    };
+    BENCHMARK("bindings rhp: 10k ready async calls") {
         return call_box("ready");
     };
 

@@ -11,14 +11,14 @@
 namespace async_string_view_param_fixture {
 
 inline Rhp::async<std::string> good(std::string text) {
-    return Rhp::async<std::string>::ready(std::move(text));
+    return Rhp::async<std::string>::completed(std::move(text));
 }
 
 using ok_lib = Rhp::lib<"cf_ok">::fn<"good", &good>;
 
 #if defined(RHP_COMPILE_FAIL)
 inline Rhp::async<int> bad(std::string_view) {
-    return Rhp::async<int>::ready(0);
+    return Rhp::async<int>::completed(0);
 }
 
 using bad_lib = Rhp::lib<"cf_bad">::fn<"bad", &bad>;

@@ -134,12 +134,6 @@ public:
     // as a C++ exception. Must not be called inside a try block that catches (...).
     [[noreturn]] void raise(const error& err) const;
 
-    // ---- asynchronous bindings ---------------------------------------------------------------
-    // Suspends the running request until the asynchronous call it handed to context::await_async
-    // completes; the binding then returns what async_wait::finish pushes. Only from a binding's C
-    // function, as its last action, holding no C++ object with a destructor (a yield may jump).
-    [[noreturn]] void yield_async() const;
-
 private:
     lua_State* state_;
 };

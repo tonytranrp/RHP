@@ -278,16 +278,14 @@ private:
 struct async_inbox {
     std::mutex mutex;
     bool closed = false;
+    bool overflow = false; // an arrival couldn't be recorded (out of memory): look at every call
     std::vector<std::weak_ptr<async_wait>> arrived;
     std::atomic<bool> any{false};
 
-    void post(std::weak_ptr<async_wait> op) {
-        const std::scoped_lock lock{mutex};
-        if (!closed) {
-            arrived.push_back(std::move(op));
-            any.store(true, std::memory_order_release);
-        }
-    }
+    // Any thread (the waker); never throws, so complete() never does.
+    void post(const std::weak_ptr<async_wait>& op) noexcept;
+    // The pump thread: what arrived since the last take.
+    [[nodiscard]] std::vector<std::weak_ptr<async_wait>> take(bool& overflowed);
 };
 
 // Options from the table a script passes last (rhp.every(ms, fn, {times = 3})).
@@ -499,8 +497,16 @@ private:
     // arrived and settles calls nobody waits for any more; drop_async() lets go of a call whose
     // request is gone (taking back a success that already arrived).
     void wake_async();
+    void arrive(const std::shared_ptr<async_wait>& op);
     void drop_async(std::shared_ptr<async_wait> op) noexcept;
+    void count(async_settled outcome) noexcept;
     void close_async() noexcept; // the destructor: no result is received any more
+
+public:
+    // sandbox::release_async.
+    [[nodiscard]] async_leftovers release_async();
+
+private:
     // Ends one suspended request (abandon_requests for a single id).
     void abandon_request(request_id id, std::string_view why);
     // A handler request failed: apply its policy now, or when the run around it ends.
@@ -583,6 +589,7 @@ private:
     std::shared_ptr<async_inbox> async_inbox_ = std::make_shared<async_inbox>();
     std::vector<std::shared_ptr<async_wait>> detached_async_; // calls whose request is gone, until their result arrives
     std::uint64_t async_compensated_ = 0;
+    std::uint64_t async_dropped_ = 0;
     std::shared_ptr<script_listener_table> listeners_ = std::make_shared<script_listener_table>();
 
     // Work applied when no run is active.

@@ -25,6 +25,8 @@ constexpr const char* kHandleTagsKey = "rhp.handle_tags"; // registry: type tag 
 constexpr const char* kMethodsField = "__rhp_methods";     // a handle metatable's methods (name -> function)
 constexpr const char* kGettersField = "__rhp_getters";     // and its properties (name -> getter(self))
 
+int handle_newindex(lua_State* L); // __newindex of every handle: members are read-only
+
 detail::sandbox_impl& impl_of(lua_State* L) noexcept {
     return static_cast<detail::sandbox_impl&>(**static_cast<detail::context**>(lua_getextraspace(L)));
 }
@@ -337,6 +339,13 @@ result<void> stack::define_userdata_type(std::string_view key, std::string_view 
     lua_setfield(state_, -2, "__tostring");
     lua_pushliteral(state_, "locked");
     lua_setfield(state_, -2, "__metatable");
+    // Members (add_handle_member) live in this table; without any, every key reads as nil.
+    lua_createtable(state_, 0, 4);
+    lua_pushvalue(state_, -1);
+    lua_setfield(state_, -3, kMethodsField);
+    lua_setfield(state_, -2, "__index");
+    lua_pushcfunction(state_, &handle_newindex);
+    lua_setfield(state_, -2, "__newindex");
     lua_pop(state_, 1);
 
     if (lua_getfield(state_, LUA_REGISTRYINDEX, kHandleTagsKey) != LUA_TTABLE) {
@@ -345,9 +354,17 @@ result<void> stack::define_userdata_type(std::string_view key, std::string_view 
         lua_pushvalue(state_, -1);
         lua_setfield(state_, LUA_REGISTRYINDEX, kHandleTagsKey);
     }
+    // The first handle name declared for a C++ type stays the one handles of that type are pushed
+    // as (events, other libs); a second name for the same type keeps its own metatable for its lib.
     lua_pushlightuserdata(state_, const_cast<void*>(type_tag));
-    push_string(key);
-    lua_rawset(state_, -3);
+    if (lua_rawget(state_, -2) == LUA_TNIL) {
+        lua_pop(state_, 1);
+        lua_pushlightuserdata(state_, const_cast<void*>(type_tag));
+        push_string(key);
+        lua_rawset(state_, -3);
+    } else {
+        lua_pop(state_, 1);
+    }
     lua_pop(state_, 1);
     return {};
 }
@@ -581,8 +598,12 @@ int continue_async(lua_State* L, int /*status*/, lua_KContext /*ctx*/) {
 
 } // namespace
 
-void stack::yield_async() const {
-    (void)lua_yieldk(state_, 0, 0, &continue_async);
+} // namespace Rhp::script
+
+namespace Rhp::script::detail {
+
+void yield_async(lua_State* L) {
+    (void)lua_yieldk(L, 0, 0, &continue_async);
     // A yield from a C function never returns here: it unwinds (or jumps) back into lua_resume.
 #if defined(_MSC_VER) && !defined(__clang__)
     __assume(false);
@@ -590,6 +611,10 @@ void stack::yield_async() const {
     __builtin_unreachable();
 #endif
 }
+
+} // namespace Rhp::script::detail
+
+namespace Rhp::script {
 
 namespace detail {
 

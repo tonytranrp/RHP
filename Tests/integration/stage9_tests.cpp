@@ -102,6 +102,9 @@ struct keys {
 // A host pumped on its own thread.
 class running_host {
 public:
+    [[nodiscard]] std::size_t identities() const noexcept { return host_.identities(); }
+
+public:
     running_host(Rhp::endpoint ep, const keys& k) : host_(std::move(ep), k.ring(), k.trusted()) {
         REQUIRE(host_.install<test_lib>());
         pump_ = std::jthread{[this](std::stop_token stop) {
@@ -162,7 +165,7 @@ TEST_CASE("stage9: a client cancel stops a waiting call and its late result is t
     auto p = c.async().exec("s9.spawn()");
     REQUIRE(eventually([] { return pending_count() == 1; }));
     c.cancel(p.request());
-    const auto r = p.get();
+    const auto r = std::move(p).get();
     REQUIRE_FALSE(r.has_value());
     CHECK(r.error().code == errc::kCancelled);
     auto done = take_pending();
@@ -181,11 +184,12 @@ TEST_CASE("stage9: a client that disconnects while its call waits leaves nothing
         Rhp::client<cfg> c{at.reversed(), k.as_patch(), k.signer()};
         auto p = c.async().exec("s9.spawn()");
         REQUIRE(eventually([] { return pending_count() == 1; }));
-    } // the identity's last session ends: its scripts stop
+    } // the identity's last session ends: its scripts stop and its sandbox closes
     auto done = take_pending();
     REQUIRE(done.has_value());
-    REQUIRE(eventually([&] { return done->stop_requested(); }));
-    (void)done->complete(8);
+    REQUIRE(eventually([&] { return done->stop_requested() && host.identities() == 0; }));
+    // The sandbox is gone, but the host kept the call: the late success is still taken back.
+    CHECK(done->complete(8));
     CHECK(eventually([] { return despawned() == std::vector<int>{8}; }));
 }
 
@@ -200,7 +204,7 @@ TEST_CASE("stage9: an async result kept by a loaded module is reverted remotely"
     auto done = take_pending();
     REQUIRE(done.has_value());
     CHECK(done->complete(5));
-    const auto mod = loading.get();
+    const auto mod = std::move(loading).get();
     REQUIRE(mod.has_value());
     const auto report = c.revert(*mod);
     REQUIRE(report.has_value());

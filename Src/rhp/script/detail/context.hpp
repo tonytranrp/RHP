@@ -17,9 +17,18 @@ namespace Rhp::script::detail {
 
 class context;
 
+// What settling an orphaned asynchronous call did with its result.
+enum class async_settled : std::uint8_t {
+    kNothing, // no result yet, or a failure: nothing to take back
+    kUndone,  // a success, taken back through the binding's undo<G>
+    kDropped, // a success with no undo (a pure or irreversible binding): it stays
+};
+
 // A call of an asynchronous binding (Rhp::async<T>) whose request waits for its result. Made by
 // the binding trampoline (lib_builder.hpp), kept by the sandbox while the request waits and, once
-// the request is gone, until the result arrives (compensate()).
+// the request is gone, until the result arrives (settle()). Owned on the sandbox's thread only:
+// completing threads reach it through a weak_ptr in the inbox. Destroying one that holds an
+// untaken success settles it (so no path loses a success).
 class async_wait {
 public:
     virtual ~async_wait() = default;
@@ -34,9 +43,9 @@ public:
     // On the waiting request's thread: records the binding's effect and pushes its results, or
     // raises its error. Returns the number of results.
     virtual int finish(stack& s, context& ctx) = 0;
-    // The request is gone and the result arrived: a success is taken back through the binding's
-    // undo<G> (or counted, for irreversible bindings). Returns true when a success was dropped.
-    virtual bool compensate() noexcept = 0;
+    // Nobody will read the result: stops reading atomically (a later complete() returns false) and
+    // takes back a success that already arrived through the binding's undo<G>.
+    virtual async_settled settle() noexcept = 0;
 
     request_id request{}; // the request waiting for it (set by the sandbox)
     bool detached = false;  // its request is gone
@@ -83,5 +92,10 @@ protected:
     context(const context&) = default;
     context& operator=(const context&) = default;
 };
+
+// Suspends the running request until the call it handed to context::await_async completes; the
+// binding then returns what async_wait::finish pushes (puc_lua/stack.cpp). Only from a binding's C
+// function, as its last action, holding no C++ object with a destructor (the yield may jump).
+[[noreturn]] void yield_async(lua_State* L);
 
 } // namespace Rhp::script::detail

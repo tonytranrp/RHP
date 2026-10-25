@@ -130,9 +130,47 @@ struct sandbox_stats {
     std::size_t waiting = 0;            // requests in rhp.wait_event or task:join()
     std::uint64_t handler_failures = 0; // handler calls that failed so far
     std::size_t async_waiting = 0;      // requests waiting for an asynchronous binding (Rhp::async<T>)
-    // Asynchronous results that arrived after their request was gone (cancelled, unloaded, timed
-    // out) and were taken back through the binding's undo<G> (or dropped, when irreversible).
+    // Asynchronous successes that arrived after their request was gone (cancelled, unloaded, timed
+    // out): taken back through the binding's undo<G>, or (a binding with no undo: pure or
+    // irreversible) dropped, the effect staying.
     std::uint64_t async_compensated = 0;
+    std::uint64_t async_dropped = 0;
+};
+
+namespace detail {
+struct async_inbox;
+class async_wait;
+class sandbox_impl;
+} // namespace detail
+
+// Asynchronous calls a sandbox still waited for when it was about to go (sandbox::release_async):
+// a success that arrives later is still taken back through its binding's undo<G> when pump() runs.
+// Destroying it gives up on the rest (their complete() returns false: the producers clean up).
+// Pump it on the thread that pumped the sandbox.
+class async_leftovers {
+public:
+    async_leftovers();
+    ~async_leftovers();
+    async_leftovers(async_leftovers&&) noexcept;
+    async_leftovers& operator=(async_leftovers&&) noexcept;
+    async_leftovers(const async_leftovers&) = delete;
+    async_leftovers& operator=(const async_leftovers&) = delete;
+
+    // Settles the calls whose results arrived; returns how many are still pending.
+    std::size_t pump();
+    [[nodiscard]] std::size_t pending() const noexcept { return pending_.size(); }
+    [[nodiscard]] bool empty() const noexcept { return pending_.empty(); }
+    [[nodiscard]] std::uint64_t undone() const noexcept { return undone_; }
+    [[nodiscard]] std::uint64_t dropped() const noexcept { return dropped_; }
+
+private:
+    friend class detail::sandbox_impl;
+    void close() noexcept;
+
+    std::shared_ptr<detail::async_inbox> inbox_;
+    std::vector<std::shared_ptr<detail::async_wait>> pending_;
+    std::uint64_t undone_ = 0;
+    std::uint64_t dropped_ = 0;
 };
 
 // Tag for unload(mod, Rhp::script::force): unload even if other modules require this one.
@@ -308,6 +346,11 @@ public:
 
     // Pump thread.
     [[nodiscard]] sandbox_stats stats() const;
+
+    // Hands over the asynchronous calls whose requests are gone but whose results haven't arrived,
+    // before the sandbox is destroyed (or reverted) by an owner that outlives it: a host keeps them
+    // after an identity's sandbox closes. Without this, destroying the sandbox gives up on them.
+    [[nodiscard]] async_leftovers release_async();
 
     // LuaLS annotations for everything this identity can use: the rhp API and every installed lib,
     // filtered by caller_role().

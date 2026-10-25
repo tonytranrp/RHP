@@ -138,6 +138,21 @@ using tag_lib = Rhp::lib<"tags">::handle<"tag", tag_id, &tag_alive>::fn<"make", 
 
 inline constexpr Rhp::lua_event<"tests.methods.spotted", unit_id> spotted{};
 
+struct bare_id {
+    int v = 0;
+    bool operator==(const bare_id&) const = default;
+};
+
+inline bool bare_alive(const bare_id&) {
+    return true;
+}
+
+inline bare_id make_bare() {
+    return bare_id{1};
+}
+
+using bare_lib = Rhp::lib<"bare">::handle<"bare", bare_id, &bare_alive>::fn<"make", &make_bare>;
+
 } // namespace method_tests_fixtures
 
 namespace {
@@ -179,6 +194,15 @@ TEST_CASE("properties read a handle's values", "[script][methods]") {
     const auto r = box.exec("local u = units.make(7, 0) u:move(1, 0) return u.x, u.hp");
     REQUIRE(r.has_value());
     CHECK(*r == value_list{Rhp::value{8.0}, Rhp::value{100}});
+}
+
+TEST_CASE("a handle type without members reads every key as nil and refuses writes", "[script][methods]") {
+    sandbox box = make_box();
+    REQUIRE(box.install<fx::bare_lib>());
+    const auto r = box.exec("local b = bare.make() return b.anything == nil");
+    REQUIRE(r.has_value());
+    CHECK(*r == value_list{Rhp::value{true}});
+    CHECK(box.exec("local b = bare.make() b.x = 1").error().code == errc::kInvalidArgument);
 }
 
 TEST_CASE("an unknown member reads as nil", "[script][methods]") {
@@ -291,10 +315,12 @@ TEST_CASE("a handle with only methods works without properties", "[script][metho
 
 TEST_CASE("handles delivered by events carry their methods", "[script][methods]") {
     sandbox box = make_box();
-    REQUIRE(box.load("tests.methods.watcher", "seen = 0 rhp.on('tests.methods.spotted', function(u) seen = u.hp end)"));
+    const auto mod = box.load("tests.methods.watcher", "seen = 0 rhp.on('tests.methods.spotted', function(u) seen = u.hp end) function seen_hp() return seen end");
+    REQUIRE(mod.has_value());
     const auto id = fx::make_unit(0, 0);
-    fx::spotted.fire(id);
-    const auto r = box.exec("return seen");
+    fx::spotted.fire(id); // queued for the sandbox's next pump()
+    box.pump();
+    const auto r = box.call(*mod, "seen_hp");
     REQUIRE(r.has_value());
     CHECK(*r == value_list{Rhp::value{100}});
 }
@@ -303,7 +329,7 @@ TEST_CASE("stubs list a handle's methods and properties", "[script][methods][stu
     const std::string patch = Rhp::script::stubs::generate<fx::game_lib>(Rhp::role::kPatch);
     CHECK(patch.find("---@class unit\n") != std::string::npos);
     CHECK(patch.find("---@field move fun(self: unit, arg1: number, arg2: number): number, number\n") != std::string::npos);
-    CHECK(patch.find("---@field heal fun(self: unit): integer\n") != std::string::npos);
+    CHECK(patch.find("---@field heal async fun(self: unit): integer\n") != std::string::npos);
     CHECK(patch.find("---@field same fun(self: unit, arg1: unit): boolean\n") != std::string::npos);
     CHECK(patch.find("---@field x number read-only\n") != std::string::npos);
     CHECK(patch.find("---@field hp integer read-only\n") != std::string::npos);

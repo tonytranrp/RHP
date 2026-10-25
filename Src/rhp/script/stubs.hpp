@@ -112,11 +112,11 @@ template <utils::type_list_like Handles, class R>
     }
 }
 
-// "fun(self: entity, arg1: number): vec2" for a method.
+// "fun(self: entity, arg1: number): vec2" for a method ("async fun(...)" when it waits).
 template <utils::type_list_like Handles, class M, std::size_t... Is>
 [[nodiscard]] std::string method_type(std::string_view self, std::index_sequence<Is...>) {
     using args = typename M::traits::args;
-    std::string out = std::format("fun(self: {}", self);
+    std::string out = std::format("{}fun(self: {}", M::is_async ? "async " : "", self);
     ((out += std::format(", arg{}: {}", Is + 1, type_name<Handles, utils::at_t<args, Is + 1>>())), ...);
     out += ')';
     if (const std::string results = result_types<Handles, typename M::traits::return_type>(); !results.empty()) {
@@ -418,6 +418,7 @@ function require(name) end
 ---@field waiting integer
 ---@field async_waiting integer
 ---@field async_compensated integer
+---@field async_dropped integer
 ---@field handler_failures integer
 ---@field memory integer
 

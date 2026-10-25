@@ -62,11 +62,11 @@ inline Rhp::async<int> later(int x) {
 }
 
 inline Rhp::async<int> ready(int x) {
-    return Rhp::async<int>::ready(x * 2);
+    return Rhp::async<int>::completed(x * 2);
 }
 
 inline Rhp::async<int> missing(int) {
-    return Rhp::async<int>::ready(Rhp::fail(errc::kNotFound, "no such thing"));
+    return Rhp::async<int>::completed(Rhp::fail(errc::kNotFound, "no such thing"));
 }
 
 // spawn(kind) -> entity id, later; undone with despawn(id).
@@ -414,6 +414,15 @@ TEST_CASE("limits.async_ms times out the call and takes back a late result", "[s
     CHECK(fx::g_ints[0].done.complete(5));
     box.pump();
     CHECK(fx::g_despawned == std::vector<int>{5});
+
+    REQUIRE(box.exec("return aio.later(1)")); // uncaught: the request fails with kTimeout
+    const Rhp::request_id uncaught = box.last_request();
+    clock->now += std::chrono::milliseconds{60};
+    box.pump();
+    const auto failed = result_of(out, uncaught);
+    REQUIRE(failed.has_value());
+    REQUIRE_FALSE(failed->has_value());
+    CHECK(failed->error().code == errc::kTimeout);
 }
 
 TEST_CASE("waiting for an async result spends no instruction budget", "[script][async]") {
@@ -478,7 +487,7 @@ TEST_CASE("many tasks wait at once for results completed by many threads", "[scr
     sandbox box = make_box(out);
     REQUIRE(box.exec(R"lua(
         total = 0
-        for i = 1, 64 do rhp.spawn(function() total = total + aio.later(i) end) end
+        for i = 1, 64 do rhp.spawn(function() local v = aio.later(i) total = total + v end) end
     )lua"));
     box.pump(); // the tasks start and wait
     REQUIRE(fx::g_ints.size() == 64);
@@ -503,24 +512,76 @@ TEST_CASE("many tasks wait at once for results completed by many threads", "[scr
 }
 
 TEST_CASE("cancel racing a completion on another thread ends cleanly", "[script][async][threads]") {
-    for (int round = 0; round < 200; ++round) {
+    for (int round = 0; round < 300; ++round) {
         capture out;
         sandbox box = make_box(out);
-        const auto mod = box.load("tests.async.race", "function go() aio.spawn(1) end");
+        const auto mod = box.load("tests.async.race", "function go() spawned = aio.spawn(1) end");
         REQUIRE(mod.has_value());
         REQUIRE(box.call(*mod, "go", {}));
         const Rhp::request_id request = box.last_request();
         std::thread worker{[d = fx::g_ints.at(0).done, round] { (void)d.complete(round); }};
-        box.cancel(request);
+        // Three orders: the cancel before the pump that would resume the request, the cancel after
+        // it (the script got the entity), and the cancel racing a pump on a moving result.
+        switch (round % 3) {
+        case 0:
+            box.cancel(request);
+            box.pump();
+            worker.join();
+            break;
+        case 1:
+            worker.join();
+            box.pump();
+            box.cancel(request);
+            break;
+        default:
+            box.pump();
+            box.cancel(request);
+            worker.join();
+            break;
+        }
         box.pump();
-        worker.join();
         box.pump();
         // Either the script received the entity (an effect of the module) or it was taken back.
         const auto report = box.revert(*mod);
         REQUIRE(report.has_value());
         CHECK(fx::g_despawned == std::vector<int>{round});
         CHECK(report->undone + box.stats().async_compensated == 1);
+        if (round % 3 == 1) {
+            CHECK(report->undone == 1); // it finished before the cancel
+        }
     }
+}
+
+TEST_CASE("a pure async binding's success that nobody receives is counted as dropped", "[script][async]") {
+    capture out;
+    sandbox box = make_box(out);
+    REQUIRE(box.exec("aio.later(1)"));
+    box.cancel(box.last_request());
+    box.pump();
+    CHECK(fx::g_ints[0].done.complete(3));
+    box.pump();
+    CHECK(box.stats().async_dropped == 1);
+    CHECK(box.stats().async_compensated == 0);
+}
+
+TEST_CASE("released leftovers still take back a late success after the sandbox is gone", "[script][async]") {
+    std::optional<Rhp::promise<int>> done;
+    Rhp::script::async_leftovers left;
+    {
+        capture out;
+        sandbox box = make_box(out);
+        REQUIRE(box.exec("aio.spawn(1)"));
+        box.cancel(box.last_request());
+        box.pump();
+        done = fx::g_ints.at(0).done;
+        left = box.release_async();
+        CHECK(left.pending() == 1);
+    }
+    CHECK(left.pump() == 1); // nothing arrived yet
+    CHECK(done->complete(44));
+    CHECK(left.pump() == 0);
+    CHECK(left.undone() == 1);
+    CHECK(fx::g_despawned == std::vector<int>{44});
 }
 
 TEST_CASE("a sandbox destroyed while a call waits stops the producer", "[script][async]") {

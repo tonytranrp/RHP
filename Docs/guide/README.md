@@ -33,12 +33,12 @@ A running C++ program (the **host**) accepts Lua scripts from a **client** (your
                                          └─────────────────────────────┘
 ```
 
-## What is available today (Stages 0–8)
+## What is available today (Stages 0–9)
 
 | Area | Supported |
 |---|---|
-| Scripting | Lua 5.5 sandbox per identity; modules with their own `_ENV`; `exec`, `load`, `call`, `reload`, `rollback`, `checkpoint` / `revert_to`, `revert`, `unload`, `pin` / `unpin`, `revert_all`; `require`; coroutine scheduler (`rhp.wait`, `rhp.next_frame`, `rhp.sleep`, `rhp.timer`); frame callbacks and timer control (`rhp.every_frame(s)`, `rhp.after`, `rhp.every`, pause / resume / reschedule); background tasks (`rhp.spawn`); script events (`rhp.publish`, `rhp.once`, `rhp.wait_event`); a failing handler is reported and undoes only its own call; `on_save` / `on_restore` state hand-over |
-| C++ binding | `Rhp::lib<>` with `fn`, `var`, `ro`, `handle`, `sub`; `undo<>`, `irreversible`, `requires_role<>`; `Rhp::patch_point<>`; `Rhp::lua_event<>`; custom types through `Rhp::convert<T>`; LuaLS stub generation |
+| Scripting | Lua 5.5 sandbox per identity; modules with their own `_ENV`; `exec`, `load`, `call`, `reload`, `rollback`, `checkpoint` / `revert_to`, `revert`, `unload`, `pin` / `unpin`, `revert_all`; `require`; coroutine scheduler (`rhp.wait`, `rhp.next_frame`, `rhp.sleep`, `rhp.timer`); frame callbacks and timer control (`rhp.every_frame(s)`, `rhp.after`, `rhp.every`, pause / resume / reschedule); background tasks (`rhp.spawn`); script events (`rhp.publish`, `rhp.once`, `rhp.wait_event`); a failing handler is reported and undoes only its own call; `on_save` / `on_restore` state hand-over; scripts wait for asynchronous bindings without blocking the game |
+| C++ binding | `Rhp::lib<>` with `fn`, `var`, `ro`, `handle`, `sub`, and `method` / `property` on handles; asynchronous bindings returning `Rhp::async<T>`; `undo<>`, `irreversible`, `requires_role<>`; `Rhp::patch_point<>`; `Rhp::lua_event<>`; custom types through `Rhp::convert<T>`; LuaLS stub generation |
 | Transports | in-process loopback, TCP, WebSocket binary tunnel, reliable UDP, local IPC; custom transports through `net::transport` |
 | Network tooling | authenticated HTTP/1.1 gateway with signed answers and optional channel binding; opt-in DNS-SD discovery; `Rhp::fleet<Cfg>` `exec`/`load`/`call` broadcasts with one outcome per host, on one shared network thread |
 | Directions | normal (client dials host) and **reverse** (host dials a listening client: phones, NAT) |
@@ -51,4 +51,4 @@ A running C++ program (the **host**) accepts Lua scripts from a **client** (your
 | Performance | `rhp_bench` benchmarks every hot path against raw Lua ([benchmarks](../benchmarks.md)); the cancel hook only where a cancel can come from (`limits.cancel_checks`) |
 | Platforms | target presets for Windows, Linux, macOS, iOS and Android; verified builds and remaining platform checks are recorded in [platform decisions](../decisions/platforms-and-toolchains.md) |
 
-Start with the [runnable CLI walkthrough](getting-started.md#first-run-host-plus-rhp-cli), then the [complete local sandbox example](getting-started.md#without-any-network). The guide describes the current Stage 8 API; historical architecture decisions retain their stage context. Open items and platform checks are in [Status and TODO](../TODO.md).
+Start with the [runnable CLI walkthrough](getting-started.md#first-run-host-plus-rhp-cli), then the [complete local sandbox example](getting-started.md#without-any-network). The guide describes the current Stage 9 API; historical architecture decisions retain their stage context. Open items and platform checks are in [Status and TODO](../TODO.md).

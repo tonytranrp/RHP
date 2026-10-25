@@ -19,3 +19,4 @@ One file per decision topic, named by topic (no numbers). Each records **what** 
 | Stage 6 networking | [stage6-networking.md](stage6-networking.md) |
 | Stage 7 scheduling and events | [stage7-scheduling-events.md](stage7-scheduling-events.md) |
 | Stage 8 packaging, hardening and performance | [stage8-packaging-performance.md](stage8-packaging-performance.md) |
+| Stage 9 asynchronous bindings and methods on handles | [stage9-script-ergonomics.md](stage9-script-ergonomics.md) |

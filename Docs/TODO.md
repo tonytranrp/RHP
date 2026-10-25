@@ -1,6 +1,16 @@
 # Status and TODO
 
-Last updated 2026-10-24. Stages 0–7 are implemented and released (tag `stage-7`). Stage 8 (packaging, hardening and performance) is implemented on branch `stage-8-packaging-hardening`, awaiting review and merge (tag `stage-8` then). Progress is tracked as "Stage N" only (no `v1` / `v2` naming anywhere). Known limits are in [the guide's limitations page](guide/limitations.md).
+Last updated 2026-10-24. Stages 0–7 are implemented and released (tag `stage-7`). Stage 8 (packaging, hardening and performance) is implemented on branch `stage-8-packaging-hardening` (PR #8), awaiting review and merge (tag `stage-8` then). Stage 9 (asynchronous bindings and methods on handles) is implemented on branch `stage-9-async-methods`, stacked on Stage 8. Progress is tracked as "Stage N" only (no `v1` / `v2` naming anywhere). Known limits are in [the guide's limitations page](guide/limitations.md).
+
+## Stage 9 — asynchronous bindings and methods on handles
+
+Done when: *a binding can finish later on any thread while its script waits without blocking the game, everything it did stays revertible, and a handle carries its own methods and properties.* Decisions: [Stage 9](decisions/stage9-script-ergonomics.md), ARCHITECTURE §35.
+
+- [x] `Rhp::async<T>` / `Rhp::promise<T>` (`core/async.hpp`), thread-safe, with stop requests
+- [x] Asynchronous bindings: the request suspends, `pump()` wakes it, errors at the call site, undo journaled on arrival, orphaned results taken back, `limits.async_ms`, stats, `---@async` stubs
+- [x] `lib::method<>` / `lib::property<>` on handles: one trampoline with `fn`, read-only members, names unique per handle, stubs
+- [x] Tests: unit (core, script), compile-fail, host/client integration; benchmarks for methods, properties and ready async calls
+- Stage 9 follow-ups: a host-side wake for asynchronous results (a headless host polls `pump()` anyway); writable properties (a setter with its own undo).
 
 ## Stage 8 — packaging, hardening and performance
 

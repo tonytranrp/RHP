@@ -61,6 +61,68 @@ using score_lib = Rhp::lib<"score">::fn<"add", &add_score, Rhp::undo<&remove_sco
 
 Each successful `score.add(10)` records its own `remove_score(10)`. Resetting all score to zero would also erase unrelated changes, so it is not the inverse of one addition. Result-fed undo is preferred when the inverse accepts the result; argument-fed undo is the fallback. A returned `Rhp::result<T>` error is not journaled as a successful effect. Tuples return multiple Lua values; `result<void>` returns none on success.
 
+## Methods and properties on handles
+
+A handle can carry its own functions and read-only values. A method or property belongs to the handle type of its first parameter:
+
+```cpp
+using game_lib = Rhp::lib<"game">
+    ::handle<"entity", game::entity_id, &game::is_alive>
+    ::fn<"spawn", &game::spawn, Rhp::undo<&game::despawn>>
+    ::method<"move", &game::move, Rhp::undo<&game::move_back>> // e:move(dx, dy); move(entity_id, float, float)
+    ::method<"heal", &game::heal>                              // may return Rhp::async<T> like any binding
+    ::property<"hp", &game::health_of>                         // e.hp; health_of(entity_id) -> int
+    ::property<"owner", &game::owner_of, Rhp::requires_role<Rhp::role::kAdmin>>;
+```
+
+```lua
+local e = game.spawn(0, 0)
+e:move(3, 4)
+print(e.hp)
+```
+
+| Entry | Meaning |
+|---|---|
+| `method<"name", &f, tags...>` | `h:name(args...)` calls `f(h, args...)`. Takes the `fn` tags (`undo`, `irreversible`, `requires_role`) and may be asynchronous. Errors are labelled `entity:name`; a missing or wrong handle is reported as `(self)` |
+| `property<"name", &f [, requires_role<R>]>` | `h.name` reads `f(h)`. One parameter, a result, nothing to undo, no waiting |
+
+- The handle must be declared in the same lib tree (a lib that only adds members to a handle declared elsewhere re-declares `::handle` with the same name, type and validity check). A stale handle fails every member with `kStaleHandle`.
+- Members are read-only from Lua: `e.hp = 5` raises `kInvalidArgument`. An unknown member reads as `nil` (also on handle types without members). One property makes every lookup on that handle a C call (the methods-only `__index` is a plain table): see [benchmarks](../benchmarks.md).
+- A name is used once per handle across the lib tree (compile time) and across libs installed into one sandbox (`install` fails with `kAlreadyLoaded` and adds no member; handle types it declared stay defined).
+- Properties return exactly one value: no tuples, no `Rhp::async`, nothing to undo (compile errors otherwise). A handle type with several names in different libs is pushed (by events, by other libs) under the first name a sandbox saw.
+- Handles delivered by events or returned by any lib carry the same members. Stubs list them under the handle's `---@class`.
+
+## Asynchronous bindings: `Rhp::async<T>`
+
+A binding that returns `Rhp::async<T>` lets work finish later, on any thread, while the script that called it waits without blocking the game:
+
+```cpp
+Rhp::async<std::string> fetch_profile(std::string player) {
+    auto [later, done] = Rhp::make_async<std::string>();
+    std::thread{[done, player] {
+        if (!done.complete(download_profile(player))) { // or complete(Rhp::fail(errc::kNotFound, "no such player"))
+            // false: nobody receives it any more; anything the work made is yours to clean up
+        }
+    }}.detach();
+    return std::move(later); // a structured binding is not moved implicitly
+}
+
+using net_lib = Rhp::lib<"net">::fn<"profile", &fetch_profile>;
+```
+
+```lua
+local profile = net.profile("ada") -- this request waits; pump() keeps running everything else
+print(profile)
+```
+
+- `Rhp::make_async<T>()` returns the reading side (`Rhp::async<T>`, given to RHP) and the completing side (`Rhp::promise<T>`, copyable, any thread). The first `complete(value)` or `complete(error)` wins; later ones return `false` (it is `[[nodiscard]]`: `false` also means nobody will receive the result). `Rhp::async<T>::completed(result)` returns an operation that is already over (a cache hit, a bad argument): the script doesn't suspend. Dropping every promise copy without completing gives the script `kRuntime`. A moved-from promise does nothing.
+- The result reaches the script at the next `pump()` after `complete()`. Errors are raised at the call site, so `pcall(net.profile, "ada")` catches them. `T` may be `void` or a tuple (several Lua values).
+- Only a script's own thread can wait: from a patch handler, `on_save` / `on_restore` / `on_unload`, a coroutine the script created or a `table.sort` comparator the call fails with `kInvalidArgument` before your function runs (even when it would have been a `completed()` cache hit). Timers, frame callbacks, event handlers and tasks can wait.
+- `undo<G>` is recorded when the result arrives (with the result, or with copies of the arguments). If the script is gone by then (cancelled, its module unloaded, `limits.async_ms` ran out), `promise::stop_requested()` turns true and, when a success still arrives, RHP takes it back with `G` at the next `pump()` (`stats().async_compensated`; a binding without an undo counts in `async_dropped`: its effect stays). `G` may then run after the module's other effects were undone, so it must tolerate stale state. A host keeps the calls of an identity whose sandbox closed (disconnect) and still takes their late successes back; a sandbox you destroy yourself gives up on them unless you keep `box.release_async()` and pump it: then `complete()` returns `false` and the producer cleans up.
+- A `const std::string&` parameter refers to RHP's copy of the argument, which lives only while your function runs: capture by value (`[path]`) in work that finishes later.
+- Waiting costs no instruction budget or wall time. `limits.async_ms` (script clock; 0 = no limit) bounds a wait with `kTimeout`.
+- Parameters and results must own their data: `std::string_view` / `const char*` parameters, a `std::string_view` result, `async<async<T>>`, `async<Rhp::result<T>>` and `Rhp::result<async<T>>` don't compile.
+
 ## Patch points: overridable call sites
 
 ```cpp

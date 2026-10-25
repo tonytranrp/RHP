@@ -503,6 +503,7 @@ public:
         for (auto& [name, id] : identities_) {
             id.box->pump();
         }
+        std::erase_if(async_leftovers_, [](script::async_leftovers& left) { return left.pump() == 0; });
         flush_outbox();
         if (!setup_.io_thread) {
             io_.poll();
@@ -1281,6 +1282,10 @@ private:
             rt.relay->cancels.clear();
         }
         const script::revert_report report = rt.box->revert_all();
+        // Asynchronous calls still running for it: a success arriving later is still taken back.
+        if (script::async_leftovers left = rt.box->release_async(); !left.empty()) {
+            async_leftovers_.push_back(std::move(left));
+        }
         rt.box.reset();
         rt.pinned.clear();
         for (auto& [r, record] : std::exchange(rt.audits, {})) {
@@ -2173,6 +2178,7 @@ private:
     // Pump thread.
     std::map<session_id, pump_session> pump_sessions_;
     std::map<std::string, identity_runtime, std::less<>> identities_;
+    std::vector<script::async_leftovers> async_leftovers_; // of identities that went (teardown)
     std::map<std::string, blob_sink, std::less<>> blob_sinks_;
     std::deque<outbound> outbox_backlog_;
     std::atomic<std::size_t> identity_count_{0};

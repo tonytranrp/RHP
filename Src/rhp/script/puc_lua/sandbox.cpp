@@ -2325,4 +2325,8 @@ sandbox_stats sandbox::stats() const {
     return impl_->stats();
 }
 
+async_leftovers sandbox::release_async() {
+    return impl_->release_async();
+}
+
 } // namespace Rhp::script

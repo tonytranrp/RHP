@@ -462,13 +462,14 @@ sandbox_stats sandbox_impl::stats() const {
         }
     }
     out.async_compensated = async_compensated_;
+    out.async_dropped = async_dropped_;
     out.handler_failures = handler_failures_;
     return out;
 }
 
 void sandbox_impl::push_stats(lua_State* L) {
     const sandbox_stats st = stats();
-    lua_createtable(L, 0, 10);
+    lua_createtable(L, 0, 11);
     const auto field = [L](const char* name, std::uint64_t v) {
         lua_pushinteger(L, static_cast<lua_Integer>(v));
         lua_setfield(L, -2, name);
@@ -481,6 +482,7 @@ void sandbox_impl::push_stats(lua_State* L) {
     field("waiting", st.waiting);
     field("async_waiting", st.async_waiting);
     field("async_compensated", st.async_compensated);
+    field("async_dropped", st.async_dropped);
     field("handler_failures", st.handler_failures);
     field("memory", memory_used_);
 }

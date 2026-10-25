@@ -22,14 +22,38 @@ TEST_CASE("async: the first completion wins and later ones are refused", "[core]
     const auto r = later.take();
     REQUIRE(r.has_value());
     CHECK(*r == 7);
-    CHECK_FALSE(later.take().has_value()); // taken once
+    const auto again = later.take();
+    REQUIRE_FALSE(again.has_value()); // taken once
+    CHECK(again.error().message.find("already taken") != std::string::npos);
 }
 
-TEST_CASE("async: ready() builds an operation that is already over", "[core][async]") {
-    auto ok = Rhp::async<std::string>::ready(std::string{"hit"});
+TEST_CASE("async: abandon hands back an untaken outcome and refuses later completions", "[core][async]") {
+    auto [later, done] = Rhp::make_async<int>();
+    CHECK(done.complete(5));
+    auto left = later.abandon();
+    REQUIRE(left.has_value());
+    CHECK(**left == 5);
+    CHECK(done.stop_requested());
+    auto [other, other_done] = Rhp::make_async<int>();
+    CHECK_FALSE(other.abandon().has_value()); // nothing arrived
+    CHECK_FALSE(other_done.complete(1));
+}
+
+TEST_CASE("async: a moved-from promise does nothing", "[core][async]") {
+    auto [later, done] = Rhp::make_async<int>();
+    const Rhp::promise<int> keeper = std::move(done);
+    CHECK_FALSE(done.complete(1)); // NOLINT(bugprone-use-after-move): the point of the test
+    CHECK_FALSE(done.stop_requested());
+    CHECK_FALSE(done.stop_token().stop_possible());
+    CHECK(keeper.complete(2));
+    CHECK(*later.take() == 2);
+}
+
+TEST_CASE("async: completed() builds an operation that is already over", "[core][async]") {
+    auto ok = Rhp::async<std::string>::completed(std::string{"hit"});
     CHECK(ok.ready());
     CHECK(*ok.take() == "hit");
-    auto bad = Rhp::async<int>::ready(Rhp::fail(errc::kNotFound, "no such texture"));
+    auto bad = Rhp::async<int>::completed(Rhp::fail(errc::kNotFound, "no such texture"));
     CHECK(bad.ready());
     const auto r = bad.take();
     REQUIRE_FALSE(r.has_value());

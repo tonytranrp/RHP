@@ -8,7 +8,8 @@
 // costs nanoseconds. The jump skips the frames between lua_yield and lua_resume without running
 // their destructors, so a C function that yields (lua_yield / lua_yieldk, itself or through a
 // helper it calls) must hold no C++ object with a destructor at that point. In RHP those are
-// rhp.wait, rhp.next_frame, rhp.sleep, rhp.wait_event and task:join (Src/rhp/script/puc_lua); the
+// rhp.wait, rhp.next_frame, rhp.sleep, rhp.wait_event, task:join (Src/rhp/script/puc_lua) and every
+// asynchronous binding (detail::call_fn -> detail::yield_async, Src/rhp/script/detail/lib_builder.hpp); the
 // time-slice yield in the count hook is safe either way (Lua jumps after the hook has returned).
 #if defined(RHP_LUA_JUMP_YIELDS)
 #include <setjmp.h> // NOLINT(modernize-deprecated-headers): _setjmp / _longjmp are POSIX, not in <csetjmp>

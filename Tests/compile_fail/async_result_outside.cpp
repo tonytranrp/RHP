@@ -1,4 +1,4 @@
-// Rhp::result<Rhp::async<T>> must not compile: an async that fails at once is async<T>::ready(error).
+// Rhp::result<Rhp::async<T>> must not compile: an async that fails at once is async<T>::completed(error).
 #include <string>
 #include <string_view>
 #include <utility>
@@ -10,14 +10,14 @@
 namespace async_result_outside_fixture {
 
 inline Rhp::async<std::string> good(std::string text) {
-    return Rhp::async<std::string>::ready(std::move(text));
+    return Rhp::async<std::string>::completed(std::move(text));
 }
 
 using ok_lib = Rhp::lib<"cf_ok">::fn<"good", &good>;
 
 #if defined(RHP_COMPILE_FAIL)
 inline Rhp::result<Rhp::async<int>> bad(int) {
-    return Rhp::async<int>::ready(0);
+    return Rhp::async<int>::completed(0);
 }
 
 using bad_lib = Rhp::lib<"cf_bad">::fn<"bad", &bad>;

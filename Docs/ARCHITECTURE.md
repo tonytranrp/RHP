@@ -1372,3 +1372,19 @@ Taken without a questionnaire: the user asked for Stage 8 to be finished (docume
 | AG9 | Call costs | Unpatched points call their default directly; a Lua patch layer builds `original` once; lib functions resolve through the members table as `__index`; host signature checks on the network thread; Ed25519 public key derived once; hardware CRC32C; one-allocation frames; client idempotency keys from a seeded counter. |
 | AG10 | Dependencies | Git pins checked against the commit their tag named; CPM.cmake checked against its SHA-256; `NOTICE` and `THIRD_PARTY_LICENSES.md`; license texts installed. |
 | AG11 | Benchmarks | `Tests/bench` (`RHP_BUILD_BENCH`) with raw-Lua twins (and `unchecked` runs without the cancel hook), `Tools/bench/summarize.py` / `compare.py`, results and method in `Docs/benchmarks.md`; ctest runs a smoke pass. |
+
+## 35. Decision log (round 11, Stage 9)
+
+Taken without a questionnaire: the user asked for Stage 9 (asynchronous bindings and methods on handles) as the next goal, with the same workflow as Stage 8. Per-topic reasoning: [Stage 9 decisions](decisions/stage9-script-ergonomics.md).
+
+| # | Topic | Decision |
+|---|---|---|
+| AH1 | Async types | `Rhp::async<T>` / `Rhp::promise<T>` / `Rhp::make_async<T>()` in `core/async.hpp` (no Lua): the first completion wins, any thread; the last promise copy dropped uncompleted gives the reader an error; a reader that goes away requests a stop. |
+| AH2 | Waiting | A binding returning `async<T>` suspends its request (`lua_yieldk` with a continuation); the completing thread posts to a locked inbox and `pump()` wakes the request. A ready result doesn't yield. Errors are raised at the call site. |
+| AH3 | Who may wait | Only a request's own thread (the `rhp.wait` rule), checked before the binding runs. |
+| AH4 | Journal | `undo<G>` (result- or argument-fed) and `irreversible` are recorded when the result arrives; a failure records nothing. |
+| AH5 | Orphaned results | A call whose request is gone is kept until its result arrives; a success is taken back with `G` at the next pump (`async_compensated`; no undo: `async_dropped`). Giving up is atomic (`async<T>::abandon()`), so no path loses a success; a closing sandbox hands pending calls to `async_leftovers` (the host keeps an identity's after a disconnect). |
+| AH6 | Limits | Waiting costs no budget; `limits.async_ms` (script clock) times a wait out with `kTimeout`. Borrowed parameters / results and nested async / result types don't compile. |
+| AH7 | Methods | `lib::method<"name", &f, tags...>` and `lib::property<"name", &f [, requires_role]>` belong to the handle type of `f`'s first parameter, declared in the lib tree. Labels `handle:name` / `handle.name`; `(self)` names a bad handle argument. |
+| AH8 | Member table | Methods table as `__index` (a C `__index` once properties exist); `__newindex` refuses writes. Names unique per handle at compile time (tree) and install time (sandbox, all or nothing). |
+| AH9 | Same trampoline | Methods and properties are bindings: roles, undo, results, async and stubs (`---@field name fun(self: h, ...)`, `---@async`) work the same. |

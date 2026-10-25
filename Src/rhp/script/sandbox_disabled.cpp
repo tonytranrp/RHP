@@ -148,4 +148,19 @@ sandbox_stats sandbox::stats() const {
     return {};
 }
 
+async_leftovers sandbox::release_async() {
+    return {};
+}
+
+async_leftovers::async_leftovers() = default;
+async_leftovers::~async_leftovers() = default;
+async_leftovers::async_leftovers(async_leftovers&&) noexcept = default;
+async_leftovers& async_leftovers::operator=(async_leftovers&&) noexcept = default;
+
+std::size_t async_leftovers::pump() {
+    return 0;
+}
+
+void async_leftovers::close() noexcept {}
+
 } // namespace Rhp::script
