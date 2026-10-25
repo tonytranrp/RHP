@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -13,6 +14,36 @@
 #include <rhp/script/stack.hpp>
 
 namespace Rhp::script::detail {
+
+class context;
+
+// A call of an asynchronous binding (Rhp::async<T>) whose request waits for its result. Made by
+// the binding trampoline (lib_builder.hpp), kept by the sandbox while the request waits and, once
+// the request is gone, until the result arrives (compensate()).
+class async_wait {
+public:
+    virtual ~async_wait() = default;
+    async_wait(const async_wait&) = delete;
+    async_wait& operator=(const async_wait&) = delete;
+
+    [[nodiscard]] virtual bool ready() const = 0;
+    // Calls `wake` once, on the completing thread; false (nothing armed) when the result is already there.
+    [[nodiscard]] virtual bool arm(std::function<void()> wake) = 0;
+    // Tells the producer nobody waits any more (Rhp::promise::stop_requested()).
+    virtual void request_stop() noexcept = 0;
+    // On the waiting request's thread: records the binding's effect and pushes its results, or
+    // raises its error. Returns the number of results.
+    virtual int finish(stack& s, context& ctx) = 0;
+    // The request is gone and the result arrived: a success is taken back through the binding's
+    // undo<G> (or counted, for irreversible bindings). Returns true when a success was dropped.
+    virtual bool compensate() noexcept = 0;
+
+    request_id request{}; // the request waiting for it (set by the sandbox)
+    bool detached = false;  // its request is gone
+
+protected:
+    async_wait() = default;
+};
 
 // What binding trampolines, patch layers and event deliveries need from the sandbox that owns a
 // Lua state. Implemented by the sandbox; reached from a stack through the state's extra space.
@@ -37,6 +68,14 @@ public:
 
     // The main Lua state of the sandbox.
     [[nodiscard]] virtual lua_State* main_state() const noexcept = 0;
+
+    // Asynchronous bindings. `L` is a request's own thread and may yield right now.
+    [[nodiscard]] virtual bool can_suspend(lua_State* L) const noexcept = 0;
+    // The running request waits for `op` (L must be able to suspend). False when `op` is already
+    // ready: the binding finishes at once.
+    [[nodiscard]] virtual bool await_async(lua_State* L, std::shared_ptr<async_wait> op) = 0;
+    // After the request resumed: what it waited for, or nullptr when limits.async_ms ran out first.
+    [[nodiscard]] virtual std::shared_ptr<async_wait> take_async(lua_State* L) = 0;
 
 protected:
     context() = default;

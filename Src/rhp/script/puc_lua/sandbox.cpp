@@ -473,6 +473,7 @@ sandbox_impl::~sandbox_impl() {
         abandon_requests([](const request_record&) { return true; }, "the sandbox was destroyed");
     } catch (...) { // a destructor must not throw; effects are still undone below
     }
+    close_async();
     (void)ledger_.revert_all();
     closing_lua_ = true; // from here (lua_close runs finalizers) no effect is recorded, no event attached
     for (const auto& [name, state] : attached_) {
@@ -2179,6 +2180,7 @@ void sandbox_impl::pump() {
                         e.publisher, &e.args);
         }
         fire_schedule();
+        wake_async();
         resume_ready();
     });
     drain();

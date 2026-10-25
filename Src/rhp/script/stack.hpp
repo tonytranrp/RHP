@@ -101,6 +101,12 @@ public:
     [[nodiscard]] void* push_userdata(std::size_t size, std::string_view key) const;
     // The userdata's memory if the value at `index` carries the metatable registered under `key`.
     [[nodiscard]] void* to_userdata(int index, std::string_view key) const noexcept;
+    // Methods and properties of the handle type registered under `key` (defined first). The
+    // function on top (popped) becomes method `name` (h:name(...)) or property `name` (h.name,
+    // read-only: called with the handle). handle_member_free fails with kAlreadyLoaded when the
+    // handle already has a member of that name.
+    [[nodiscard]] result<void> handle_member_free(std::string_view key, std::string_view name) const;
+    void add_handle_member(std::string_view key, std::string_view name, bool property) const;
     // Pushes a copy of `size` bytes as a userdata of the handle type defined with `type_tag`.
     // Returns false and pushes nothing when no lib in this state defined that type.
     [[nodiscard]] bool push_handle(const void* type_tag, const void* data, std::size_t size) const;
@@ -127,6 +133,12 @@ public:
     // Raises a Lua error carrying `err` (formatted "[code] where: message"). Never returns; unwinds
     // as a C++ exception. Must not be called inside a try block that catches (...).
     [[noreturn]] void raise(const error& err) const;
+
+    // ---- asynchronous bindings ---------------------------------------------------------------
+    // Suspends the running request until the asynchronous call it handed to context::await_async
+    // completes; the binding then returns what async_wait::finish pushes. Only from a binding's C
+    // function, as its last action, holding no C++ object with a destructor (a yield may jump).
+    [[noreturn]] void yield_async() const;
 
 private:
     lua_State* state_;

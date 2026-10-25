@@ -14,6 +14,7 @@ rhp_add_test_suite(rhp_utils_tests
 
 rhp_add_test_suite(rhp_core_tests
     SOURCES
+        core/async_tests.cpp
         core/convert_tests.cpp
         core/error_tests.cpp
         core/errors_mode_tests.cpp
@@ -124,12 +125,14 @@ endif()
 if(RHP_ENABLE)
     rhp_add_test_suite(rhp_script_tests
         SOURCES
+            script/async_tests.cpp
             script/binding_tests.cpp
             script/event_tests.cpp
             script/handler_error_tests.cpp
             script/ledger_tests.cpp
             script/lib_tests.cpp
             script/limits_tests.cpp
+            script/method_tests.cpp
             script/patch_point_tests.cpp
             script/reload_tests.cpp
             script/require_tests.cpp

@@ -129,6 +129,10 @@ struct sandbox_stats {
     std::size_t tasks = 0;              // unfinished rhp.spawn tasks
     std::size_t waiting = 0;            // requests in rhp.wait_event or task:join()
     std::uint64_t handler_failures = 0; // handler calls that failed so far
+    std::size_t async_waiting = 0;      // requests waiting for an asynchronous binding (Rhp::async<T>)
+    // Asynchronous results that arrived after their request was gone (cancelled, unloaded, timed
+    // out) and were taken back through the binding's undo<G> (or dropped, when irreversible).
+    std::uint64_t async_compensated = 0;
 };
 
 // Tag for unload(mod, Rhp::script::force): unload even if other modules require this one.

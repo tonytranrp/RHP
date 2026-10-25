@@ -120,7 +120,8 @@ enum class request_kind : std::uint8_t {
 enum class wait_kind : std::uint8_t {
     kNone,
     kEvent, // rhp.wait_event: resumed by a delivery (woken) or its timeout (wake_time)
-    kTask   // task:join(): resumed when the task ends (woken)
+    kTask,  // task:join(): resumed when the task ends (woken)
+    kAsync  // an asynchronous binding: resumed when its result arrives (woken) or limits.async_ms (wake_time)
 };
 
 // One script request: a coroutine the scheduler runs, suspends and resumes.
@@ -143,6 +144,7 @@ struct request_record {
     std::string wait_event{};    // kEvent: the event waited for
     std::uint64_t wait_task = 0; // kTask: the task joined
     int resume_ref = kNoRef;     // kEvent: the delivered arguments, packed {n = count, ...}
+    std::shared_ptr<async_wait> async{}; // kAsync: the call it waits for
     // Handlers: what started it, for the overlap guard, rhp.off and failure reports.
     std::uint64_t schedule_key = 0;
     std::uint64_t task_key = 0;
@@ -271,6 +273,23 @@ private:
     core::listener_table<std::string, script_event_fn> table_;
 };
 
+// Results of asynchronous bindings that arrived (on any thread) for the next pump(). Shared with
+// the wakers the calls hold, so a call completing after the sandbox is gone finds it closed.
+struct async_inbox {
+    std::mutex mutex;
+    bool closed = false;
+    std::vector<std::weak_ptr<async_wait>> arrived;
+    std::atomic<bool> any{false};
+
+    void post(std::weak_ptr<async_wait> op) {
+        const std::scoped_lock lock{mutex};
+        if (!closed) {
+            arrived.push_back(std::move(op));
+            any.store(true, std::memory_order_release);
+        }
+    }
+};
+
 // Options from the table a script passes last (rhp.every(ms, fn, {times = 3})).
 struct handler_opts {
     std::optional<std::uint32_t> times{};
@@ -293,6 +312,9 @@ public:
     result<void> run_handler(const effect_owner& owner, c_function fn, void* data) override;
     void report_fault(const effect_owner& owner, error err) noexcept override;
     [[nodiscard]] lua_State* main_state() const noexcept override { return state_; }
+    [[nodiscard]] bool can_suspend(lua_State* L) const noexcept override;
+    [[nodiscard]] bool await_async(lua_State* L, std::shared_ptr<async_wait> op) override;
+    [[nodiscard]] std::shared_ptr<async_wait> take_async(lua_State* L) override;
 
     // ---- event_listener ------------------------------------------------------------------------
     [[nodiscard]] std::thread::id listener_thread() const noexcept override { return thread_.load(std::memory_order_acquire); }
@@ -473,6 +495,12 @@ private:
     void request_ended(request_record& req, const result<value_list>* outcome, bool abandoned) noexcept;
     void finish_task(request_record& req, const result<value_list>* outcome, bool abandoned) noexcept;
     void stop_waiting(request_record& req) noexcept;
+    // Asynchronous bindings (async.cpp). wake_async() (pump) wakes the requests whose results
+    // arrived and settles calls nobody waits for any more; drop_async() lets go of a call whose
+    // request is gone (taking back a success that already arrived).
+    void wake_async();
+    void drop_async(std::shared_ptr<async_wait> op) noexcept;
+    void close_async() noexcept; // the destructor: no result is received any more
     // Ends one suspended request (abandon_requests for a single id).
     void abandon_request(request_id id, std::string_view why);
     // A handler request failed: apply its policy now, or when the run around it ends.
@@ -552,6 +580,9 @@ private:
     bool closing_lua_ = false;                       // lua_close runs: builtins refuse, effects are undone at once
     std::vector<queued_script_event> script_events_; // for the next pump()
     std::uint64_t handler_failures_ = 0;
+    std::shared_ptr<async_inbox> async_inbox_ = std::make_shared<async_inbox>();
+    std::vector<std::shared_ptr<async_wait>> detached_async_; // calls whose request is gone, until their result arrives
+    std::uint64_t async_compensated_ = 0;
     std::shared_ptr<script_listener_table> listeners_ = std::make_shared<script_listener_table>();
 
     // Work applied when no run is active.

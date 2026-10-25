@@ -42,6 +42,7 @@ struct limits {
     std::uint32_t cancel_check_instructions = 1'000;
     cancel_scope cancel_checks = cancel_scope::kRequests; // which runs check for cancel() (see cancel_scope)
     std::uint32_t event_queue = 65'536; // events queued per sandbox for its next pump() (other threads' fires, rhp.publish); 0 = unlimited
+    std::uint32_t async_ms = 0;         // script time an asynchronous binding (Rhp::async<T>) may take before the script gets kTimeout; 0 = no limit
 
     [[nodiscard]] constexpr bool operator==(const limits&) const = default;
 };

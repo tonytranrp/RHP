@@ -5,9 +5,12 @@
 #include <cstdint>
 #include <expected>
 #include <functional>
+#include <optional>
 #include <string_view>
 #include <type_traits>
 
+#include <rhp/core/async.hpp>
+#include <rhp/core/result.hpp>
 #include <rhp/core/role.hpp>
 #include <rhp/utils/fixed_string.hpp>
 #include <rhp/utils/function_traits.hpp>
@@ -56,7 +59,9 @@ enum class entry_kind : std::uint8_t {
     kVar,
     kRo,
     kHandle,
-    kSub
+    kSub,
+    kMethod,  // a function called on a handle: e:move(1, 2)
+    kProperty // a read-only value of a handle: e.x
 };
 
 // ---- function bindings -------------------------------------------------------------------------
@@ -92,6 +97,46 @@ template <class T, class E>
 struct unwrap_result<std::expected<T, E>> {
     using type = T;
 };
+
+template <class T>
+struct unwrap_result<Rhp::async<T>> {
+    using type = T;
+};
+
+// ---- asynchronous bindings ---------------------------------------------------------------------
+
+// A value that only views memory it doesn't own (a Lua string's bytes).
+template <class T>
+inline constexpr bool borrowed_v = std::same_as<T, std::string_view> || std::same_as<T, const char*> || std::same_as<T, char*>;
+
+template <class T>
+inline constexpr bool borrowed_v<std::optional<T>> = borrowed_v<T>;
+
+template <class List>
+inline constexpr bool owning_params_v = false;
+
+template <class... Args>
+inline constexpr bool owning_params_v<utils::type_list<Args...>> = (!borrowed_v<std::remove_cvref_t<Args>> && ...);
+
+// A binding returning Rhp::async<T> finishes after the call returns, so nothing it is given or
+// gives back may view a Lua string (std::string, not std::string_view), and T is a plain value:
+// not another async, not a Rhp::result (async<T> already carries an error). Rhp::result<async<T>>
+// is refused too: an async that fails at once is Rhp::async<T>::ready(error).
+template <auto F>
+consteval bool async_ok() {
+    using R = std::remove_cvref_t<utils::return_type_t<decltype(F)>>;
+    if constexpr (is_result_v<R>) {
+        return !is_async_v<std::remove_cvref_t<typename R::value_type>>;
+    } else if constexpr (is_async_v<R>) {
+        using T = typename R::value_type;
+        return owning_params_v<utils::args_t<decltype(F)>> && !borrowed_v<T> && !is_async_v<T> && !is_result_v<T>;
+    } else {
+        return true;
+    }
+}
+
+template <auto F>
+concept async_binding_ok = async_ok<F>();
 
 // The value an undo receives: the binding's result with any Rhp::result<> peeled off.
 template <auto F>
@@ -154,6 +199,8 @@ struct fn_entry {
     using undo_tag = typename undo_of<Tags...>::type;
     static constexpr undo_feed feed = undo_feed_of<F, undo_tag>();
     static constexpr bool is_irreversible = count_tag_v<irreversible, Tags...> > 0;
+    // Returns Rhp::async<T>: the calling script suspends until the result arrives.
+    static constexpr bool is_async = is_async_v<std::remove_cvref_t<typename traits::return_type>>;
     static constexpr role required = [] {
         role r = (undo_count_v<Tags...> + count_tag_v<irreversible, Tags...>) > 0 ? role::kPatch : role::kObserve;
         ((is_requires_role_v<Tags> ? void(r = role_value<Tags>::value) : void()), ...);
@@ -212,9 +259,71 @@ struct sub_entry {
     using lib = Lib;
 };
 
+// Methods and properties live on their handle, not in the lib: they never clash with lib names.
+template <class Entry>
+consteval bool lib_name_free(std::string_view name) {
+    return Entry::kind == entry_kind::kMethod || Entry::kind == entry_kind::kProperty || Entry::name != name;
+}
+
 template <class... Entries>
 consteval bool name_free(std::string_view name) {
-    return ((Entries::name != name) && ...);
+    return (lib_name_free<Entries>(name) && ...);
+}
+
+// ---- methods and properties on handles ---------------------------------------------------------
+
+template <class List>
+struct first_arg {
+    using type = void;
+};
+
+template <class A, class... Rest>
+struct first_arg<utils::type_list<A, Rest...>> {
+    using type = A;
+};
+
+// The handle a method or property belongs to: its first parameter's type (void when it has none).
+template <auto F>
+using self_t = std::remove_cvref_t<typename first_arg<utils::args_t<decltype(F)>>::type>;
+
+template <auto F>
+concept method_function = bindable_function<F> && (utils::function_traits<decltype(F)>::arity >= 1) && handle_value<self_t<F>> &&
+                          (!std::is_reference_v<typename first_arg<utils::args_t<decltype(F)>>::type> ||
+                           std::is_const_v<std::remove_reference_t<typename first_arg<utils::args_t<decltype(F)>>::type>>);
+
+// A property reads one value of its handle: one parameter (the handle), a result, nothing to undo,
+// no waiting.
+template <auto F, class... Tags>
+concept property_function = method_function<F> && (utils::function_traits<decltype(F)>::arity == 1) &&
+                            !std::is_void_v<utils::return_type_t<decltype(F)>> &&
+                            !is_async_v<std::remove_cvref_t<utils::return_type_t<decltype(F)>>> &&
+                            (undo_count_v<Tags...> + count_tag_v<irreversible, Tags...> == 0) && (role_count_v<Tags...> <= 1);
+
+template <utils::fixed_string Name, auto F, class... Tags>
+struct method_entry : fn_entry<Name, F, Tags...> {
+    static constexpr entry_kind kind = entry_kind::kMethod;
+    using self_type = self_t<F>;
+};
+
+template <utils::fixed_string Name, auto F, class... Tags>
+struct property_entry : fn_entry<Name, F, Tags...> {
+    static constexpr entry_kind kind = entry_kind::kProperty;
+    using self_type = self_t<F>;
+};
+
+template <class Entry, class Self>
+consteval bool member_clash(std::string_view name) {
+    if constexpr (Entry::kind == entry_kind::kMethod || Entry::kind == entry_kind::kProperty) {
+        return std::is_same_v<typename Entry::self_type, Self> && Entry::name == name;
+    } else {
+        return false;
+    }
+}
+
+// No method or property of the same handle has this name yet (in this lib; install checks the tree).
+template <class Self, class... Entries>
+consteval bool member_free(std::string_view name) {
+    return (!member_clash<Entries, Self>(name) && ...);
 }
 
 } // namespace detail
@@ -228,12 +337,17 @@ consteval bool name_free(std::string_view name) {
 //       ::fn <"find",    &game::find>                                  // pure, kObserve
 //       ::fn <"explode", &game::explode, Rhp::irreversible>            // allowed, reported by revert
 //       ::fn <"wipe",    &game::wipe,    Rhp::requires_role<Rhp::role::kAdmin>>
+//       ::fn <"load",    &game::load_texture>                          // returns Rhp::async<T>: the script waits
 //       ::var<"gravity", &game::g_gravity>                             // read kObserve, write kPatch (journaled)
 //       ::ro <"tick",    &game::g_tick>
 //       ::handle<"entity", game::entity_id, &game::is_alive>           // opaque userdata + validity check
+//       ::method<"move", &game::move>                                  // e:move(dx, dy): first parameter is the entity
+//       ::property<"hp", &game::health_of>                             // e.hp (read-only)
 //       ::sub<Rhp::lib<"debug">::fn<"dump", &game::dump_state>>;
 //
-// Names are Lua identifiers and unique within a lib - both checked where you write them.
+// Names are Lua identifiers and unique within a lib - both checked where you write them. A method
+// or property belongs to the handle type of its first parameter (declared in this lib tree; a lib
+// that only adds members re-declares the ::handle) and is named uniquely on that handle.
 // Whether every parameter/return type crosses the Lua boundary is checked at
 // sandbox::install<L>() (handles may be declared after the functions that use them).
 template <utils::fixed_string Name, class... Entries>
@@ -245,7 +359,7 @@ struct lib {
 
     template <utils::fixed_string N, auto F, detail::fn_tag... Tags>
         requires(utils::is_identifier(N.view()) && detail::name_free<Entries...>(N.view())) && detail::bindable_function<F> &&
-                    detail::valid_fn_tags<F, Tags...>
+                    detail::valid_fn_tags<F, Tags...> && detail::async_binding_ok<F>
     using fn = lib<Name, Entries..., detail::fn_entry<N, F, Tags...>>;
 
     template <utils::fixed_string N, auto Ptr>
@@ -264,6 +378,19 @@ struct lib {
     template <class Sub>
         requires(detail::name_free<Entries...>(Sub::name))
     using sub = lib<Name, Entries..., detail::sub_entry<Sub>>;
+
+    // A function called on a handle (e:move(1, 2), label "entity:move"). Takes the fn tags.
+    template <utils::fixed_string N, auto F, detail::fn_tag... Tags>
+        requires(utils::is_identifier(N.view()) && detail::member_free<detail::self_t<F>, Entries...>(N.view())) &&
+                    detail::method_function<F> && detail::valid_fn_tags<F, Tags...> && detail::async_binding_ok<F>
+    using method = lib<Name, Entries..., detail::method_entry<N, F, Tags...>>;
+
+    // A read-only value of a handle (e.hp, label "entity.hp"): F(handle) -> value. Only
+    // requires_role<> applies.
+    template <utils::fixed_string N, auto F, detail::fn_tag... Tags>
+        requires(utils::is_identifier(N.view()) && detail::member_free<detail::self_t<F>, Entries...>(N.view())) &&
+                    detail::property_function<F, Tags...>
+    using property = lib<Name, Entries..., detail::property_entry<N, F, Tags...>>;
 };
 
 namespace detail {

@@ -398,6 +398,9 @@ void sandbox_impl::stop_waiting(request_record& req) noexcept {
         }
         req.wait_task = 0;
         req.waiting = wait_kind::kNone;
+    } else if (req.waiting == wait_kind::kAsync) {
+        drop_async(std::exchange(req.async, nullptr));
+        req.waiting = wait_kind::kNone;
     }
     req.woken = false;
 }
@@ -451,14 +454,21 @@ sandbox_stats sandbox_impl::stats() const {
         out.subscriptions += subs.size();
     }
     out.tasks = static_cast<std::size_t>(std::ranges::count_if(tasks_, [](const auto& t) { return !t.second.finished; }));
-    out.waiting = static_cast<std::size_t>(std::ranges::count_if(requests_, [](const auto& r) { return r.second->waiting != wait_kind::kNone; }));
+    for (const auto& [id, req] : requests_) {
+        if (req->waiting == wait_kind::kAsync) {
+            ++out.async_waiting;
+        } else if (req->waiting != wait_kind::kNone) {
+            ++out.waiting;
+        }
+    }
+    out.async_compensated = async_compensated_;
     out.handler_failures = handler_failures_;
     return out;
 }
 
 void sandbox_impl::push_stats(lua_State* L) {
     const sandbox_stats st = stats();
-    lua_createtable(L, 0, 8);
+    lua_createtable(L, 0, 10);
     const auto field = [L](const char* name, std::uint64_t v) {
         lua_pushinteger(L, static_cast<lua_Integer>(v));
         lua_setfield(L, -2, name);
@@ -469,6 +479,8 @@ void sandbox_impl::push_stats(lua_State* L) {
     field("subscriptions", st.subscriptions);
     field("tasks", st.tasks);
     field("waiting", st.waiting);
+    field("async_waiting", st.async_waiting);
+    field("async_compensated", st.async_compensated);
     field("handler_failures", st.handler_failures);
     field("memory", memory_used_);
 }

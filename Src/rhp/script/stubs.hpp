@@ -62,7 +62,8 @@ template <utils::type_list_like Handles, class T>
     }
 }
 
-// One "---@return" per Lua result: tuples spread, Rhp::result<T> is T (errors are raised).
+// One "---@return" per Lua result: tuples spread, Rhp::result<T> and Rhp::async<T> are T (errors
+// are raised).
 template <utils::type_list_like Handles, class R>
 void append_returns(std::string& out) {
     using U = std::remove_cvref_t<R>;
@@ -72,7 +73,7 @@ void append_returns(std::string& out) {
         [&]<class... Ts>(std::type_identity<std::tuple<Ts...>>) {
             ((out += std::format("---@return {}\n", type_name<Handles, Ts>())), ...);
         }(std::type_identity<U>{});
-    } else if constexpr (is_result_v<U>) {
+    } else if constexpr (is_result_v<U> || is_async_v<U>) {
         append_returns<Handles, typename U::value_type>(out);
     } else {
         out += std::format("---@return {}\n", type_name<Handles, U>());
@@ -92,9 +93,62 @@ void append_params([[maybe_unused]] std::string& out, std::index_sequence<Is...>
     return out;
 }
 
-template <class... Hs>
-void append_handle_classes([[maybe_unused]] std::string& out, utils::type_list<Hs...>) {
-    ((out += std::format("---@class {}\n\n", Hs::name)), ...);
+// The LuaLS type of a method's results: "" (none), "integer", "integer, string".
+template <utils::type_list_like Handles, class R>
+[[nodiscard]] std::string result_types() {
+    using U = std::remove_cvref_t<R>;
+    if constexpr (std::is_void_v<U>) {
+        return {};
+    } else if constexpr (script::detail::is_tuple_v<U>) {
+        return [&]<class... Ts>(std::type_identity<std::tuple<Ts...>>) {
+            std::string out;
+            ((out += (out.empty() ? "" : ", ") + type_name<Handles, Ts>()), ...);
+            return out;
+        }(std::type_identity<U>{});
+    } else if constexpr (is_result_v<U> || is_async_v<U>) {
+        return result_types<Handles, typename U::value_type>();
+    } else {
+        return type_name<Handles, U>();
+    }
+}
+
+// "fun(self: entity, arg1: number): vec2" for a method.
+template <utils::type_list_like Handles, class M, std::size_t... Is>
+[[nodiscard]] std::string method_type(std::string_view self, std::index_sequence<Is...>) {
+    using args = typename M::traits::args;
+    std::string out = std::format("fun(self: {}", self);
+    ((out += std::format(", arg{}: {}", Is + 1, type_name<Handles, utils::at_t<args, Is + 1>>())), ...);
+    out += ')';
+    if (const std::string results = result_types<Handles, typename M::traits::return_type>(); !results.empty()) {
+        out += ": " + results;
+    }
+    return out;
+}
+
+// One class per handle, with the methods and properties the caller may use.
+template <utils::type_list_like Handles, class H, class... Ms>
+void append_handle_class(std::string& out, role caller, utils::type_list<Ms...>) {
+    out += std::format("---@class {}\n", H::name);
+    const auto member = [&]<class M>(std::type_identity<M>) {
+        if constexpr (std::is_same_v<typename M::self_type, typename H::type>) {
+            if (!allows(caller, M::required)) {
+                return;
+            }
+            if constexpr (M::kind == script::detail::entry_kind::kProperty) {
+                out += std::format("---@field {} {} read-only\n", M::name, result_types<Handles, typename M::traits::return_type>());
+            } else {
+                out += std::format("---@field {} {}\n", M::name,
+                                   method_type<Handles, M>(H::name, std::make_index_sequence<M::traits::arity - 1>{}));
+            }
+        }
+    };
+    (member(std::type_identity<Ms>{}), ...);
+    out += '\n';
+}
+
+template <utils::type_list_like Handles, class Members, class... Hs>
+void append_handle_classes([[maybe_unused]] std::string& out, [[maybe_unused]] role caller, utils::type_list<Hs...>) {
+    (append_handle_class<Handles, Hs>(out, caller, Members{}), ...);
 }
 
 template <utils::type_list_like Handles, class Lib>
@@ -134,6 +188,9 @@ private:
                 return;
             }
             using traits = typename Entry::traits;
+            if constexpr (Entry::is_async) {
+                out += "---@async\n"; // the call suspends the script until the result arrives
+            }
             append_params<Handles, typename traits::args>(out, std::make_index_sequence<traits::arity>{});
             append_returns<Handles, typename traits::return_type>(out);
             out += std::format("function {}.{}({}) end\n\n", path, Entry::name, arg_list(traits::arity));
@@ -164,7 +221,7 @@ template <lib_type L>
 [[nodiscard]] std::string generate(role caller = role::kAdmin) {
     using handles = script::detail::handles_of_t<L>;
     std::string out;
-    detail::append_handle_classes(out, handles{});
+    detail::append_handle_classes<handles, script::detail::members_of_t<L>>(out, caller, handles{});
     detail::lib_writer<handles, L>::append(out, L::name, caller);
     detail::trim_trailing_blank(out);
     return out;
@@ -359,6 +416,8 @@ function require(name) end
 ---@field subscriptions integer
 ---@field tasks integer
 ---@field waiting integer
+---@field async_waiting integer
+---@field async_compensated integer
 ---@field handler_failures integer
 ---@field memory integer
 

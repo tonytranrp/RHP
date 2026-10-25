@@ -14,6 +14,7 @@
 #include <type_traits>
 #include <utility>
 
+#include <rhp/core/async.hpp>
 #include <rhp/core/result.hpp>
 #include <rhp/core/role.hpp>
 #include <rhp/script/detail/context.hpp>
@@ -216,6 +217,11 @@ struct return_traits<Handles, std::expected<T, E>> {
     static constexpr bool ok = std::is_same_v<E, error> && return_traits<Handles, T>::ok;
 };
 
+template <class Handles, class T>
+struct return_traits<Handles, Rhp::async<T>> {
+    static constexpr bool ok = return_traits<Handles, T>::ok;
+};
+
 // Pushes a binding's result; returns the number of Lua results. Rhp::result errors are raised.
 template <class Handles, class R>
 int push_return(stack& s, std::string_view label, R& r) {
@@ -247,10 +253,21 @@ int push_return(stack& s, std::string_view label, R& r) {
     return make_error(errc::kForbidden, std::format("needs role {}", need), std::string{label});
 }
 
-[[nodiscard]] inline error arg_error(error err, std::string_view label, std::size_t position) {
-    err.where = std::format("{} (argument {})", label, position);
+// `position` counts from 1; a method's first parameter is its handle ("(self)"), and the
+// arguments after it count from 1 as the script wrote them.
+[[nodiscard]] inline error arg_error(error err, std::string_view label, std::size_t position, bool method = false) {
+    if (!method) {
+        err.where = std::format("{} (argument {})", label, position);
+    } else if (position == 1) {
+        err.where = std::format("{} (self)", label);
+    } else {
+        err.where = std::format("{} (argument {})", label, position - 1);
+    }
     return err;
 }
+
+template <class Entry>
+inline constexpr bool is_member_v = Entry::kind == entry_kind::kMethod || Entry::kind == entry_kind::kProperty;
 
 // Effect recorded by a binding tagged Rhp::undo<G>: calls G with the captured values.
 template <auto G, class... Captured>
@@ -289,7 +306,7 @@ int invoke_fn(stack& s, context& ctx, std::string_view label, std::index_sequenc
     std::tuple<result<storage_t<utils::at_t<args, Is>>>...> pulled{
         pull_arg<Handles, utils::at_t<args, Is>>(s, static_cast<int>(Is) + 1)...};
     std::optional<error> bad;
-    ((bad || std::get<Is>(pulled) ? void() : void(bad = arg_error(std::get<Is>(pulled).error(), label, Is + 1))), ...);
+    ((bad || std::get<Is>(pulled) ? void() : void(bad = arg_error(std::get<Is>(pulled).error(), label, Is + 1, is_member_v<Entry>))), ...);
     if (bad) {
         s.raise(*bad);
     }
@@ -353,6 +370,141 @@ int invoke_fn(stack& s, context& ctx, std::string_view label, std::index_sequenc
     }
 }
 
+// ---- asynchronous bindings ------------------------------------------------------------------------
+
+// One call of an asynchronous binding: its Rhp::async<T>, plus copies of the arguments when its
+// undo<G> takes them.
+template <class Handles, class Entry, class... Captured>
+class async_call final : public async_wait {
+public:
+    using async_type = std::remove_cvref_t<typename Entry::traits::return_type>;
+    using value_type = typename async_type::value_type;
+
+    template <class... A>
+    async_call(std::string label, async_type later, A&&... captured)
+        : label_(std::move(label)), later_(std::move(later)), captured_(Captured(std::forward<A>(captured))...) {}
+
+    [[nodiscard]] bool ready() const override { return later_.ready(); }
+    [[nodiscard]] bool arm(std::function<void()> wake) override { return later_.arm(std::move(wake)); }
+    void request_stop() noexcept override { later_.request_stop(); }
+
+    int finish(stack& s, context& ctx) override {
+        result<value_type> r = later_.take();
+        if (!r) {
+            error err = std::move(r).error();
+            if (err.where.empty()) {
+                err.where = label_;
+            }
+            s.raise(err);
+        }
+        // The C++ effect happened: journal it before pushing results (pushing may raise).
+        if constexpr (Entry::feed == undo_feed::kResult) {
+            ctx.record_effect(label_, std::make_unique<undo_call_effect<Entry::undo_tag::function, value_type>>(*r));
+        } else if constexpr (Entry::feed == undo_feed::kArgs) {
+            ctx.record_effect(label_, std::apply(
+                                          [](const Captured&... a) {
+                                              return std::make_unique<undo_call_effect<Entry::undo_tag::function, Captured...>>(a...);
+                                          },
+                                          captured_));
+        } else if constexpr (Entry::is_irreversible) {
+            ctx.record_effect(label_, std::make_unique<irreversible_effect>());
+        }
+        if constexpr (std::is_void_v<value_type>) {
+            return 0;
+        } else {
+            return push_return<Handles>(s, label_, *r);
+        }
+    }
+
+    bool compensate() noexcept override {
+        if (!later_.ready()) {
+            return false;
+        }
+        result<value_type> r = later_.take();
+        if (!r) {
+            return false;
+        }
+        try {
+            if constexpr (Entry::feed == undo_feed::kResult) {
+                std::invoke(Entry::undo_tag::function, *r);
+            } else if constexpr (Entry::feed == undo_feed::kArgs) {
+                std::apply(Entry::undo_tag::function, captured_);
+            }
+        } catch (...) { // an undo that throws is dropped, as when a revert runs it
+        }
+        return true;
+    }
+
+private:
+    std::string label_;
+    async_type later_;
+    std::tuple<Captured...> captured_;
+};
+
+[[nodiscard]] inline error not_suspendable(std::string_view label) {
+    return make_error(errc::kInvalidArgument,
+                      "is an asynchronous binding: only a script's own thread can wait for it (not a patch handler, "
+                      "on_save / on_restore / on_unload, a coroutine it created, or a callback of a C function such as table.sort)",
+                      std::string{label});
+}
+
+// Calls an asynchronous binding. Returns its number of results when it finished at once, or -1
+// when the request must wait (the sandbox keeps the call).
+template <class Handles, class Entry, std::size_t... Is>
+int start_async(stack& s, context& ctx, std::string_view label, std::index_sequence<Is...>) {
+    using args = typename Entry::traits::args;
+    using R = std::remove_cvref_t<typename Entry::traits::return_type>;
+    constexpr bool keep_args = Entry::feed == undo_feed::kArgs;
+    // Refused before anything starts: nothing could receive the result.
+    if (!ctx.can_suspend(s.state())) {
+        s.raise(not_suspendable(label));
+    }
+
+    std::tuple<result<storage_t<utils::at_t<args, Is>>>...> pulled{
+        pull_arg<Handles, utils::at_t<args, Is>>(s, static_cast<int>(Is) + 1)...};
+    std::optional<error> bad;
+    ((bad || std::get<Is>(pulled) ? void() : void(bad = arg_error(std::get<Is>(pulled).error(), label, Is + 1, is_member_v<Entry>))), ...);
+    if (bad) {
+        s.raise(*bad);
+    }
+
+    const auto arg = [&]<std::size_t I>() -> decltype(auto) {
+        if constexpr (keep_args) {
+            return static_cast<storage_t<utils::at_t<args, I>>&>(*std::get<I>(pulled));
+        } else {
+            return static_cast<storage_t<utils::at_t<args, I>>&&>(*std::get<I>(pulled));
+        }
+    };
+
+    std::optional<error> thrown;
+    std::optional<R> out;
+    try {
+        out.emplace(std::invoke(Entry::function, arg.template operator()<Is>()...));
+    } catch (const Rhp::exception& e) {
+        thrown = e.err();
+    } catch (const std::exception& e) {
+        thrown = make_error(errc::kRuntime, e.what(), std::string{label});
+    }
+    if (thrown) {
+        if (thrown->where.empty()) {
+            thrown->where = std::string{label};
+        }
+        s.raise(*thrown);
+    }
+
+    std::shared_ptr<async_wait> op;
+    if constexpr (keep_args) {
+        op = std::make_shared<async_call<Handles, Entry, capture_t<utils::at_t<args, Is>>...>>(std::string{label}, std::move(*out),
+                                                                                                *std::get<Is>(pulled)...);
+    } else {
+        op = std::make_shared<async_call<Handles, Entry>>(std::string{label}, std::move(*out));
+    }
+    if (ctx.await_async(s.state(), op)) {
+        return -1;
+    }
+    return op->finish(s, ctx);
+}
+
 // Upvalue 1 of every binding closure is its full label ("game.debug.dump").
 template <class Handles, class Entry>
 int call_fn(lua_State* L) {
@@ -362,7 +514,15 @@ int call_fn(lua_State* L) {
     if (!allows(ctx.caller_role(), Entry::required)) {
         s.raise(forbidden(label, Entry::required));
     }
-    return invoke_fn<Handles, Entry>(s, ctx, label, std::make_index_sequence<Entry::traits::arity>{});
+    if constexpr (Entry::is_async) {
+        const int results = start_async<Handles, Entry>(s, ctx, label, std::make_index_sequence<Entry::traits::arity>{});
+        if (results >= 0) {
+            return results;
+        }
+        s.yield_async(); // nothing here has a destructor: the yield may jump
+    } else {
+        return invoke_fn<Handles, Entry>(s, ctx, label, std::make_index_sequence<Entry::traits::arity>{});
+    }
 }
 
 template <class Handles, class Entry>
@@ -446,6 +606,70 @@ private:
     }
 };
 
+// ---- methods and properties ---------------------------------------------------------------------------
+
+// Every method and property across a lib tree.
+template <class Entry>
+struct members_of_entry {
+    using type = utils::type_list<>;
+};
+
+template <class Lib>
+struct members_of;
+
+template <utils::fixed_string N, auto F, class... Tags>
+struct members_of_entry<method_entry<N, F, Tags...>> {
+    using type = utils::type_list<method_entry<N, F, Tags...>>;
+};
+
+template <utils::fixed_string N, auto F, class... Tags>
+struct members_of_entry<property_entry<N, F, Tags...>> {
+    using type = utils::type_list<property_entry<N, F, Tags...>>;
+};
+
+template <class Lib>
+struct members_of_entry<sub_entry<Lib>> {
+    using type = typename members_of<Lib>::type;
+};
+
+template <utils::fixed_string Name, class... Entries>
+struct members_of<lib<Name, Entries...>> {
+    using type = utils::concat_t<utils::type_list<>, typename members_of_entry<Entries>::type...>;
+};
+
+template <class Lib>
+using members_of_t = typename members_of<Lib>::type;
+
+template <class Handles, class Members>
+struct member_installer;
+
+template <class Handles, class... Ms>
+struct member_installer<Handles, utils::type_list<Ms...>> {
+    // All or nothing: every name is checked free on its handle before any is added.
+    static void install([[maybe_unused]] stack& s) {
+        result<void> r{};
+        ((r = r ? s.handle_member_free(handle_key_v<find_handle_t<Handles, typename Ms::self_type>>.view(), Ms::name) : r), ...);
+        if (!r) {
+            s.raise(r.error());
+        }
+        (add<Ms>(s), ...);
+    }
+
+private:
+    template <class M>
+    static void add(stack& s) {
+        using H = find_handle_t<Handles, typename M::self_type>;
+        constexpr bool property = M::kind == entry_kind::kProperty;
+        if constexpr (property) {
+            s.push_string(std::format("{}.{}", H::name, M::name));
+        } else {
+            s.push_string(std::format("{}:{}", H::name, M::name));
+        }
+        s.push_function(&call_fn<Handles, M>, 1);
+        s.add_handle_member(handle_key_v<H>.view(), M::name, property);
+    }
+};
+
 template <class Handles>
 struct handle_definer;
 
@@ -469,6 +693,7 @@ int install_lib_tree(lua_State* L) {
     if (auto defined = handle_definer<handles>::define(s); !defined) {
         s.raise(defined.error());
     }
+    member_installer<handles, members_of_t<Lib>>::install(s);
     lib_builder<Lib, handles>::push(s, Lib::name);
     return 1;
 }
@@ -489,6 +714,14 @@ struct entry_installable<fn_entry<N, F, Tags...>, Handles>
     : std::bool_constant<params_ok<utils::args_t<decltype(F)>, Handles>::value &&
                          return_traits<Handles, std::remove_cvref_t<utils::return_type_t<decltype(F)>>>::ok &&
                          !std::is_reference_v<utils::return_type_t<decltype(F)>>> {};
+
+template <utils::fixed_string N, auto F, class... Tags, class Handles>
+struct entry_installable<method_entry<N, F, Tags...>, Handles>
+    : std::bool_constant<entry_installable<fn_entry<N, F, Tags...>, Handles>::value && is_handle_v<Handles, self_t<F>>> {};
+
+template <utils::fixed_string N, auto F, class... Tags, class Handles>
+struct entry_installable<property_entry<N, F, Tags...>, Handles>
+    : std::bool_constant<entry_installable<fn_entry<N, F, Tags...>, Handles>::value && is_handle_v<Handles, self_t<F>>> {};
 
 template <utils::fixed_string N, auto Ptr, class Handles>
 struct entry_installable<var_entry<N, Ptr>, Handles>
@@ -527,14 +760,28 @@ struct handles_distinct<utils::type_list<Hs...>> {
     static constexpr bool value = check();
 };
 
+// A method or property name is used once per handle across the whole tree.
+template <class Members>
+struct members_distinct;
+
+template <class... Ms>
+struct members_distinct<utils::type_list<Ms...>> {
+    template <class M>
+    static consteval std::size_t uses() {
+        return (std::size_t{0} + ... + ((std::is_same_v<typename M::self_type, typename Ms::self_type> && M::name == Ms::name) ? 1u : 0u));
+    }
+    static constexpr bool value = ((uses<Ms>() == 1) && ...);
+};
+
 } // namespace Rhp::script::detail
 
 namespace Rhp::script {
 
 // Every binding's parameter and result type crosses the Lua boundary (as a handle or through
-// Rhp::convert), and handle names/types are unique across the whole lib tree.
+// Rhp::convert), handle names/types are unique across the whole lib tree, and every method or
+// property belongs to a handle of the tree under a name of its own.
 template <class L>
 concept installable = lib_type<L> && detail::lib_installable<L, detail::handles_of_t<L>>::value &&
-                      detail::handles_distinct<detail::handles_of_t<L>>::value;
+                      detail::handles_distinct<detail::handles_of_t<L>>::value && detail::members_distinct<detail::members_of_t<L>>::value;
 
 } // namespace Rhp::script
