@@ -178,3 +178,42 @@ TEST_CASE("identity files round-trip and print the host's lines", "[security][fi
     CHECK(identity_file::load("no/such/file").error().code == errc::kNotFound);
     CHECK(identity_file::generate("").error().code == errc::kInvalidArgument);
 }
+
+TEST_CASE("repeated script signatures and verdicts are remembered but never stretched", "[security][signing]") {
+    // A repeated source is signed and verified from the recent-scripts cache: same bytes, same
+    // answer, and nothing cached lets a different source, signature or keyring through.
+    const auto dev_secret = *ed25519_secret_key::generate();
+    const auto other_secret = *ed25519_secret_key::generate();
+    const signing_key dev{"dev", dev_secret};
+    const std::string source = "return 'cached'";
+    const auto first = dev.sign(source);
+    const auto second = dev.sign(source);
+    REQUIRE(first);
+    REQUIRE(second);
+    CHECK(*first == *second); // Ed25519 is deterministic: the cache gives the same bytes
+
+    trusted_signers trust{{"dev", dev_secret.public_key()}};
+    REQUIRE(trust.verify(source, *first));
+    REQUIRE(trust.verify(source, *first)); // from the cache
+    CHECK(trust.verify(source + " ", *first).error().code == errc::kBadSignature);
+
+    // The cached signature under a name another keyring gives a different key, or doesn't know.
+    trusted_signers other{{"dev", other_secret.public_key()}};
+    CHECK(other.verify(source, *first).error().code == errc::kBadSignature);
+    trusted_signers nobody{{"someone", other_secret.public_key()}};
+    CHECK(nobody.verify(source, *first).error().code == errc::kBadSignature);
+
+    // A flipped bit in the cached signature is a different signature.
+    auto bytes = *first->find("sig")->get_if<value::bytes>();
+    bytes[5] ^= std::byte{0x01};
+    CHECK(trust.verify(source, signature_with("dev", bytes)).error().code == errc::kBadSignature);
+
+    // More distinct scripts than the cache holds still verify (older entries are replaced).
+    for (int i = 0; i < 100; ++i) {
+        const std::string each = "return " + std::to_string(i);
+        const auto s = dev.sign(each);
+        REQUIRE(s);
+        REQUIRE(trust.verify(each, *s));
+    }
+    REQUIRE(trust.verify(source, *first));
+}

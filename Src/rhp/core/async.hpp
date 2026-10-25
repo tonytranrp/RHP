@@ -45,7 +45,7 @@ struct state {
     bool reader_gone = false;
     std::optional<result<T>> outcome;
     std::function<void()> waker; // armed by the reader; called once, on the completing thread, outside the lock
-    std::stop_source stop;
+    std::stop_source stop{std::nostopstate}; // made by make_async: an operation that's already over needs none
 };
 
 // Delivers `r` unless something already did; returns true when a reader may still take it.
@@ -235,6 +235,7 @@ private:
 template <class T>
 [[nodiscard]] std::pair<async<T>, promise<T>> make_async() {
     auto s = std::make_shared<async_detail::state<T>>();
+    s->stop = std::stop_source{};
     auto a = std::make_shared<async_detail::anchor<T>>(s);
     return {async<T>{std::move(s)}, promise<T>{std::move(a)}};
 }

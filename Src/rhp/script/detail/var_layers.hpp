@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <atomic>
 #include <cstddef>
 #include <iterator>
 #include <memory>
@@ -13,6 +14,21 @@
 
 namespace Rhp::script::detail {
 
+// Whether a variable of type T can be read and written through std::atomic_ref without a lock (where
+// the standard library has it).
+template <class T>
+consteval bool lock_free_var() {
+#if defined(__cpp_lib_atomic_ref)
+    if constexpr (std::is_trivially_copyable_v<T>) {
+        return std::atomic_ref<T>::is_always_lock_free && std::atomic_ref<T>::required_alignment <= alignof(T);
+    } else {
+        return false;
+    }
+#else
+    return false;
+#endif
+}
+
 // Process-wide stack of script writes to one C++ variable (one instantiation per variable).
 //
 // Each write remembers the value it replaced. Undoing the newest write restores that value;
@@ -21,14 +37,19 @@ namespace Rhp::script::detail {
 // modules (or sandboxes) are reverted in.
 //
 // Threading: RHP's own reads (read), writes (assign) and undos of the variable are serialized by one
-// lock per variable, so sandboxes on different threads may expose the same variable. The
-// application's own accesses to it are its business (the pump thread, or its own synchronization).
+// lock per variable (reads of a small trivially copyable one are atomic loads instead), so sandboxes
+// on different threads may expose the same variable. The application's own accesses to it are its
+// business (the pump thread, or its own synchronization).
 template <auto Ptr>
 class var_layers {
     struct locked {}; // assign() holds the lock and layers the effect itself
 
 public:
     using value_type = std::remove_pointer_t<decltype(Ptr)>;
+
+    // Small trivially copyable variables (numbers, bools, enums) are read without the lock: RHP's own
+    // writes store them atomically too, so a read never sees half of one.
+    static constexpr bool kAtomic = lock_free_var<value_type>();
 
     class write_effect;
 
@@ -44,7 +65,7 @@ public:
         // Not layered until the assignment succeeded: if copying or assigning throws, its destructor
         // has nothing to detach (and doesn't take the lock this scope holds).
         std::unique_ptr<write_effect> fx{new write_effect(locked{}, *Ptr)};
-        *Ptr = std::move(incoming);
+        store(std::move(incoming));
         stack.push_back(fx.get()); // can't throw: reserved
         fx->layered_ = true;
         return fx;
@@ -53,8 +74,15 @@ public:
     // A script's read, serialized with every write and undo RHP makes. Copies the value out, so
     // nothing is pushed to Lua under the lock.
     [[nodiscard]] static value_type read() {
-        const std::scoped_lock lock{mutex()};
-        return *Ptr;
+#if defined(__cpp_lib_atomic_ref)
+        if constexpr (kAtomic) {
+            return std::atomic_ref<value_type>{*Ptr}.load(std::memory_order_acquire);
+        } else
+#endif
+        {
+            const std::scoped_lock lock{mutex()};
+            return *Ptr;
+        }
     }
 
     class write_effect final : public effect {
@@ -94,7 +122,7 @@ public:
             if (const auto newer = std::next(it); newer != stack.end()) {
                 (*newer)->replaced_ = std::move(replaced_);
             } else if (restore) {
-                *Ptr = std::move(replaced_);
+                store(std::move(replaced_));
             }
             stack.erase(it);
             layered_ = false;
@@ -111,6 +139,18 @@ public:
     }
 
 private:
+    // Under the lock (writes and undos stay serialized among themselves).
+    static void store(value_type v) {
+#if defined(__cpp_lib_atomic_ref)
+        if constexpr (kAtomic) {
+            std::atomic_ref<value_type>{*Ptr}.store(v, std::memory_order_release);
+        } else
+#endif
+        {
+            *Ptr = std::move(v);
+        }
+    }
+
     static std::mutex& mutex() {
         static std::mutex m;
         return m;

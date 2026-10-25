@@ -513,6 +513,17 @@ int start_async(stack& s, context& ctx, std::string_view label, std::index_seque
         s.raise(*thrown);
     }
 
+    if (out->ready()) {
+        // Already over (a cache hit, an error found up front): finished here, without the shared
+        // call a suspension needs. Nothing yields below; a raise unwinds `now` like any C++ object.
+        if constexpr (keep_args) {
+            async_call<Handles, Entry, capture_t<utils::at_t<args, Is>>...> now{std::string{label}, std::move(*out), *std::get<Is>(pulled)...};
+            return now.finish(s, ctx);
+        } else {
+            async_call<Handles, Entry> now{std::string{label}, std::move(*out)};
+            return now.finish(s, ctx);
+        }
+    }
     std::shared_ptr<async_wait> op;
     if constexpr (keep_args) {
         op = std::make_shared<async_call<Handles, Entry, capture_t<utils::at_t<args, Is>>...>>(std::string{label}, std::move(*out),
