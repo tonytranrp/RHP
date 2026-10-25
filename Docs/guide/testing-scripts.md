@@ -237,7 +237,7 @@ end)
 | `rhp.sleep(ms)`, `rhp.wait(n)` in a test | the runner moves the clock or pumps for the test |
 | `os.time()`, `os.clock()` | follow the fake clock (a test file starts at `--epoch`, 1 700 000 000 by default) |
 | `test.publish(name, ...)` | `rhp.publish`, then two frames: handlers ran and their failures are reported |
-| `test.fire("shop.opened", 3)` | fires a C++ `Rhp::lua_event` by name, as the game would |
+| `test.fire("shop.opened", 3)` | fires a C++ `Rhp::lua_event` by name, as the game would (an event registers itself where the program fires it; when the test executable doesn't contain that code, the `rhp.on` handlers get it as a script event at the next frame) |
 | `test.call_point("shop.tax", 120)` | calls a patch point as C++ would, overrides included (points whose parameters and result convert to values) |
 | `test.output()`, `test.emitted()`, `test.failures()` | what scripts printed, `rhp.emit`ted, and the handler failures so far in this test |
 | `test.deferred()` | a result to resolve later: `d:resolve(v)`, `d:reject(e)`, `d:await()` (from a stub standing in for an asynchronous binding) |
