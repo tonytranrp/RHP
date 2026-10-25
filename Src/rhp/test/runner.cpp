@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <format>
 #include <functional>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -319,6 +320,7 @@ struct runner::impl {
         std::string source;
     };
     std::vector<script_file> scripts;
+    std::vector<std::string> lua_fake_returns;      // fake<L> results set from Lua in this test
     std::vector<std::string> script_errors;         // modules folder problems, reported per file
     std::map<std::string, std::string> chunk_files; // chunk name -> file (relative) for coverage
 
@@ -417,7 +419,9 @@ struct runner::impl {
 
     // ---- the sandbox of a test file ----
 
-    std::unique_ptr<sandbox> make_sandbox(std::vector<file_error>& errors) {
+    // `warnings`: problems of the module folders (a file that isn't a module, a module that doesn't
+    // load); reported, but the file's tests still run (one that needs the module fails itself).
+    std::unique_ptr<sandbox> make_sandbox(std::vector<file_error>& errors, std::vector<file_error>& warnings) {
         script::sandbox_options so;
         so.caller_role = options.caller;
         so.limits = options.limits;
@@ -441,7 +445,6 @@ struct runner::impl {
                                    .set("where", value{f.err.where})
                                    .done());
         };
-        clock = steady::time_point{};
         auto box = std::make_unique<sandbox>(std::move(so));
         if (install) {
             try {
@@ -477,7 +480,7 @@ struct runner::impl {
                 errors.push_back(file_error{std::format("building fakes from the API description failed: {}", faked.error()), current_file, 0, {}});
             }
         }
-        load_modules(*box, errors);
+        load_modules(*box, warnings);
         box->start_metering();
         return box;
     }
@@ -514,8 +517,10 @@ struct runner::impl {
             }
             if (later.size() == left.size()) {
                 for (const script_file* s : later) {
-                    auto again = box.load(s->module, s->source);
-                    errors.push_back(file_error{std::format("module {} didn't load: {}", s->module, again ? std::string{"a require() cycle"} : std::format("{}", again.error())), relative(s->path), 0, {}});
+                    if (auto again = box.load(s->module, s->source); !again) {
+                        const bool waiting = again.error().message.find("is not loaded") != std::string::npos || again.error().message.find("is still loading") != std::string::npos;
+                        errors.push_back(file_error{std::format("module {} didn't load: {}", s->module, waiting ? std::string{"a require() cycle, or a module that doesn't exist"} : std::format("{}", again.error())), relative(s->path), 0, {}});
+                    }
                 }
                 break;
             }
@@ -550,6 +555,7 @@ struct runner::impl {
         }
         const auto started = steady::now();
         std::uint64_t idle = 0;
+        auto idle_since = started;
         while (box.pending(id)) {
             if (steady::now() - started > options.timeout || frames > options.max_frames) {
                 timed_out = true;
@@ -561,6 +567,7 @@ struct runner::impl {
             switch (cmd.what) {
             case clock_command::kind::kAdvance: {
                 const steady::time_point target = clock + std::chrono::duration_cast<steady::duration>(std::chrono::duration<double, std::milli>{cmd.ms});
+                bool moved_on = false; // the test resumed and asked for something else, or ended
                 while (true) {
                     const auto due = box.next_due();
                     if (!due || *due > target) {
@@ -568,18 +575,24 @@ struct runner::impl {
                     }
                     clock = std::max(clock, *due);
                     pump(box, frames);
+                    if (!box.pending(id) || pending_command.what != clock_command::kind::kNone) {
+                        moved_on = true;
+                        break;
+                    }
                     if (frames > options.max_frames) {
                         break;
                     }
                 }
                 clock = std::max(clock, target);
-                pump(box, frames);
+                if (!moved_on) {
+                    pump(box, frames);
+                }
                 idle = 0;
                 break;
             }
             case clock_command::kind::kFrames: {
                 const auto dt = std::chrono::duration_cast<steady::duration>(std::chrono::duration<double, std::milli>{cmd.dt});
-                for (std::uint64_t i = 0; i < cmd.frames && box.pending(id); ++i) {
+                for (std::uint64_t i = 0; i < cmd.frames && box.pending(id) && pending_command.what == clock_command::kind::kNone; ++i) {
                     clock += dt;
                     pump(box, frames);
                 }
@@ -597,7 +610,13 @@ struct runner::impl {
                     clock = *due;
                     idle = 0;
                 } else if (const script::sandbox_stats st = box.stats();
-                           st.queued_events == 0 && (st.waiting != 0 || st.async_waiting != 0) && ++idle > 100) {
+                           st.queued_events != 0 || st.schedule_entries != 0 || st.tasks != 0 || (st.waiting == 0 && st.async_waiting == 0)) {
+                    idle = 0; // something may still wake it, or it waits on frames (--max-frames)
+                } else if (idle++ == 0) {
+                    idle_since = steady::now();
+                } else if (idle > 100 && steady::now() - idle_since > std::chrono::seconds{1}) {
+                    // A second of pumps with nothing that could wake it (an asynchronous binding
+                    // completing on another thread gets that second).
                     timed_out = true;
                     box.cancel(id);
                     box.pump();
@@ -643,11 +662,21 @@ struct runner::impl {
             return {};
         };
         if (command == "advance") {
-            pending_command = clock_command{clock_command::kind::kAdvance, arg_number(0), 0, 0};
+            const double ms = arg_number(0);
+            if (!std::isfinite(ms) || ms < 0 || ms > 1e12) {
+                return fail(errc::kInvalidArgument, std::format("test.advance: {} ms isn't a time to advance by", ms), "test");
+            }
+            pending_command = clock_command{clock_command::kind::kAdvance, ms, 0, 0};
             return value{};
         }
         if (command == "frames") {
-            pending_command = clock_command{clock_command::kind::kFrames, 0, static_cast<std::uint64_t>(arg_number(0)), arg_number(1)};
+            const double n = arg_number(0);
+            const double dt = arg_number(1);
+            if (!std::isfinite(n) || n < 1 || !std::isfinite(dt) || dt < 0 || dt > 1e9) {
+                return fail(errc::kInvalidArgument, std::format("test.frames: {} frames of {} ms isn't a frame count", n, dt), "test");
+            }
+            const auto count = static_cast<std::uint64_t>(std::min(n, static_cast<double>(options.max_frames) + 1));
+            pending_command = clock_command{clock_command::kind::kFrames, 0, count, dt};
             return value{};
         }
         if (command == "config") {
@@ -694,6 +723,7 @@ struct runner::impl {
             return value{std::move(out)};
         }
         if (command == "fake_returns") {
+            lua_fake_returns.push_back(arg_text(0));
             fake_registry::instance().set_returns(arg_text(0), std::vector<value>{args.begin() + (args.empty() ? 0 : 1), args.end()});
             return value{};
         }
@@ -718,8 +748,15 @@ struct runner::impl {
             store.broken = std::format("can't read {}: {}", generic(store.path), failure->message);
             return;
         }
-        sandbox reader{script::sandbox_options{.caller_role = role::kObserve, .output = [](std::string_view) {}}};
+        script::sandbox_options reader_options{.caller_role = role::kObserve, .output = [](std::string_view) {}};
+        reader_options.limits.instructions = 100'000'000; // a corrupted file can't hang the run
+        reader_options.limits.wall_ms = 10'000;
+        sandbox reader{std::move(reader_options)};
         auto values = reader.exec(source, generic(store.path));
+        const auto* as_array = values && !values->empty() ? values->front().get_if<value::array>() : nullptr;
+        if (as_array != nullptr && as_array->empty()) {
+            return; // `return {}`: no snapshots left
+        }
         if (!values || values->empty() || values->front().get_if<value::map>() == nullptr) {
             store.broken = std::format("{} isn't a snapshot file (fix or delete it): {}", generic(store.path),
                                        !values ? std::format("{}", values.error()) : std::string{"it doesn't return a table"});
@@ -746,6 +783,12 @@ struct runner::impl {
         }
         if (!store.broken.empty()) {
             return object{}.set("status", value{"broken"}).set("message", value{store.broken}).done();
+        }
+        if (const auto seen = store.written.find(key); seen != store.written.end() && seen->second != text) {
+            return object{}
+                .set("status", value{"broken"})
+                .set("message", value{std::format("two snapshots are named '{}' in this run (tests with the same full name? name them: assert.snapshot(v, 'name'))", key)})
+                .done();
         }
         store.written[key] = text;
         const auto it = store.stored.find(key);
@@ -806,9 +849,11 @@ struct runner::impl {
         for (const char c : name) {
             safe += (std::isalnum(static_cast<unsigned char>(c)) != 0 || c == '-' || c == '_') ? c : '_';
         }
-        if (safe.size() > 80) {
-            safe = std::format("{}_{:08x}", safe.substr(0, 70), utils::crc32c(utils::bytes_view{reinterpret_cast<const std::byte*>(name.data()), name.size()}));
+        if (safe.size() > 70) {
+            safe.resize(70);
         }
+        // The hash of the exact name: "a+b" and "a b", or names differing only in case, don't share inputs.
+        safe = std::format("{}_{:08x}", safe, utils::crc32c(utils::bytes_view{reinterpret_cast<const std::byte*>(name.data()), name.size()}));
         const fs::path file{current_file};
         return root / file.parent_path() / "__fuzz__" / file.stem() / safe;
     }
@@ -839,7 +884,8 @@ struct runner::impl {
 
     value corpus_save(const std::string& name, const std::string& text, const std::string& kind) {
         const std::uint32_t hash = utils::crc32c(utils::bytes_view{reinterpret_cast<const std::byte*>(text.data()), text.size()});
-        const fs::path path = corpus_dir(name) / std::format("{}-{:08x}.lua", kind.empty() ? "input" : kind, hash);
+        const std::string_view what = kind == "crash" || kind == "cov" ? std::string_view{kind} : std::string_view{"input"};
+        const fs::path path = corpus_dir(name) / std::format("{}-{:08x}.lua", what, hash);
         std::error_code ec;
         if (!fs::exists(path, ec)) {
             if (auto written = write_text(path, text); !written) {
@@ -967,15 +1013,24 @@ struct runner::impl {
             out.push_back(std::move(l));
         }
         if (options.shuffle) {
-            std::mt19937_64 rng{seed ^ utils::crc32c(utils::bytes_view{reinterpret_cast<const std::byte*>(current_file.data()), current_file.size()})};
-            std::ranges::shuffle(out, rng);
+            // Fisher-Yates over splitmix64: the same order for a seed with every standard library.
+            std::uint64_t state = seed ^ utils::crc32c(utils::bytes_view{reinterpret_cast<const std::byte*>(current_file.data()), current_file.size()});
+            const auto next = [&state] {
+                std::uint64_t z = (state += 0x9E3779B97F4A7C15ull);
+                z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+                z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+                return z ^ (z >> 31);
+            };
+            for (std::size_t i = out.size(); i > 1; --i) {
+                std::swap(out[i - 1], out[static_cast<std::size_t>(next() % i)]);
+            }
         }
         return out;
     }
 
     // Loads a file into a fresh sandbox: the API, the framework, the modules, then the file itself.
-    std::unique_ptr<sandbox> open_file(const std::string& source, std::vector<file_error>& errors) {
-        auto box = make_sandbox(errors);
+    std::unique_ptr<sandbox> open_file(const std::string& source, std::vector<file_error>& errors, std::vector<file_error>& warnings) {
+        auto box = make_sandbox(errors, warnings);
         if (!errors.empty()) {
             return box;
         }
@@ -1022,7 +1077,12 @@ struct runner::impl {
             return r;
         }
 
-        fake_registry::instance().reset(); // fake<L> calls and results belong to one test
+        // fake<L>: calls and the results a test set from Lua belong to that test (results set from C++
+        // before the run stay).
+        fake_registry::instance().clear_calls();
+        for (const std::string& path : std::exchange(lua_fake_returns, {})) {
+            fake_registry::instance().reset(path);
+        }
         (void)box.checkpoint("rhp.test");
         const script::sandbox_stats before_stats = box.stats();
         const std::size_t before_effects = box.effects().size();
@@ -1155,6 +1215,34 @@ struct runner::impl {
             }
         }
 
+        // A test stopped by a limit, a timeout or a cancel never ran its cleanup: finally, after_each
+        // and the removal of its globals run now, in a request of their own.
+        if (!ran) {
+            std::uint64_t abort_frames = 0;
+            bool abort_timed_out = false;
+            auto aborted = run_request(box, "return __rhp_t.abort()", "rhp.test/abort", abort_frames, abort_timed_out);
+            if (!aborted) {
+                r.notes.push_back(std::format("its cleanup failed too: {}", aborted.error()));
+            } else if (!aborted->empty()) {
+                if (const auto* globals = array_of(aborted->front(), "globals"); globals != nullptr && !globals->empty()) {
+                    std::string names;
+                    for (const value& g : *globals) {
+                        if (const auto* name = g.get_if<std::string>()) {
+                            names += (names.empty() ? "" : ", ") + *name;
+                        }
+                    }
+                    r.notes.push_back(std::format("the test set global(s) {} (removed after it)", names));
+                }
+                if (const auto* errs = array_of(aborted->front(), "errors")) {
+                    for (const value& e : *errs) {
+                        if (const auto* text = e.get_if<std::string>()) {
+                            r.notes.push_back(std::format("its cleanup failed: {}", *text));
+                        }
+                    }
+                }
+            }
+        }
+
         // Events the test published that are still queued reach their handlers now (within this
         // test, whose revert follows), not in the next test.
         for (int round = 0; round < 4 && box.stats().queued_events != 0; ++round) {
@@ -1255,11 +1343,13 @@ struct runner::impl {
         store.path = path.parent_path() / "__snapshots__" / (path.stem().string() + ".snap.lua");
         snapshots = &store;
 
-        auto box = open_file(source, fr.errors);
+        std::vector<file_error> warnings;
+        auto box = open_file(source, fr.errors, warnings);
         std::vector<listed> tests;
         if (fr.errors.empty()) {
             tests = selection(list_tests(*box, fr.errors));
         }
+        fr.errors.insert(fr.errors.end(), warnings.begin(), warnings.end());
         std::vector<test_info> infos;
         for (const listed& l : tests) {
             infos.push_back(l.info);
@@ -1274,7 +1364,8 @@ struct runner::impl {
                 sandbox* use = box.get();
                 if (options.share == isolation::kTest && !t.info.skipped) {
                     std::vector<file_error> errs;
-                    own = open_file(source, errs);
+                    std::vector<file_error> ignored; // the file's own sandbox reported them
+                    own = open_file(source, errs, ignored);
                     if (!errs.empty()) {
                         fr.errors.insert(fr.errors.end(), errs.begin(), errs.end());
                         continue;
@@ -1384,12 +1475,14 @@ std::vector<std::pair<file_result, std::vector<test_info>>> runner::list() {
         if (failure) {
             fr.errors.push_back(file_error{failure->message, fr.file, 0, {}});
         } else {
-            auto box = impl_->open_file(source, fr.errors);
+            std::vector<file_error> warnings;
+            auto box = impl_->open_file(source, fr.errors, warnings);
             if (fr.errors.empty()) {
                 for (const auto& l : impl_->selection(impl_->list_tests(*box, fr.errors))) {
                     infos.push_back(l.info);
                 }
             }
+            fr.errors.insert(fr.errors.end(), warnings.begin(), warnings.end());
         }
         out.emplace_back(std::move(fr), std::move(infos));
     }
@@ -1489,6 +1582,11 @@ void fake_registry::reset(std::string_view path) {
     if (const auto it = returns_.find(path); it != returns_.end()) {
         returns_.erase(it);
     }
+}
+
+void fake_registry::clear_calls() {
+    const std::scoped_lock lock{mutex_};
+    calls_.clear();
 }
 
 void fake_registry::set_strict(bool strict) {

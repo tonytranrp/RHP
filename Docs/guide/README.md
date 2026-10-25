@@ -13,6 +13,7 @@ How to use RHP, what it supports, and how to configure and connect it. For *why*
 | [Python client](../../clients/python/README.md) | talk to a host from Python: `pip install ./clients/python`, signed scripts, events, resume |
 | [Networking and fleet](networking.md) | WebSocket, UDP, IPC, HTTP, DNS-SD and collect-all execution |
 | [Releases](releases.md) | signed releases a host keeps across restarts, health-checked candidates, revocation, staged rollout |
+| [Testing scripts](testing-scripts.md) | test the Lua written against your API offline: busted / Jest style, spies and fakes, a fake clock, exact costs, coverage, snapshots, property tests, fuzzing, CI reports, VS Code |
 | [Tools](tools.md) | tunables, the sampling profiler and the debugger (rhp-cli, DAP for editors, C++) |
 | [Configuration](configuration.md) | `Rhp::config<>` slots, `Rhp::limits`, options, CMake switches |
 | [Security](security.md) | keys, roles, signing, setting up a host safely |
@@ -36,7 +37,7 @@ A running C++ program (the **host**) accepts Lua scripts from a **client** (your
                                          └─────────────────────────────┘
 ```
 
-## What is available today (Stages 0–11)
+## What is available today (Stages 0–12)
 
 | Area | Supported |
 |---|---|
@@ -50,10 +51,11 @@ A running C++ program (the **host**) accepts Lua scripts from a **client** (your
 | Client | blocking, `then` callbacks, `std::future`, `co_await`; cancel; blobs; output and `rhp.emit` callbacks; `client.on` subscriptions to host events |
 | Releases | signed release manifests (`Rhp::release`): channels, anti-rollback floors, validity windows, scope (app / build / platform), health-watched candidates, persistence across restarts with boot-attempt quarantine, revocation lists, staged fleet rollout with rollback |
 | Tools | tunables (`Rhp::range` / `step` / `unit` / `doc` tags on lib variables, `tune` journaled), a sampling profiler with folded-stack output, a debugger (breakpoints, pause, step, stacks, variables) that pauses one script while the program runs, `rhp-cli dap` for editors |
+| Testing scripts | `Rhp::test`: Lua specs run offline in real sandboxes (your libs, or `fake<L>` / fakes from an API description); `describe` / `it`, luassert-compatible `assert`, Jest-style `expect`, spies / stubs / mocks; a fake clock; exact instruction and memory costs, budgets, benches; leak checks; snapshots, property tests, fuzzing; text / TAP / JUnit / JSON / GitHub reports, LCOV / Cobertura coverage; `Rhp::test::main`, `rhp-cli test`, `rhp_add_lua_tests`, a VS Code extension |
 | Operations | audit events and JSON-lines log (`handler_failed` included), `host.on_script_event`, runtime kill switch (`set_enabled`), compile-time kill switch (`RHP_ENABLE=OFF`) |
-| Tooling | the pure-Python client `rhp_client` (`clients/python`); `rhp-cli` (REPL, `run`, `exec`, `stubs`, `blob`, `watch`, `events`, `keygen`, `pubkey`, `sign`, `discover`, `fleet`, `release`, `revoke`, `rollout`, `tune`, `profile`, `dap`), `headless_server`, five examples |
+| Tooling | the pure-Python client `rhp_client` (`clients/python`); `rhp-cli` (REPL, `run`, `exec`, `stubs`, `blob`, `watch`, `events`, `keygen`, `pubkey`, `sign`, `discover`, `fleet`, `release`, `revoke`, `rollout`, `tune`, `profile`, `dap`, `test`), `headless_server`, six examples; the VS Code extension for Lua tests (`clients/vscode`) |
 | Packaging | `find_package(rhp)` from an installed prefix (Debug and Release side by side), `add_subdirectory` or CPM; a generated `<rhp/build_config.hpp>`; dependency pins checked by commit and hash; third-party licenses installed |
 | Performance | `rhp_bench` benchmarks every hot path against raw Lua ([benchmarks](../benchmarks.md)); the cancel hook only where a cancel can come from (`limits.cancel_checks`) |
 | Platforms | target presets for Windows, Linux, macOS, iOS and Android; verified builds and remaining platform checks are recorded in [platform decisions](../decisions/platforms-and-toolchains.md) |
 
-Start with the [runnable CLI walkthrough](getting-started.md#first-run-host-plus-rhp-cli), then the [complete local sandbox example](getting-started.md#without-any-network). The guide describes the current Stage 11 API; historical architecture decisions retain their stage context. Open items and platform checks are in [Status and TODO](../TODO.md).
+Start with the [runnable CLI walkthrough](getting-started.md#first-run-host-plus-rhp-cli), then the [complete local sandbox example](getting-started.md#without-any-network). The guide describes the current Stage 12 API; historical architecture decisions retain their stage context. Open items and platform checks are in [Status and TODO](../TODO.md).

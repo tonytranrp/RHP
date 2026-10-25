@@ -29,6 +29,10 @@ describe("description fakes", function()
         assert.equals(3.5, arena.gravity)
     end)
 
+    it("variables are back after the test (ok)", function()
+        assert.equals(0.0, arena.gravity)
+    end)
+
     it("handles have methods and properties (ok)", function()
         local u = arena.make(1)
         assert.equals(0, u:move(2))

@@ -145,9 +145,40 @@ function coverageOf(runEnd) {
     });
 }
 
+/**
+ * The program to start for a command: a path (relative to the workspace folder) as it is; a bare
+ * name looked up on PATH (Windows: with PATHEXT's executable extensions, never .bat / .cmd, which
+ * only a shell can run). Unresolved names come back unchanged (the spawn reports them).
+ */
+function resolveProgram(command, cwd, env, platform) {
+    const path = require('node:path');
+    const fs = require('node:fs');
+    const isFile = (f) => {
+        try {
+            return fs.statSync(f).isFile();
+        } catch {
+            return false;
+        }
+    };
+    if (command.includes('/') || command.includes('\\')) {
+        return path.resolve(cwd, command);
+    }
+    const dirs = (env.PATH || env.Path || '').split(platform === 'win32' ? ';' : ':').filter(Boolean);
+    const exts = platform === 'win32' ? ['', '.exe', '.com'] : [''];
+    for (const dir of dirs) {
+        for (const ext of exts) {
+            const candidate = path.join(dir, command + ext);
+            if ((platform !== 'win32' || /\.(exe|com)$/i.test(candidate)) && isFile(candidate)) {
+                return candidate;
+            }
+        }
+    }
+    return command;
+}
+
 /** The id the runner gives a test: "<file relative to the root>::<full name>". */
 function testId(file, name) {
     return `${file}::${name}`;
 }
 
-module.exports = { escapeRegex, listArgs, runArgs, lineSplitter, parseEvent, parseList, outcomeOf, costLine, coverageOf, testId };
+module.exports = { escapeRegex, listArgs, runArgs, lineSplitter, parseEvent, parseList, outcomeOf, costLine, coverageOf, testId, resolveProgram };

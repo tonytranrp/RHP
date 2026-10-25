@@ -1,6 +1,17 @@
 # Status and TODO
 
-Last updated 2026-10-24. Stages 0–7 are implemented and released (tag `stage-7`). Stage 8 (packaging, hardening and performance) is implemented on branch `stage-8-packaging-hardening` (PR #8), awaiting review and merge (tag `stage-8` then). Stage 9 (asynchronous bindings and methods on handles) is implemented on branch `stage-9-async-methods` (PR #9), stacked on Stage 8. Stage 10 (release manifests, persistence and rollout) is implemented on branch `stage-10-releases` (PR #10), stacked on Stage 9. Stage 11 (debugger, profiler and tunables) is implemented on branch `stage-11-debug-profile-tune`, stacked on Stage 10. Progress is tracked as "Stage N" only (no `v1` / `v2` naming anywhere). Known limits are in [the guide's limitations page](guide/limitations.md).
+Last updated 2026-10-24. Stages 0–11 are implemented, merged and released (tags `stage-0` … `stage-11`). Stage 12 (a test engine for Lua scripts) is implemented on branch `stage-12-lua-test-engine`. Progress is tracked as "Stage N" only (no `v1` / `v2` naming anywhere). Known limits are in [the guide's limitations page](guide/limitations.md).
+
+## Stage 12 — a test engine for Lua scripts
+
+Done when: *the Lua a user writes against their API can be tested offline like any modern codebase (busted or Jest style, spies and fakes, a fake clock), with exact costs, coverage, snapshots, property tests and fuzzing, from a test executable, `rhp-cli`, ctest and an editor.* Decisions: [Stage 12](decisions/stage12-test-engine.md), ARCHITECTURE §38. Usage: [Testing scripts](guide/testing-scripts.md).
+
+- [x] Sandbox test tools: exact instruction meter, allocation counters, line coverage from the compiled code, the `__rhp_test` bridge (journaled swaps of lib members, module exports, handle methods and variables), `sandbox::api` / `rhp.api()`, patch points and events callable by name, `exec_cached`
+- [x] `Rhp::test`: runner (sandbox per file or per test, fake clock, checkpoint / revert per test, leak checks), busted DSL, luassert-compatible `assert` and matchers, Jest-style `expect`, spies / stubs / mocks, `test.*` (clock, events, points, measure, bench, budgets, deferred), snapshots, property tests with shrinking, fuzzing with a corpus, fakes (`fake<L>` and from a description)
+- [x] Reports: text, TAP 14, JUnit, JSON events, GitHub annotations; LCOV, Cobertura; folded profiles
+- [x] Entry points: `Rhp::test::main`, `rhp-cli test` (`--api`, `--api-from`, `--exe`), `rhp_add_lua_tests` (installed), `Examples/lua_tests`, the VS Code extension (`clients/vscode`)
+- [x] Tests: fixture specs with known outcomes for every feature, golden reports, CLI and process tests, the package consumer, compile-fail cases for `fake<L>`, the `RHP_ENABLE=OFF` build, the extension with `node --test`; benchmarks (`[testing]`) and the optimizations they led to
+- Stage 12 follow-ups: running test files in parallel; a watch mode in the runner; mutation testing; publishing the VS Code extension; module bytecode caching for `--isolation test`.
 
 ## Stage 11 — debugger, profiler and tunables
 

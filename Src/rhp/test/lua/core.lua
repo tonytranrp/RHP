@@ -112,7 +112,10 @@ function T.name_of(template, case, index)
         local v = args[position]
         if spec == "d" or spec == "i" then
             local n = tonumber(v)
-            return n and format("%d", n // 1) or tostring(v)
+            if n and n == n and n > -2 ^ 63 and n < 2 ^ 63 then
+                return format("%d", n // 1)
+            end
+            return tostring(v)
         elseif spec == "f" then
             local n = tonumber(v)
             return n and tostring(n + 0.0) or tostring(v)
@@ -221,7 +224,7 @@ local function each_of(add)
             for i = 1, #cases do
                 local case = cases[i]
                 -- A list case is spread into arguments; a record case ({name = ...}) is passed whole.
-                local spread = type(case) == "table" and (case.n ~= nil or #case > 0)
+                local spread = type(case) == "table" and #case > 0
                 local args = spread and case or { case }
                 local n = spread and (case.n or #case) or 1
                 add(T.name_of(template, case, i), function()
@@ -430,7 +433,53 @@ function T.prepare(id)
     return { ok = true }
 end
 
--- Runs test `id`: before_each (outer first), the body, finally (last first), after_each (inner first).
+-- The cleanup half of a test: finally (last first), after_each (inner first), the fakes' reset and
+-- the removal of the globals it created. Each step runs once: T.abort finishes what a test stopped
+-- by a limit, a timeout or a cancel left undone. Returns the first error (when ok was true).
+local function clean_up(state, ok, err)
+    while #state.finally > 0 do
+        local fn = state.finally[#state.finally]
+        state.finally[#state.finally] = nil
+        local fok, ferr = call(fn)
+        if ok and not fok then
+            ok, err = fok, ferr
+        end
+    end
+    while state.reached > 0 do
+        local block = state.chain[state.reached]
+        state.reached = state.reached - 1
+        local list = block.after_each
+        for j = 1, #list do
+            local aok, aerr = call(list[j])
+            if ok and not aok then
+                ok, err = aok, aerr
+            end
+        end
+    end
+    if T.after_test and not state.after_test_done then
+        state.after_test_done = true
+        local aok, aerr = call(T.after_test, state)
+        if ok and not aok then
+            ok, err = aok, aerr
+        end
+    end
+    T.running = nil
+    T.measure_depth = 0
+    -- Globals the test created are removed (the next test starts without them) and reported.
+    local new_globals = {}
+    for k in next, T.env do
+        if not state.globals_before[k] then
+            new_globals[#new_globals + 1] = tostring(k)
+        end
+    end
+    for i = 1, #new_globals do
+        rawset(T.env, new_globals[i], nil)
+    end
+    sort(new_globals)
+    return ok, err, new_globals
+end
+
+-- Runs test `id`: before_each (outer first), the body, then the cleanup.
 function T.run(id)
     local test = T.tests[id]
     local state = {
@@ -439,25 +488,32 @@ function T.run(id)
         assertions = 0,
         measures = {},
         benches = {},
-        budget = test.opts.budget,
+        budget = nil, -- a copy of the test's: test.budget adds to it
         snapshot_count = 0,
         strict_undo = test.opts.undone or false,
         fakes = {},
+        chain = chain_of(test.block),
+        reached = 0, -- blocks whose before_each ran (their after_each runs)
+        globals_before = {},
     }
-    T.running = state
-    T.measure_depth = 0 -- a measure an error left open
-    local globals_before = {}
-    for k in next, T.env do
-        globals_before[k] = true
+    if test.opts.budget then
+        state.budget = {}
+        for k, v in pairs(test.opts.budget) do
+            state.budget[k] = v
+        end
     end
+    for k in next, T.env do
+        state.globals_before[k] = true
+    end
+    T.running = state
+    T.measure_depth = 0
     if T.before_test then
         T.before_test(state)
     end
-    local chain = chain_of(test.block)
+    local chain = state.chain
     local ok, err = true, nil
-    local reached = 0
     for i = 1, #chain do
-        reached = i
+        state.reached = i
         local list = chain[i].before_each
         for j = 1, #list do
             ok, err = call(list[j])
@@ -476,39 +532,8 @@ function T.run(id)
             ok, err = call(test.fn)
         end
     end
-    for i = #state.finally, 1, -1 do
-        local fok, ferr = call(state.finally[i])
-        if ok and not fok then
-            ok, err = fok, ferr
-        end
-    end
-    for i = reached, 1, -1 do
-        local list = chain[i].after_each
-        for j = 1, #list do
-            local aok, aerr = call(list[j])
-            if ok and not aok then
-                ok, err = aok, aerr
-            end
-        end
-    end
-    if T.after_test then
-        local aok, aerr = call(T.after_test, state)
-        if ok and not aok then
-            ok, err = aok, aerr
-        end
-    end
-    T.running = nil
-    -- Globals the test created are removed (the next test starts without them) and reported.
-    local new_globals = {}
-    for k in next, T.env do
-        if not globals_before[k] then
-            new_globals[#new_globals + 1] = tostring(k)
-        end
-    end
-    for i = 1, #new_globals do
-        rawset(T.env, new_globals[i], nil)
-    end
-    sort(new_globals)
+    local new_globals
+    ok, err, new_globals = clean_up(state, ok, err)
     local result
     if ok then
         result = { status = "passed" }
@@ -525,6 +550,21 @@ function T.run(id)
     result.strict_undo = state.strict_undo
     result.globals = new_globals
     return result
+end
+
+-- After a test that never returned (a limit, a timeout, a cancel): its cleanup, as far as it got.
+-- Returns {globals = {...}, errors = {...}} (errors of the hooks that ran now).
+function T.abort()
+    local state = T.running
+    if not state then
+        return { globals = {}, errors = {} }
+    end
+    local ok, err, new_globals = clean_up(state, true, nil)
+    local errors = {}
+    if not ok then
+        errors[1] = describe_error(err, state.test).message
+    end
+    return { globals = new_globals, errors = errors }
 end
 
 -- Runs teardown and lazy_teardown of every block whose setup ran (inner blocks first).

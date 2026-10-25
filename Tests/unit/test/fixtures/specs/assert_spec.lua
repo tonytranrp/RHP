@@ -61,6 +61,21 @@ describe("assert", function()
         assert.same(match.contains(2), { 1, 2, 3 })
     end)
 
+    it("matchers nested in match.same, contains and table_containing (ok)", function()
+        assert.same(match.same({ id = match.is_number() }), { id = 5 })
+        assert.same(match.table_containing({ pos = { x = match._ } }), { pos = { x = 1 }, hp = 2 })
+        assert.same(match.contains({ kind = match.is_string() }), { { kind = "orc" }, 3 })
+        expect({ { kind = "orc" } }).to.contain({ kind = match.is_string() })
+    end)
+
+    it("a custom matcher may return any truthy value (ok)", function()
+        assert:register("matcher", "has_x", function(_, args)
+            return function(v) return type(v) == "string" and string.find(v, "x", 1, true) end
+        end)
+        assert.same({ name = match.has_x() }, { name = "box" })
+        assert.same({ name = match.is_not.has_x() }, { name = "bag" })
+    end)
+
     it("custom assertion (ok)", function()
         assert:register("assertion", "even", function(_, args) return args[1] % 2 == 0 end,
             "Expected an even number:\n%s", "Expected an odd number:\n%s")

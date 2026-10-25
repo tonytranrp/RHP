@@ -99,12 +99,14 @@ The exit status is 0 when everything passed, 1 when a test or a file failed, 2 f
 
 ## How tests run
 
+- **Modules that don't load** are reported as an error of each test file, but the file's tests still run (a test that needs the module fails on its own).
 - **Files.** Arguments are test files, or folders searched for `*_spec.lua`, `*.spec.lua`, `*_test.lua` and `test_*.lua`. `-s / --scripts DIR` names module folders: `DIR/shop/rules.lua` is module `shop.rules`, `DIR/shop/init.lua` is `shop`. Every module of those folders is loaded into each test sandbox (in the order their `require`s need), so tests `require` them like the program does.
 - **Sandboxes.** Each test file gets one sandbox with your libs installed, the modules loaded and the framework in its scratch environment: test files see `describe`, `assert`, `spy` and the rest; the modules under test don't. With `--isolation test`, every test gets a fresh sandbox (the modules and the file load again).
 - **Undo.** Each test runs as one request after a checkpoint, and everything it did is reverted after it: lib effects with an `undo<>`, variable writes, patches, timers, frame callbacks, subscriptions, tasks, swapped functions. Module state that isn't an effect (a module's own table fields) lasts for the file (`--isolation test` resets it). Globals a test creates are removed after it and reported as a note.
 - **Setup.** `setup` / `before_all` and `lazy_setup` of the blocks above a test run before its checkpoint: what they do lasts for the file. `teardown` / `after_all` run when the file ends.
+- **Stopped tests.** A test stopped by a limit, its timeout or a cancel still gets its cleanup (`finally`, `after_each`, its globals removed) in a request of its own.
 - **Leaks.** After the revert, the runner checks that nothing the test started is left: timers and frame callbacks, subscriptions, tasks, waiting requests, ledger effects and changed variables. A leak makes a passing test an error. Effects of bindings marked `Rhp::irreversible` stay and are noted; with `test.expect_undone()` (or `--strict-undo` for every test) they fail the test.
-- **Limits.** Each test request runs with `--instructions N` / `--memory BYTES` limits when given, and a wall-time limit of `--timeout` (10 s by default). A test that waits on time or frames forever stops after `--max-frames` (10 000) pump calls; one that waits for an event nothing will fire stops sooner, with a message saying so.
+- **Limits.** Each test request runs with `--instructions N` / `--memory BYTES` limits when given, and a wall-time limit of `--timeout` (10 s by default). A test that waits on time or frames forever stops after `--max-frames` (10 000) pump calls; one that waits for an event or a result nothing can deliver (no timers, frame callbacks or tasks left, for a second) stops sooner, with a message saying so.
 - **Roles.** Scripts run with `--role patch` by default (what a patching client gets). Use `--role observe` or `admin` to test what those roles may do.
 - **Order.** Tests run in file order. `--shuffle` randomizes the order within each file from `--seed` (printed every run, so a failing order can be replayed); the same seed drives property and fuzz inputs.
 
@@ -304,7 +306,7 @@ end)
 Without the real program, a test can run against **fakes** with the same names and types.
 
 - **From C++:** install `Rhp::test::fake<shop::lib>` instead of `shop::lib`. Every function records its calls and returns its type's default; `undo<>` tags record their reverts; variables get storage of their own; handles are always alive. The scripts can't tell.
-- **From an API description:** `sandbox::api()` (Lua: `rhp.api()`) describes the installed libs. `--dump-api api.json` writes it from a test executable; `rhp-cli test --api api.json` fakes those libs; `rhp-cli test --api-from host:port -i id.rhpid` fetches it from a running host.
+- **From an API description:** `sandbox::api()` (Lua: `rhp.api()`) describes the installed libs. `--dump-api api.json` writes it from a test executable; `rhp-cli test --api api.json` fakes those libs; `rhp-cli test --api-from host:port --api-identity id.rhpid` fetches it from a running host (`--api-tls`, `--api-ca`, `--api-server-name`, `--api-insecure-lan` as for other commands).
 
 Either way, from Lua:
 
@@ -315,7 +317,7 @@ fake.reset("shop.price")
 local c = fake.handle("customer", { gold = 50 })         -- description fakes: a handle with properties
 ```
 
-Calls and configured results are forgotten after each test. `--strict-fakes` makes a call nothing configured raise `not mocked: shop.price("sword")`. Arguments are type-checked against the description. A fake of a function whose result has no default (and doesn't convert from a value) doesn't compile; one that converts from a value but has no default needs `fake.returns`.
+Calls, and results configured from Lua, are forgotten after each test (results a test executable configured from C++ through `fake_registry` before the run stay); variables of description fakes go back to their values. `--strict-fakes` makes a call nothing configured raise `not mocked: shop.price("sword")`. Arguments are type-checked against the description. A fake of a function whose result has no default (and doesn't convert from a value) doesn't compile; one that converts from a value but has no default needs `fake.returns`.
 
 ## Coverage and profiles
 
@@ -342,12 +344,12 @@ game_lua_tests tests -s scripts -r junit:out/lua-tests.xml -r github --coverage 
 `rhp-cli test` takes the same arguments:
 
 - With no libs, scripts get the `rhp` API only: fine for pure logic.
-- `--api api.json` or `--api-from host:port -i id.rhpid` fakes the libs of a description.
+- `--api api.json` or `--api-from host:port --api-identity id.rhpid` fakes the libs of a description.
 - `--exe build/game_lua_tests` runs your program's own test executable with the other arguments, so one command line works for every project.
 
 ## In CMake and CI
 
-`rhp_add_lua_tests(<name> TARGET <exe> FILES <specs...> [SCRIPTS <dirs...>] [ROOT <dir>] [ARGS <args...>] [LABELS <labels...>] [JUNIT] [TIMEOUT <s>])` makes each file a ctest test named `<name>.<file stem>`, labelled `lua`. It comes with `find_package(rhp)` and with RHP as a subdirectory. `TARGET rhp-cli` runs files with `rhp-cli test`. `JUNIT` writes `<build>/<name>/<stem>.junit.xml` for CI test reports.
+`rhp_add_lua_tests(<name> TARGET <exe> FILES <specs...> [SCRIPTS <dirs...>] [ROOT <dir>] [ARGS <args...>] [LABELS <labels...>] [JUNIT] [TIMEOUT <s>] [STORE_SNAPSHOTS])` makes each file a ctest test named `<name>.<file stem>` (with its folder too when two files share a stem), labelled `lua`. It runs with `--ci`, so ctest never writes new snapshots into the source tree (`STORE_SNAPSHOTS` allows it); store them by running the test executable once. It comes with `find_package(rhp)` and with RHP as a subdirectory. `TARGET rhp-cli` runs files with `rhp-cli test`. `JUNIT` writes `<build>/<name>/<stem>.junit.xml` for CI test reports.
 
 A GitHub Actions step:
 

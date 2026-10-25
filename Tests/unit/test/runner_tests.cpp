@@ -24,6 +24,9 @@
 #include <rhp/script/patch_point.hpp>
 #include <rhp/script/sandbox.hpp>
 #include <rhp/test/test.hpp>
+#include <rhp/utils/scope_guard.hpp>
+
+#include "embedded_fixtures.hpp"
 
 namespace fs = std::filesystem;
 using Rhp::test::status;
@@ -97,14 +100,35 @@ inline void reset() {
     g_wipes = 0;
 }
 
-const fs::path kFixtures{RHP_TEST_FIXTURES};
+// The fixture folder: the source tree's, or (on a device that can't read it) the embedded copy
+// written to a temporary folder.
+fs::path fixtures_root() {
+    const fs::path source{RHP_TEST_FIXTURES};
+    std::error_code ec;
+    if (fs::exists(source / "specs" / "basics_spec.lua", ec)) {
+        return source;
+    }
+    const fs::path base = fs::temp_directory_path() / std::format("rhp_test_fixtures_{}", std::chrono::steady_clock::now().time_since_epoch().count());
+    for (const auto& f : rhp_test_fixtures::fixture_files()) {
+        const fs::path path = base / fs::path{std::string{f.name}};
+        fs::create_directories(path.parent_path(), ec);
+        std::ofstream{path, std::ios::binary} << f.text;
+    }
+    return base / "fixtures";
+}
+
+// Computed on first use: the embedded table is initialized dynamically, so not before main().
+const fs::path& fixtures_dir() {
+    static const fs::path dir = fixtures_root();
+    return dir;
+}
 
 Rhp::test::run_options options_for(std::vector<std::string> specs) {
     Rhp::test::run_options o;
-    o.root = kFixtures;
-    o.scripts.push_back(kFixtures / "scripts");
+    o.root = fixtures_dir();
+    o.scripts.push_back(fixtures_dir() / "scripts");
     for (const std::string& s : specs) {
-        o.tests.push_back(kFixtures / "specs" / s);
+        o.tests.push_back(fixtures_dir() / "specs" / s);
     }
     o.seed = 42;
     o.limits.instructions = 20'000'000; // a runaway test stops here
@@ -273,6 +297,9 @@ TEST_CASE("measures budgets and leak checks", "[test][measure]") {
     const auto* over = find(x.result, "measure over the instruction budget (fails)");
     REQUIRE(over != nullptr);
     CHECK(over->message.find("over budget: instructions") != std::string::npos);
+    const auto* peak = find(x.result, "measure measuring something small keeps the test's own peak (fails)");
+    REQUIRE(peak != nullptr);
+    CHECK(peak->message.find("over budget: memory") != std::string::npos);
     const auto* global = find(x.result, "measure a global left behind is removed (ok)");
     REQUIRE(global != nullptr);
     REQUIRE(global->notes.size() == 1);
@@ -353,9 +380,9 @@ struct temp_tree {
     explicit temp_tree(std::string_view name, std::vector<std::string> specs) {
         root = fs::temp_directory_path() / std::format("rhp_test_{}_{}", name, std::chrono::steady_clock::now().time_since_epoch().count());
         fs::create_directories(root / "specs");
-        fs::copy(kFixtures / "scripts", root / "scripts", fs::copy_options::recursive);
+        fs::copy(fixtures_dir() / "scripts", root / "scripts", fs::copy_options::recursive);
         for (const std::string& s : specs) {
-            fs::copy_file(kFixtures / "specs" / s, root / "specs" / s);
+            fs::copy_file(fixtures_dir() / "specs" / s, root / "specs" / s);
         }
     }
     ~temp_tree() {
@@ -411,7 +438,7 @@ TEST_CASE("snapshots are stored matched updated and refused in ci", "[test][snap
 
     run x = run_specs(tree.options({"snapshot_spec.lua"}));
     INFO(x.text);
-    CHECK(x.result.totals.passed == 2);
+    CHECK(x.result.totals.passed == 3);
     REQUIRE(fs::exists(stored));
     const std::string first = temp_tree::read_file(stored);
     CHECK(first.find("[\"snapshot a table (ok) 1\"] = [=[") != std::string::npos);
@@ -419,7 +446,7 @@ TEST_CASE("snapshots are stored matched updated and refused in ci", "[test][snap
     CHECK(first.find("snapshot named snapshots and expect (ok) damage") != std::string::npos);
 
     x = run_specs(tree.options({"snapshot_spec.lua"}));
-    CHECK(x.result.totals.passed == 2);
+    CHECK(x.result.totals.passed == 3);
     CHECK(temp_tree::read_file(stored) == first);
 
     tree.replace("snapshot_spec.lua", "{ 1, 2 })", "{ 1, 3 })");
@@ -434,14 +461,14 @@ TEST_CASE("snapshots are stored matched updated and refused in ci", "[test][snap
     Rhp::test::run_options update = tree.options({"snapshot_spec.lua"});
     update.update_snapshots = true;
     x = run_specs(update);
-    CHECK(x.result.totals.passed == 2);
+    CHECK(x.result.totals.passed == 3);
     x = run_specs(tree.options({"snapshot_spec.lua"}));
-    CHECK(x.result.totals.passed == 2);
+    CHECK(x.result.totals.passed == 3);
 
     // A renamed test leaves its snapshot behind: reported as obsolete, removed by an update.
     tree.replace("snapshot_spec.lua", "it(\"a table (ok)\"", "it(\"a renamed table (ok)\"");
     x = run_specs(tree.options({"snapshot_spec.lua"}));
-    CHECK(x.result.totals.passed == 2);
+    CHECK(x.result.totals.passed == 3);
     bool obsolete = false;
     for (const std::string& n : x.result.notes) {
         obsolete = obsolete || n.find("obsolete") != std::string::npos;
@@ -452,7 +479,7 @@ TEST_CASE("snapshots are stored matched updated and refused in ci", "[test][snap
     const std::string good = temp_tree::read_file(stored);
     temp_tree::write_file(stored, "return {");
     x = run_specs(tree.options({"snapshot_spec.lua"}));
-    CHECK(x.result.totals.failed == 2);
+    CHECK(x.result.totals.failed == 3);
     CHECK(find(x.result, "snapshot named snapshots and expect (ok)")->message.find("isn't a snapshot file") != std::string::npos);
     CHECK(temp_tree::read_file(stored) == "return {");
     temp_tree::write_file(stored, good);
@@ -461,7 +488,7 @@ TEST_CASE("snapshots are stored matched updated and refused in ci", "[test][snap
     Rhp::test::run_options ci = tree.options({"snapshot_spec.lua"});
     ci.ci = true;
     x = run_specs(ci);
-    CHECK(x.result.totals.failed == 2);
+    CHECK(x.result.totals.failed == 3);
     CHECK_FALSE(fs::exists(stored));
     const auto* refused = find(x.result, "snapshot named snapshots and expect (ok)");
     REQUIRE(refused != nullptr);
@@ -478,6 +505,15 @@ TEST_CASE("properties shrink failures and reproduce from the seed", "[test][prop
     const auto* list = find(x.result, "property a failing list property shrinks the list (fails)");
     REQUIRE(list != nullptr);
     CHECK(list->message.find("the property returned false") != std::string::npos);
+    const auto* negative = find(x.result, "property a failing negative property shrinks and ends (fails)");
+    REQUIRE(negative != nullptr);
+    CHECK(negative->message.find("Counterexample: (-5)") != std::string::npos);
+    const auto* either = find(x.result, "property one_of shrinks values of either kind (fails)");
+    REQUIRE(either != nullptr);
+    CHECK(either->message.find("Counterexample: ('x')") != std::string::npos);
+    const auto* optional = find(x.result, "property optional shrinks to nil (fails)");
+    REQUIRE(optional != nullptr);
+    CHECK(optional->message.find("Counterexample: (nil)") != std::string::npos);
 
     const run again = run_specs(options_for({"property_spec.lua"}));
     const auto* list_again = find(again.result, "property a failing list property shrinks the list (fails)");
@@ -496,7 +532,20 @@ TEST_CASE("fuzzing finds shrinks and keeps crashes", "[test][fuzz]") {
     const std::size_t at = crash->message.find("Input: ('");
     REQUIRE(at != std::string::npos);
     CHECK(crash->message.substr(at + 12, 2) == "')"); // shrunk to 3 characters
-    const fs::path corpus = tree.root / "specs" / "__fuzz__" / "fuzz_spec" / "fuzz_finds_the_crash__fails_";
+    const auto* any = find(x.result, "fuzz finds a crash with the default generator (fails)");
+    REQUIRE(any != nullptr);
+    CHECK(any->message.find("Fuzzing found a failure") != std::string::npos);
+    CHECK(any->message.find("too long") != std::string::npos);
+    CHECK(any->message.find("attempt to") == std::string::npos); // shrinking gen.any() works
+    fs::path corpus;
+    std::size_t corpora = 0;
+    for (const auto& dir : fs::directory_iterator{tree.root / "specs" / "__fuzz__" / "fuzz_spec"}) {
+        ++corpora;
+        if (dir.path().filename().string().starts_with("fuzz_finds_the_crash__fails_")) {
+            corpus = dir.path();
+        }
+    }
+    CHECK(corpora == 2); // both crashes saved, each in its own folder
     REQUIRE(fs::exists(corpus));
     CHECK(std::distance(fs::directory_iterator{corpus}, fs::directory_iterator{}) == 1);
 
@@ -720,7 +769,7 @@ std::string normalized(std::string text) {
 }
 
 void check_golden(std::string_view name, const std::string& actual) {
-    const fs::path golden = kFixtures.parent_path() / "golden" / name;
+    const fs::path golden = fixtures_dir().parent_path() / "golden" / name;
     const std::string text = normalized(actual);
     std::string expected = fs::exists(golden) ? temp_tree::read_file(golden) : std::string{};
     std::erase(expected, '\r'); // a checkout with CRLF line ends
@@ -792,6 +841,8 @@ TEST_CASE("libs faked from a description stand in for the program", "[test][fake
 
 TEST_CASE("fake of a lib records calls instead of reaching the program", "[test][fake]") {
     const Rhp::test::install_fn install = [](Rhp::script::sandbox& box) { return box.install<Rhp::test::fake<arena_lib>>(); };
+    Rhp::test::fake_registry::instance().set_returns("arena.count", {Rhp::value{std::int64_t{42}}}); // from C++: kept for every test
+    const Rhp::utils::scope_guard forget{[]() noexcept { Rhp::test::fake_registry::instance().reset(); }};
     Rhp::test::run_options o = options_for({"fake_cpp_spec.lua"});
     run x = run_specs(o, install);
     INFO(x.text);
@@ -799,6 +850,8 @@ TEST_CASE("fake of a lib records calls instead of reaching the program", "[test]
     CHECK(g_spawned.empty());
     CHECK(g_gravity == 9.5);
     CHECK(Rhp::test::fake_registry::instance().calls("arena.spawn").empty()); // reset for each test
+    CHECK(Rhp::test::fake_registry::instance().returns("arena.count").has_value());
+    CHECK_FALSE(Rhp::test::fake_registry::instance().returns("arena.spawn").has_value()); // set from Lua: gone
 
     o.strict_fakes = true;
     x = run_specs(o, install);
@@ -837,7 +890,7 @@ TEST_CASE("arguments parse into options", "[test][cli]") {
                     "--repeat", "3", "--fail-fast", "--isolation", "test", "--role", "admin", "--timeout", "250", "--max-frames", "99", "--instructions", "1000",
                     "--memory", "4096", "-r", "junit:out/j.xml", "-r", "tap", "-v", "--coverage", "lcov", "--coverage", "cobertura:c.xml", "--coverage-tests",
                     "--profile=50", "--profile-out", "p.folded", "--no-measure", "--strict-undo", "--ci", "-u", "--fuzz", "300", "--property-runs", "20",
-                    "--api", "api.json", "--strict-fakes", "--list", "--no-color", "--root", "r"});
+                    "--api", "api.json", "--strict-fakes", "--list", "--no-color", "--root", "r", "--epoch", "86400"});
     REQUIRE(p);
     const Rhp::test::run_options& o = p->run;
     CHECK(o.tests == std::vector<fs::path>{"specs"});
@@ -881,6 +934,7 @@ TEST_CASE("arguments parse into options", "[test][cli]") {
     CHECK(o.list_only);
     CHECK(o.color == false);
     CHECK(o.root == fs::path{"r"});
+    CHECK(o.epoch == 86400);
 
     CHECK(parse({"--help"})->help);
     CHECK(parse({"-r", "C:/reports/x.txt"}).error().message.find("unknown reporter") != std::string::npos);
@@ -961,4 +1015,89 @@ TEST_CASE("the API description round trips through a file", "[test][cli]") {
     r = run_cli({root + "/specs/fakes_spec.lua", "--api", root + "/bad.json"}, {});
     CHECK(r.status == 2);
     CHECK(r.err.find("isn't an API description") != std::string::npos);
+}
+
+TEST_CASE("the embedded fixtures are the source tree's", "[test][fixtures]") {
+    const fs::path source{RHP_TEST_FIXTURES};
+    std::error_code ec;
+    if (!fs::exists(source, ec)) {
+        SKIP("the source tree isn't reachable here");
+    }
+    const auto without_cr = [](std::string text) {
+        std::erase(text, '\r');
+        return text;
+    };
+    std::vector<std::string> embedded;
+    for (const auto& f : rhp_test_fixtures::fixture_files()) {
+        embedded.emplace_back(f.name);
+        INFO(f.name);
+        CHECK(without_cr(std::string{f.text}) == without_cr(temp_tree::read_file(source.parent_path() / fs::path{std::string{f.name}})));
+    }
+    // Every fixture file is listed in Tests/unit/CMakeLists.txt (snapshots and corpora a test left aside).
+    for (const fs::path& dir : {source, source.parent_path() / "golden"}) {
+        for (const auto& entry : fs::recursive_directory_iterator{dir}) {
+            const std::string rel = fs::relative(entry.path(), source.parent_path()).generic_string();
+            if (!entry.is_regular_file() || rel.find("__") != std::string::npos || rel.ends_with(".actual")) {
+                continue;
+            }
+            INFO(rel << " isn't in rhp_test_fixture_files (Tests/unit/CMakeLists.txt)");
+            CHECK(std::ranges::find(embedded, rel) != embedded.end());
+        }
+    }
+}
+
+TEST_CASE("a test stopped by a limit still gets its cleanup", "[test][abort]") {
+    Rhp::test::run_options o = options_for({"abort_spec.lua"});
+    o.limits.instructions = 2'000'000;
+    const run x = run_specs(o);
+    INFO(x.text);
+    check_conventions(x);
+    const auto* runaway = find(x.result, "aborted runs away (errors)");
+    REQUIRE(runaway != nullptr);
+    bool noted = false;
+    for (const std::string& n : runaway->notes) {
+        noted = noted || n.find("runaway_global") != std::string::npos;
+    }
+    CHECK(noted);
+}
+
+TEST_CASE("snapshots refuse duplicate names and survive being emptied", "[test][snapshot]") {
+    const temp_tree tree{"snap2", {"dup_snapshot_spec.lua", "snapshot_spec.lua"}};
+    run x = run_specs(tree.options({"dup_snapshot_spec.lua"}));
+    INFO(x.text);
+    CHECK(x.result.totals.passed == 1);
+    CHECK(x.result.totals.failed == 1);
+    bool refused = false;
+    for (const auto& t : x.result.files[0].tests) {
+        refused = refused || t.message.find("two snapshots are named 'same name 1'") != std::string::npos;
+    }
+    CHECK(refused);
+
+    // Every snapshot assertion removed, then --update-snapshots: the file holds none; adding one back works.
+    tree.replace("snapshot_spec.lua", "VALUE)", "{ 1 })");
+    x = run_specs(tree.options({"snapshot_spec.lua"}));
+    CHECK(x.result.totals.passed == 3);
+    const std::string original = temp_tree::read_file(tree.root / "specs" / "snapshot_spec.lua");
+    temp_tree::write_file(tree.root / "specs" / "snapshot_spec.lua", "it('nothing (ok)', function() end)\n");
+    Rhp::test::run_options update = tree.options({"snapshot_spec.lua"});
+    update.update_snapshots = true;
+    x = run_specs(update);
+    CHECK(x.result.totals.passed == 1);
+    temp_tree::write_file(tree.root / "specs" / "snapshot_spec.lua", original);
+    x = run_specs(tree.options({"snapshot_spec.lua"}));
+    CHECK(x.result.totals.passed == 3);
+    CHECK(x.result.totals.failed == 0);
+}
+
+TEST_CASE("a module that doesn't load doesn't stop the tests", "[test][modules]") {
+    const temp_tree tree{"badmod", {"isolation_spec.lua"}};
+    temp_tree::write_file(tree.root / "scripts" / "game" / "broken.lua", "return +\n");
+    const run x = run_specs(tree.options({"isolation_spec.lua"}));
+    INFO(x.text);
+    REQUIRE(x.result.files.size() == 1);
+    CHECK(x.result.files[0].tests.size() == 2);
+    CHECK(outcome_of(x, "second reads the module state") == status::kPassed);
+    REQUIRE(x.result.files[0].errors.size() == 1);
+    CHECK(x.result.files[0].errors[0].message.find("module game.broken didn't load") != std::string::npos);
+    CHECK_FALSE(x.result.totals.ok());
 }

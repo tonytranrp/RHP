@@ -59,6 +59,15 @@ describe("each", function()
         assert.is_number(case.hp)
     end)
 
+    it.each({ { n = 3, expected = 6 } })("factorial of $n is $expected (ok)", function(case)
+        assert.equals(6, case.expected)
+        assert.equals(3, case.n)
+    end)
+
+    it.each({ { 1 / 0 }, { 0 / 0 } })("odd numbers like %d don't break names (ok)", function(v)
+        assert.is_number(v)
+    end)
+
     it.each({ "a", "b" })("case %# is %s (ok)", function(v)
         assert.is_string(v)
     end)

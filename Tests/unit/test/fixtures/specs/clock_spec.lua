@@ -40,6 +40,30 @@ describe("clock", function()
         assert.equals(before + 32, test.now())
     end)
 
+    it("frames right after advance count from the advanced time (ok)", function()
+        local n = 0
+        rhp.every_frame(function() n = n + 1 end)
+        local before = test.now()
+        test.advance(100)
+        local after_advance = n
+        test.frames(1, { dt = 16 })
+        assert.equals(before + 116, test.now())
+        assert.equals(after_advance + 1, n)
+    end)
+
+    it("an event a frame callback fires later wakes a waiting test (ok)", function()
+        local frames = 0
+        rhp.every_frame(function()
+            frames = frames + 1
+            if frames == 150 then
+                rhp.publish("game.late_start", frames)
+            end
+        end)
+        local fired, at = rhp.wait_event("game.late_start")
+        assert.is_true(fired)
+        assert.equals(150, at)
+    end)
+
     it("run_pending and run_all (ok)", function()
         local hits = 0
         rhp.after(10, function() hits = hits + 1 end)

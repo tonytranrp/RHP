@@ -10,6 +10,7 @@
 #include <vector>
 
 #include <rhp/core/result.hpp>
+#include <rhp/core/value.hpp>
 #include <rhp/script/sandbox.hpp>
 #include <rhp/test/runner.hpp>
 
@@ -18,8 +19,9 @@ namespace Rhp::test {
 // The whole command line of a test executable (or `rhp-cli test`): parses `args` (without the
 // program name), runs or lists the tests, writes the reports and coverage files, and returns the
 // exit status: 0 when everything passed, 1 when a test or a file failed, 2 for bad arguments.
+// `api`: an API description to fake (as --api FILE would), from rhp-cli test --api-from.
 int run_cli(std::span<const std::string_view> args, const install_fn& install, std::string_view program = "lua-tests", std::ostream& out = std::cout,
-            std::ostream& err = std::cerr);
+            std::ostream& err = std::cerr, const value* api = nullptr);
 
 // main() of a test executable that installs the program's libs:
 //

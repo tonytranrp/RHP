@@ -5,13 +5,20 @@ include_guard(GLOBAL)
 # Writes a .cpp defining `std::span<const <ns>::lua_source> <ns>::<fn>() noexcept` with the bytes of
 # every file (in order) and its chunk name (<prefix><file name>). Regenerated at configure time when
 # a file changes (CMAKE_CONFIGURE_DEPENDS), and only rewritten when the text differs.
+#
+# With BASE_DIR <dir>, a file's name is its path relative to <dir> ("specs/a_spec.lua") instead of
+# its file name.
 function(rhp_embed_text output)
-    cmake_parse_arguments(PARSE_ARGV 1 arg "" "NAMESPACE;FUNCTION;PREFIX;HEADER" "FILES")
+    cmake_parse_arguments(PARSE_ARGV 1 arg "" "NAMESPACE;FUNCTION;PREFIX;HEADER;BASE_DIR" "FILES")
     set(arrays "")
     set(entries "")
     set(index 0)
     foreach(file IN LISTS arg_FILES)
-        get_filename_component(name "${file}" NAME)
+        if(arg_BASE_DIR)
+            file(RELATIVE_PATH name "${arg_BASE_DIR}" "${file}")
+        else()
+            get_filename_component(name "${file}" NAME)
+        endif()
         file(READ "${file}" hex HEX)
         string(LENGTH "${hex}" hex_length)
         math(EXPR size "${hex_length} / 2")

@@ -30,7 +30,12 @@ local function deep_copy(v, seen)
     for k, x in next, v do
         out[deep_copy(k, seen)] = deep_copy(x, seen)
     end
-    return setmetatable(out, getmetatable(v))
+    -- A protected metatable (__metatable) can't be set on the copy: comparisons ignore it anyway.
+    local mt = getmetatable(v)
+    if type(mt) == "table" then
+        pcall(setmetatable, out, mt)
+    end
+    return out
 end
 
 local function copy_args(args)
@@ -94,7 +99,20 @@ end
 -- Puts the original back (the sandbox would at the end of the test anyway).
 function spy_mt:revert()
     if self.target ~= nil then
-        bridge.swap(self.target, self.key, self.original)
+        -- Only while this spy is the member: a spy installed over it stays (the test's end puts
+        -- everything back anyway), and this one just calls through from now on.
+        if rawequal(self.target[self.key], self.fn) then
+            -- Below may be a spy reverted earlier (it only calls through): skip to what it replaced.
+            local original = self.original
+            while spies[original] ~= nil and spies[original].reverted do
+                original = spies[original].original
+            end
+            bridge.swap(self.target, self.key, original)
+        else
+            local original = self.original
+            self.callback = function(...) return original(...) end
+        end
+        self.reverted = true
         self.target = nil
     end
     return self.original

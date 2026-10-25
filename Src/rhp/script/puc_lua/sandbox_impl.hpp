@@ -354,6 +354,7 @@ public:
     void stop_metering();
     [[nodiscard]] run_meter meter();
     void reset_peak() noexcept { peak_ = memory_used_; }
+    void raise_peak(std::size_t at_least) noexcept { peak_ = std::max(peak_, at_least); }
     result<void> collect_garbage(int cycles);
     result<void> set_gc_mode(gc_mode mode);
     result<void> start_coverage();

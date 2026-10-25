@@ -479,6 +479,7 @@ int test_command(std::vector<std::string> args) {
         into = args[++i];
         return true;
     };
+    // rhp-cli's own options are named so they can't be mistaken for the runner's (--filter --tls).
     for (std::size_t i = 0; i < args.size(); ++i) {
         const std::string& a = args[i];
         bool ok = true;
@@ -486,15 +487,15 @@ int test_command(std::vector<std::string> args) {
             ok = take(i, exe);
         } else if (a == "--api-from") {
             ok = take(i, conn.address);
-        } else if (a == "-i" || a == "--identity") {
+        } else if (a == "--api-identity") {
             ok = take(i, conn.identity);
-        } else if (a == "--ca") {
+        } else if (a == "--api-ca") {
             ok = take(i, conn.ca);
-        } else if (a == "--server-name") {
+        } else if (a == "--api-server-name") {
             ok = take(i, conn.server_name);
-        } else if (a == "--tls") {
+        } else if (a == "--api-tls") {
             conn.tls = true;
-        } else if (a == "--insecure-lan") {
+        } else if (a == "--api-insecure-lan") {
             conn.insecure_lan = true;
         } else {
             rest.push_back(a);
@@ -506,7 +507,8 @@ int test_command(std::vector<std::string> args) {
     if (std::ranges::find(rest, "--help") != rest.end() || std::ranges::find(rest, "-h") != rest.end()) {
         std::print("rhp-cli test also takes:\n"
                    "      --exe PROGRAM          run a program's own test executable (its real libs) with the other arguments\n"
-                   "      --api-from HOST:PORT   fake the libs of a running host (with -i/--identity, --tls, --ca, --server-name, --insecure-lan)\n\n");
+                   "      --api-from HOST:PORT   fake the libs of a running host, with --api-identity FILE (or RHP_IDENTITY),\n"
+                   "                             --api-tls, --api-ca FILE, --api-server-name NAME, --api-insecure-lan\n\n");
     }
     if (!exe.empty()) {
         auto status = Rhp::platform::run_process(exe, rest);
@@ -516,37 +518,28 @@ int test_command(std::vector<std::string> args) {
         }
         return *status;
     }
-    std::filesystem::path api_file;
+    std::optional<Rhp::value> api;
     if (!conn.address.empty()) {
         if (conn.identity.empty()) {
             conn.identity = env("RHP_IDENTITY");
+        }
+        if (conn.identity.empty()) {
+            std::println(stderr, "rhp-cli test: --api-from needs --api-identity FILE (or RHP_IDENTITY)");
+            return 2;
         }
         auto c = open(conn, nullptr, true);
         if (!c) {
             return 2;
         }
-        auto api = c->client->exec("return rhp.api()", "rhp-cli test");
-        if (!api || api->empty()) {
-            std::println(stderr, "rhp-cli test: the host didn't describe its API: {}", api ? std::string{"no value"} : std::format("{}", api.error()));
+        auto described = c->client->exec("return rhp.api()", "rhp-cli test");
+        if (!described || described->empty()) {
+            std::println(stderr, "rhp-cli test: the host didn't describe its API: {}", described ? std::string{"no value"} : std::format("{}", described.error()));
             return 2;
         }
-        api_file = std::filesystem::temp_directory_path() /
-                   std::format("rhp-api-{}.json", std::chrono::steady_clock::now().time_since_epoch().count());
-        const std::string text = Rhp::json::to_text(api->front(), 2) + "\n";
-        if (!Rhp::platform::replace_file(api_file, std::span<const std::byte>{reinterpret_cast<const std::byte*>(text.data()), text.size()})) {
-            std::println(stderr, "rhp-cli test: can't write {}", api_file.generic_string());
-            return 2;
-        }
-        rest.emplace_back("--api");
-        rest.push_back(api_file.string());
+        api = std::move(described->front());
     }
     std::vector<std::string_view> views{rest.begin(), rest.end()};
-    const int status = Rhp::test::run_cli(views, {}, "rhp-cli test");
-    if (!api_file.empty()) {
-        std::error_code ec;
-        std::filesystem::remove(api_file, ec);
-    }
-    return status;
+    return Rhp::test::run_cli(views, {}, "rhp-cli test", std::cout, std::cerr, api ? &*api : nullptr);
 }
 
 int inspect(const std::string& path) {

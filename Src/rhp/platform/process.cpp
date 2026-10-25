@@ -2,6 +2,7 @@
 #include <cstring>
 #include <filesystem>
 #include <format>
+#include <optional>
 #include <span>
 #include <string>
 #include <system_error>
@@ -32,14 +33,35 @@ namespace Rhp::platform {
 
 namespace {
 
-std::wstring widen(std::string_view s) {
+// UTF-8 to UTF-16; nullopt for text that isn't UTF-8.
+std::optional<std::wstring> widen(std::string_view s) {
     if (s.empty()) {
-        return {};
+        return std::wstring{};
     }
-    const int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0);
+    const int n = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, s.data(), static_cast<int>(s.size()), nullptr, 0);
+    if (n <= 0) {
+        return std::nullopt;
+    }
     std::wstring out(static_cast<std::size_t>(n), L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), out.data(), n);
+    MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, s.data(), static_cast<int>(s.size()), out.data(), n);
     return out;
+}
+
+// A program without a folder, looked up on PATH only (CreateProcess would try the current folder
+// first, where anything could be planted).
+std::optional<std::wstring> on_path(const std::wstring& name) {
+    const DWORD size = GetEnvironmentVariableW(L"PATH", nullptr, 0);
+    std::wstring path(size, L'\0');
+    if (size == 0 || GetEnvironmentVariableW(L"PATH", path.data(), size) == 0) {
+        return std::nullopt;
+    }
+    std::wstring found(32768, L'\0');
+    const DWORD n = SearchPathW(path.c_str(), name.c_str(), L".exe", static_cast<DWORD>(found.size()), found.data(), nullptr);
+    if (n == 0 || n >= found.size()) {
+        return std::nullopt;
+    }
+    found.resize(n);
+    return found;
 }
 
 // One argument quoted the way CommandLineToArgvW (and the C runtime) splits it back.
@@ -75,19 +97,33 @@ result<int> run_process(const std::filesystem::path& program, std::span<const st
     std::filesystem::path exe = program;
     if (exe.has_parent_path()) {
         std::error_code ec;
-        exe = std::filesystem::absolute(exe, ec); // a relative path with '/' isn't searched for
+        exe = std::filesystem::absolute(exe, ec);
+    } else if (auto found = on_path(exe.wstring())) {
+        exe = *found;
+    } else {
+        return fail(errc::kNotFound, std::format("{} isn't on PATH", program.generic_string()), "run_process");
     }
     exe.make_preferred();
+    // Batch files run through cmd.exe, whose own parsing of arguments no quoting makes safe.
+    const std::wstring extension = exe.extension().wstring();
+    if (_wcsicmp(extension.c_str(), L".bat") == 0 || _wcsicmp(extension.c_str(), L".cmd") == 0) {
+        return fail(errc::kInvalidArgument, std::format("{} is a batch file: run the program it starts instead", program.generic_string()), "run_process");
+    }
     std::wstring line;
     append_quoted(line, exe.wstring());
     for (const std::string& a : args) {
+        auto wide = widen(a);
+        if (!wide) {
+            return fail(errc::kInvalidArgument, "an argument isn't UTF-8", "run_process");
+        }
         line += L' ';
-        append_quoted(line, widen(a));
+        append_quoted(line, *wide);
     }
     STARTUPINFOW startup{};
     startup.cb = sizeof(startup);
     PROCESS_INFORMATION info{};
-    if (CreateProcessW(nullptr, line.data(), nullptr, nullptr, TRUE, 0, nullptr, nullptr, &startup, &info) == 0) {
+    const std::wstring application = exe.wstring();
+    if (CreateProcessW(application.c_str(), line.data(), nullptr, nullptr, TRUE, 0, nullptr, nullptr, &startup, &info) == 0) {
         return fail(errc::kNotFound, std::format("can't start {}: {}", program.generic_string(), std::system_category().message(static_cast<int>(GetLastError()))),
                     "run_process");
     }

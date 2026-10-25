@@ -22,7 +22,7 @@ build/bench/Tests/bench/Release/rhp_bench "[bench]" --benchmark-samples 50 --ben
 python Tools/bench/summarize.py bench.xml
 ```
 
-`Tools/bench/compare.py before.xml after.xml` diffs two runs and reports a change only when the confidence intervals don't overlap and the means differ by more than 5% (`--threshold`). The `unchecked` side runs the same work with `limits.cancel_checks = kNone`. Groups can be run alone: `"[lua]"`, `"[bindings]"`, `"[patch]"`, `"[events]"`, `"[scheduler]"`, `"[requests]"`, `"[wire]"`, `"[security]"`, `"[e2e]"`, `"[tools]"`.
+`Tools/bench/compare.py before.xml after.xml` diffs two runs and reports a change only when the confidence intervals don't overlap and the means differ by more than 5% (`--threshold`). The `unchecked` side runs the same work with `limits.cancel_checks = kNone`. Groups can be run alone: `"[lua]"`, `"[bindings]"`, `"[patch]"`, `"[events]"`, `"[scheduler]"`, `"[requests]"`, `"[wire]"`, `"[security]"`, `"[e2e]"`, `"[tools]"`, `"[testing]"`.
 
 Always benchmark a Release build (`RelWithDebInfo` on MSVC inlines less). On a laptop or a hybrid-core CPU, pin the process to one performance core and keep the machine idle; even then, treat differences under 10% as noise unless they repeat. ctest only runs a two-sample smoke pass (`bench.smoke`) so the suite keeps compiling and running.
 
@@ -39,6 +39,7 @@ Always benchmark a Release build (`RelWithDebInfo` on MSVC inlines less). On a l
 | `wire` | MessagePack encode / decode, value copy, CRC32C, frame encode / decode at 64 B, 4 KiB, 64 KiB | `memcpy` of the same bytes |
 | `security` | BLAKE2b-256, Ed25519 sign and verify of 4 KiB | |
 | `e2e` | a signed `exec` and a `call` from a client to a host over loopback, both on one thread (`io<zero_threads>`) | the same `exec` on a sandbox directly (`e2e local`) |
+| `testing` (Stage 12) | the same loop and `fib(22)` with the exact instruction meter, with line coverage, and both; the test runner over a file with no tests, 100 empty tests (measured and `--no-measure`), and one test doing 10k lib calls (plain and through `spy.on`), 10k plain checks, 10k `assert.equals`, 10k `expect().to.equal` | the same Lua on a plain `lua_State`; a state compiling the framework; 100 `pcall`s of empty functions |
 | `tools` (Stage 11) | the same loop and `fib(22)` with no tool, with a breakpoint armed elsewhere / on a line number the loop runs / inside the module, and with the profiler sampling every 1000 and 100 instructions; a tunable read and a `tune` write | the same Lua on a plain `lua_State`; a plain global read and write |
 
 ## Results
@@ -134,3 +135,36 @@ What the numbers say:
 - **An armed debugger costs about 2-2.5x on top of the sandbox** for line-dense code: every line runs the hook, and the line bitmap rejects it. A line number that has a breakpoint in any source adds a `lua_getinfo` and a source lookup (`debug-line`). Gating line events on call / return per source was tried and dropped: re-arming the hook restarts Lua's instruction countdown, which starved instruction limits and cancels. Clear breakpoints when you stop debugging (`set_breakpoints(source, {})`, `debug_reset()`, or end the debugging session).
 - **The profiler at its default interval (1000) is close to free** on loops (2.06x vs 2.10x) and costs about 10% on call-heavy code. At 100 the stack walks show, most on deep recursion (`fib`: 4.8x). Sample at 1000 unless short scripts need more resolution.
 - **Tunables are for tools, not hot paths.** Listing one tunable builds its description (tags, current value); a `tune` runs a journaled scratch request. Both are per command, not per frame.
+
+## Stage 12 test engine
+
+Measured on 2026-10-24 on the same laptop (Windows 11, MSVC Release, pinned to one core at high priority, 40 samples). `-off` rows are the same work without the feature (the plain sandbox, or the runner on a test without spies or assertions), so a feature's cost is the difference.
+
+| Work | Raw | Off | Metered | Coverage | Coverage + metered |
+|---|---:|---:|---:|---:|---:|
+| 100k arithmetic loop | 965 us | 1.82 ms | 1.82 ms | 5.23 ms | 5.23 ms |
+| fib(22) | 1.46 ms | 2.77 ms | 2.81 ms | 5.31 ms | 5.34 ms |
+
+The runner, before and after the optimizations below (same machine, same settings):
+
+| Work | Before | After |
+|---|---:|---:|
+| a test file with no tests (a sandbox, the framework, the file) | 3.97 ms | 1.39 ms |
+| 100 empty tests, measured (one file) | 26.5 ms | 15.3 ms |
+| 100 empty tests, `--no-measure` | 6.82 ms | 4.07 ms |
+| 10k lib calls in one test (`spy-off`) | 5.19 ms | 2.52 ms |
+| 10k lib calls through `spy.on` | 42.9 ms | 25.0 ms |
+| 10k plain checks (`assert-off`) | 4.51 ms | 1.83 ms |
+| 10k `assert.equals` | 35.7 ms | 14.7 ms |
+| 10k `expect(x).to.equal(y)` | 62.4 ms | 21.5 ms |
+
+For scale: a raw state compiling the framework takes 3.28 ms, and 100 `pcall`s of empty functions 54 us.
+
+What the numbers say:
+
+- **Exact metering is free.** The meter adds the count hook's ticks and reads each thread's countdown after a resume; the loop and `fib` cost the same with and without it.
+- **Coverage costs about 2-3x on line-dense code**, the price of Lua's line hook (the same as an armed debugger, [Stage 11](#stage-11-tools)). The hook itself is a lookup of the running prototype and an array increment. Turn coverage on for coverage runs, not for every run.
+- **A test file costs about 1.4 ms.** Most of the 4 ms before was parsing the framework's 100 KB of Lua in every new sandbox; now each process compiles it once and later sandboxes load its bytecode (`sandbox::exec_cached`, trusted sources only). Test files are cached the same way, which matters with `--isolation test`, where every test makes a sandbox.
+- **A measured test costs about 150 us, an unmeasured one about 40 us.** The difference is the full garbage collection on each side of a measured test (the retained-memory figure); there was a second collection on each side before, needed only for objects with finalizers. `--no-measure` skips them for fast iteration.
+- **Assertions and spies are cheap enough for hot loops.** An `assert.equals` costs about 1.3 us (word chains are made once per spelling and resolved once), an `expect(...).to.equal` about 2 us (one table per word, messages built only for a failure), a call through a spy about 2.3 us (arguments without tables aren't copied).
+
