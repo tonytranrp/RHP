@@ -25,6 +25,11 @@ else()
     set(_rhp_pch_default OFF)
 endif()
 option(RHP_PCH "Precompile the standard headers once for RHP's libraries and once for its tests (cmake/RhpPch.cmake)" ${_rhp_pch_default})
+# Link-time optimization of RHP's targets (and the dependencies built with them) in optimized builds:
+# measured 10-35% on binding calls, variable and property reads and handle methods, under 5% on
+# pure script work. Off by default:
+# objects compiled for LTO only link with the same compiler version.
+option(RHP_LTO "Link-time optimization (IPO) for RHP's targets in Release / RelWithDebInfo / MinSizeRel" OFF)
 option(RHP_UNITY_BUILD "Compile RHP's libraries, tests and tools as unity files (clean builds)" OFF)
 set(RHP_SANITIZE "" CACHE STRING "Sanitizers to enable: 'address;undefined', 'address' (MSVC) or 'thread'")
 
@@ -77,6 +82,18 @@ if(RHP_IS_TOP_LEVEL AND CMAKE_GENERATOR MATCHES "Ninja" AND NOT DEFINED CMAKE_JO
     endif()
     set_property(GLOBAL APPEND PROPERTY JOB_POOLS rhp_link=${_rhp_links})
     set(CMAKE_JOB_POOL_LINK rhp_link)
+endif()
+
+if(RHP_LTO)
+    include(CheckIPOSupported)
+    check_ipo_supported(RESULT _rhp_ipo OUTPUT _rhp_ipo_why LANGUAGES CXX)
+    if(_rhp_ipo)
+        foreach(_rhp_config RELEASE RELWITHDEBINFO MINSIZEREL)
+            set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_${_rhp_config} ON)
+        endforeach()
+    else()
+        message(WARNING "RHP: RHP_LTO is on but this toolchain can't do it: ${_rhp_ipo_why}")
+    endif()
 endif()
 
 # MSVC: debug information inside the objects (/Z7), so an installed static library needs no PDBs.

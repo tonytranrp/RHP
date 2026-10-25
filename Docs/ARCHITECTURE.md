@@ -874,6 +874,7 @@ flowchart BT
 | `RHP_FUZZ` | `OFF` | Tests/fuzz as libFuzzer executables (Clang) |
 | `RHP_SANITIZE` | empty | `address;undefined` (Clang), `address` (MSVC) or `thread` |
 | `RHP_PCH` | `ON` when top-level, not cross-compiling and not clang-cl | one shared precompiled header for the libraries, one for the tests |
+| `RHP_LTO` | `OFF` | link-time optimization in optimized configurations |
 | `RHP_UNITY_BUILD` | `OFF` | RHP's own targets as unity files (CI: linux-clang, windows-msvc) |
 | `RHP_WARNINGS_AS_ERRORS` | `ON` | MSVC `/W4 /permissive- /Zc:__cplusplus /utf-8 /WX`; Clang `-Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Werror` (RHP's own targets only) |
 

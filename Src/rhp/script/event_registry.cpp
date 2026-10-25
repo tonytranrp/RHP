@@ -72,7 +72,9 @@ void event_state::end_delivery(const event_listener* listener, std::thread::id m
     if (const auto it = std::ranges::find(d, std::pair<const event_listener*, std::thread::id>{listener, me}); it != d.end()) {
         d.erase(it);
     }
-    shared_->idle.notify_all();
+    if (shared_->waiting != 0) {
+        shared_->idle.notify_all();
+    }
 }
 
 void event_state::attach(event_listener* listener) {
@@ -98,9 +100,11 @@ void event_state::detach(const event_listener* listener) noexcept {
     active_.store(!l.empty(), std::memory_order_release);
     // Wait for deliveries to it on other threads (its own thread may be inside one: that finishes).
     const auto me = std::this_thread::get_id();
+    ++shared_->waiting;
     shared_->idle.wait(lock, [&] {
         return std::ranges::none_of(shared_->delivering, [&](const auto& d) { return d.first == listener && d.second != me; });
     });
+    --shared_->waiting;
 }
 
 std::size_t event_state::listeners() {
