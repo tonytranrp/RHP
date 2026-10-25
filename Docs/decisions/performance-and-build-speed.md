@@ -63,7 +63,10 @@ memory when every test executable linked at once.
 - **One shared precompiled header per group** (`RHP_PCH`, `cmake/RhpPch.cmake`): the libraries above
   core and the test suites reuse one PCH each. A PCH per target cost more than it saved (31 PCH
   compiles, about 190 MB each); `<rhp/rhp.hpp>` stays out (it slowed every PCH). Headers come in
-  force-included, so CI's `linux-clang-asan` job builds without it.
+  force-included, so CI's `linux-clang-asan` job builds without it. `rhp_net` and the test suites
+  that link Asio compile without it (Asio's macros and `_WIN32_WINNT` can change what the standard
+  headers mean), and it is off for clang-cl (it refuses a PCH built with other `/D` macros) and for
+  cross builds (not measured there).
 - **Catch2 as unity files** (always: it is built once per tree).
 - **Links share a Ninja job pool** sized by memory (top-level builds): a link takes 1-2 s alone and
   13-22 s when every core links at once.
