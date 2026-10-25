@@ -1,10 +1,10 @@
 # rhp-cli: REPL and scripting client. rhp_cli_core holds everything but the terminal front-end
 # (text helpers, the command shell) so the tests can drive it in-process.
-add_library(rhp_cli_core STATIC src/text.cpp)
+add_library(rhp_cli_core STATIC src/text.cpp src/release_files.cpp)
 target_sources(rhp_cli_core PUBLIC
     FILE_SET HEADERS
     BASE_DIRS src
-    FILES src/text.hpp src/shell.hpp
+    FILES src/text.hpp src/shell.hpp src/release_files.hpp
 )
 target_link_libraries(rhp_cli_core PUBLIC Rhp::rhp)
 target_compile_features(rhp_cli_core PUBLIC cxx_std_23)

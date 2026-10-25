@@ -33,6 +33,8 @@ rhp-cli connect 127.0.0.1:7777 -i dev.rhpid
 | `--name NAME --app APP --build BUILD` | discovery instance and filter metadata |
 | `--advertise-libs` | additionally publish installed library names; requires `--advertise` |
 | `--http-port N` | enable the HTTP gateway on the listen address; port 0 selects a free port |
+| `--releases DIR` | serve signed releases (`rhp-cli release apply`, `rollout`) and keep what runs in `DIR` across restarts (needs `--release-signers`) |
+| `--release-signers FILE` | who may sign releases: `name base64-public-key [pattern,...]` per line |
 
 `Tests/tools/rhp_cli_tests.cpp` drives it as a separate process: keygen → key files → `run --pin` → a scripted REPL → blob → stubs → an unsigned identity refused → the audit log checked, reverse mode, TLS (`--tls` on both ends, plaintext refused), and DNS-SD discovery followed by a signed fleet broadcast to two hosts.
 

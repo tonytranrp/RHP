@@ -4,6 +4,8 @@
 //   rhp-cli connect 127.0.0.1:7777 -i dev.rhpid         # REPL
 //   rhp-cli run patch.lua -c 127.0.0.1:7777 -i dev.rhpid --pin
 //   rhp-cli stubs -c 127.0.0.1:7777 -i dev.rhpid -o rhp_api.lua
+//   rhp-cli release build --channel game.balance --module tuning.lua -i dev.rhpid -o balance.rhprel
+//   rhp-cli release apply balance.rhprel -c 127.0.0.1:7777 -i admin.rhpid --confirm health
 //
 // Every script it sends is signed with the identity's Ed25519 key.
 #include <atomic>
@@ -33,6 +35,7 @@
 #include <unistd.h>
 #endif
 
+#include "release_files.hpp"
 #include "shell.hpp"
 #include "text.hpp"
 #include <CLI/CLI.hpp>
@@ -361,6 +364,111 @@ int sign(const std::string& file, const std::string& identity) {
     return 0;
 }
 
+// Adds the identity's signature to a release or revocation file (in place).
+template <class Doc, class Decode, class Encode>
+int sign_file(const std::string& path, const std::string& identity, Decode decode, Encode encode) {
+    auto id = Rhp::security::identity_file::load(identity);
+    auto bytes = rhp_cli::read_binary_file(path);
+    if (!id || !bytes) {
+        std::println(stderr, "{}", !id ? std::format("{}", id.error()) : std::format("can't read {}", path));
+        return 1;
+    }
+    auto key = id->signer_key();
+    if (!key) {
+        std::println(stderr, "{} has no signing_key", identity);
+        return 1;
+    }
+    auto doc = decode(*bytes);
+    if (!doc) {
+        std::println(stderr, "{}", doc.error());
+        return 1;
+    }
+    if (auto signed_ok = Rhp::release::sign(*doc, *key); !signed_ok) {
+        std::println(stderr, "{}", signed_ok.error());
+        return 1;
+    }
+    auto out = encode(*doc);
+    if (!out || !rhp_cli::write_binary_file(path, *out)) {
+        std::println(stderr, "can't write {}", path);
+        return 1;
+    }
+    std::println("{}: signed by {} ({} signatures)", path, key->name, doc->signatures.size());
+    return 0;
+}
+
+int release_build(const rhp_cli::release_spec& spec, const std::vector<std::string>& identities, const std::string& out_path) {
+    auto r = rhp_cli::build_release(spec, std::chrono::system_clock::now());
+    if (!r) {
+        std::println(stderr, "{}", r.error());
+        return 1;
+    }
+    for (const std::string& identity : identities) {
+        auto id = Rhp::security::identity_file::load(identity);
+        auto key = id ? id->signer_key() : std::nullopt;
+        if (!key) {
+            std::println(stderr, "{}: no signing key", identity);
+            return 1;
+        }
+        if (auto ok = Rhp::release::sign(*r, *key); !ok) {
+            std::println(stderr, "{}", ok.error());
+            return 1;
+        }
+    }
+    auto bytes = Rhp::release::encode_release(*r);
+    const std::string path = out_path.empty() ? std::format("{}.{}.rhprel", r->body.channel, r->body.seq) : out_path;
+    if (!bytes || !rhp_cli::write_binary_file(path, *bytes)) {
+        std::println(stderr, "can't write {}", path);
+        return 1;
+    }
+    std::print("{}", rhp_cli::describe(*r));
+    std::println("wrote {}", path);
+    return 0;
+}
+
+int revoke_build(const rhp_cli::revocation_spec& spec, const std::vector<std::string>& identities, const std::string& out_path) {
+    auto r = rhp_cli::build_revocations(spec, std::chrono::system_clock::now());
+    if (!r) {
+        std::println(stderr, "{}", r.error());
+        return 1;
+    }
+    for (const std::string& identity : identities) {
+        auto id = Rhp::security::identity_file::load(identity);
+        auto key = id ? id->signer_key() : std::nullopt;
+        if (!key || !Rhp::release::sign(*r, *key)) {
+            std::println(stderr, "{}: no signing key", identity);
+            return 1;
+        }
+    }
+    auto bytes = Rhp::release::encode_revocations(*r);
+    const std::string path = out_path.empty() ? std::format("revocations.{}.rhprev", r->body.seq) : out_path;
+    if (!bytes || !rhp_cli::write_binary_file(path, *bytes)) {
+        std::println(stderr, "can't write {}", path);
+        return 1;
+    }
+    std::print("{}", rhp_cli::describe(*r));
+    std::println("wrote {}", path);
+    return 0;
+}
+
+int inspect(const std::string& path) {
+    auto bytes = rhp_cli::read_binary_file(path);
+    if (!bytes) {
+        std::println(stderr, "can't read {}", path);
+        return 1;
+    }
+    if (auto r = Rhp::release::decode_release(*bytes)) {
+        std::print("{}", rhp_cli::describe(*r));
+        return 0;
+    }
+    if (auto r = Rhp::release::decode_revocations(*bytes)) {
+        std::print("{}", rhp_cli::describe(*r));
+        return 0;
+    } else {
+        std::println(stderr, "{}: {}", path, r.error());
+        return 1;
+    }
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -445,6 +553,83 @@ int main(int argc, char** argv) {
     watch_cmd->add_option("folder", folder, "folder to watch")->required();
     add_connection_options(*watch_cmd, conn, false);
 
+    // ---- releases ---------------------------------------------------------------------------------
+    auto* release_cmd = app.add_subcommand("release", "build, sign, inspect and send signed releases (host.serve)");
+    release_cmd->require_subcommand(1);
+    rhp_cli::release_spec spec;
+    std::vector<std::string> sign_with;
+    auto* rbuild_cmd = release_cmd->add_subcommand("build", "make a .rhprel from Lua modules");
+    rbuild_cmd->add_option("--channel", spec.channel, "the channel it fills (game.balance)")->required();
+    rbuild_cmd->add_option("--module", spec.modules, "a module: path, or name=path (repeat, in load order)")->required();
+    rbuild_cmd->add_option("--seq", spec.seq, "sequence number, or auto (the current Unix time; default)");
+    rbuild_cmd->add_option("--label", spec.label, "free text shown in status");
+    rbuild_cmd->add_option("--app", spec.app, "only hosts of this app");
+    rbuild_cmd->add_option("--build", spec.builds, "only hosts of this build (repeat)");
+    rbuild_cmd->add_option("--platform", spec.platforms, "only this platform (repeat): windows, linux, macos, ios, android");
+    rbuild_cmd->add_option("--not-before", spec.not_before, "valid from this Unix time");
+    rbuild_cmd->add_option("--not-after", spec.not_after, "valid until this Unix time");
+    rbuild_cmd->add_option("--role", spec.role, "run as patch (default) or admin");
+    rbuild_cmd->add_option("--lib", spec.libs, "a lib the host must have (repeat)");
+    rbuild_cmd->add_option("--fail-event", spec.fail_events, "a script event that marks a watched candidate unhealthy (repeat)");
+    rbuild_cmd->add_option("--max-handler-failures", spec.max_handler_failures, "handler failures a watched candidate may have");
+    rbuild_cmd->add_option("-i,--identity", sign_with, "sign with this identity (repeat for several signers)");
+    rbuild_cmd->add_option("-o,--out", out_path, "file to write (default <channel>.<seq>.rhprel)");
+    auto* rsign_cmd = release_cmd->add_subcommand("sign", "add a signature to a .rhprel");
+    rsign_cmd->add_option("file", file, "the .rhprel file")->required();
+    rsign_cmd->add_option("-i,--identity", identity, "identity file")->required()->envname("RHP_IDENTITY");
+    auto* rinspect_cmd = release_cmd->add_subcommand("inspect", "describe a .rhprel or .rhprev file");
+    rinspect_cmd->add_option("file", file, "the file")->required();
+    std::string confirm = "now";
+    auto* rapply_cmd = release_cmd->add_subcommand("apply", "run a .rhprel on a host (admin)");
+    rapply_cmd->add_option("file", file, "the .rhprel file")->required();
+    rapply_cmd->add_option("--confirm", confirm, "now (default), health or manual");
+    add_connection_options(*rapply_cmd, conn, false);
+    auto* rstatus_cmd = release_cmd->add_subcommand("status", "what the host's channels run");
+    add_connection_options(*rstatus_cmd, conn, false);
+    std::string channel;
+    bool hold = false;
+    auto* rconfirm_cmd = release_cmd->add_subcommand("confirm", "make a channel's candidate active (admin)");
+    rconfirm_cmd->add_option("channel", channel, "the channel")->required();
+    add_connection_options(*rconfirm_cmd, conn, false);
+    auto* rdeactivate_cmd = release_cmd->add_subcommand("deactivate", "stop what a channel runs (admin)");
+    rdeactivate_cmd->add_option("channel", channel, "the channel")->required();
+    rdeactivate_cmd->add_flag("--hold", hold, "run nothing until a new release (default: fall back)");
+    add_connection_options(*rdeactivate_cmd, conn, false);
+
+    std::vector<std::string> rollout_hosts;
+    std::vector<std::string> canaries;
+    std::vector<std::string> stage_specs;
+    std::size_t max_failures = 0;
+    bool keep_on_failure = false;
+    auto* rollout_cmd = app.add_subcommand("rollout", "spread a .rhprel over hosts stage by stage (canaries, then fractions)");
+    rollout_cmd->add_option("file", file, "the .rhprel file")->required();
+    rollout_cmd->add_option("-i,--identity", identity, "admin identity file")->required()->envname("RHP_IDENTITY");
+    rollout_cmd->add_option("--host", rollout_hosts, "host:port (repeat); without any, hosts are discovered");
+    rollout_cmd->add_option("--canary", canaries, "a host (its name, or host:port with --host) that goes first (repeat)");
+    rollout_cmd->add_option("--stage", stage_specs, "fraction:observe_ms, cumulative (default 0.1:30000 0.5:30000 1:0)");
+    rollout_cmd->add_option("--max-failures", max_failures, "hosts that may fail before the rollout stops");
+    rollout_cmd->add_flag("--keep-on-failure", keep_on_failure, "don't deactivate the release where it went when the rollout stops");
+    add_discovery_options(*rollout_cmd);
+    rollout_cmd->add_flag("--tls", conn.tls, "TLS even on loopback");
+    rollout_cmd->add_flag("--insecure-lan", conn.insecure_lan, "allow plaintext to non-loopback endpoints");
+
+    auto* revoke_cmd = app.add_subcommand("revoke", "build, sign and send revocation lists");
+    revoke_cmd->require_subcommand(1);
+    rhp_cli::revocation_spec revocations;
+    auto* vbuild_cmd = revoke_cmd->add_subcommand("build", "make a .rhprev (cumulative: list everything still revoked)");
+    vbuild_cmd->add_option("--seq", revocations.seq, "sequence number, or auto (default)");
+    vbuild_cmd->add_option("--release", revocations.releases, "a release id to revoke, hex (repeat)");
+    vbuild_cmd->add_option("--key", revocations.keys, "a signing key to stop trusting, base64 (repeat)");
+    vbuild_cmd->add_option("--floor", revocations.floors, "channel=seq: refuse that channel's releases up to seq (repeat)");
+    vbuild_cmd->add_option("-i,--identity", sign_with, "sign with this identity (repeat)");
+    vbuild_cmd->add_option("-o,--out", out_path, "file to write (default revocations.<seq>.rhprev)");
+    auto* vsign_cmd = revoke_cmd->add_subcommand("sign", "add a signature to a .rhprev");
+    vsign_cmd->add_option("file", file, "the .rhprev file")->required();
+    vsign_cmd->add_option("-i,--identity", identity, "identity file")->required()->envname("RHP_IDENTITY");
+    auto* vapply_cmd = revoke_cmd->add_subcommand("apply", "send a .rhprev to a host");
+    vapply_cmd->add_option("file", file, "the .rhprev file")->required();
+    add_connection_options(*vapply_cmd, conn, false);
+
     try {
         app.parse(argc, argv);
     } catch (const CLI::ParseError& e) {
@@ -461,6 +646,25 @@ int main(int argc, char** argv) {
     }
     if (sign_cmd->parsed()) {
         return sign(file, identity);
+    }
+    if (rbuild_cmd->parsed()) {
+        return release_build(spec, sign_with, out_path);
+    }
+    if (rsign_cmd->parsed()) {
+        return sign_file<Rhp::release::release>(
+            file, identity, [](const std::vector<std::byte>& b) { return Rhp::release::decode_release(b); },
+            [](const Rhp::release::release& r) { return Rhp::release::encode_release(r); });
+    }
+    if (rinspect_cmd->parsed()) {
+        return inspect(file);
+    }
+    if (vbuild_cmd->parsed()) {
+        return revoke_build(revocations, sign_with, out_path);
+    }
+    if (vsign_cmd->parsed()) {
+        return sign_file<Rhp::release::signed_revocations>(
+            file, identity, [](const std::vector<std::byte>& b) { return Rhp::release::decode_revocations(b); },
+            [](const Rhp::release::signed_revocations& r) { return Rhp::release::encode_revocations(r); });
     }
     discovery.duration = std::chrono::milliseconds{discover_ms};
     discovery.protocol_revision = Rhp::wire::kProtocolRevision;
@@ -525,6 +729,75 @@ int main(int argc, char** argv) {
         }
         return ok ? 0 : 1;
     }
+    if (rollout_cmd->parsed()) {
+        auto id = Rhp::security::identity_file::load(identity);
+        auto bytes = rhp_cli::read_binary_file(file);
+        if (!id || !bytes) {
+            std::println(stderr, "{}", !id ? std::format("{}", id.error()) : std::format("can't read {}", file));
+            return 1;
+        }
+        auto signer = id->signer_key();
+        Rhp::fleet_options options;
+        options.insecure_lan = conn.insecure_lan;
+        options.tls = conn.tls ? Rhp::net::tls_mode::kRequire : Rhp::net::tls_mode::kAuto;
+        auto group = signer ? std::make_unique<Rhp::fleet<cli_cfg>>(id->credential(), std::move(*signer), std::move(options))
+                            : std::make_unique<Rhp::fleet<cli_cfg>>(id->credential(), std::move(options));
+        if (rollout_hosts.empty()) {
+            if (auto found = group->discover(discovery); !found) {
+                std::println(stderr, "{}", found.error());
+                return 1;
+            }
+        }
+        for (const std::string& h : rollout_hosts) {
+            auto ep = rhp_cli::parse_endpoint(h, false, conn.insecure_lan);
+            if (!ep) {
+                std::println(stderr, "{}: {}", h, ep.error().message);
+                return 2;
+            }
+            Rhp::net::service_record r;
+            r.name = h;
+            r.address = ep->host;
+            r.port = ep->port;
+            r.protocol_revision = Rhp::wire::kProtocolRevision;
+            if (auto added = group->add(std::move(r)); !added) {
+                std::println(stderr, "{}: {}", h, added.error());
+                return 1;
+            }
+        }
+        if (group->size() == 0) {
+            std::println(stderr, "no hosts to roll out to");
+            return 1;
+        }
+        Rhp::rollout_plan plan;
+        plan.canaries = canaries;
+        plan.max_failures = max_failures;
+        plan.rollback_on_failure = !keep_on_failure;
+        if (!stage_specs.empty()) {
+            plan.stages.clear();
+            for (const std::string& stage_spec : stage_specs) {
+                const auto colon = stage_spec.find(':');
+                try {
+                    const double fraction = std::stod(stage_spec.substr(0, colon));
+                    const long long ms = colon == std::string::npos ? 0 : std::stoll(stage_spec.substr(colon + 1));
+                    plan.stages.push_back({fraction, std::chrono::milliseconds{ms}});
+                } catch (const std::exception&) {
+                    std::println(stderr, "--stage is fraction:observe_ms (got '{}')", stage_spec);
+                    return 2;
+                }
+            }
+        }
+        plan.on_progress = [](std::string_view line) { std::println("{}", line); };
+        const auto report = group->rollout(*bytes, plan);
+        for (const auto& h : report.hosts) {
+            std::println("  {:<24} {}{}", h.host.name, Rhp::to_string(h.status), h.err ? std::format(" ({})", h.err->message) : std::string{});
+        }
+        if (!report.completed) {
+            std::println(stderr, "rollout of {} to {} did not complete: {}", report.release.substr(0, 8), report.channel, report.err ? report.err->message : "?");
+            return 1;
+        }
+        std::println("rolled out {} to {} on {} host(s)", report.release.substr(0, 8), report.channel, report.hosts.size());
+        return 0;
+    }
     if (connect_cmd->parsed()) {
         return repl(conn);
     }
@@ -561,6 +834,41 @@ int main(int argc, char** argv) {
             std::this_thread::sleep_for(std::chrono::milliseconds{100});
         }
         sh.unwatch();
+    } else if (rapply_cmd->parsed() || vapply_cmd->parsed()) {
+        auto bytes = rhp_cli::read_binary_file(file);
+        if (!bytes) {
+            std::println(stderr, "can't read {}", file);
+            return 1;
+        }
+        if (rapply_cmd->parsed()) {
+            auto r = c->client->release_apply(*bytes, confirm);
+            if (!r) {
+                std::println(stderr, "{}", r.error());
+                return 1;
+            }
+            std::println("{}: {} seq {} ({}{})", r->channel, rhp_cli::format_value(Rhp::value{r->id}), r->seq, r->running, r->already ? ", already running" : "");
+        } else {
+            auto r = c->client->revoke(*bytes);
+            if (!r) {
+                std::println(stderr, "{}", r.error());
+                return 1;
+            }
+            std::println("revocation list applied: {} channel(s) changed", *r);
+        }
+    } else if (rstatus_cmd->parsed()) {
+        auto r = c->client->release_status();
+        if (!r) {
+            std::println(stderr, "{}", r.error());
+            return 1;
+        }
+        std::print("{}", rhp_cli::describe(*r));
+    } else if (rconfirm_cmd->parsed() || rdeactivate_cmd->parsed()) {
+        auto r = rconfirm_cmd->parsed() ? c->client->release_confirm(channel) : c->client->release_deactivate(channel, hold);
+        if (!r) {
+            std::println(stderr, "{}", r.error());
+            return 1;
+        }
+        std::println("{}: {}", channel, rconfirm_cmd->parsed() ? "confirmed" : (hold ? "deactivated, held" : "deactivated"));
     } else if (events_cmd->parsed()) {
         for (const std::string& event : event_names) {
             if (!sh.subscribe(event)) {

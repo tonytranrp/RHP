@@ -39,6 +39,17 @@ rhp> watch scripts
 | `watch <folder>` / `unwatch` | reload `<folder>/*.lua` whenever one is saved |
 | `subscribe <event>` / `unsubscribe <event>` | print each delivery of a host C++ event, or of an `rhp.publish` of your identity (`*`: every publish) |
 
+Releases ([guide](../../Docs/guide/releases.md)) have subcommands of their own:
+
+| Command | What |
+|---|---|
+| `release build --channel C --module [name=]file ... -i id.rhpid -o out.rhprel` | make (and sign) a release; `--seq` (default `auto`), `--label`, `--app`, `--build`, `--platform`, `--not-before`, `--not-after`, `--role`, `--lib`, `--fail-event`, `--max-handler-failures` |
+| `release sign file -i id.rhpid` / `release inspect file` | add a signature / describe a `.rhprel` or `.rhprev` |
+| `release apply file -c host -i id [--confirm now\|health\|manual]` | run it on a host (admin) |
+| `release status`, `release confirm <channel>`, `release deactivate <channel> [--hold]` | inspect and steer a host's channels |
+| `revoke build [--release id] [--key b64] [--floor channel=seq] -i id` / `revoke sign` / `revoke apply file` | revocation lists |
+| `rollout file -i id [--host h:p ...] [--canary name] [--stage fraction:ms] [--max-failures n]` | spread a release over hosts (discovered when no `--host`) stage by stage |
+
 Tab completes commands, lib names and functions (from the host's stubs) and loaded modules. Ctrl+C cancels the running script on the host; at a `...>` prompt it drops the unfinished Lua. History lives in `~/.rhp/history`. When stdin is not a terminal, `connect` reads one command per line (scripted sessions); unfinished Lua at the end of the input is an error. `call` arguments in double quotes stay strings (`"42"`), bare ones are parsed (`42`).
 
 | Subcommand | What |

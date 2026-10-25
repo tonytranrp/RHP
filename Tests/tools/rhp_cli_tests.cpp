@@ -620,4 +620,66 @@ TEST_CASE("stage6: the CLI discovers separate hosts and broadcasts a signed scri
     CHECK(results.find(second_name + ": {42}") != std::string::npos);
 }
 
+TEST_CASE("rhp-cli: releases are built, applied, kept across a restart and revoked", "[cli][process][releases]") {
+    scratch_dir dir;
+    const auto id = dir.path / "dev.rhpid";
+    REQUIRE(run(std::format("{} keygen dev --out {} > {}", kCli, q(id), q(dir.path / "keygen.txt"))) == 0);
+    REQUIRE(run(std::format("{} pubkey -i {} --role admin > {}", kCli, q(id), q(dir.path / "lines.txt"))) == 0);
+    const std::string lines = dir.read("lines.txt");
+    const auto nl = lines.find('\n');
+    REQUIRE(nl != std::string::npos);
+    dir.write("keys.txt", lines.substr(0, nl + 1));
+    dir.write("signers.pub", lines.substr(nl + 1)); // the same key signs scripts and releases here
+    dir.write("tuning.lua", "game.gravity = -3\n");
+
+    REQUIRE(run(std::format("{} release build --channel game.balance --seq 1 --module {} -i {} -o {} > {} 2>&1", kCli, q(dir.path / "tuning.lua"), q(id),
+                            q(dir.path / "balance.rhprel"), q(dir.path / "build.txt"))) == 0);
+    REQUIRE(run(std::format("{} release inspect {} > {}", kCli, q(dir.path / "balance.rhprel"), q(dir.path / "inspect.txt"))) == 0);
+    const std::string inspect = dir.read("inspect.txt");
+    CHECK(inspect.find("channel    game.balance") != std::string::npos);
+    CHECK(inspect.find("signed by  dev") != std::string::npos);
+    REQUIRE(inspect.starts_with("release "));
+    const std::string release_id = inspect.substr(8, 64);
+
+    const auto start = [&](std::string_view tag) {
+        return std::jthread{[&dir, tag = std::string{tag}] {
+            (void)run(std::format("{} --port 0 --keys {} --signers {} --releases {} --release-signers {} --port-file {} --stop-file {} --seconds 120 > {} 2>&1", kHost,
+                                  q(dir.path / "keys.txt"), q(dir.path / "signers.pub"), q(dir.path / "releases"), q(dir.path / "signers.pub"),
+                                  q(dir.path / (tag + ".port")), q(dir.path / (tag + ".stop")), q(dir.path / (tag + ".log"))));
+        }};
+    };
+    const auto port_of = [&](std::string_view tag) {
+        const std::string file = std::string{tag} + ".port";
+        REQUIRE(eventually([&] { return fs::exists(dir.path / file) && !dir.read(file).empty(); }));
+        return std::format("-c 127.0.0.1:{} -i {}", std::stoi(dir.read(file)), q(id));
+    };
+    {
+        auto server = start("first");
+        const std::string who = port_of("first");
+        REQUIRE(run(std::format("{} release apply {} {} > {} 2>&1", kCli, q(dir.path / "balance.rhprel"), who, q(dir.path / "apply.txt"))) == 0);
+        INFO(dir.read("apply.txt"));
+        REQUIRE(run(std::format("{} exec \"return game.gravity\" {} > {}", kCli, who, q(dir.path / "g1.txt"))) == 0);
+        CHECK(dir.read("g1.txt").find("-3") != std::string::npos);
+        REQUIRE(run(std::format("{} release status {} > {}", kCli, who, q(dir.path / "status.txt"))) == 0);
+        CHECK(dir.read("status.txt").find("game.balance") != std::string::npos);
+        dir.write("first.stop", "");
+    }
+    {
+        auto server = start("second"); // restores what it ran from --releases
+        const std::string who = port_of("second");
+        REQUIRE(run(std::format("{} exec \"return game.gravity\" {} > {}", kCli, who, q(dir.path / "g2.txt"))) == 0);
+        INFO(dir.read("second.log"));
+        CHECK(dir.read("g2.txt").find("-3") != std::string::npos);
+        REQUIRE(run(std::format("{} revoke build --seq 1 --release {} -i {} -o {} > {} 2>&1", kCli, release_id, q(id), q(dir.path / "rev.rhprev"),
+                                q(dir.path / "revoke.txt"))) == 0);
+        REQUIRE(run(std::format("{} revoke apply {} {} > {} 2>&1", kCli, q(dir.path / "rev.rhprev"), who, q(dir.path / "revoked.txt"))) == 0);
+        CHECK(dir.read("revoked.txt").find("1 channel(s) changed") != std::string::npos);
+        REQUIRE(run(std::format("{} exec \"return game.gravity\" {} > {}", kCli, who, q(dir.path / "g3.txt"))) == 0);
+        CHECK(dir.read("g3.txt").find("-9.81") != std::string::npos);
+        CHECK(run(std::format("{} release apply {} {} > {} 2>&1", kCli, q(dir.path / "balance.rhprel"), who, q(dir.path / "again.txt"))) == 1);
+        CHECK(dir.read("again.txt").find("revoked") != std::string::npos);
+        dir.write("second.stop", "");
+    }
+}
+
 #endif

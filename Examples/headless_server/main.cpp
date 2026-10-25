@@ -25,6 +25,8 @@
 //   --advertise              publish the host through DNS-SD (--name, --app, --build set the record)
 //   --advertise-libs         also publish the installed library names (needs --advertise)
 //   --http-port N            also serve the HTTP gateway on N (0 = any free port)
+//   --releases DIR           serve signed releases (rhp-cli release apply / rollout), kept in DIR across restarts
+//   --release-signers FILE   who may sign them: `name base64-public-key [pattern,...]` per line (needed with --releases)
 #include <atomic>
 #include <charconv>
 #include <chrono>
@@ -110,6 +112,8 @@ struct options {
     bool advertise = false;
     Rhp::net::advertise_options discovery;
     std::optional<std::uint16_t> http_port;
+    std::string releases;
+    std::string release_signers;
 };
 
 [[nodiscard]] std::optional<options> parse(int argc, char** argv) {
@@ -178,6 +182,10 @@ struct options {
             o.discovery.build = *v;
         } else if (arg == "--name") {
             o.discovery.name = *v;
+        } else if (arg == "--releases") {
+            o.releases = *v;
+        } else if (arg == "--release-signers") {
+            o.release_signers = *v;
         } else if (arg == "--http-port") {
             std::uint16_t port = 0;
             const auto [end, ec] = std::from_chars(v->data(), v->data() + v->size(), port);
@@ -197,7 +205,7 @@ struct options {
         }
     }
     if (o.keys.empty() || (!o.port && o.reverse.empty())) {
-        std::println(stderr, "usage: headless_server --port N --keys FILE [--signers FILE] [--audit FILE] [--blobs DIR] [--reverse H:N] [--port-file FILE] [--stop-file FILE] [--seconds N] [--insecure-lan] [--tls] [--cert FILE --key FILE] [--ca FILE] [--advertise [--name N] [--app A] [--build B] [--advertise-libs]] [--http-port N]");
+        std::println(stderr, "usage: headless_server --port N --keys FILE [--signers FILE] [--audit FILE] [--blobs DIR] [--reverse H:N] [--port-file FILE] [--stop-file FILE] [--seconds N] [--insecure-lan] [--tls] [--cert FILE --key FILE] [--ca FILE] [--advertise [--name N] [--app A] [--build B] [--advertise-libs]] [--http-port N] [--releases DIR --release-signers FILE]");
         return std::nullopt;
     }
     if (o.discovery.include_libs && !o.advertise) {
@@ -303,12 +311,52 @@ int main(int argc, char** argv) {
     }
 
     using cfg = Rhp::config<>::logger<Rhp::core::stderr_logger>;
+    // Releases (optional): a manager that keeps what it runs in the --releases folder. Declared
+    // before the host, which serves it, so it outlives the host.
+    std::optional<Rhp::release::manager> releases;
+    if (!o->releases.empty()) {
+        if (o->release_signers.empty()) {
+            std::println(stderr, "--releases needs --release-signers");
+            return 2;
+        }
+        auto trust = Rhp::release::trust::from_file(o->release_signers);
+        if (!trust) {
+            std::println(stderr, "{}", trust.error());
+            return 1;
+        }
+        Rhp::release::manager_options ro;
+        ro.app = o->discovery.app;
+        ro.build = o->discovery.build;
+        ro.output = [](std::string_view channel, std::string_view line) { std::println("[{}] {}", channel, line); };
+        releases.emplace(std::move(*trust), std::move(ro), Rhp::release::directory_store{o->releases});
+        if (auto installed = releases->install<game::game_lib>(); !installed) {
+            std::println(stderr, "{}", installed.error());
+            return 1;
+        }
+        auto restored = releases->restore();
+        if (!restored) {
+            std::println(stderr, "releases: {}", restored.error());
+            return 1;
+        }
+        for (const auto& channel : restored->restored) {
+            std::println("releases: {} runs again", channel);
+        }
+        for (const auto& [channel, err] : restored->failed) {
+            std::println(stderr, "releases: {}: {}", channel, err);
+        }
+    }
     // Declared before the host so it outlives it: the reverts the host does when it shuts down are logged too.
     Rhp::event::subscription audit;
     Rhp::host<cfg> host{*ep, std::move(*keys), std::move(signers), host_opts};
     if (auto installed = host.install<game::game_lib>(); !installed) {
         std::println(stderr, "{}", installed.error());
         return 1;
+    }
+    if (releases) {
+        if (auto served = host.serve(*releases); !served) {
+            std::println(stderr, "{}", served.error());
+            return 1;
+        }
     }
     if (o->advertise) {
         if (auto advertised = host.advertise(o->discovery); !advertised) {
