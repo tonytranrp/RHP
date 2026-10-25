@@ -176,6 +176,7 @@ def test_tunables_profiler_and_debugger(host):
         c.call("py.work", "spin")
         report = c.profile("stop")
         assert not report.running and report.samples > 50
+        assert report.truncated == 0  # a small profile fits one reply
         assert any("spin (py.work:1)" in stack for stack, _ in report.stacks)
         assert report.folded().count("\n") == len(report.stacks)
 

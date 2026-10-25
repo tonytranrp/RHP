@@ -191,3 +191,14 @@ def test_identity_file_and_script_signature():
     for bad in ('name = dev\npsk = "x"', 'name = "dev"', 'name = "dev"\npsk = "AAAA"', 'name = "dev"\npsk = "not base64!"'):
         with pytest.raises(Exception):
             Identity.parse(bad)
+
+
+def test_profile_report_reads_truncated_replies():
+    from rhp_client.client import ProfileReport
+
+    full = ProfileReport.from_value({"running": True, "interval": 100, "samples": 9, "dropped": 1, "elapsed_us": 5,
+                                     "stacks": [["a;b", 5], ["a", 3]], "truncated": 2})
+    assert full.truncated == 2
+    assert full.stacks == [("a;b", 5), ("a", 3)]
+    assert full.folded() == "a;b 5\na 3\n"
+    assert ProfileReport.from_value({"stacks": []}).truncated == 0  # a host before the field

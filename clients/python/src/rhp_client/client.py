@@ -118,12 +118,13 @@ class ProfileReport:
     dropped: int = 0
     elapsed_us: int = 0
     stacks: List[tuple] = field(default_factory=list)  # (stack, samples), most samples first
+    truncated: int = 0  # stacks with the fewest samples the host left out to fit one reply
 
     @classmethod
     def from_value(cls, v: Any) -> "ProfileReport":
         v = v or {}
         return cls(bool(v.get("running", False)), v.get("interval", 0), v.get("samples", 0), v.get("dropped", 0), v.get("elapsed_us", 0),
-                   [(s[0], s[1]) for s in v.get("stacks") or []])
+                   [(s[0], s[1]) for s in v.get("stacks") or []], v.get("truncated", 0))
 
     def folded(self) -> str:
         """The `stack samples` lines flamegraph.pl and speedscope read."""
