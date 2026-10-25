@@ -61,11 +61,6 @@ private:
     core::listener_table<std::string, handler> handlers_;
 };
 
-// Both tables are compiled once, in hub.cpp (with the members above): a file including this header
-// doesn't instantiate them (and the std::function over every host event) again.
-extern template class core::listener_table<std::size_t, hub::handler>;
-extern template class core::listener_table<std::string, script_hub::handler>;
-
 // Keeps a handler subscribed for as long as it lives (move-only); see Rhp::subscription.
 using subscription = Rhp::subscription;
 
@@ -82,3 +77,11 @@ template <std::invocable<const any&> F>
 }
 
 } // namespace Rhp::event
+
+// Both tables are compiled once, in hub.cpp (with the members above): a file including this header
+// doesn't instantiate them (and the std::function over every host event) again.
+namespace Rhp::core {
+extern template class listener_table<std::size_t, event::hub::handler>;
+extern template class listener_table<std::string, event::script_hub::handler>;
+} // namespace Rhp::core
+

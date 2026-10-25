@@ -16,7 +16,13 @@ option(RHP_LUA_JUMP_YIELDS "Coroutine yields jump (_longjmp) instead of throwing
 option(RHP_FUZZ "Build Tests/fuzz as libFuzzer executables (Clang only); without it they are ctest replay drivers" OFF)
 # Clean builds (CI) compile RHP's own targets as unity files, 16 sources each: about a third less wall
 # time; an edit then recompiles its whole batch, so it is off for everyday work.
-option(RHP_PCH "Precompile the standard headers once for RHP's libraries and once for its tests (cmake/RhpPch.cmake)" ${RHP_IS_TOP_LEVEL})
+# Shared precompiled headers: on for RHP's own desktop builds (measured there), off for cross builds.
+if(RHP_IS_TOP_LEVEL AND NOT CMAKE_CROSSCOMPILING)
+    set(_rhp_pch_default ON)
+else()
+    set(_rhp_pch_default OFF)
+endif()
+option(RHP_PCH "Precompile the standard headers once for RHP's libraries and once for its tests (cmake/RhpPch.cmake)" ${_rhp_pch_default})
 option(RHP_UNITY_BUILD "Compile RHP's libraries, tests and tools as unity files (clean builds)" OFF)
 set(RHP_SANITIZE "" CACHE STRING "Sanitizers to enable: 'address;undefined', 'address' (MSVC) or 'thread'")
 
