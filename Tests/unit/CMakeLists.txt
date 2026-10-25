@@ -233,3 +233,6 @@ rhp_add_test_suite(rhp_test_tests
 )
 target_include_directories(rhp_test_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/test")
 target_compile_definitions(rhp_test_tests PRIVATE RHP_TEST_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures")
+
+# RHP_UNITY_BUILD: the script tests alias their fixture namespaces with the same names (fx).
+set_target_properties(rhp_script_tests PROPERTIES UNITY_BUILD OFF)

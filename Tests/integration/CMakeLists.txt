@@ -18,3 +18,8 @@ rhp_add_test_suite(rhp_integration_tests
         Rhp::tls
         Rhp::release
 )
+
+# RHP_UNITY_BUILD: the integration tests' fixture namespaces share names (keys, eventually, ...).
+if(TARGET rhp_integration_tests)
+    set_target_properties(rhp_integration_tests PROPERTIES UNITY_BUILD OFF)
+endif()
