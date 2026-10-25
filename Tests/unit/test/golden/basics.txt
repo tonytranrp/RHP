@@ -38,11 +38,5 @@ specs/broken_describe_spec.lua
   1 of 1 passed (<time>)
 
 most instructions:
-    <n>  damage fails a deep comparison (specs/basics_spec.lua)
-    <n>  handles tables and strings #fast (specs/basics_spec.lua)
-    <n>  damage fails on purpose (specs/basics_spec.lua)
 most memory (peak):
-    <n>  damage fails a deep comparison (specs/basics_spec.lua)
-    <n>  handles tables and strings #fast (specs/basics_spec.lua)
-    <n>  damage fails on purpose (specs/basics_spec.lua)
 6 passed, 2 failed, 1 error, 1 pending, 1 skipped, 1 file error in <time> (seed 42)

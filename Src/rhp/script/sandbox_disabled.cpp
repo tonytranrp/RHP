@@ -50,6 +50,10 @@ result<value_list> sandbox::exec(std::string_view, std::string_view) {
     return disabled();
 }
 
+result<value_list> sandbox::exec_cached(std::string_view, std::string_view) {
+    return disabled();
+}
+
 result<module_id> sandbox::load(std::string_view, std::string_view) {
     return disabled();
 }
@@ -245,7 +249,7 @@ run_meter sandbox::meter() {
 
 void sandbox::reset_peak() noexcept {}
 
-result<void> sandbox::collect_garbage() {
+result<void> sandbox::collect_garbage(int) {
     return disabled();
 }
 

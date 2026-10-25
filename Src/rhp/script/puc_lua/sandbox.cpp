@@ -19,6 +19,7 @@
 #include <string_view>
 #include <thread>
 #include <tuple>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -75,7 +76,7 @@ constexpr std::size_t alloc_kind_of(std::size_t tag) noexcept {
     case LUA_TFUNCTION: return static_cast<std::size_t>(alloc_kind::kFunction);
     case LUA_TUSERDATA: return static_cast<std::size_t>(alloc_kind::kUserdata);
     case LUA_TTHREAD: return static_cast<std::size_t>(alloc_kind::kThread);
-    case LUA_NUMTYPES: return static_cast<std::size_t>(alloc_kind::kUpvalue);     // LUA_TUPVAL
+    case LUA_NUMTYPES: return static_cast<std::size_t>(alloc_kind::kUpvalue);       // LUA_TUPVAL
     case LUA_NUMTYPES + 1: return static_cast<std::size_t>(alloc_kind::kPrototype); // LUA_TPROTO
     default: return static_cast<std::size_t>(alloc_kind::kOther);
     }
@@ -1178,9 +1179,63 @@ std::vector<std::string> sandbox_impl::dependents_of(module_id mod) const {
 
 // ---- requests --------------------------------------------------------------------------------------
 
-result<void> sandbox_impl::compile(std::string_view source, const std::string& chunk_name, int env_ref) {
+namespace {
+
+// Bytecode of trusted chunks (the test framework), compiled once per process: a sandbox per test
+// file would otherwise parse the same 100 KB of Lua every time. Keyed by chunk name and source; the
+// bytecode keeps its debug information (lines for errors and coverage).
+class bytecode_cache {
+public:
+    // The bytecode of (name, source), or empty when it isn't cached yet.
+    std::string find(std::string_view name, std::string_view source) {
+        const std::scoped_lock lock{mutex_};
+        const auto it = cache_.find(key(name, source));
+        return it != cache_.end() ? it->second : std::string{};
+    }
+
+    void store(std::string_view name, std::string_view source, std::string bytecode) {
+        const std::scoped_lock lock{mutex_};
+        cache_.insert_or_assign(key(name, source), std::move(bytecode));
+    }
+
+private:
+    static std::string key(std::string_view name, std::string_view source) {
+        std::string k;
+        k.reserve(name.size() + 1 + source.size());
+        k.append(name).push_back('\0');
+        k.append(source);
+        return k;
+    }
+
+    std::mutex mutex_;
+    std::unordered_map<std::string, std::string> cache_;
+};
+
+bytecode_cache& trusted_bytecode() {
+    static bytecode_cache cache;
+    return cache;
+}
+
+int dump_writer(lua_State*, const void* p, size_t size, void* out) {
+    if (p != nullptr) {
+        static_cast<std::string*>(out)->append(static_cast<const char*>(p), size);
+    }
+    return 0;
+}
+
+} // namespace
+
+result<void> sandbox_impl::compile(std::string_view source, const std::string& chunk_name, int env_ref, bool cached) {
     lua_State* L = state_;
-    const int status = luaL_loadbufferx(L, source.data(), source.size(), chunk_name.c_str(), "t");
+    std::string bytecode = cached ? trusted_bytecode().find(chunk_name, source) : std::string{};
+    const int status = bytecode.empty() ? luaL_loadbufferx(L, source.data(), source.size(), chunk_name.c_str(), "t")
+                                        : luaL_loadbufferx(L, bytecode.data(), bytecode.size(), chunk_name.c_str(), "b");
+    if (status == LUA_OK && cached && bytecode.empty()) {
+        std::string dumped;
+        if (lua_dump(L, &dump_writer, &dumped, 0) == 0 && !dumped.empty()) {
+            trusted_bytecode().store(chunk_name, source, std::move(dumped));
+        }
+    }
     if (status != LUA_OK) {
         error err = take_lua_error(L, status);
         if (err.code == errc::kRuntime) {
@@ -1931,14 +1986,14 @@ result<void> sandbox_impl::tune(std::string_view path, const value& v) {
     return out;
 }
 
-result<value_list> sandbox_impl::exec(std::string_view source, std::string_view chunk_name) {
+result<value_list> sandbox_impl::exec(std::string_view source, std::string_view chunk_name, bool cached) {
     const operation_scope operation{*this};
     drain();
     const std::string chunk = std::format("={}", chunk_name);
     result<value_list> out = value_list{};
     auto glue = protect(state_, [&] {
         const slice_scope slice{*this};
-        if (auto compiled = compile(source, chunk, record(scratch_)->live.env_ref); !compiled) {
+        if (auto compiled = compile(source, chunk, record(scratch_)->live.env_ref, cached); !compiled) {
             out = std::unexpected{std::move(compiled).error()};
             return;
         }
@@ -2468,8 +2523,8 @@ void sandbox::reset_peak() noexcept {
     impl_->reset_peak();
 }
 
-result<void> sandbox::collect_garbage() {
-    return impl_->collect_garbage();
+result<void> sandbox::collect_garbage(int cycles) {
+    return impl_->collect_garbage(cycles);
 }
 
 result<void> sandbox::set_gc_mode(gc_mode mode) {
@@ -2506,6 +2561,10 @@ result<void> sandbox::fire_event(std::string_view name, std::span<const value> a
 
 result<value_list> sandbox::exec(std::string_view source, std::string_view chunk_name) {
     return impl_->exec(source, chunk_name);
+}
+
+result<value_list> sandbox::exec_cached(std::string_view source, std::string_view chunk_name) {
+    return impl_->exec(source, chunk_name, true);
 }
 
 result<module_id> sandbox::load(std::string_view name, std::string_view source) {

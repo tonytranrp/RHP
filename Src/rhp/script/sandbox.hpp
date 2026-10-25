@@ -264,6 +264,11 @@ public:
     // On error only the effects of this run are reverted. Returns every value the chunk returned.
     result<value_list> exec(std::string_view source, std::string_view chunk_name = "exec");
 
+    // exec for trusted sources run in many sandboxes (the test framework): each distinct (chunk
+    // name, source) is compiled once per process and later sandboxes load its bytecode. Never use it
+    // for sources a client sent.
+    result<value_list> exec_cached(std::string_view source, std::string_view chunk_name);
+
     // Same, converting the first returned value (nil if none).
     template <from_value_convertible T>
     result<T> exec(std::string_view source, std::string_view chunk_name = "exec") {
@@ -420,8 +425,9 @@ public:
     [[nodiscard]] run_meter meter();
     // The peak starts over from what is in use now.
     void reset_peak() noexcept;
-    // A full garbage collection, twice (objects with finalizers go in the second).
-    result<void> collect_garbage();
+    // Full garbage collections: two by default (objects with finalizers go in the second); the test
+    // runner takes one around each test.
+    result<void> collect_garbage(int cycles = 2);
     result<void> set_gc_mode(gc_mode mode);
     // Records which lines run: every chunk compiled from now on is known with all its executable
     // lines; lines of code compiled before (or by load()) are reported as `extra`.

@@ -330,7 +330,7 @@ public:
     // ---- sandbox operations ------------------------------------------------------------------
     result<void> install_lib(std::string_view name, c_function build, std::string (*describe)(role), tunables_fn collect, value (*api)(role));
     [[nodiscard]] value api() const;
-    result<value_list> exec(std::string_view source, std::string_view chunk_name);
+    result<value_list> exec(std::string_view source, std::string_view chunk_name, bool cached = false);
     result<std::vector<tunable_info>> tunables(std::string_view prefix);
     result<void> tune(std::string_view path, const value& v);
     // Every variable of the installed libs, without values (rhp.tunables reads them).
@@ -354,7 +354,7 @@ public:
     void stop_metering();
     [[nodiscard]] run_meter meter();
     void reset_peak() noexcept { peak_ = memory_used_; }
-    result<void> collect_garbage();
+    result<void> collect_garbage(int cycles);
     result<void> set_gc_mode(gc_mode mode);
     result<void> start_coverage();
     [[nodiscard]] coverage_report coverage() const;
@@ -540,7 +540,8 @@ private:
     [[nodiscard]] bool take_cancel(request_id id);
     [[nodiscard]] int new_environment();
     // Pushes the compiled chunk with its _ENV set; fails with kCompile.
-    [[nodiscard]] result<void> compile(std::string_view source, const std::string& chunk_name, int env_ref);
+    // `cached`: a trusted source compiled once per process; later compiles load its bytecode.
+    [[nodiscard]] result<void> compile(std::string_view source, const std::string& chunk_name, int env_ref, bool cached = false);
 
     // Requests. start_request moves the function and `nargs` arguments on top of the main stack
     // into a new coroutine; step runs it until it finishes (the result), fails, or suspends (nullopt).

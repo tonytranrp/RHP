@@ -760,10 +760,11 @@ run_meter sandbox_impl::meter() {
     return m;
 }
 
-result<void> sandbox_impl::collect_garbage() {
-    return protect(state_, [this] {
-        lua_gc(state_, LUA_GCCOLLECT);
-        lua_gc(state_, LUA_GCCOLLECT);
+result<void> sandbox_impl::collect_garbage(int cycles) {
+    return protect(state_, [this, cycles] {
+        for (int i = 0; i < cycles; ++i) {
+            lua_gc(state_, LUA_GCCOLLECT);
+        }
     });
 }
 

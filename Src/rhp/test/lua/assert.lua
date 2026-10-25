@@ -184,14 +184,25 @@ local function resolve(words)
     return negated, concat(parts, "_")
 end
 
-local function chain(words, on_call)
+-- match.x.y chains, made once per word sequence.
+local match_chains = {}
+
+local function chain(words, on_call, cache_key)
     return setmetatable({ words = words }, {
         __index = function(self, key)
+            local lk = lower(key)
+            local full = cache_key .. "." .. lk
+            local cached = match_chains[full]
+            if cached ~= nil then
+                return cached
+            end
             local next_words = { unpack(rawget(self, "words")) }
-            for w in gmatch(lower(key), "[^_]+") do
+            for w in gmatch(lk, "[^_]+") do
                 next_words[#next_words + 1] = w
             end
-            return chain(next_words, on_call)
+            cached = chain(next_words, on_call, full)
+            match_chains[full] = cached
+            return cached
         end,
         __call = function(self, ...)
             return on_call(rawget(self, "words"), ...)
@@ -207,7 +218,7 @@ match = chain({}, function(words, ...)
     end
     local args = pack(...)
     return setmetatable({ name = name, negated = negated, arguments = args, callback = make({}, args) }, matcher_mt)
-end)
+end, "")
 rawset(match, "_", setmetatable({ name = "_", negated = false, arguments = { n = 0 }, callback = function() return true end }, matcher_mt))
 T.matchers = matchers
 
@@ -369,9 +380,18 @@ end, "Expected %s result(s) to be returned, but got %s", "Expected not %s result
 -- Spy assertions (assert.spy(s).was.called(n) ...): see spy.lua for the spies.
 T.spy_assertions = {}
 
+-- (negated, name) of each chain's words, worked out once per words table.
+local resolved = setmetatable({}, { __mode = "k" })
+
 -- Runs an assertion: raises the failure, or returns the arguments.
 local function check(words, target, message, ...)
-    local negated, name = resolve(words)
+    local r = resolved[words]
+    if r == nil then
+        local negated, name = resolve(words)
+        r = { negated, name }
+        resolved[words] = r
+    end
+    local negated, name = r[1], r[2]
     local args = pack(...)
     local spec
     if target ~= nil then
@@ -410,8 +430,19 @@ local function check(words, target, message, ...)
 end
 T.check = check
 
+-- Chains without a spy or a message are the same for everyone: made once ("is_not.equal" -> chain).
+local chain_cache = {}
+
+local function extended(words, key)
+    local next_words = { unpack(words) }
+    for w in gmatch(key, "[^_]+") do
+        next_words[#next_words + 1] = w
+    end
+    return next_words
+end
+
 -- assert(v, msg, ...) is Lua's assert (counted); everything else is a chain of words.
-local function assert_chain(words, target, message)
+local function assert_chain(words, target, message, cache_key)
     return setmetatable({}, {
         __index = function(_, key)
             local lk = lower(key)
@@ -425,11 +456,16 @@ local function assert_chain(words, target, message)
             elseif lk == "message" then
                 return function(m) return assert_chain(words, target, m) end
             end
-            local next_words = { unpack(words) }
-            for w in gmatch(lk, "[^_]+") do
-                next_words[#next_words + 1] = w
+            if cache_key ~= nil then
+                local key = cache_key .. "." .. lk
+                local cached = chain_cache[key]
+                if cached == nil then
+                    cached = assert_chain(extended(words, lk), nil, nil, key)
+                    chain_cache[key] = cached
+                end
+                return cached
             end
-            return assert_chain(next_words, target, message)
+            return assert_chain(extended(words, lk), target, message)
         end,
         __call = function(_, ...)
             if #words == 0 and target == nil then
@@ -441,7 +477,7 @@ local function assert_chain(words, target, message)
     })
 end
 
-assert = assert_chain({}, nil, nil)
+assert = assert_chain({}, nil, nil, "")
 
 -- assert:register("assertion", name, fn(state, arguments) -> bool, positive_template, negative_template)
 -- assert:register("matcher", name, fn(state, arguments) -> function(value) -> bool)

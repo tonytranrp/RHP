@@ -382,3 +382,30 @@ TEST_CASE("the API description lists libs events and patch points", "[script][te
     CHECK(*find_named(*seen_lib.find("variables"), "speed")->find("writable") == value{false});
     CHECK(seen.find("points")->get_if<value::array>()->empty());
 }
+
+TEST_CASE("exec_cached compiles a source once and keeps its line information", "[script][testing]") {
+    const std::string source = "local t = {}\n"
+                               "for i = 1, 3 do\n"
+                               "  t[#t + 1] = i\n"
+                               "end\n"
+                               "return #t, debug and 1 or 0\n";
+    for (int round = 0; round < 3; ++round) { // the first compiles, the others load bytecode
+        sandbox box;
+        REQUIRE(box.start_coverage());
+        auto r = box.exec_cached(source, "testing.cached");
+        REQUIRE(r);
+        REQUIRE_FALSE(r->empty());
+        CHECK(r->front() == value{std::int64_t{3}});
+        const auto report = box.coverage();
+        const auto* c = report.find("testing.cached");
+        REQUIRE(c != nullptr);
+        CHECK(c->lines == std::vector<std::uint32_t>{1, 2, 3, 5});
+    }
+    sandbox box;
+    auto bad = box.exec_cached("return +", "testing.cached_bad");
+    REQUIRE_FALSE(bad);
+    CHECK(bad.error().code == errc::kCompile);
+    auto failing = box.exec_cached("error('boom')", "testing.cached_error");
+    REQUIRE_FALSE(failing);
+    CHECK(failing.error().message.find("testing.cached_error:1: boom") != std::string::npos);
+}

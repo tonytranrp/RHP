@@ -34,6 +34,17 @@ local function deep_copy(v, seen)
 end
 
 local function copy_args(args)
+    -- Without tables there is nothing to copy: the packed arguments are both (the common case).
+    local has_table = false
+    for i = 1, args.n do
+        if type(args[i]) == "table" then
+            has_table = true
+            break
+        end
+    end
+    if not has_table then
+        return { vals = args, refs = args }
+    end
     local vals = { n = args.n }
     local refs = { n = args.n }
     for i = 1, args.n do

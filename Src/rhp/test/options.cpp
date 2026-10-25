@@ -77,6 +77,7 @@ offline. Folders are searched for *_spec.lua, *.spec.lua, *_test.lua and test_*.
       --role observe|patch|admin   the role scripts run with (default patch)
       --timeout MS           real time one test may take (default 10000)
       --max-frames N         pump() calls one test may take (default 10000)
+      --epoch SECONDS        os.time() when a test file starts (default 1700000000; the clock is fake)
       --instructions N       instruction limit of each test request
       --memory BYTES         memory limit of each test sandbox
   -r, --reporter KIND[:FILE] text, tap, junit, json, github; repeatable (stdout gets text unless one has no FILE)
@@ -197,6 +198,13 @@ result<cli_options> parse_args(std::span<const std::string_view> args) {
                 return bad(std::format("--timeout expects milliseconds > 0, got '{}'", *v));
             }
             o.timeout = std::chrono::milliseconds{static_cast<std::int64_t>(*n)};
+        } else if (a == "--epoch") {
+            RHP_VALUE("--epoch")
+            const auto n = number<std::int64_t>(*v);
+            if (!n) {
+                return bad(std::format("--epoch expects Unix seconds, got '{}'", *v));
+            }
+            o.epoch = *n;
         } else if (a == "--max-frames") {
             RHP_VALUE("--max-frames")
             const auto n = number<std::uint64_t>(*v);
