@@ -2,6 +2,7 @@
 // (rhp.pause / rhp.resume / rhp.reschedule / rhp.timers) and firing them from pump().
 
 #include <algorithm>
+#include <charconv>
 #include <chrono>
 #include <cstdint>
 #include <format>
@@ -80,13 +81,24 @@ int lua_rhp_timer(lua_State* L) {
     return 1;
 }
 
+// "rhp.after 250 ms": the same text as std::format("{} {} ms", what, ms), without formatting.
+std::string timer_label(std::string_view what, double ms) {
+    char digits[32];
+    const auto converted = std::to_chars(digits, digits + sizeof digits, ms);
+    std::string label;
+    label.reserve(what.size() + static_cast<std::size_t>(converted.ptr - digits) + 4);
+    label.append(what).push_back(' ');
+    label.append(digits, converted.ptr).append(" ms");
+    return label;
+}
+
 // rhp.after(ms, fn [, opts]) → id: one call after ms.
 int lua_rhp_after(lua_State* L) {
     const double ms = checked_ms(L, 1, "rhp.after");
     check_function(L, 2, "rhp.after");
     auto& impl = impl_of(L);
     const handler_opts opts = impl.read_opts(L, 3, "rhp.after", sandbox_impl::kOptOnError);
-    lua_pushinteger(L, static_cast<lua_Integer>(impl.add_timer(L, ms, 2, false, opts, std::format("rhp.after {} ms", ms))));
+    lua_pushinteger(L, static_cast<lua_Integer>(impl.add_timer(L, ms, 2, false, opts, timer_label("rhp.after", ms))));
     return 1;
 }
 
@@ -96,7 +108,7 @@ int lua_rhp_every(lua_State* L) {
     check_function(L, 2, "rhp.every");
     auto& impl = impl_of(L);
     const handler_opts opts = impl.read_opts(L, 3, "rhp.every", sandbox_impl::kOptTimes | sandbox_impl::kOptOnError);
-    lua_pushinteger(L, static_cast<lua_Integer>(impl.add_timer(L, ms, 2, true, opts, std::format("rhp.every {} ms", ms))));
+    lua_pushinteger(L, static_cast<lua_Integer>(impl.add_timer(L, ms, 2, true, opts, timer_label("rhp.every", ms))));
     return 1;
 }
 
@@ -332,12 +344,17 @@ void sandbox_impl::reschedule(lua_State* L, std::uint64_t seq, double interval) 
 
 void sandbox_impl::push_timers(lua_State* L) {
     const steady::time_point now = script_now();
+    std::vector<std::pair<std::uint64_t, const schedule_entry*>> mine; // in creation order
+    for (const auto& [key, e] : schedule_) {
+        if (e.owner.module == current_.module) {
+            mine.emplace_back(key, &e);
+        }
+    }
+    std::ranges::sort(mine, {}, &std::pair<std::uint64_t, const schedule_entry*>::first);
     lua_newtable(L);
     lua_Integer n = 0;
-    for (const auto& [key, e] : schedule_) {
-        if (e.owner.module != current_.module) {
-            continue;
-        }
+    for (const auto& [key, entry] : mine) {
+        const schedule_entry& e = *entry;
         lua_createtable(L, 0, 9);
         lua_pushinteger(L, static_cast<lua_Integer>(e.seq));
         lua_setfield(L, -2, "id");
@@ -395,6 +412,7 @@ void sandbox_impl::fire_schedule() {
             timers.emplace_back(e.due, key);
         }
     }
+    std::ranges::sort(frames); // registration order
     std::ranges::sort(timers);
     for (const std::uint64_t key : frames) {
         fire_entry(key, now);

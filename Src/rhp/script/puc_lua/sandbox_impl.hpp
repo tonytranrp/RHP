@@ -11,6 +11,7 @@
 #include <deque>
 #include <functional>
 #include <map>
+#include <unordered_map>
 #include <memory>
 #include <memory_resource>
 #include <mutex>
@@ -681,7 +682,8 @@ private:
     request_id last_request_;
     request_id last_resumed_; // round robin in resume_ready()
     std::uint64_t frame_ = 0;
-    std::map<std::uint64_t, schedule_entry> schedule_;
+    // Keyed by creation (keys only grow): what needs creation order sorts the keys (fire_schedule, push_timers).
+    std::unordered_map<std::uint64_t, schedule_entry> schedule_;
     std::uint64_t schedule_keys_ = 0;
     // Likewise for timers and frame callbacks: added, resumed or rescheduled entries set schedule_dirty_.
     bool schedule_dirty_ = true;

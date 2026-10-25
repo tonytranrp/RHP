@@ -1821,6 +1821,12 @@ void sandbox_impl::drain() {
     if (!running_.empty()) {
         return;
     }
+    // Nothing queued (the usual case: twice per call, exec and pump): no lock, no swaps. Every list
+    // the body below works through is in this test; a cancel queued by another thread sets the flag.
+    if (!cancel_ids_pending_.load(std::memory_order_acquire) && pending_faults_.empty() && pending_failures_.empty() && deferred_.empty() &&
+        collected_tasks_.empty() && failure_reports_.empty() && listener_calls_.empty() && finished_.empty()) {
+        return;
+    }
     std::vector<request_id> cancels;
     {
         const std::scoped_lock lock{inbox_mutex_};
@@ -2000,7 +2006,10 @@ result<void> sandbox_impl::tune(std::string_view path, const value& v) {
 result<value_list> sandbox_impl::exec(std::string_view source, std::string_view chunk_name, bool cached) {
     const operation_scope operation{*this};
     drain();
-    const std::string chunk = std::format("={}", chunk_name);
+    std::string chunk;
+    chunk.reserve(chunk_name.size() + 1);
+    chunk.push_back('=');
+    chunk.append(chunk_name);
     result<value_list> out = value_list{};
     auto glue = protect(state_, [&] {
         const slice_scope slice{*this};
@@ -2189,8 +2198,9 @@ result<value_list> sandbox_impl::call(module_id id, std::string_view function, s
         for (const auto& arg : args) {
             stack{L}.push_value(arg);
         }
-        request_record& req = start_request(request_kind::kCall, effect_owner{id, mod->live.revision}, std::format("{}.{}", mod->name, function),
-                                            static_cast<int>(args.size()), true);
+        request_record& req = start_request(request_kind::kCall, effect_owner{id, mod->live.revision}, mod->name, static_cast<int>(args.size()), true);
+        req.label.push_back('.'); // "module.function", built in the pooled record's string: no allocation once warm
+        req.label.append(function);
         if (auto done = step(req, static_cast<int>(args.size()))) {
             out = std::move(*done);
         }
