@@ -1,5 +1,6 @@
 rhp_add_module(core
     HEADERS
+        async.hpp
         convert.hpp
         error.hpp
         errors_mode.hpp

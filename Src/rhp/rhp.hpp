@@ -8,6 +8,7 @@
 #include <rhp/client/fleet.hpp>
 #include <rhp/client/pending.hpp>
 #include <rhp/config/config.hpp>
+#include <rhp/core/async.hpp>
 #include <rhp/core/convert.hpp>
 #include <rhp/core/error.hpp>
 #include <rhp/core/errors_mode.hpp>
