@@ -20,7 +20,9 @@ ctest --preset windows-msvc
 | `tools/` | `rhp-cli` (`rhp_cli_tests`, needs `RHP_BUILD_TOOLS`; the `[process]` cases also need `RHP_BUILD_EXAMPLES` and carry the label `process`) | the shell in-process over loopback; then the real `rhp-cli` and `headless_server` binaries as processes over TCP |
 | `support/rhp_test/` | header-only helpers shared by suites (`poll_until`, a recording `link_handler`, `stream_roundtrip`) | on every suite's include path |
 | `fuzz/` | frame, envelope, msgpack, sandbox_escape, network: replay drivers in ctest (`fuzz.*`), libFuzzer with `RHP_FUZZ=ON` | see [fuzz/README.md](fuzz/README.md) |
-| `bench/` | (planned, Stage 8) | the hot paths: patch points, bindings, scheduler, wire, round trips |
+| `unit/test/` | `Rhp::test` end to end (`rhp_test_tests`): Lua specs in `fixtures/specs` run through the runner against the `arena` fixture lib | a spec's test names end with the outcome they must have, `(ok)` / `(fails)` / `(errors)` (`check_conventions`); `golden/` holds normalized reports (a mismatch writes `<file>.actual` next to it for review); the fixtures are embedded too, so the suite runs where the source tree isn't reachable (list new ones in `rhp_test_fixture_files`); snapshot and fuzz cases work in a temporary copy |
+| `package/` | a consumer project built against the installed package (`package.find_package`) or RHP as a subdirectory | `find_package(rhp)`, `<windows.h>` first, a Lua test executable through `rhp_add_lua_tests` |
+| `bench/` | `rhp_bench` (`RHP_BUILD_BENCH=ON`): every hot path next to a raw-Lua twin | ctest runs a smoke pass (`bench.smoke`); numbers in [Docs/benchmarks.md](../Docs/benchmarks.md) |
 
 ## Rules
 
@@ -32,6 +34,7 @@ ctest --preset windows-msvc
 - Anything touching threads must stay clean under the `*-tsan` preset.
 - On Android, `python Tools/android/run_tests.py <build dir>` runs every suite on a device or emulator; on the iOS simulator `ctest --preset ios-sim` runs through `Tools/ios/simctl_run.sh`.
 - Catch2 test names: no commas or non-ASCII characters (ctest passes the name back as a filter).
+- The VS Code extension's tests (`clients/vscode/test`) run with `node --test` when Node.js is found (`vscode.unit`, `vscode.protocol`).
 - Network tests use loopback channel names and ports unique to their test case, TCP on `127.0.0.1` port 0 (a free port), and generous timeouts; they read game state through a client (or after the pumping thread has joined), never straight from another thread.
 - Globals, patch points, events and lib names are process-wide: give each test file its own fixture namespace, globals and point / event ids, and leave every point unpatched (a destroyed sandbox reverts everything).
 - Script time: inject `sandbox_options::clock` for `rhp.sleep` / `rhp.timer`; use real time only where it is the subject (slicing, `wall_ms`, cross-thread cancel) and keep bounds generous for sanitizer builds.

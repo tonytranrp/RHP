@@ -37,7 +37,9 @@ namespace Rhp::test {
 // default (0, "", false, a default-constructed handle, an asynchronous result that is already there),
 // or with fake_registry::set_strict(true) raises "not mocked". An undo<G> tag gets a recording undo
 // ("game.spawn.undo"), so reverts are recorded too. Variables get storage of their own, starting at
-// their range's lower bound (or a default value). Handles are always alive unless "<handle>?alive"
+// their range's lower bound (or a default value); like a real lib's variables it is process-wide (one
+// per path, shared by every sandbox and thread), and a test's writes are journaled and undone like
+// any variable write. Handles are always alive unless "<handle>?alive"
 // is set to return false. Lua tests can still stub or spy on any of it.
 template <script::lib_type L>
 struct fake_of;
@@ -160,7 +162,8 @@ struct alive {
     static bool call(const H&) {
         const auto configured = fake_registry::instance().returns(Path.view());
         if (configured && !configured->empty()) {
-            if (const auto* b = configured->front().get_if<bool>()) {
+            const value& first = configured->front();
+            if (const auto* b = first.get_if<bool>()) {
                 return *b;
             }
         }

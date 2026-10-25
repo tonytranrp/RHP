@@ -99,8 +99,19 @@ end
 
 -- ---- driving the program -------------------------------------------------------------------------------
 
+-- Fires a C++ event by name as the program would. An event registers itself where the program fires
+-- it, and a test executable may not contain that code: then the handlers (`rhp.on(name)`, a script
+-- subscription while the event is unknown) get it as a script event, at the next frame.
 function test.fire(name, ...)
-    bridge.fire(name, ...)
+    local ok, err = pcall(bridge.fire, name, ...)
+    if ok then
+        return
+    end
+    if string.find(tostring(err), "no event '", 1, true) then
+        rhp.publish(name, ...)
+        return
+    end
+    error(err, 2)
 end
 
 function test.call_point(id, ...)
