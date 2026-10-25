@@ -8,7 +8,9 @@ include_guard(GLOBAL)
 #     [ARGS <arguments...>]      more runner arguments (--isolation test, --coverage lcov:..., ...)
 #     [LABELS <labels...>]       ctest labels (lua is always one)
 #     [JUNIT]                    also write <build>/<name>/<file stem>.junit.xml for CI test reports
-#     [TIMEOUT <seconds>])       ctest timeout of each file
+#     [TIMEOUT <seconds>]        ctest timeout of each file
+#     [STORE_SNAPSHOTS])         let ctest store new snapshots (by default it runs with --ci: a missing
+#                                snapshot fails instead of being written into the source tree)
 #
 # Lua test files run as ctest tests through the program's own test executable:
 #
@@ -18,8 +20,9 @@ include_guard(GLOBAL)
 #
 # With TARGET rhp-cli (built in this tree) the files run with the `rhp` API only (or the fakes of an
 # --api FILE.json in ARGS). Files are listed, never globbed: adding one is a CMake change like a source.
+# Two files with the same stem get their folder in the test name too.
 function(rhp_add_lua_tests name)
-    cmake_parse_arguments(PARSE_ARGV 1 arg "JUNIT" "TARGET;ROOT;TIMEOUT" "FILES;SCRIPTS;ARGS;LABELS")
+    cmake_parse_arguments(PARSE_ARGV 1 arg "JUNIT;STORE_SNAPSHOTS" "TARGET;ROOT;TIMEOUT" "FILES;SCRIPTS;ARGS;LABELS")
     if(NOT arg_TARGET)
         message(FATAL_ERROR "rhp_add_lua_tests(${name}): TARGET is required (a test executable, or rhp-cli)")
     endif()
@@ -36,15 +39,26 @@ function(rhp_add_lua_tests name)
         list(APPEND command test)
     endif()
     set(common --no-color --root "${arg_ROOT}")
+    if(NOT arg_STORE_SNAPSHOTS)
+        list(APPEND common --ci)
+    endif()
     foreach(folder IN LISTS arg_SCRIPTS)
         cmake_path(ABSOLUTE_PATH folder BASE_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" NORMALIZE)
         list(APPEND common --scripts "${folder}")
     endforeach()
 
+    set(used "")
     foreach(file IN LISTS arg_FILES)
         cmake_path(ABSOLUTE_PATH file BASE_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" NORMALIZE)
         cmake_path(GET file STEM stem)
         string(REGEX REPLACE "[^A-Za-z0-9_]" "_" stem "${stem}")
+        if(stem IN_LIST used)
+            cmake_path(GET file PARENT_PATH parent)
+            cmake_path(GET parent FILENAME folder)
+            string(REGEX REPLACE "[^A-Za-z0-9_]" "_" folder "${folder}")
+            set(stem "${folder}.${stem}")
+        endif()
+        list(APPEND used "${stem}")
         set(reports "")
         if(arg_JUNIT)
             set(reports --reporter "junit:${CMAKE_CURRENT_BINARY_DIR}/${name}/${stem}.junit.xml")

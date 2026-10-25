@@ -26,6 +26,8 @@ public:
     [[nodiscard]] std::optional<std::vector<value>> returns(std::string_view path) const;
     // Forgets calls and configured returns (of one path, or all when empty).
     void reset(std::string_view path = {});
+    // Forgets every recorded call (configured returns stay). The runner does it before each test.
+    void clear_calls();
     // Strict fakes raise "not mocked: path(...)" for calls nothing configured.
     void set_strict(bool strict);
     [[nodiscard]] bool strict() const;

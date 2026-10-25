@@ -118,6 +118,7 @@ struct coverage_state {
     std::unordered_map<std::string, std::uint32_t, string_hash, std::equal_to<>> by_name;
     std::unordered_map<const void*, std::uint32_t> by_proto; // function prototype -> chunk
     const void* last_proto = nullptr;                        // the prototype of the last line event
+    const char* last_source = nullptr;                       // and its source name's characters
     std::uint32_t last_chunk = 0;
     std::uint64_t distinct = 0; // (chunk, line) pairs hit at least once, `extra` included
 

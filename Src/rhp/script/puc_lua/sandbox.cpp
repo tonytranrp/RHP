@@ -672,6 +672,7 @@ std::uint32_t sandbox_impl::hook_count() const noexcept {
 // `armed`: the run checks for cancels and limits. The profiler counts everywhere; the debugger adds
 // line events.
 void sandbox_impl::arm_hook(lua_State* L, bool armed) noexcept {
+    credit_hook_progress(L); // lua_sethook restarts the countdown: the meter keeps what ran of it
     int mask = armed || counts_everywhere() ? LUA_MASKCOUNT : 0;
     if (wants_line_events()) {
         // Every line, with a bitmap check first. (Switching line events per function on calls and
@@ -721,6 +722,7 @@ void sandbox_impl::sync_hook(lua_State* L, bool checked) noexcept {
     if (lua_gethookmask(L) == mask && ((mask & LUA_MASKCOUNT) == 0 || lua_gethookcount(L) == count)) {
         return;
     }
+    credit_hook_progress(L);
     if (mask == 0) {
         lua_sethook(L, nullptr, 0, 0);
     } else {
@@ -1195,6 +1197,12 @@ public:
 
     void store(std::string_view name, std::string_view source, std::string bytecode) {
         const std::scoped_lock lock{mutex_};
+        // Bounded: a long-lived process running edited sources again and again starts over.
+        bytes_ += name.size() + source.size() + bytecode.size();
+        if (bytes_ > kMaxBytes) {
+            cache_.clear();
+            bytes_ = name.size() + source.size() + bytecode.size();
+        }
         cache_.insert_or_assign(key(name, source), std::move(bytecode));
     }
 
@@ -1207,8 +1215,11 @@ private:
         return k;
     }
 
+    static constexpr std::size_t kMaxBytes = 64u * 1024u * 1024u;
+
     std::mutex mutex_;
     std::unordered_map<std::string, std::string> cache_;
+    std::size_t bytes_ = 0;
 };
 
 bytecode_cache& trusted_bytecode() {

@@ -713,12 +713,14 @@ RHP/
 │   ├── CPM.cmake · Dependencies.cmake      # every pin in one place
 │   ├── RhpOptions · RhpPlatform · RhpWarnings · RhpSanitizers · RhpModule (rhp_add_module)
 │   ├── RhpLua · RhpAsio · RhpMonocypher · RhpMbedtls · RhpTools   # third-party targets
+│   ├── RhpEmbed (text files as C++ arrays) · RhpLuaTests (rhp_add_lua_tests, installed)
 │   └── lua/lua_cxx.cpp · monocypher/*_cxx.cpp                   # C sources compiled as C++
 ├── Src/rhp/                 # one folder per module, included as <rhp/<module>/...>, umbrella rhp.hpp
 │   ├── utils/      fixed_string · type_list · function_traits · scope_guard · spsc_ring · byte_buffer
 │   │               crc32c(.cpp) · base64 · units · overloaded
 │   ├── core/       error · result · errors_mode · value(.cpp) · convert · ids · log(.cpp) · limits · role · subscription
-│   ├── platform/   os · random(.cpp)                       ← general OS facts
+│   │               json(.cpp)
+│   ├── platform/   os · random(.cpp) · files(.cpp) · process(.cpp)   ← general OS facts
 │   ├── wire/       ops · frame(.cpp) · codec · codec/msgpack(.cpp) · messages(.cpp)
 │   ├── net/        endpoint · io_context(.cpp) · link · discovery · loopback/ · tcp/ · websocket/ · udp_reliable/
 │   │               local/ · mdns/ · detail/http                  ← Asio and OS APIs only in their .cpp files
@@ -726,7 +728,9 @@ RHP/
 │   │               hash · http_auth                 tls/: tls · openssl(.cpp) · mbedtls(.cpp) · auto_backend
 │   ├── exec/       executor (pumped, steady_clock) · io_runner (owned_io_thread, zero_threads)
 │   ├── script/     stack · marshal · lib · patch_point · lua_event · ledger · sandbox · stubs · detail/
-│   │               puc_lua/: sandbox · schedule · script_events · tasks · lib_proxy · stack (.cpp, lua.h never leaks)
+│   │               testing · api   puc_lua/: sandbox · schedule · script_events · tasks · lib_proxy · stack · debug
+│   │               testing · lua_internals (.cpp, lua.h never leaks)
+│   ├── test/       runner · options · reporter · report · cli · fake · fake_registry · lua/*.lua (the framework)
 │   ├── event/      events(.cpp) · hub — typed host events, subscriptions, JSON
 │   ├── audit/      sinks(.cpp) — file_sink, ostream_sink
 │   ├── session/    session(.cpp): handshake · seq/ack/nack · MAC · heartbeat · resume · secure_link(.cpp)
@@ -737,6 +741,7 @@ RHP/
 │   ├── unit/          mirrors Src/rhp/* — files named `<thing>_tests.cpp`
 │   ├── integration/   host_client · stage4 · stage5 · stage6 · stage6_fleet · stage7
 │   ├── tools/         rhp-cli in-process + as a process against headless_server
+│   ├── package/       a consumer project built against the installed package (find_package / subdirectory)
 │   ├── compile_fail/  bad concepts, duplicate names — ctest WILL_FAIL
 │   ├── fuzz/          frame · envelope · msgpack · sandbox_escape · network (replay drivers / libFuzzer)
 │   └── support/       header-only test helpers (`rhp_test/…`)
@@ -745,12 +750,16 @@ RHP/
 │   ├── frame_loop/        a game loop next to a runaway script, reload with state, LuaLS stubs
 │   ├── remote_exec/       three keys against one host over loopback and TCP, cancel, revert on disconnect
 │   ├── custom_transport/  writing your own Rhp::net::transport
-│   └── headless_server/   standalone host: key files, audit log, blobs, reverse mode, TLS, DNS-SD, HTTP gateway
+│   ├── headless_server/   standalone host: key files, audit log, blobs, reverse mode, TLS, DNS-SD, HTTP gateway
+│   └── lua_tests/         a game's Lua scripts tested offline with Rhp::test and rhp_add_lua_tests
 ├── Tools/
 │   ├── rhp-cli/           REPL and subcommands (replxx, CLI11): keygen · pubkey · sign · connect · run · exec · stubs
-│   │                      blob · watch · events · discover · fleet
+│   │                      blob · watch · events · discover · fleet · release · revoke · rollout · tune · profile · dap · test
 │   ├── android/           run_tests.py — the test executables on a device / emulator over adb
 │   └── ios/               simctl_run.sh — the ios-sim preset's test runner
+├── clients/
+│   ├── python/            rhp_client, a pure-Python client
+│   └── vscode/            the Test Explorer extension for Lua tests
 └── Docs/
     ├── ARCHITECTURE.md · TODO.md
     ├── guide/             the user guide
@@ -909,7 +918,8 @@ flowchart TB
     U["unit (mirrors Src/rhp)"] --> I["integration<br/>loopback → TCP → TLS"]
     I --> F["fuzz: frame · envelope · msgpack · sandbox · network"]
     I --> CF["compile-fail: concepts, duplicate names"]
-    I --> B["bench (planned): patch point · roundtrip · slice overhead"]
+    I --> B["bench: hot paths against raw-Lua twins"]
+    U --> L["Lua specs through Rhp::test (fixtures with known outcomes, golden reports)"]
 ```
 
 Must-have cases: revert matrix (every effect kind × load/reload/rollback/revert/revert_to/unload × cross-module interleaving) · transactional reload · scheduler (cancel from the I/O thread stops an infinite loop inside `pump()`; opt-in `slice_us` yields on time) · sandbox escapes · roles (observe can't mutate) · signing (unsigned/wrong-key rejected) · reconnect+resume exactly-once · CRC corruption → nack → resend · blob fragmentation · boundary instantiations (`Rhp::config<>`, empty `Rhp::lib<"x">`, `void` returns, minimal user transport).
@@ -1421,3 +1431,22 @@ Taken without a questionnaire: the user asked for Stage 11 (debugger, profiler a
 | AJ7 | Events | Pauses publish the script event `rhp.debug` (identity-scoped; `on_script_event`, `client.on`), to C++ listeners only, after the operation. |
 | AJ8 | Wire | Revision 6: `tunables`, `profile` (observe), `tune`, `debug` (patch) on the caller's own sandbox; the last debugging session's end resets the debugger, the profiling session's end stops the profiler; debugger control actions audited; profile replies truncated to a quarter of `max_frame`. |
 | AJ9 | Front ends | rhp-cli shell commands (a paused expression, `call`, `load` or `reload` goes to the background), `rhp-cli tune` / `profile`, and `rhp-cli dap` (Debug Adapter Protocol over stdio, sources mapped to modules by `--root`). |
+
+## 38. Decision log (round 14, Stage 12)
+
+Taken without a questionnaire: the user asked for a native test engine for the Lua that users write against their API, with every option (busted and Jest syntax, test executables and `rhp-cli test`, fakes, exact costs, coverage, snapshots, properties, fuzzing, reports, an editor extension). Per-topic reasoning: [Stage 12 decisions](decisions/stage12-test-engine.md); usage: [Testing scripts](guide/testing-scripts.md).
+
+| # | Topic | Decision |
+|---|---|---|
+| AK1 | Sandboxes | Tests run in real sandboxes with the program's libs and the modules of `--scripts`; the framework lives in the scratch environment; one sandbox per file, or per test with `--isolation test`. |
+| AK2 | Undo | Block setup outside the test's checkpoint; the test is one request; `revert_to` after it; leak checks on schedule entries, subscriptions, tasks, waiting requests, effects and variable values; irreversible effects noted or failed (`expect_undone`, `--strict-undo`); created globals removed; queued events delivered before the revert. |
+| AK3 | Clock | The runner owns a fake clock; `test.advance` / `test.frames` are commands the runner runs between pumps, due times stepped in order; `os.time` / `os.clock` follow it; wall-time, frame and stuck-wait limits per test. |
+| AK4 | Meter | Exact instruction counts (count-hook ticks plus each thread's countdown remainder after every resume, through `lua_internals.cpp`); metering never changes limits; allocation counters always on. |
+| AK5 | Coverage | Executable lines from the compiled prototypes (exact totals); hits from the line hook, armed only while needed; `rhp: coverage off/on` and `luacov` exclusions. |
+| AK6 | Bridge | `__rhp_test` in the scratch environment only (`enable_testing`); member, module export, handle method and variable swaps are ledger effects; the framework is embedded Lua (`cmake/RhpEmbed.cmake`). |
+| AK7 | Dialects | busted DSL with luassert-compatible assertions, matchers, spies, stubs and mocks; Jest-style `expect`; first-difference paths; expected / actual for diffs. |
+| AK8 | Fakes | `Rhp::test::fake<L>` (compile-time recorders) and fakes from an API description (`sandbox::api`, `rhp.api()`, `--dump-api`, `--api`, `--api-from`); shared `fake.*` API, reset per test, strict mode. |
+| AK9 | Data-driven | Lua snapshots next to tests (`--ci`, `--update-snapshots`, unreadable files fail); seeded property tests with greedy shrinking; generation- and coverage-guided fuzzing keeping crashes as regression inputs. |
+| AK10 | Reports | Text, TAP 14, JUnit, JSON events, GitHub annotations; LCOV, Cobertura; folded stacks. |
+| AK11 | Entry points | `Rhp::test::main`, `rhp-cli test` (`--exe` via `platform::run_process`, `--api-from`), `rhp_add_lua_tests` (installed), the VS Code extension (`clients/vscode`); `RHP_ENABLE=OFF` reports files as not runnable, descriptions and fakes still work. |
+| AK12 | Cost | `bench_testing.cpp` first; then a process-wide bytecode cache for trusted chunks (`sandbox::exec_cached`), one collection per side of a measured test, cached assert / match chains, lazy `expect` messages, shared spy argument tables. |

@@ -84,7 +84,30 @@ auto rounds = dev.on("game.round_over", [](const Rhp::remote_event& e) { /* a to
 rhp-cli events game.round_over ui.toast -c 127.0.0.1:7777 -i dev.rhpid    # print events until Ctrl+C
 ```
 
-See [`Examples/hello_console`](Examples/hello_console), [`Examples/frame_loop`](Examples/frame_loop), [`Examples/remote_exec`](Examples/remote_exec), [`Examples/custom_transport`](Examples/custom_transport), [`Examples/headless_server`](Examples/headless_server) and [`Tools/rhp-cli`](Tools/rhp-cli); Stage 7 usage is in [scheduling and events](Docs/guide/scheduling-and-events.md).
+And the Lua written against your API is tested like any other code, offline (Stage 12):
+
+```lua
+-- tests/rules_spec.lua: busted or Jest style, against the real bindings, with a fake clock
+local rules = require("shop.rules")
+
+describe("checkout", function()
+    it("charges the customer", function()
+        local c = shop.visit(200)
+        assert.is_true(rules.checkout(c, { "sword" }))
+        expect(c.gold).to.equal(80)          -- undone after the test, with everything else it did
+    end)
+
+    it("stays cheap", function()
+        test.expect_budget(function() rules.total(big_basket) end, { instructions = 5000 })
+    end)
+end)
+```
+
+```bash
+game_lua_tests tests -s scripts --coverage lcov:lcov.info -r junit:lua-tests.xml   # Rhp::test::main, or rhp-cli test
+```
+
+See [`Examples/hello_console`](Examples/hello_console), [`Examples/frame_loop`](Examples/frame_loop), [`Examples/remote_exec`](Examples/remote_exec), [`Examples/custom_transport`](Examples/custom_transport), [`Examples/headless_server`](Examples/headless_server), [`Examples/lua_tests`](Examples/lua_tests) and [`Tools/rhp-cli`](Tools/rhp-cli); Stage 7 usage is in [scheduling and events](Docs/guide/scheduling-and-events.md), Stage 12 in [testing scripts](Docs/guide/testing-scripts.md).
 
 ## Targets
 
@@ -103,6 +126,7 @@ Start with the [user guide](Docs/guide/README.md):
 | [Scheduling and events](Docs/guide/scheduling-and-events.md) | per-frame work, background tasks, events between modules, C++ and tools |
 | [Host and client](Docs/guide/host-and-client.md) | the C++ API, async calls, blobs, audit, `client.on` |
 | [Connecting](Docs/guide/connecting.md) / [Networking](Docs/guide/networking.md) | endpoints, TLS, reverse mode, `rhp-cli`, other transports, discovery, fleet |
+| [Testing scripts](Docs/guide/testing-scripts.md) | test Lua scripts offline: specs, spies, fakes, a fake clock, costs, coverage, CI, VS Code |
 | [Python client](clients/python/README.md) | `rhp_client`: a pure-Python client (signed scripts, events, resume) |
 | [Configuration](Docs/guide/configuration.md) / [Security](Docs/guide/security.md) | limits, options, keys, roles, signing |
 | [Reference](Docs/guide/reference.md) | error codes, events, wire protocol, sandbox contents |
@@ -135,7 +159,7 @@ target_link_libraries(my_app PRIVATE Rhp::rhp)
 
 Or install it once and use `find_package(rhp CONFIG REQUIRED)` (no version: RHP counts stages, not releases); see [getting started](Docs/guide/getting-started.md#installed-package).
 
-Releases are tagged by stage (`stage-7`, then `stage-8`); there are no `v1`-style version numbers. Hosts, clients and `rhp-cli` must come from the same protocol revision (Stages 7 to 9: revision 4; Stage 10: revision 5; Stage 11: revision 6). What RHP costs on top of plain Lua is measured in [benchmarks](Docs/benchmarks.md).
+Releases are tagged by stage (`stage-7`, `stage-8`, ...); there are no `v1`-style version numbers. Hosts, clients and `rhp-cli` must come from the same protocol revision (Stages 7 to 9: revision 4; Stage 10: revision 5; Stages 11 and 12: revision 6). What RHP costs on top of plain Lua is measured in [benchmarks](Docs/benchmarks.md).
 
 ## Limitations
 

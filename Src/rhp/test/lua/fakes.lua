@@ -29,9 +29,34 @@ function registry.reset(path)
     registry.returns[path] = nil
 end
 
--- Every test starts with no recorded calls and no configured results.
+-- Every test starts with no recorded calls and no configured results, and the variables of fake
+-- libs go back to what they were before it when it ends (a real lib's writes are journaled).
+local var_stores = {} -- the `values` table of every fake lib
+local saved_vars = {}
+
 T.before_test = function()
     registry.reset()
+    for i = 1, #var_stores do
+        local copy = {}
+        for k, v in pairs(var_stores[i]) do
+            copy[k] = v
+        end
+        saved_vars[i] = copy
+    end
+end
+
+T.after_test = function()
+    for i = 1, #var_stores do
+        local store, saved = var_stores[i], saved_vars[i]
+        if saved then
+            for k in pairs(store) do
+                store[k] = nil
+            end
+            for k, v in pairs(saved) do
+                store[k] = v
+            end
+        end
+    end
 end
 
 local handle_types = {} -- name -> {methods = table, properties = {name = type}, next_id = n}
@@ -188,6 +213,7 @@ local function build_lib(desc, strict)
     for _, f in ipairs(desc.functions or {}) do
         members[f.name] = fake_function(path .. "." .. f.name, f, strict)
     end
+    var_stores[#var_stores + 1] = values
     for _, v in ipairs(desc.variables or {}) do
         variables[v.name] = v
         local initial = v.min ~= nil and (v.type == "integer" and v.min // 1 or v.min) or default_of(v.type)

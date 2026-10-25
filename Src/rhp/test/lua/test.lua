@@ -223,6 +223,7 @@ function test.measure(fn, opts)
         bridge.gc()
     end
     bridge.meter(settled)
+    bridge.raise_peak(before.peak) -- the test's own peak isn't lowered by measuring something small
     T.measure_depth = depth - 1
     local results = { n = kept.n }
     for i = 1, kept.n do

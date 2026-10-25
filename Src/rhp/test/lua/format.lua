@@ -239,12 +239,19 @@ end
 -- type name in angle brackets (a string), cycles "<cycle>".
 local function long_string(s)
     local level = 0
-    while find(s, "]" .. rep("=", level) .. "]", 1, true) do
+    -- Neither "]=*]" inside nor a "]=*" at the end (it would close the bracket early).
+    while find(s, "]" .. rep("=", level) .. "]", 1, true) or sub(s, -(level + 1)) == "]" .. rep("=", level) do
         level = level + 1
     end
     local eq = rep("=", level)
     local lead = sub(s, 1, 1) == "\n" and "\n" or ""
     return "[" .. eq .. "[" .. lead .. s .. "]" .. eq .. "]"
+end
+
+-- Names that can't be bare keys.
+local keywords = {}
+for w in ("and break do else elseif end false for function global goto if in local nil not or repeat return then true until while"):gmatch("%a+") do
+    keywords[w] = true
 end
 
 local function serialize(v, indent, seen)
@@ -288,10 +295,10 @@ local function serialize(v, indent, seen)
     for _, k in ipairs(keys) do
         if not (mtype(k) == "integer" and k >= 1 and k <= n) then
             local key
-            if type(k) == "string" and find(k, "^[%a_][%w_]*$") then
+            if type(k) == "string" and find(k, "^[%a_][%w_]*$") and not keywords[k] then
                 key = k
             else
-                key = "[" .. serialize(k, inner, seen) .. "]"
+                key = "[ " .. serialize(k, inner, seen) .. " ]" -- spaces: "[[[" would start a long string
             end
             lines[#lines + 1] = inner .. key .. " = " .. serialize(v[k], inner, seen) .. ","
         end

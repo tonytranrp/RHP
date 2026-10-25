@@ -29,10 +29,20 @@ What RHP does not do, or does only partly, as of Stage 8. Most of these are deli
 ## Binding and scripting
 
 - **Lua 5.5 only, one script engine.** There is no second engine and no `config<>::engine<>` slot yet.
-- **No class binding.** `Rhp::lib` binds functions, variables and opaque handles. Handles must be trivially copyable, equality-comparable, non-arithmetic value types. There is no inheritance or method binding.
-- **Text chunks only.** Binary Lua chunks are always refused, for every role. Non-admin roles have no `io`, `os` (except `time` / `clock`), `debug`, `package`, `dofile`, `loadfile` or `collectgarbage`.
+- **No class binding.** `Rhp::lib` binds functions, variables and opaque handles with methods and properties. Handles must be trivially copyable, equality-comparable, non-arithmetic value types. There is no inheritance.
+- **Text chunks only.** Binary Lua chunks are always refused, for every role and every client operation. The one exception is C++: `sandbox::exec_cached` loads bytecode it compiled itself from a trusted source (the test framework). Non-admin roles have no `io`, `os` (except `time` / `clock`), `debug`, `package`, `dofile`, `loadfile` or `collectgarbage`.
 - **`require` finds loaded modules only.** It looks in the same identity's loaded modules, never the file system.
 - **Single-threaded sandboxes.** Lua runs only on the thread that calls `pump()` (or the operation). Patch points hit from another thread run the C++ default.
+
+## Testing scripts
+
+- **One runner, one thread.** Test files run one after another; the runner pumps its sandboxes itself. Code that needs other threads (a network round trip) belongs in C++ tests.
+- **Process-wide points and events.** A test executable shares patch points and C++ events between files. Each test's patches are undone, but C++ code running in the background of the executable would see them while a test runs.
+- **`test.call_point` needs value types.** Points whose parameters or result don't convert to `Rhp::value` can only be called from C++.
+- **Costs of C++ aren't instructions.** Instruction counts are exact for Lua; time in C++ bindings shows in `time_ms` only, and C++ allocations aren't in the memory figures.
+- **Coverage costs about 2-3x** on line-dense code (Lua's line hook), so it is opt-in.
+- **Lua-level fuzzing.** `test.fuzz` generates and mutates Lua values; it finds logic errors in scripts, not memory errors in C++ (that is what `Tests/fuzz` and libFuzzer are for).
+- **No watch mode in the runner.** The VS Code extension re-lists files on save; a terminal runner reruns on demand.
 
 ## Networking
 

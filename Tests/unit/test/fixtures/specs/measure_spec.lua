@@ -42,6 +42,14 @@ describe("measure", function()
         test.expect_budget(function() combat.big_list(1000) end, { bytes = 1024 })
     end)
 
+    it("measuring something small keeps the test's own peak (fails)", function()
+        test.budget({ memory = 64 * 1024 })
+        local big = combat.big_list(2000) -- far over 64 KiB
+        big = nil
+        test.gc()
+        test.measure(function() return combat.sum(10) end)
+    end)
+
     it("a global left behind is removed (ok)", function()
         leaked_global = 1
     end)

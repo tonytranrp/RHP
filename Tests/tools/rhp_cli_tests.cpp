@@ -623,7 +623,7 @@ TEST_CASE("rhp-cli: test runs Lua tests offline and with a host's API faked", "[
     const std::string at = "127.0.0.1:" + std::to_string(std::stoi(dir.read("port.txt")));
 
     // The host describes its libs; the tests run here against fakes of them.
-    CHECK(run(std::format("{} test {} --api-from {} -i {} --no-color -r junit:{} > {} 2>&1", kCli, q(dir.path / "game_spec.lua"), at, q(id),
+    CHECK(run(std::format("{} test {} --api-from {} --api-identity {} --no-color -r junit:{} > {} 2>&1", kCli, q(dir.path / "game_spec.lua"), at, q(id),
                           q(dir.path / "junit.xml"), q(dir.path / "faked.txt"))) == 0);
     INFO(dir.read("faked.txt"));
     CHECK(dir.read("faked.txt").find("1 passed") != std::string::npos);

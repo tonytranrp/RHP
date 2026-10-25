@@ -71,3 +71,23 @@ test('ids and cost lines', () => {
     assert.equal(p.testId('specs/a_spec.lua', 'd one'), 'specs/a_spec.lua::d one');
     assert.equal(p.costLine({ name: 't', cost: { instructions: 10, peak: 64, allocations: 2 } }), 't: 10 instructions, peak 64 B, 2 allocations');
 });
+
+test('programs resolve on PATH without a shell', () => {
+    const path = require('node:path');
+    const dir = path.dirname(process.execPath);
+    const name = path.basename(process.execPath, path.extname(process.execPath));
+    const found = p.resolveProgram(name, '/w', { PATH: dir }, process.platform);
+    assert.equal(path.resolve(found).toLowerCase(), path.resolve(process.execPath).toLowerCase());
+    assert.equal(p.resolveProgram('build/lua_tests', '/w', { PATH: dir }, 'linux'), path.resolve('/w', 'build/lua_tests'));
+    assert.equal(p.resolveProgram('no-such-program-here', '/w', { PATH: dir }, process.platform), 'no-such-program-here');
+});
+
+test('a test name reaches the runner as one argument', () => {
+    const { spawnSync } = require('node:child_process');
+    const name = 'd & calc "quoted" ^caret% (ok)';
+    const args = p.runArgs({ files: ['a_spec.lua'], root: '/w', tests: [name] });
+    const r = spawnSync(process.execPath, ['-e', 'process.stdout.write(JSON.stringify(process.argv.slice(1)))', '--', ...args], { encoding: 'utf8', shell: false });
+    const got = JSON.parse(r.stdout);
+    const at = got.indexOf('--filter');
+    assert.ok(new RegExp(got[at + 1].slice(1, -1)).test(name));
+});

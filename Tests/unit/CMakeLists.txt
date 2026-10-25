@@ -177,10 +177,52 @@ if(RHP_ENABLE)
 else()
     set(rhp_test_test_sources test/disabled_tests.cpp)
 endif()
+# The fixtures are also embedded, for devices that can't read the source tree (Android).
+include(RhpEmbed)
+set(rhp_test_fixture_files
+    "${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures/scripts/game/combat.lua"
+    "${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures/scripts/game/util.lua"
+    "${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures/specs/abort_spec.lua"
+    "${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures/specs/assert_spec.lua"
+    "${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures/specs/basics_spec.lua"
+    "${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures/specs/broken_describe_spec.lua"
+    "${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures/specs/clock_spec.lua"
+    "${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures/specs/coverage_spec.lua"
+    "${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures/specs/dsl_spec.lua"
+    "${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures/specs/dup_snapshot_spec.lua"
+    "${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures/specs/expect_spec.lua"
+    "${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures/specs/fake_cpp_spec.lua"
+    "${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures/specs/fakes_spec.lua"
+    "${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures/specs/fuzz_spec.lua"
+    "${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures/specs/isolation_spec.lua"
+    "${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures/specs/measure_spec.lua"
+    "${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures/specs/only_spec.lua"
+    "${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures/specs/property_spec.lua"
+    "${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures/specs/select_spec.lua"
+    "${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures/specs/snapshot_spec.lua"
+    "${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures/specs/spy_spec.lua"
+    "${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures/specs/syntax_error_spec.lua"
+    "${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures/specs/timeout_spec.lua"
+    "${CMAKE_CURRENT_SOURCE_DIR}/test/golden/basics.github"
+    "${CMAKE_CURRENT_SOURCE_DIR}/test/golden/basics.jsonl"
+    "${CMAKE_CURRENT_SOURCE_DIR}/test/golden/basics.junit.xml"
+    "${CMAKE_CURRENT_SOURCE_DIR}/test/golden/basics.tap"
+    "${CMAKE_CURRENT_SOURCE_DIR}/test/golden/basics.txt"
+)
+set(rhp_test_fixtures_cpp "${CMAKE_CURRENT_BINARY_DIR}/rhp_test_fixtures.cpp")
+rhp_embed_text("${rhp_test_fixtures_cpp}"
+    NAMESPACE rhp_test_fixtures
+    FUNCTION fixture_files
+    HEADER embedded_fixtures.hpp
+    BASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/test"
+    FILES ${rhp_test_fixture_files}
+)
 rhp_add_test_suite(rhp_test_tests
     SOURCES
         ${rhp_test_test_sources}
+        "${rhp_test_fixtures_cpp}"
     LINKS
         Rhp::test
 )
+target_include_directories(rhp_test_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/test")
 target_compile_definitions(rhp_test_tests PRIVATE RHP_TEST_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures")

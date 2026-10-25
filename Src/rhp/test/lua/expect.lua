@@ -68,7 +68,7 @@ matchers.be_a = simple(function(v, t)
     return type(v) == t or (type(v) == "number" and (t == "integer" or t == "float") and math.type(v) == t)
 end, "be a")
 matchers.be_an = matchers.be_a
-matchers.be_near = simple(function(v, e, tol) return type(v) == "number" and v >= e - (tol or 0) and v <= e + (tol or 0) end, "be near")
+matchers.be_near = simple(function(v, e, tol) return type(v) == "number" and type(e) == "number" and v >= e - (tol or 0) and v <= e + (tol or 0) end, "be near")
 matchers.be_greater_than = simple(function(v, x) return type(v) == "number" and v > x end, "be greater than")
 matchers.be_less_than = simple(function(v, x) return type(v) == "number" and v < x end, "be less than")
 matchers.be_at_least = simple(function(v, x) return type(v) == "number" and v >= x end, "be at least")
@@ -102,7 +102,16 @@ matchers.fail = function(fn, expected)
     end
     local ok, err = pcall(fn)
     local text = type(err) == "table" and rawget(err, "rhp_failure") and err.message or tostring(err)
-    local matched = not ok and (expected == nil or text == expected or find(text, expected, 1, true) ~= nil or find(text, expected) ~= nil)
+    local matched = false
+    if not ok then
+        if expected == nil then
+            matched = true
+        else
+            local want = tostring(expected)
+            -- the text itself, then as a Lua pattern (a broken pattern just doesn't match)
+            matched = text == want or find(text, want, 1, true) ~= nil or (pcall(find, text, want) and find(text, want) ~= nil)
+        end
+    end
     return matched, function()
         return ok and "expected the function to raise, but it returned" or format("expected an error matching %s, got %s", T.inline(expected), T.inline(text)),
             format("expected the function not to raise, but it raised %s", T.inline(text))

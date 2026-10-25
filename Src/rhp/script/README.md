@@ -11,9 +11,11 @@ The script engine: PUC Lua 5.5 (built as C++), the `Rhp::lib<>` binding DSL, pat
 | `ledger.hpp` | `effect`, `ledger` (owner-keyed undo log), `revert_report` |
 | `marshal.hpp` | `push` / `pull` between C++ and the Lua stack; `pushable`, `pullable`, `Rhp::convertible` |
 | `stack.hpp` | `Rhp::script::stack`: the only wall between templates and the Lua C API (all out of line) |
+| `api.hpp` | `api::describe<L>(role)`: a lib as a value tree (functions, variables, handles, sub-libs; LuaLS type names) for `sandbox::api()`, `rhp.api()` and test fakes; no Lua needed |
+| `testing.hpp` | test tools (Stage 12): `run_meter` (exact instructions, allocations, peak, objects by kind), `coverage_report`, `gc_mode`, `testing_options` for `sandbox::enable_testing` (the `__rhp_test` bridge, a host callback, fake `os.time`) |
 | `stubs.hpp` | `stubs::generate<L>(role)` / `write<L>` / `rhp_api(role)`: LuaLS annotations from a lib type, filtered by role; no Lua needed |
 | `detail/` | trampolines and lib builder, patch layers, variable layers, patch point and event registries, sandbox context |
-| `puc_lua/` | the `.cpp` files that include `lua.h`, plus the private `sandbox_impl.hpp` / `builtins.hpp`: `sandbox.cpp` (requests, faults, the frame), `schedule.cpp` (timers, frame callbacks), `script_events.cpp` (subscriptions, `rhp.publish`, `rhp.wait_event`, C++ listeners), `tasks.cpp` (`rhp.spawn`), `lib_proxy.cpp` (locked lib proxies), `stack.cpp` (the Lua C API wall) |
+| `puc_lua/` | the `.cpp` files that include `lua.h`, plus the private `sandbox_impl.hpp` / `builtins.hpp`: `sandbox.cpp` (requests, faults, the frame), `schedule.cpp` (timers, frame callbacks), `script_events.cpp` (subscriptions, `rhp.publish`, `rhp.wait_event`, C++ listeners), `tasks.cpp` (`rhp.spawn`), `lib_proxy.cpp` (locked lib proxies), `stack.cpp` (the Lua C API wall), `debug.cpp` (the debugger), `testing.cpp` (meter, coverage, the test bridge, `api()`), `lua_internals.cpp` (the one file besides the sandbox that reads Lua's internals: per-thread hook countdown, prototypes and their lines) |
 
 ## How a binding call flows
 
@@ -32,6 +34,7 @@ Lua: game.spawn("crate", 1)
 - Every Lua call made from C++ outside a running script goes through `stack::run_protected` (or `stack::call`), so an out-of-memory under a memory limit becomes an error, never a panic.
 - Effects that can be reverted out of order (variable writes, patch layers) live in process-wide per-target stacks (`detail/var_layers.hpp`, `detail/patch_layers.hpp`); the ledger only owns and orders them.
 - A sandbox and its Lua state belong to one thread. Patch points may be hit from any thread; a layer owned by another thread is skipped (counted in `off_thread_misses()`).
+- Test tools never change what a script does: metering credits instructions to budgets too, swaps of lib members are ledger effects, the `__rhp_test` bridge exists only in the scratch environment of a sandbox with `enable_testing`. `exec_cached` is for trusted sources only (bytecode is never checked).
 - `RHP_ENABLE=OFF`: `puc_lua/` is not compiled, Lua is not fetched, `sandbox_disabled.cpp` reports `kDisabled`, patch points are direct calls. The DSL and the ledger still build.
 
 ## Requests and the frame

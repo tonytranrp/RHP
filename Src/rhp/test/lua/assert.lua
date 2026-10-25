@@ -41,7 +41,7 @@ T.pack = pack
 local matcher_mt = {}
 matcher_mt.__index = matcher_mt
 function matcher_mt:__call(v)
-    return self.callback(v) == not self.negated
+    return (not not self.callback(v)) == not self.negated -- a predicate may return any truthy value
 end
 matcher_mt.__tostring = function(m)
     local args = {}
@@ -69,7 +69,7 @@ matchers["false"] = function() return function(v) return v == false end end
 matchers.truthy = function() return function(v) return v ~= nil and v ~= false end end
 matchers.falsy = function() return function(v) return v == nil or v == false end end
 matchers.ref = function(_, args) local r = args[1] return function(v) return rawequal(v, r) end end
-matchers.same = function(_, args) local r = args[1] return function(v) return (T.deep_equal(v, r, true)) end end
+matchers.same = function(_, args) local r = args[1] return function(v) return (T.deep_equal(r, v, true)) end end -- expected first: matchers inside it apply
 matchers.equal = function(_, args) local r = args[1] return function(v) return v == r end end
 matchers.equals = matchers.equal
 matchers.near = function(_, args)
@@ -138,7 +138,7 @@ matchers.contains = function(_, args)
             return false
         end
         for _, x in pairs(v) do
-            if T.deep_equal(x, item, true) then
+            if T.deep_equal(item, x, true) then
                 return true
             end
         end
@@ -157,7 +157,7 @@ matchers.table_containing = function(_, args)
                 if not want(got) then
                     return false
                 end
-            elseif not T.deep_equal(got, want, true) then
+            elseif not T.deep_equal(want, got, true) then
                 return false
             end
         end
@@ -169,19 +169,39 @@ end
 local fillers = { is = true, are = true, was = true, has = true, does = true, a = true, an = true, the = true, to = true, be = true, been = true }
 local negations = { ["not"] = true, no = true }
 
--- Splits accumulated words into (negated, name).
+-- Splits accumulated words into (negated, name, the name with its filler words: a registered
+-- name such as "has_x" keeps them).
 local function resolve(words)
     local negated = false
     local parts = {}
+    local all = {}
     for i = 1, #words do
         local w = words[i]
         if negations[w] then
             negated = not negated
-        elseif not fillers[w] then
-            parts[#parts + 1] = w
+        else
+            all[#all + 1] = w
+            if not fillers[w] then
+                parts[#parts + 1] = w
+            end
         end
     end
-    return negated, concat(parts, "_")
+    return negated, concat(parts, "_"), all
+end
+
+-- The name to look up in `known`: the words without fillers, else the longest run of trailing words
+-- (fillers included) that names something ("is_not.has_x" -> "has_x").
+local function pick_name(known, name, all)
+    if known[name] ~= nil then
+        return name
+    end
+    for k = 1, #all do
+        local candidate = concat(all, "_", k)
+        if known[candidate] ~= nil then
+            return candidate
+        end
+    end
+    return name
 end
 
 -- match.x.y chains, made once per word sequence.
@@ -211,7 +231,8 @@ local function chain(words, on_call, cache_key)
 end
 
 match = chain({}, function(words, ...)
-    local negated, name = resolve(words)
+    local negated, name, all = resolve(words)
+    name = pick_name(matchers, name, all)
     local make = matchers[name]
     if not make then
         error(format("no matcher 'match.%s'", concat(words, "_")), 2)
@@ -387,7 +408,8 @@ local resolved = setmetatable({}, { __mode = "k" })
 local function check(words, target, message, ...)
     local r = resolved[words]
     if r == nil then
-        local negated, name = resolve(words)
+        local negated, name, all = resolve(words)
+        name = pick_name(target ~= nil and T.spy_assertions or assertions, name, all)
         r = { negated, name }
         resolved[words] = r
     end

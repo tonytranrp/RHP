@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cstddef>
 #include <filesystem>
 #include <format>
@@ -34,7 +35,7 @@ result<void> write_file(const fs::path& path, std::string_view text) {
 
 } // namespace
 
-int run_cli(std::span<const std::string_view> args, const install_fn& install, std::string_view program, std::ostream& out, std::ostream& err) {
+int run_cli(std::span<const std::string_view> args, const install_fn& install, std::string_view program, std::ostream& out, std::ostream& err, const value* given_api) {
     auto parsed = parse_args(args);
     if (!parsed) {
         err << std::format("{}: {}\n", program, parsed.error().message);
@@ -71,6 +72,13 @@ int run_cli(std::span<const std::string_view> args, const install_fn& install, s
             return 2;
         }
         o.api = std::move(*api);
+    }
+    if (given_api != nullptr) {
+        if (given_api->find("libs") == nullptr) {
+            err << std::format("{}: the API description has no libs\n", program);
+            return 2;
+        }
+        o.api = *given_api;
     }
     if (o.tests.empty()) {
         err << std::format("{}: no test files or folders given (--help for usage)\n", program);

@@ -10,12 +10,14 @@
 #include <cstdint>
 #include <exception>
 #include <format>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <optional>
 #include <span>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -80,15 +82,21 @@ public:
     ~slot_swap_effect() override { release(); }
 
     void undo() override {
-        // Newest first; rawset on a key the table holds doesn't allocate, so this can't raise.
-        for (auto it = slots_.rbegin(); it != slots_.rend(); ++it) {
-            lua_rawgeti(L_, LUA_REGISTRYINDEX, it->table);
-            lua_rawgeti(L_, LUA_REGISTRYINDEX, it->key);
-            lua_rawgeti(L_, LUA_REGISTRYINDEX, it->original);
-            lua_rawset(L_, -3);
-            lua_pop(L_, 1);
-        }
+        // Newest first, in protected mode: a key the test set to nil may be gone from the table, and
+        // putting it back can allocate (and fail under a memory limit) - an error, never a panic.
+        auto put_back = protect(L_, [this] {
+            for (auto it = slots_.rbegin(); it != slots_.rend(); ++it) {
+                lua_rawgeti(L_, LUA_REGISTRYINDEX, it->table);
+                lua_rawgeti(L_, LUA_REGISTRYINDEX, it->key);
+                lua_rawgeti(L_, LUA_REGISTRYINDEX, it->original);
+                lua_rawset(L_, -3);
+                lua_pop(L_, 1);
+            }
+        });
         release();
+        if (!put_back) {
+            throw Rhp::exception{std::move(put_back).error()};
+        }
     }
 
 private:
@@ -314,6 +322,13 @@ int bridge_meter(lua_State* L) {
 
 int bridge_reset_peak(lua_State* L) {
     impl_of(L).reset_peak();
+    return 0;
+}
+
+// raise_peak(bytes): the peak is at least this again (test.measure puts back the test's own peak).
+int bridge_raise_peak(lua_State* L) {
+    const lua_Integer at_least = luaL_checkinteger(L, 1);
+    impl_of(L).raise_peak(static_cast<std::size_t>(std::max<lua_Integer>(at_least, 0)));
     return 0;
 }
 
@@ -652,7 +667,6 @@ int lua_coroutine_wrap(lua_State* L) {
     return 1;
 }
 
-
 // ---- the API description ---------------------------------------------------------------------------
 
 value sandbox_impl::api() const {
@@ -834,12 +848,15 @@ void sandbox_impl::coverage_line(lua_State* /*L*/, lua_Debug* ar) noexcept {
     }
     try {
         std::uint32_t index = 0;
-        if (proto == c.last_proto) {
+        // The same prototype as the last line (its source string too: a freed prototype's address
+        // can come back for another chunk).
+        const std::string_view raw_source = internals::proto_source(proto);
+        if (proto == c.last_proto && raw_source.data() == c.last_source) {
             index = c.last_chunk;
         } else {
             // A prototype seen before maps to its chunk; one that wasn't compiled while recording (or
             // whose address a newer function reuses) is found by its source name.
-            std::string_view source = internals::proto_source(proto);
+            std::string_view source = raw_source;
             if (!source.empty() && (source.front() == '@' || source.front() == '=')) {
                 source.remove_prefix(1);
             }
@@ -851,6 +868,7 @@ void sandbox_impl::coverage_line(lua_State* /*L*/, lua_Debug* ar) noexcept {
                 c.by_proto.insert_or_assign(proto, index);
             }
             c.last_proto = proto;
+            c.last_source = raw_source.data();
             c.last_chunk = index;
         }
         c.hit(index, static_cast<std::uint32_t>(ar->currentline));
@@ -879,6 +897,7 @@ result<void> sandbox_impl::enable_testing(testing_options options) {
             {"swap_var", &bridge_swap_var},
             {"meter", &bridge_meter},
             {"reset_peak", &bridge_reset_peak},
+            {"raise_peak", &bridge_raise_peak},
             {"gc", &bridge_gc},
             {"gc_mode", &bridge_gc_mode},
             {"next_due", &bridge_next_due},

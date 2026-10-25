@@ -46,6 +46,24 @@ describe("property", function()
         end)
     end)
 
+    it("a failing negative property shrinks and ends (fails)", function()
+        test.property({ gen.int(-1000, -1) }, function(n)
+            assert.is_true(n > -5)
+        end)
+    end)
+
+    it("one_of shrinks values of either kind (fails)", function()
+        test.property({ gen.one_of(gen.constant("x"), gen.int(1, 3)) }, function(v)
+            return v ~= "x"
+        end)
+    end)
+
+    it("optional shrinks to nil (fails)", function()
+        test.property({ gen.optional(gen.int(1, 100)) }, function(v)
+            return v ~= nil and v < 0
+        end)
+    end)
+
     it("a failing list property shrinks the list (fails)", function()
         test.property({ gen.list(gen.int(0, 100)) }, function(list)
             local total = 0

@@ -83,6 +83,8 @@ Details: [`../decisions/wire-format.md`](../decisions/wire-format.md) and `Docs/
 | `string.dump` | removed | available (admin's full standard library) |
 | Other capabilities | no `dofile`, `loadfile`, `collectgarbage`, `io`, `package`, `debug` | available; admin file/native-library operations are outside RHP's text-source loader and undo model |
 | `require` | host loader: only loaded modules of the same identity | same |
+| `rhp.api()` | the installed libs, events and patch points as a value tree (the `rhp-cli test --api-from` source) | same |
+| Test sandboxes (`Rhp::test`) | the scratch environment also holds the test framework (`describe`, `it`, `assert`, `expect`, `spy`, `stub`, `mock`, `match`, `test`, `gen`, `fake`) and the `__rhp_test` bridge; modules don't see them; `os.time` / `os.clock` follow the fake clock | same |
 
 ## Threading summary
 

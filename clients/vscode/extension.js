@@ -59,12 +59,14 @@ function testItem(file, name, line) {
     return item;
 }
 
-// Runs the runner; resolves with its exit status, calling onLine for every line it prints.
+// Runs the runner; resolves with its exit status, calling onLine for every line it prints. Never
+// through a shell: test names become --filter arguments, and a shell would read them as commands.
 function spawn(folder, args, onLine, token) {
     const c = config(folder);
-    const [program, ...lead] = c.command;
+    const [command, ...lead] = c.command;
+    const program = p.resolveProgram(command, folder.uri.fsPath, process.env, process.platform);
     return new Promise((resolve) => {
-        const child = cp.spawn(program, [...lead, ...args], { cwd: folder.uri.fsPath, shell: process.platform === 'win32' && !program.includes('\\') && !program.includes('/') });
+        const child = cp.spawn(program, [...lead, ...args], { cwd: folder.uri.fsPath, shell: false, windowsHide: true });
         const out = p.lineSplitter(onLine);
         let err = '';
         child.stdout.setEncoding('utf8');

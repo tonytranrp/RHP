@@ -78,8 +78,12 @@ function rng_mt:int(lo, hi)
         return lo
     end
     local range = hi - lo + 1
-    if range <= 0 then -- the whole integer range
-        return self:next()
+    if range <= 0 then -- wider than 2^63: draw until one fits (at least half do)
+        local v
+        repeat
+            v = self:next()
+        until v >= lo and v <= hi
+        return v
     end
     return lo + ((self:next() >> 1) % range)
 end
@@ -116,6 +120,14 @@ local function is_generator(v)
     return type(v) == "table" and getmetatable(v) == gen_mt
 end
 
+-- Halves toward zero (floor division would stop at -1 for negative values).
+local function half(x)
+    if x >= 0 then
+        return x // 2
+    end
+    return -((-x) // 2)
+end
+
 -- Integers shrink toward `target` by halving the distance.
 local function shrink_integer(v, target)
     local out = {}
@@ -124,10 +136,10 @@ local function shrink_integer(v, target)
     end
     out[#out + 1] = target
     local gap = v - target
-    local step = gap // 2
-    while step ~= 0 and step ~= gap do
+    local step = half(gap)
+    while step ~= 0 and step ~= gap and #out < 64 do
         out[#out + 1] = v - step
-        step = step // 2
+        step = half(step)
     end
     if gap > 0 then
         out[#out + 1] = v - 1
@@ -155,7 +167,11 @@ function gen.int(lo, hi)
             return target
         end
         -- small values more often while size is small
-        local span = (hi - lo) * size // 100
+        local width = hi - lo
+        if width < 0 then -- wider than the integers: hi - lo wrapped
+            width = math.maxinteger
+        end
+        local span = width <= 0x7FFFFFFF and width * size // 100 or width // 100 * size
         if span < 1 then
             span = 1
         end
@@ -176,7 +192,7 @@ function gen.int(lo, hi)
             end
         end
         return out
-    end, format("int(%d, %d)", lo, hi))
+    end, format("int(%s, %s)", tostring(lo), tostring(hi)))
 end
 
 function gen.number(lo, hi)
@@ -234,6 +250,23 @@ function gen.element(list)
     end, "element")
 end
 
+-- Candidates of g's shrinker for v when v could be g's (same type, no error): a composite generator
+-- doesn't know which of its generators made a value.
+local function shrink_as(g, v)
+    local ok, candidates = pcall(g.shrink, v)
+    if not ok or type(candidates) ~= "table" then
+        return {}
+    end
+    local out = {}
+    for i = 1, candidates.n or #candidates do
+        local c = candidates[i]
+        if type(c) == type(v) then
+            out[#out + 1] = c
+        end
+    end
+    return out
+end
+
 -- gen.one_of(g1, g2, ...): a value of one of the generators.
 function gen.one_of(...)
     local gens = pack(...)
@@ -245,7 +278,7 @@ function gen.one_of(...)
     return generator(function(rng, size) return gens[rng:int(1, gens.n)].generate(rng, size) end, function(v)
         local out = {}
         for i = 1, gens.n do
-            for _, c in ipairs(gens[i].shrink(v)) do
+            for _, c in ipairs(shrink_as(gens[i], v)) do
                 out[#out + 1] = c
             end
         end
@@ -272,7 +305,7 @@ function gen.frequency(...)
     end, function(v)
         local out = {}
         for i = 1, entries.n do
-            for _, c in ipairs(entries[i][2].shrink(v)) do
+            for _, c in ipairs(shrink_as(entries[i][2], v)) do
                 out[#out + 1] = c
             end
         end
@@ -290,10 +323,10 @@ function gen.optional(g)
         if v == nil then
             return {}
         end
-        local out = { nil }
-        out.n = 1
+        local out = { n = 1 } -- nil first: the smallest
         for _, c in ipairs(g.shrink(v)) do
-            out[#out + 1] = c
+            out.n = out.n + 1
+            out[out.n] = c
         end
         return out
     end, "optional")
@@ -402,7 +435,7 @@ function gen.list(g, opts)
     end, "list")
 end
 
--- gen.tuple(g1, g2, ...): {v1, v2, ...}
+-- gen.tuple(g1, g2, ...): {a, b, ...}
 function gen.tuple(...)
     local gens = pack(...)
     return generator(function(rng, size)
