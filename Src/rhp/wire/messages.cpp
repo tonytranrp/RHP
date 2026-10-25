@@ -487,4 +487,180 @@ result<event_message> Rhp::convert<event_message>::from_value(const value& v) {
     return event_message{std::move(*name), *module, std::move(args), *dropped};
 }
 
+// ---- releases ------------------------------------------------------------------------------------
+
+value Rhp::convert<release_apply_request>::to_value(const release_apply_request& m) {
+    return map_builder{}.set("envelope", value{m.envelope}).set("confirm", m.confirm).done();
+}
+
+result<release_apply_request> Rhp::convert<release_apply_request>::from_value(const value& v) {
+    if (!v.is_map()) {
+        return not_a_map("release_apply", v);
+    }
+    RHP_WIRE_READ(envelope, field<value::bytes>(v, "envelope", "release_apply"));
+    RHP_WIRE_READ(confirm, field_or<std::string>(v, "confirm", "release_apply", "now"));
+    return release_apply_request{std::move(*envelope), std::move(*confirm)};
+}
+
+value Rhp::convert<release_channel_request>::to_value(const release_channel_request& m) {
+    return map_builder{}.set("channel", m.channel).set("hold", m.hold).done();
+}
+
+result<release_channel_request> Rhp::convert<release_channel_request>::from_value(const value& v) {
+    if (!v.is_map()) {
+        return not_a_map("release_channel", v);
+    }
+    RHP_WIRE_READ(channel, field<std::string>(v, "channel", "release_channel"));
+    RHP_WIRE_READ(hold, field_or<bool>(v, "hold", "release_channel", false));
+    return release_channel_request{std::move(*channel), *hold};
+}
+
+value Rhp::convert<revoke_request>::to_value(const revoke_request& m) {
+    return map_builder{}.set("envelope", value{m.envelope}).done();
+}
+
+result<revoke_request> Rhp::convert<revoke_request>::from_value(const value& v) {
+    if (!v.is_map()) {
+        return not_a_map("revoke", v);
+    }
+    RHP_WIRE_READ(envelope, field<value::bytes>(v, "envelope", "revoke"));
+    return revoke_request{std::move(*envelope)};
+}
+
+value Rhp::convert<release_info_message>::to_value(const release_info_message& m) {
+    return map_builder{}.set("id", value{m.id}).set("seq", m.seq).set("label", m.label).set("signers", m.signers).done();
+}
+
+result<release_info_message> Rhp::convert<release_info_message>::from_value(const value& v) {
+    if (!v.is_map()) {
+        return not_a_map("release_info", v);
+    }
+    RHP_WIRE_READ(id, field<value::bytes>(v, "id", "release_info"));
+    RHP_WIRE_READ(seq, field_or<std::uint64_t>(v, "seq", "release_info", 0));
+    RHP_WIRE_READ(label, field_or<std::string>(v, "label", "release_info", {}));
+    RHP_WIRE_READ(signers, field_or<std::vector<std::string>>(v, "signers", "release_info", {}));
+    return release_info_message{std::move(*id), *seq, std::move(*label), std::move(*signers)};
+}
+
+value Rhp::convert<release_apply_reply>::to_value(const release_apply_reply& m) {
+    return map_builder{}
+        .set("channel", m.channel)
+        .set("id", value{m.id})
+        .set("seq", m.seq)
+        .set("running", m.running)
+        .set("already", m.already)
+        .set("replaced", value{m.replaced})
+        .set("signers", m.signers)
+        .done();
+}
+
+result<release_apply_reply> Rhp::convert<release_apply_reply>::from_value(const value& v) {
+    if (!v.is_map()) {
+        return not_a_map("release_apply reply", v);
+    }
+    RHP_WIRE_READ(channel, field<std::string>(v, "channel", "release_apply reply"));
+    RHP_WIRE_READ(id, field<value::bytes>(v, "id", "release_apply reply"));
+    RHP_WIRE_READ(seq, field_or<std::uint64_t>(v, "seq", "release_apply reply", 0));
+    RHP_WIRE_READ(running, field_or<std::string>(v, "running", "release_apply reply", "active"));
+    RHP_WIRE_READ(already, field_or<bool>(v, "already", "release_apply reply", false));
+    RHP_WIRE_READ(replaced, field_or<value::bytes>(v, "replaced", "release_apply reply", {}));
+    RHP_WIRE_READ(signers, field_or<std::vector<std::string>>(v, "signers", "release_apply reply", {}));
+    return release_apply_reply{std::move(*channel), std::move(*id), *seq, std::move(*running), *already, std::move(*replaced), std::move(*signers)};
+}
+
+value Rhp::convert<channel_status_message>::to_value(const channel_status_message& m) {
+    return map_builder{}
+        .set("channel", m.channel)
+        .set("running", m.running)
+        .set("active", m.active ? Rhp::to_value(*m.active) : value{})
+        .set("candidate", m.candidate ? Rhp::to_value(*m.candidate) : value{})
+        .set("previous", value{m.previous})
+        .set("floor", m.floor)
+        .set("held", m.held)
+        .set("attempts", m.attempts)
+        .set("confirm", m.confirm)
+        .set("handler_failures", m.handler_failures)
+        .set("modules", m.modules)
+        .done();
+}
+
+result<channel_status_message> Rhp::convert<channel_status_message>::from_value(const value& v) {
+    if (!v.is_map()) {
+        return not_a_map("channel_status", v);
+    }
+    channel_status_message out;
+    RHP_WIRE_READ(channel, field<std::string>(v, "channel", "channel_status"));
+    RHP_WIRE_READ(running, field_or<std::string>(v, "running", "channel_status", "empty"));
+    for (const auto& [key, slot] : {std::pair{"active", &out.active}, std::pair{"candidate", &out.candidate}}) {
+        const value* f = v.find(key);
+        if (f != nullptr && !f->is_nil()) {
+            auto info = Rhp::from_value<release_info_message>(*f);
+            if (!info) {
+                return std::unexpected{std::move(info).error()};
+            }
+            *slot = std::move(*info);
+        }
+    }
+    RHP_WIRE_READ(previous, field_or<value::bytes>(v, "previous", "channel_status", {}));
+    RHP_WIRE_READ(floor, field_or<std::uint64_t>(v, "floor", "channel_status", 0));
+    RHP_WIRE_READ(held, field_or<bool>(v, "held", "channel_status", false));
+    RHP_WIRE_READ(attempts, field_or<std::uint64_t>(v, "attempts", "channel_status", 0));
+    RHP_WIRE_READ(confirm, field_or<std::string>(v, "confirm", "channel_status", "now"));
+    RHP_WIRE_READ(failures, field_or<std::uint64_t>(v, "handler_failures", "channel_status", 0));
+    RHP_WIRE_READ(modules, field_or<std::vector<std::string>>(v, "modules", "channel_status", {}));
+    out.channel = std::move(*channel);
+    out.running = std::move(*running);
+    out.previous = std::move(*previous);
+    out.floor = *floor;
+    out.held = *held;
+    out.attempts = *attempts;
+    out.confirm = std::move(*confirm);
+    out.handler_failures = *failures;
+    out.modules = std::move(*modules);
+    return out;
+}
+
+value Rhp::convert<release_status_reply>::to_value(const release_status_reply& m) {
+    value::array channels;
+    for (const channel_status_message& c : m.channels) {
+        channels.push_back(Rhp::to_value(c));
+    }
+    return map_builder{}
+        .set("app", m.app)
+        .set("build", m.build)
+        .set("platform", m.platform)
+        .set("revocation_seq", m.revocation_seq)
+        .set("channels", value{std::move(channels)})
+        .done();
+}
+
+result<release_status_reply> Rhp::convert<release_status_reply>::from_value(const value& v) {
+    if (!v.is_map()) {
+        return not_a_map("release_status reply", v);
+    }
+    release_status_reply out;
+    RHP_WIRE_READ(app, field_or<std::string>(v, "app", "release_status reply", {}));
+    RHP_WIRE_READ(build, field_or<std::string>(v, "build", "release_status reply", {}));
+    RHP_WIRE_READ(platform, field_or<std::string>(v, "platform", "release_status reply", {}));
+    RHP_WIRE_READ(seq, field_or<std::uint64_t>(v, "revocation_seq", "release_status reply", 0));
+    out.app = std::move(*app);
+    out.build = std::move(*build);
+    out.platform = std::move(*platform);
+    out.revocation_seq = *seq;
+    if (const value* c = v.find("channels"); c != nullptr && !c->is_nil()) {
+        const auto* items = c->get_if<value::array>();
+        if (items == nullptr) {
+            return Rhp::fail(Rhp::errc::kProtocol, "release_status.channels must be an array", "wire");
+        }
+        for (const value& item : *items) {
+            auto ch = Rhp::from_value<channel_status_message>(item);
+            if (!ch) {
+                return std::unexpected{std::move(ch).error()};
+            }
+            out.channels.push_back(std::move(*ch));
+        }
+    }
+    return out;
+}
+
 #undef RHP_WIRE_READ

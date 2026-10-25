@@ -228,8 +228,20 @@ struct outbound {
     case wire::op::kCancel:
     case wire::op::kBlob:
     case wire::op::kSubscribe:
-    case wire::op::kUnsubscribe: return false;
+    case wire::op::kUnsubscribe:
+    case wire::op::kReleaseStatus: return false;
     default: return true;
+    }
+}
+
+[[nodiscard]] bool is_release_op(wire::op code) noexcept {
+    switch (code) {
+    case wire::op::kReleaseApply:
+    case wire::op::kReleaseConfirm:
+    case wire::op::kReleaseDeactivate:
+    case wire::op::kReleaseStatus:
+    case wire::op::kRevoke: return true;
+    default: return false;
     }
 }
 
@@ -377,6 +389,24 @@ public:
         return {};
     }
 
+    result<void> serve_releases(release_bridge bridge) {
+        if (auto here = on_pump_thread("host.serve"); !here) {
+            return here;
+        }
+        if (releases_.handle) {
+            return fail(errc::kAlreadyLoaded, "this host already serves a release manager", "host.serve");
+        }
+        releases_ = std::move(bridge);
+        if (releases_.on_event) {
+            releases_.on_event([this](event::release_changed e) {
+                if (wants<event::release_changed>()) {
+                    publish(std::move(e));
+                }
+            });
+        }
+        return {};
+    }
+
     result<void> add_blob_sink(std::string_view name, blob_fn fn, role need) {
         if (auto here = on_pump_thread("host.on_blob"); !here) {
             return here;
@@ -504,6 +534,9 @@ public:
             id.box->pump();
         }
         std::erase_if(async_leftovers_, [](script::async_leftovers& left) { return left.pump() == 0; });
+        if (releases_.pump) {
+            releases_.pump();
+        }
         flush_outbox();
         if (!setup_.io_thread) {
             io_.poll();
@@ -1763,6 +1796,17 @@ private:
             subscription_request(sess, in);
             return;
         }
+        if (is_release_op(in.code)) {
+            if (!releases_.handle) {
+                return reply_error(in.session, in.req,
+                                   make_error(errc::kNotFound, "this host serves no releases (host.serve)", std::string{wire::to_string(in.code)}));
+            }
+            auto r = releases_.handle(in.code, in.body);
+            if (!r) {
+                return reply_error(in.session, in.req, std::move(r).error());
+            }
+            return reply(in.session, in.req, std::move(*r));
+        }
         const running_scope running{*rt.relay, in};
 
         const auto bad_request = [&](const error& err) { reply_error(in.session, in.req, err); };
@@ -2179,6 +2223,7 @@ private:
     std::map<session_id, pump_session> pump_sessions_;
     std::map<std::string, identity_runtime, std::less<>> identities_;
     std::vector<script::async_leftovers> async_leftovers_; // of identities that went (teardown)
+    release_bridge releases_;                              // host.serve: the release manager, if any
     std::map<std::string, blob_sink, std::less<>> blob_sinks_;
     std::deque<outbound> outbox_backlog_;
     std::atomic<std::size_t> identity_count_{0};
@@ -2234,6 +2279,10 @@ result<void> install(engine& e, std::string_view name, installer fn) {
 
 result<void> add_blob_sink(engine& e, std::string_view name, blob_fn fn, role need) {
     return e.add_blob_sink(name, std::move(fn), need);
+}
+
+result<void> serve_releases(engine& e, release_bridge bridge) {
+    return e.serve_releases(std::move(bridge));
 }
 
 void set_enabled(engine& e, bool on) noexcept {

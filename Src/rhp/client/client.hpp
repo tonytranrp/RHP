@@ -33,6 +33,9 @@ namespace Rhp {
 using wire::module_ref;
 using wire::module_status;
 using wire::revert_summary;
+using wire::release_apply_reply;
+using wire::release_status_reply;
+using wire::channel_status_message;
 
 // Talks to an Rhp::host: authenticates with a credential (a key name + secret for psk_keyring),
 // signs every script it sends with its signing key (Ed25519 by default), then sends requests and
@@ -158,6 +161,33 @@ public:
     // ends; revert / unload refuse it (kForbidden) until unpin.
     return_t<void> pin(module_ref mod) { return finish(nothing(send(wire::op::kPin, wire::module_request{std::move(mod)}))); }
     return_t<void> unpin(module_ref mod) { return finish(nothing(send(wire::op::kUnpin, wire::module_request{std::move(mod)}))); }
+
+    // ---- releases (a host that serves a release manager: host.serve) --------------------------------
+
+    // Admin: runs a signed release envelope (a .rhprel file, Rhp::release::encode_release) in its
+    // channel. `confirm`: "now", "health" or "manual".
+    return_t<release_apply_reply> release_apply(std::span<const std::byte> envelope, std::string_view confirm = "now") {
+        return finish(as<release_apply_reply>(
+            send(wire::op::kReleaseApply, wire::release_apply_request{value::bytes(envelope.begin(), envelope.end()), std::string{confirm}})));
+    }
+
+    // Admin: the channel's candidate becomes active.
+    return_t<void> release_confirm(std::string_view channel) {
+        return finish(nothing(send(wire::op::kReleaseConfirm, wire::release_channel_request{std::string{channel}, false})));
+    }
+
+    // Admin: the channel stops what runs (falling back), or with `hold` runs nothing until a new release.
+    return_t<void> release_deactivate(std::string_view channel, bool hold = false) {
+        return finish(nothing(send(wire::op::kReleaseDeactivate, wire::release_channel_request{std::string{channel}, hold})));
+    }
+
+    // The host's channels and what they run.
+    return_t<release_status_reply> release_status() { return finish(as<release_status_reply>(raw(wire::op::kReleaseStatus, value{}))); }
+
+    // Sends a signed revocation list (a .rhprev file); returns how many channels changed.
+    return_t<std::uint64_t> revoke(std::span<const std::byte> envelope) {
+        return finish(as<std::uint64_t>(send(wire::op::kRevoke, wire::revoke_request{value::bytes(envelope.begin(), envelope.end())})));
+    }
 
     // Pushes bytes to a host blob sink (host.on_blob), in chunks, and returns the sink's verdict.
     // `name` is passed to the sink (a file name, free-form).

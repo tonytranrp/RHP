@@ -197,8 +197,41 @@ TEST_CASE("messages: event fields default when missing", "[wire][messages][stage
     CHECK(Rhp::from_value<wire::event_message>(value{bad_args}).error().code == errc::kProtocol);
 }
 
+TEST_CASE("messages: release ops need admin to change and observe to read", "[wire][messages][stage10]") {
+    CHECK(wire::kProtocolRevision == 5);
+    for (const auto code : {wire::op::kReleaseApply, wire::op::kReleaseConfirm, wire::op::kReleaseDeactivate}) {
+        CHECK(wire::required_role(code) == Rhp::role::kAdmin);
+        CHECK(wire::is_request(code));
+    }
+    CHECK(wire::required_role(wire::op::kReleaseStatus) == Rhp::role::kObserve);
+    CHECK(wire::required_role(wire::op::kRevoke) == Rhp::role::kObserve);
+    CHECK(wire::to_string(wire::op::kRevoke) == "revoke");
+    CHECK(static_cast<std::uint16_t>(wire::op::kRevoke) < 48);
+}
+
+TEST_CASE("messages: release messages round-trip", "[wire][messages][stage10]") {
+    const wire::release_apply_request apply{Rhp::value::bytes{std::byte{1}, std::byte{2}}, "health"};
+    CHECK(*Rhp::from_value<wire::release_apply_request>(Rhp::to_value(apply)) == apply);
+    const wire::release_channel_request channel{"game.balance", true};
+    CHECK(*Rhp::from_value<wire::release_channel_request>(Rhp::to_value(channel)) == channel);
+    wire::channel_status_message c;
+    c.channel = "game.balance";
+    c.running = "candidate";
+    c.active = wire::release_info_message{Rhp::value::bytes(32, std::byte{7}), 3, "three", {"dev"}};
+    c.candidate = wire::release_info_message{Rhp::value::bytes(32, std::byte{8}), 4, "four", {"dev", "ops"}};
+    c.previous = Rhp::value::bytes(32, std::byte{6});
+    c.floor = 4;
+    c.attempts = 1;
+    c.confirm = "manual";
+    c.modules = {"tuning"};
+    wire::release_status_reply status{"mygame", "1.0", "windows", 2, {c}};
+    CHECK(*Rhp::from_value<wire::release_status_reply>(Rhp::to_value(status)) == status);
+    const wire::release_apply_reply reply{"game.balance", Rhp::value::bytes(32, std::byte{8}), 4, "candidate", false, Rhp::value::bytes(32, std::byte{7}), {"dev"}};
+    CHECK(*Rhp::from_value<wire::release_apply_reply>(Rhp::to_value(reply)) == reply);
+    CHECK_FALSE(Rhp::from_value<wire::release_apply_request>(Rhp::value{"nope"}));
+}
+
 TEST_CASE("messages: subscribe ops need observe and event is a reply", "[wire][messages][stage7]") {
-    CHECK(wire::kProtocolRevision == 4);
     CHECK(wire::required_role(wire::op::kSubscribe) == Rhp::role::kObserve);
     CHECK(wire::required_role(wire::op::kUnsubscribe) == Rhp::role::kObserve);
     CHECK(wire::is_request(wire::op::kSubscribe));

@@ -148,8 +148,21 @@ TEST_CASE("to_json keeps valid UTF-8 and replaces invalid bytes", "[event][json]
     CHECK(line.find("\"module\":\"a" + r + "b" + r + "c" + r + r + r + "d" + r + r + "\"") != std::string::npos);
 }
 
-TEST_CASE("handler_failed is the last host event and writes one JSON line", "[event][stage7]") {
-    STATIC_REQUIRE(event::kind_of<event::handler_failed> == std::variant_size_v<event::any> - 1);
+TEST_CASE("release_changed is the last host event and writes one JSON line", "[event][stage10]") {
+    STATIC_REQUIRE(event::kind_of<event::release_changed> == std::variant_size_v<event::any> - 1);
+    event::release_changed e{};
+    e.kind = "rolled_back";
+    e.channel = "game.balance";
+    e.release = "ab12";
+    e.reason = "unhealthy: 2 handler failures";
+    const std::string json = event::to_json(event::any{e});
+    CHECK(json.starts_with(R"({"event":"release_changed")"));
+    CHECK(json.find(R"("channel":"game.balance")") != std::string::npos);
+    CHECK(json.find(R"("reason":"unhealthy: 2 handler failures")") != std::string::npos);
+}
+
+TEST_CASE("handler_failed writes one JSON line", "[event][stage7]") {
+    STATIC_REQUIRE(event::kind_of<event::handler_failed> == std::variant_size_v<event::any> - 2);
     const event::handler_failed failed{std::chrono::system_clock::time_point{}, "dev", "combat", "timer", "timer", 12, "report",
                                        Rhp::make_error(Rhp::errc::kRuntime, "boom", "combat:3")};
     const std::string json = event::to_json(event::any{failed});

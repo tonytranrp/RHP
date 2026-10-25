@@ -3,7 +3,7 @@
 # call reports kDisabled.
 set(rhp_client_sources "")
 if(RHP_ENABLE)
-    set(rhp_client_sources client.cpp fleet.cpp)
+    set(rhp_client_sources client.cpp fleet.cpp rollout.cpp)
 endif()
 
 rhp_add_module(client
@@ -13,6 +13,7 @@ rhp_add_module(client
         detail/engine.hpp
         detail/fleet_engine.hpp
         pending.hpp
+        rollout.hpp
     SOURCES
         ${rhp_client_sources}
     DEPS

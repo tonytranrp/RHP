@@ -19,8 +19,10 @@
 #include <rhp/event/events.hpp>
 #include <rhp/event/hub.hpp>
 #include <rhp/host/detail/engine.hpp>
+#include <rhp/host/detail/releases.hpp>
 #include <rhp/net/endpoint.hpp>
 #include <rhp/platform/os.hpp>
+#include <rhp/release/manager.hpp>
 #include <rhp/script/lib.hpp>
 #include <rhp/script/sandbox.hpp>
 
@@ -134,6 +136,19 @@ public:
         (void)fn;
         (void)need;
         return Cfg::errors_t::finish(result<void>{fail(errc::kDisabled, "RHP is compiled out (RHP_ENABLE=0)", std::string{sink})});
+#endif
+    }
+
+    // Serves a release manager: clients apply, confirm and deactivate releases (admin) and read
+    // their status or send revocation lists (observe) through it, and pump() pumps it (with every
+    // release_changed reported as a host event). The manager must outlive the host. Call from the
+    // pump thread. kAlreadyLoaded if one is served already.
+    return_t<void> serve(release::manager& releases) {
+#if RHP_ENABLE
+        return Cfg::errors_t::finish(host_detail::serve_releases(*engine_, host_detail::bridge(releases)));
+#else
+        (void)releases;
+        return Cfg::errors_t::finish(result<void>{fail(errc::kDisabled, "RHP is compiled out (RHP_ENABLE=0)", "host.serve")});
 #endif
     }
 

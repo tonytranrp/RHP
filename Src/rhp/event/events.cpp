@@ -208,6 +208,17 @@ std::string to_json(const any& e) {
                                   .err("outcome", x.outcome)
                                   .done();
                           },
+                          [](const release_changed& x) {
+                              return json_object{x.name, x.time}
+                                  .string("kind", x.kind)
+                                  .string("channel", x.channel)
+                                  .string("release", x.release)
+                                  .string("fallback", x.fallback)
+                                  .number("seq", x.seq)
+                                  .string("reason", x.reason)
+                                  .err("outcome", x.outcome)
+                                  .done();
+                          },
                       },
                       e);
 }

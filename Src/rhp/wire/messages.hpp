@@ -150,6 +150,73 @@ struct subscribe_request {
     std::string name;
 };
 
+// Releases (Stage 10). The envelopes are opaque here: Rhp::release decodes and checks them.
+struct release_apply_request {
+    value::bytes envelope;
+    std::string confirm = "now"; // "now", "health" or "manual"
+
+    [[nodiscard]] bool operator==(const release_apply_request&) const = default;
+};
+
+// release_confirm and release_deactivate.
+struct release_channel_request {
+    std::string channel;
+    bool hold = false; // deactivate: run nothing until a new release arrives
+
+    [[nodiscard]] bool operator==(const release_channel_request&) const = default;
+};
+
+struct revoke_request {
+    value::bytes envelope;
+};
+
+struct release_info_message {
+    value::bytes id; // 32 bytes
+    std::uint64_t seq = 0;
+    std::string label;
+    std::vector<std::string> signers;
+
+    [[nodiscard]] bool operator==(const release_info_message&) const = default;
+};
+
+struct release_apply_reply {
+    std::string channel;
+    value::bytes id;
+    std::uint64_t seq = 0;
+    std::string running; // "active" or "candidate"
+    bool already = false;
+    value::bytes replaced; // empty: nothing ran before
+    std::vector<std::string> signers;
+
+    [[nodiscard]] bool operator==(const release_apply_reply&) const = default;
+};
+
+struct channel_status_message {
+    std::string channel;
+    std::string running; // "empty", "active" or "candidate"
+    std::optional<release_info_message> active;
+    std::optional<release_info_message> candidate;
+    value::bytes previous;
+    std::uint64_t floor = 0;
+    bool held = false;
+    std::uint64_t attempts = 0;
+    std::string confirm; // "now", "health" or "manual"
+    std::uint64_t handler_failures = 0;
+    std::vector<std::string> modules;
+
+    [[nodiscard]] bool operator==(const channel_status_message&) const = default;
+};
+
+struct release_status_reply {
+    std::string app;
+    std::string build;
+    std::string platform;
+    std::uint64_t revocation_seq = 0;
+    std::vector<channel_status_message> channels;
+
+    [[nodiscard]] bool operator==(const release_status_reply&) const = default;
+};
+
 // Reply bodies (kResult):
 //   exec, call            array of returned values
 //   load                  module id
@@ -159,6 +226,10 @@ struct subscribe_request {
 //   list                  array of module_status
 //   status                module_status
 //   describe              string (LuaLS stubs)
+//   release_apply         release_apply_reply
+//   release_confirm, release_deactivate   nil
+//   release_status        release_status_reply
+//   revoke                integer (channels that changed)
 // kError carries an Rhp::error; kOutput a string; kEmit an emit_message; kEvent an event_message.
 
 struct revert_summary {
@@ -228,6 +299,13 @@ RHP_WIRE_MESSAGE_CONVERT(Rhp::wire::module_request);
 RHP_WIRE_MESSAGE_CONVERT(Rhp::wire::tag_request);
 RHP_WIRE_MESSAGE_CONVERT(Rhp::wire::cancel_request);
 RHP_WIRE_MESSAGE_CONVERT(Rhp::wire::blob_chunk);
+RHP_WIRE_MESSAGE_CONVERT(Rhp::wire::release_apply_request);
+RHP_WIRE_MESSAGE_CONVERT(Rhp::wire::release_channel_request);
+RHP_WIRE_MESSAGE_CONVERT(Rhp::wire::revoke_request);
+RHP_WIRE_MESSAGE_CONVERT(Rhp::wire::release_info_message);
+RHP_WIRE_MESSAGE_CONVERT(Rhp::wire::release_apply_reply);
+RHP_WIRE_MESSAGE_CONVERT(Rhp::wire::channel_status_message);
+RHP_WIRE_MESSAGE_CONVERT(Rhp::wire::release_status_reply);
 RHP_WIRE_MESSAGE_CONVERT(Rhp::wire::revert_summary);
 RHP_WIRE_MESSAGE_CONVERT(Rhp::wire::module_status);
 RHP_WIRE_MESSAGE_CONVERT(Rhp::wire::emit_message);

@@ -8,10 +8,12 @@ rhp_add_test_suite(rhp_integration_tests
         stage6_fleet_tests.cpp
         stage7_tests.cpp
         stage9_tests.cpp
+        stage10_tests.cpp
     LINKS
         Rhp::host
         Rhp::client
         Rhp::audit
         Rhp::session
         Rhp::tls
+        Rhp::release
 )

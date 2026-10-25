@@ -24,6 +24,7 @@
 #include <rhp/security/http_auth.hpp>
 #include <rhp/security/tls/tls.hpp>
 #include <rhp/wire/codec.hpp>
+#include <rhp/wire/ops.hpp>
 
 namespace Rhp {
 
@@ -92,6 +93,15 @@ struct setup {
 
 using installer = result<void> (*)(script::sandbox& box);
 
+// A release manager as the engine serves it (host.serve): answers the release requests and is
+// pumped with the host. Built by host_detail::bridge (host/releases.cpp).
+struct release_bridge {
+    std::function<result<value>(wire::op code, const value& body)> handle;
+    std::function<void()> pump;
+    // The manager's events, set by the engine when it starts serving (publishes release_changed).
+    std::function<void(std::function<void(event::release_changed)>)> on_event;
+};
+
 template <script::installable L>
 result<void> install_into(script::sandbox& box) {
     return box.install<L>();
@@ -113,6 +123,8 @@ using engine_ptr = std::unique_ptr<engine, engine_deleter>;
 result<void> advertise(engine& e, net::advertise_options options);
 result<void> discovery_status(engine& e);
 result<void> install(engine& e, std::string_view name, installer fn);
+// Pump thread (any one thread before the first pump()). kAlreadyLoaded if one is served already.
+result<void> serve_releases(engine& e, release_bridge bridge);
 result<void> add_blob_sink(engine& e, std::string_view name, blob_fn fn, role need);
 void set_enabled(engine& e, bool on) noexcept;
 [[nodiscard]] bool enabled(const engine& e) noexcept;

@@ -12,8 +12,8 @@ namespace Rhp::wire {
 // The protocol revision both ends must agree on in hello. A plain integer, bumped on any change to
 // the frame layout, the handshake or a message schema.
 // 2: signatures, pin / unpin, blobs (Stage 4); 3: resume, CRC-less TLS frames (Stage 5);
-// 4: subscribe / unsubscribe / event (Stage 7).
-inline constexpr std::uint8_t kProtocolRevision = 4;
+// 4: subscribe / unsubscribe / event (Stage 7); 5: releases and revocation lists (Stage 10).
+inline constexpr std::uint8_t kProtocolRevision = 5;
 
 // What a frame carries (the header's `op`, 16 bits on the wire).
 //
@@ -47,6 +47,11 @@ enum class op : std::uint16_t {
     kBlob,        // one chunk of a blob for a host-registered sink
     kSubscribe,   // deliver an event to this session (kEvent) until kUnsubscribe or the session ends
     kUnsubscribe, // stop delivering it
+    kReleaseApply,      // run a signed release envelope in its channel (the host's release manager)
+    kReleaseConfirm,    // a channel's candidate becomes active
+    kReleaseDeactivate, // a channel stops what runs (falls back, or holds)
+    kReleaseStatus,     // the channels and what they run
+    kRevoke,            // apply a signed revocation list
 
     kOutput = 48, // print() line
     kEmit,        // rhp.emit(value)
@@ -86,6 +91,11 @@ enum class op : std::uint16_t {
     case op::kBlob: return "blob";
     case op::kSubscribe: return "subscribe";
     case op::kUnsubscribe: return "unsubscribe";
+    case op::kReleaseApply: return "release_apply";
+    case op::kReleaseConfirm: return "release_confirm";
+    case op::kReleaseDeactivate: return "release_deactivate";
+    case op::kReleaseStatus: return "release_status";
+    case op::kRevoke: return "revoke";
     case op::kOutput: return "output";
     case op::kEmit: return "emit";
     case op::kResult: return "result";
@@ -132,7 +142,9 @@ enum class op : std::uint16_t {
     case op::kStatus:
     case op::kDescribe:
     case op::kSubscribe:
-    case op::kUnsubscribe: return role::kObserve;
+    case op::kUnsubscribe:
+    case op::kReleaseStatus:
+    case op::kRevoke: return role::kObserve; // a revocation list carries its own signatures
     case op::kLoad:
     case op::kReload:
     case op::kRollback:
@@ -143,7 +155,10 @@ enum class op : std::uint16_t {
     case op::kBlob: return role::kObserve; // each sink checks its own role (admin by default)
     case op::kRevertAll:
     case op::kPin:
-    case op::kUnpin: return role::kAdmin;
+    case op::kUnpin:
+    case op::kReleaseApply: // releases outlive the session and survive restarts
+    case op::kReleaseConfirm:
+    case op::kReleaseDeactivate: return role::kAdmin;
     default: return std::nullopt;
     }
 }

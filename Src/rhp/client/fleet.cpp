@@ -190,21 +190,46 @@ private:
     }
 
     std::vector<outcome> broadcast(wire::op code, result<value> body, std::string_view where) {
-        for (auto& m : members_) {
-            refresh(m);
+        std::vector<std::size_t> all(members_.size());
+        for (std::size_t i = 0; i < all.size(); ++i) {
+            all[i] = i;
         }
-        std::vector<outcome> out;
+        return send_to(code, std::move(body), all, where);
+    }
+
+public:
+    [[nodiscard]] std::vector<net::service_record> records() const {
+        std::vector<net::service_record> out;
         out.reserve(members_.size());
+        for (const auto& m : members_) {
+            out.push_back(m.record);
+        }
+        return out;
+    }
+
+    // The request on the members at `which` (indices into records()), one outcome each, in that order.
+    std::vector<outcome> send_to(wire::op code, result<value> body, std::span<const std::size_t> which, std::string_view where) {
+        std::vector<outcome> out;
+        out.reserve(which.size());
+        for (const std::size_t i : which) {
+            if (i < members_.size()) {
+                refresh(members_[i]);
+            }
+        }
         if (!body) {
-            for (const auto& m : members_) {
-                out.push_back({m.record, std::unexpected{body.error()}});
+            for (const std::size_t i : which) {
+                out.push_back({i < members_.size() ? members_[i].record : net::service_record{}, std::unexpected{body.error()}});
             }
             return out;
         }
-        auto pending = std::make_shared<collector>(members_.size());
-        std::vector<std::uint64_t> requests(members_.size(), 0);
-        for (std::size_t i = 0; i < members_.size(); ++i) {
-            requests[i] = client_detail::submit(*members_[i].connection, code, *body, [pending, i](result<value> r) { pending->complete(i, std::move(r)); });
+        auto pending = std::make_shared<collector>(which.size());
+        std::vector<std::uint64_t> requests(which.size(), 0);
+        for (std::size_t k = 0; k < which.size(); ++k) {
+            if (which[k] >= members_.size()) {
+                pending->complete(k, fail(errc::kNotFound, "no such fleet member", std::string{where}));
+                continue;
+            }
+            requests[k] = client_detail::submit(*members_[which[k]].connection, code, *body, [pending, k](result<value> r) { pending->complete(k, std::move(r)); });
         }
         wait(*pending);
         std::vector<std::optional<result<value>>> outcomes;
@@ -213,15 +238,20 @@ private:
             pending->collected = true;
             outcomes = std::move(pending->outcomes);
         }
-        for (std::size_t i = 0; i < members_.size(); ++i) {
-            if (!outcomes[i]) {
-                client_detail::cancel(*members_[i].connection, requests[i]);
-                outcomes[i] = fail(errc::kTimeout, "the host missed the broadcast deadline", std::string{where});
+        for (std::size_t k = 0; k < which.size(); ++k) {
+            const bool known = which[k] < members_.size();
+            if (!outcomes[k]) {
+                if (known) {
+                    client_detail::cancel(*members_[which[k]].connection, requests[k]);
+                }
+                outcomes[k] = fail(errc::kTimeout, "the host missed the broadcast deadline", std::string{where});
             }
-            out.push_back({members_[i].record, std::move(*outcomes[i])});
+            out.push_back({known ? members_[which[k]].record : net::service_record{}, std::move(*outcomes[k])});
         }
         return out;
     }
+
+private:
 
     // Until every member answered or the shared deadline passed. With zero_threads nobody else
     // runs the reactor: this thread runs every member's network meanwhile.
@@ -306,6 +336,14 @@ std::vector<outcome> load(engine& e, std::string_view name, std::string_view sou
 
 std::vector<outcome> call(engine& e, std::string_view module, std::string_view function, std::span<const value> args) {
     return e.call(module, function, args);
+}
+
+std::vector<net::service_record> records(const engine& e) {
+    return e.records();
+}
+
+std::vector<outcome> send(engine& e, wire::op code, const value& body, std::span<const std::size_t> which) {
+    return e.send_to(code, body, which, wire::to_string(code));
 }
 
 result<value_list> values(result<value>&& body) {

@@ -7,6 +7,7 @@
 #include <rhp/client/client.hpp>
 #include <rhp/client/fleet.hpp>
 #include <rhp/client/pending.hpp>
+#include <rhp/client/rollout.hpp>
 #include <rhp/config/config.hpp>
 #include <rhp/core/async.hpp>
 #include <rhp/core/convert.hpp>
@@ -34,8 +35,14 @@
 #include <rhp/net/tcp/tcp.hpp>
 #include <rhp/net/udp_reliable/udp_reliable.hpp>
 #include <rhp/net/websocket/websocket.hpp>
+#include <rhp/platform/files.hpp>
 #include <rhp/platform/os.hpp>
 #include <rhp/platform/random.hpp>
+#include <rhp/release/manager.hpp>
+#include <rhp/release/manifest.hpp>
+#include <rhp/release/release.hpp>
+#include <rhp/release/store.hpp>
+#include <rhp/release/trust.hpp>
 #include <rhp/script/ledger.hpp>
 #include <rhp/script/lib.hpp>
 #include <rhp/script/lua_event.hpp>

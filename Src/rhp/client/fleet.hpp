@@ -15,12 +15,14 @@
 #include <rhp/build_config.hpp>
 #include <rhp/client/client.hpp>
 #include <rhp/client/detail/fleet_engine.hpp>
+#include <rhp/client/rollout.hpp>
 #include <rhp/core/convert.hpp>
 #include <rhp/core/error.hpp>
 #include <rhp/core/ids.hpp>
 #include <rhp/core/result.hpp>
 #include <rhp/core/value.hpp>
 #include <rhp/net/discovery.hpp>
+#include <rhp/wire/messages.hpp>
 #include <rhp/wire/ops.hpp>
 
 namespace Rhp {
@@ -202,6 +204,44 @@ public:
     [[nodiscard]] std::vector<host_result<T>> call(std::string_view module, std::string_view function, const A0& a0, const A&... rest) {
         const value args[] = {Rhp::to_value(a0), Rhp::to_value(rest)...};
         return call<T>(module, function, std::span<const value>{args});
+    }
+
+    // ---- releases (hosts that serve a release manager: host.serve) ---------------------------------
+
+    // Spreads a signed release envelope over the members in the plan's stages: each stage's hosts
+    // apply it health-watched, are observed for the stage's time (a host whose release fails rolls
+    // it back by itself; one that stops answering counts as failed too), then confirmed. More than
+    // plan.max_failures failures stop the rollout and, with rollback_on_failure, deactivate the
+    // release wherever it went. Members need admin identities. Blocks the calling thread.
+    [[nodiscard]] rollout_report rollout(std::span<const std::byte> envelope, rollout_plan plan = {}) {
+#if RHP_ENABLE
+        return fleet_detail::rollout(*engine_, envelope, plan);
+#else
+        (void)envelope;
+        (void)plan;
+        rollout_report out;
+        out.err = make_error(errc::kDisabled, "RHP is compiled out (RHP_ENABLE=0)", "fleet.rollout");
+        return out;
+#endif
+    }
+
+    // What every member's channels run (one outcome per member).
+    [[nodiscard]] std::vector<host_result<wire::release_status_reply>> release_status() {
+#if RHP_ENABLE
+        const auto all = fleet_detail::records(*engine_);
+        std::vector<std::size_t> which(all.size());
+        for (std::size_t i = 0; i < which.size(); ++i) {
+            which[i] = i;
+        }
+        std::vector<host_result<wire::release_status_reply>> out;
+        for (auto& o : fleet_detail::send(*engine_, wire::op::kReleaseStatus, value{}, which)) {
+            out.push_back({std::move(o.host), o.body ? Rhp::from_value<wire::release_status_reply>(*o.body)
+                                                     : result<wire::release_status_reply>{std::unexpected{std::move(o.body).error()}}});
+        }
+        return out;
+#else
+        return disabled<wire::release_status_reply>("fleet.release_status");
+#endif
     }
 
 private:

@@ -118,8 +118,23 @@ struct handler_failed {
     error outcome;
 };
 
+// A served release manager (host.serve) changed what a channel runs, or refused a release.
+// `kind`: "applied", "confirmed", "rolled_back", "refused" or "revocations"; ids are hex.
+struct release_changed {
+    static constexpr std::string_view name = "release_changed";
+    time_point time;
+    std::string kind;
+    std::string channel;
+    std::string release;  // what it is about (empty: none)
+    std::string fallback; // rolled_back: what runs instead (empty: nothing)
+    std::uint64_t seq = 0;
+    std::string reason;   // rolled_back: why ("unhealthy: ...", "deactivated", "revoked", "expired")
+    error outcome;        // refused: why
+};
+
 // Every host event, for handlers that take them all (the audit sinks). New kinds go at the end.
-using any = std::variant<session_opened, session_closed, auth_failed, script_executed, blob_received, identity_reverted, session_resumed, handler_failed>;
+using any = std::variant<session_opened, session_closed, auth_failed, script_executed, blob_received, identity_reverted, session_resumed, handler_failed,
+                         release_changed>;
 
 // An rhp.publish of some identity's script (host.on_script_event). Not part of `any`: script events
 // are application traffic, not an audit record.

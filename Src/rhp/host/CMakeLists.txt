@@ -2,13 +2,14 @@
 # sandboxes, routing) is compiled once in host.cpp. RHP_ENABLE=OFF: the shell is inert, no engine.
 set(rhp_host_sources "")
 if(RHP_ENABLE)
-    set(rhp_host_sources host.cpp gateway.cpp)
+    set(rhp_host_sources host.cpp gateway.cpp releases.cpp)
 endif()
 
 rhp_add_module(host
     HEADERS
         host.hpp
         detail/engine.hpp
+        detail/releases.hpp
     SOURCES
         ${rhp_host_sources}
     DEPS
@@ -16,4 +17,5 @@ rhp_add_module(host
         Rhp::session
         Rhp::script
         Rhp::event
+        Rhp::release
 )

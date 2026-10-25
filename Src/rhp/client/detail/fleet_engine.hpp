@@ -11,6 +11,7 @@
 #include <vector>
 
 #include <rhp/client/detail/engine.hpp>
+#include <rhp/client/rollout.hpp>
 #include <rhp/core/result.hpp>
 #include <rhp/core/value.hpp>
 #include <rhp/net/discovery.hpp>
@@ -81,6 +82,14 @@ void run_io(engine& e, std::stop_token stop);
 [[nodiscard]] std::vector<outcome> exec(engine& e, std::string_view source);
 [[nodiscard]] std::vector<outcome> load(engine& e, std::string_view name, std::string_view source);
 [[nodiscard]] std::vector<outcome> call(engine& e, std::string_view module, std::string_view function, std::span<const value> args);
+
+// The members, in member order.
+[[nodiscard]] std::vector<net::service_record> records(const engine& e);
+// Sends one request to the members at `which` (indices into records()) within the deadline.
+[[nodiscard]] std::vector<outcome> send(engine& e, wire::op code, const value& body, std::span<const std::size_t> which);
+
+// fleet::rollout (rollout.cpp).
+[[nodiscard]] rollout_report rollout(engine& e, std::span<const std::byte> envelope, const rollout_plan& plan);
 
 // A reply body as the list of returned values (what client::exec returns).
 [[nodiscard]] result<value_list> values(result<value>&& body);
