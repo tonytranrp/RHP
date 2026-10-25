@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <format>
 #include <fstream>
+#include <iostream>
 #include <memory>
 #include <optional>
 #include <ostream>
@@ -186,6 +187,10 @@ int run_cli(std::span<const std::string_view> args, const install_fn& install, s
         }
     }
     return result.totals.ok() ? 0 : 1;
+}
+
+int run_cli(std::span<const std::string_view> args, const install_fn& install, std::string_view program) {
+    return run_cli(args, install, program, std::cout, std::cerr);
 }
 
 } // namespace Rhp::test

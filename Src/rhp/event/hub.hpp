@@ -29,19 +29,15 @@ public:
     static constexpr std::size_t kAnyKind = std::variant_size_v<any>;
 
     // `kind`: one event's index in `any`, or kAnyKind for every event.
-    std::uint64_t add(std::size_t kind, handler fn) { return handlers_.add(kind, std::move(fn)); }
+    std::uint64_t add(std::size_t kind, handler fn);
 
-    void unsubscribe(std::uint64_t id) noexcept override { (void)handlers_.remove(id); }
+    void unsubscribe(std::uint64_t id) noexcept override;
     void remove(std::uint64_t id) noexcept { unsubscribe(id); }
 
     // True if anyone listens to `kind` (lets the host skip building events nobody wants).
-    [[nodiscard]] bool wants(std::size_t kind) const {
-        return handlers_.any([kind](std::size_t k) { return k == kind || k == kAnyKind; });
-    }
+    [[nodiscard]] bool wants(std::size_t kind) const;
 
-    void publish(const any& e) const {
-        handlers_.dispatch([index = e.index()](std::size_t k) { return k == index || k == kAnyKind; }, e);
-    }
+    void publish(const any& e) const;
 
 private:
     core::listener_table<std::size_t, handler> handlers_;
@@ -53,21 +49,22 @@ class script_hub final : public Rhp::subscribable {
 public:
     using handler = std::function<void(const script_event&)>;
 
-    std::uint64_t add(std::string name, handler fn) { return handlers_.add(std::move(name), std::move(fn)); }
+    std::uint64_t add(std::string name, handler fn);
 
-    void unsubscribe(std::uint64_t id) noexcept override { (void)handlers_.remove(id); }
+    void unsubscribe(std::uint64_t id) noexcept override;
 
-    [[nodiscard]] bool wants(std::string_view name) const {
-        return handlers_.any([name](const std::string& n) { return n == name || n == "*"; });
-    }
+    [[nodiscard]] bool wants(std::string_view name) const;
 
-    void publish(const script_event& e) const {
-        handlers_.dispatch([&e](const std::string& n) { return n == e.event || n == "*"; }, e);
-    }
+    void publish(const script_event& e) const;
 
 private:
     core::listener_table<std::string, handler> handlers_;
 };
+
+// Both tables are compiled once, in hub.cpp (with the members above): a file including this header
+// doesn't instantiate them (and the std::function over every host event) again.
+extern template class core::listener_table<std::size_t, hub::handler>;
+extern template class core::listener_table<std::string, script_hub::handler>;
 
 // Keeps a handler subscribed for as long as it lives (move-only); see Rhp::subscription.
 using subscription = Rhp::subscription;

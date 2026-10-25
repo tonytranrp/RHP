@@ -2,8 +2,7 @@
 
 #include <concepts>
 #include <functional>
-#include <iostream>
-#include <ostream>
+#include <iosfwd>
 #include <span>
 #include <string>
 #include <string_view>
@@ -20,8 +19,10 @@ namespace Rhp::test {
 // program name), runs or lists the tests, writes the reports and coverage files, and returns the
 // exit status: 0 when everything passed, 1 when a test or a file failed, 2 for bad arguments.
 // `api`: an API description to fake (as --api FILE would), from rhp-cli test --api-from.
-int run_cli(std::span<const std::string_view> args, const install_fn& install, std::string_view program = "lua-tests", std::ostream& out = std::cout,
-            std::ostream& err = std::cerr, const value* api = nullptr);
+int run_cli(std::span<const std::string_view> args, const install_fn& install, std::string_view program, std::ostream& out, std::ostream& err,
+            const value* api = nullptr);
+// The same, writing to std::cout and std::cerr.
+int run_cli(std::span<const std::string_view> args, const install_fn& install, std::string_view program = "lua-tests");
 
 // main() of a test executable that installs the program's libs:
 //
