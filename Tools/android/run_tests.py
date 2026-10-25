@@ -15,6 +15,7 @@ import subprocess
 import sys
 
 REMOTE = "/data/local/tmp/rhp-tests"
+ADB_RETRIES = 2  # runs of one executable after an adb shell session drops
 
 
 def adb(serial, *args, check=True, capture=False):
@@ -55,9 +56,16 @@ def main():
         for exe in exes:
             adb(args.serial, "push", str(exe), f"{REMOTE}/{exe.name}", capture=True)
             extra = " --iterations 3000" if exe.name.endswith("_replay") else ""
-            run = adb(args.serial, "shell", f"cd {REMOTE} && chmod 755 {exe.name} && TMPDIR={REMOTE}/tmp HOME={REMOTE}/tmp ./{exe.name}{extra}; echo RHP_EXIT=$?",
-                      check=False, capture=True)
-            out = run.stdout
+            command = f"cd {REMOTE} && chmod 755 {exe.name} && TMPDIR={REMOTE}/tmp HOME={REMOTE}/tmp ./{exe.name}{extra}; echo RHP_EXIT=$?"
+            for attempt in range(1 + ADB_RETRIES):
+                run = adb(args.serial, "shell", command, check=False, capture=True)
+                out = run.stdout
+                if "RHP_EXIT=" in out:
+                    break
+                # No exit marker: the adb shell session itself dropped (the shell prints the marker
+                # even after the executable crashes). Run it again rather than report a test failure.
+                print(f"  {exe.name}: adb shell returned no exit status (adb exit {run.returncode}: {run.stderr.strip()[-200:]}); "
+                      f"{'retrying' if attempt < ADB_RETRIES else 'giving up'}")
             code = out.rsplit("RHP_EXIT=", 1)[-1].strip() if "RHP_EXIT=" in out else "?"
             summary = [line for line in out.splitlines() if "test cases" in line or "All tests passed" in line or line.startswith("ran ")]
             status = "ok" if code == "0" else f"FAILED ({code})"
