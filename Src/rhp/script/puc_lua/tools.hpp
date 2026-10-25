@@ -87,7 +87,17 @@ struct debugger_state {
     std::map<request_id, debug_stop> paused;
     std::set<std::string, std::less<>> reported; // "source:line" of hits already reported (until the breakpoints change)
 
+    // The last function scope_lines looked at: its source name's characters and first and last line
+    // decide the answer (a reused prototype address can't make it stale), until breakpoints change.
+    struct scope_answer {
+        const char* source = nullptr;
+        int first = 0;
+        int last = 0;
+        bool on = false;
+    } last_scope;
+
     void rebuild_lines() {
+        last_scope = {};
         lines.clear();
         for (const auto& [source, at] : breakpoints) {
             for (const std::uint32_t line : at) {
@@ -101,6 +111,23 @@ struct debugger_state {
 
     // Line events are needed (the hook adds LUA_MASKLINE).
     [[nodiscard]] bool wants_lines() const noexcept { return !breakpoints.empty() || pause_next || step.has_value(); }
+    // ... on every line: a pause or a step stops at the next line, wherever it is. With breakpoints
+    // only, functions without one run without line events (sandbox_impl::scope_lines).
+    [[nodiscard]] bool wants_every_line() const noexcept { return pause_next || step.has_value(); }
+
+    // A breakpoint lies in `source` (the chunk name without its '@' / '='), lines first..last of a
+    // function (first 0: a chunk's main function, whose lines are the whole chunk's).
+    [[nodiscard]] bool has_breakpoint(std::string_view source, int first, int last) const {
+        const auto it = breakpoints.find(source);
+        if (it == breakpoints.end()) {
+            return false;
+        }
+        if (first <= 0) {
+            return !it->second.empty();
+        }
+        const auto at = std::ranges::lower_bound(it->second, static_cast<std::uint32_t>(first));
+        return at != it->second.end() && *at <= static_cast<std::uint32_t>(last);
+    }
 };
 
 // Line coverage (testing.cpp): hit counts per chunk, found from the running function's prototype.

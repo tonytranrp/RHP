@@ -673,13 +673,9 @@ std::uint32_t sandbox_impl::hook_count() const noexcept {
 // line events.
 void sandbox_impl::arm_hook(lua_State* L, bool armed) noexcept {
     credit_hook_progress(L); // lua_sethook restarts the countdown: the meter keeps what ran of it
-    int mask = armed || counts_everywhere() ? LUA_MASKCOUNT : 0;
-    if (wants_line_events()) {
-        // Every line, with a bitmap check first. (Switching line events per function on calls and
-        // returns would be cheaper for loops, but lua_sethook restarts the instruction countdown:
-        // a loop of calls would never reach a count event, so limits and cancels would stop working.)
-        mask |= LUA_MASKLINE;
-    }
+    // Line events: every line, or by function (internals::set_line_events switches them without
+    // restarting the instruction countdown, so limits and cancels keep working in loops of calls).
+    const int mask = (armed || counts_everywhere() ? LUA_MASKCOUNT : 0) | line_mask();
     if (mask == 0) {
         lua_sethook(L, nullptr, 0, 0);
     } else {
@@ -714,12 +710,11 @@ bool sandbox_impl::checked_now() const noexcept {
 }
 
 void sandbox_impl::sync_hook(lua_State* L, bool checked) noexcept {
-    int mask = checked || counts_everywhere() ? LUA_MASKCOUNT : 0;
-    if (wants_line_events()) {
-        mask |= LUA_MASKLINE;
-    }
+    const int mask = (checked || counts_everywhere() ? LUA_MASKCOUNT : 0) | line_mask();
     const int count = static_cast<int>(hook_count());
-    if (lua_gethookmask(L) == mask && ((mask & LUA_MASKCOUNT) == 0 || lua_gethookcount(L) == count)) {
+    // By function, a thread's line events come and go with its calls: either is in step.
+    const int ignored = lines_wanted() == line_mode::kByFunction ? LUA_MASKLINE : 0;
+    if ((lua_gethookmask(L) | ignored) == mask && ((mask & LUA_MASKCOUNT) == 0 || lua_gethookcount(L) == count)) {
         return;
     }
     credit_hook_progress(L);
@@ -863,6 +858,10 @@ void sandbox_impl::count_hook(lua_State* L, lua_Debug* ar) {
     auto& self = impl_of(L);
     if (ar->event == LUA_HOOKLINE) {
         self.line_event(L, ar);
+        return;
+    }
+    if (ar->event == LUA_HOOKCALL || ar->event == LUA_HOOKTAILCALL || ar->event == LUA_HOOKRET) {
+        self.scope_lines(L, ar);
         return;
     }
     if (self.running_.empty()) {
