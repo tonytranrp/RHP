@@ -6,7 +6,9 @@
 #include <rhp/utils/crc32c.hpp>
 
 // The CPU's CRC32C instruction where there is one: SSE4.2 on x86-64 (checked at run time), the
-// ARMv8 CRC extension on ARM64 when the compiler targets it. Everywhere else, the slicing-by-8 table.
+// ARMv8 CRC extension on ARM64 when the compiler targets it, or (RHP_CRC32C_ARM_RUNTIME, set by
+// CMake where the toolchain supports it) when the CPU reports it at run time. Everywhere else, the
+// slicing-by-8 table.
 #if defined(_M_X64) || defined(__x86_64__)
 #define RHP_CRC32C_X86 1
 #include <nmmintrin.h>
@@ -18,13 +20,17 @@
 // cl.exe compiles the intrinsic for any target; Clang (clang-cl included) wants the feature on the
 // function that uses it.
 #if defined(_MSC_VER) && !defined(__clang__)
-#define RHP_TARGET_SSE42
+#define RHP_TARGET_CRC
 #else
-#define RHP_TARGET_SSE42 __attribute__((target("sse4.2")))
+#define RHP_TARGET_CRC __attribute__((target("sse4.2")))
 #endif
 #elif defined(__aarch64__) && defined(__ARM_FEATURE_CRC32)
 #define RHP_CRC32C_ARM 1
-#define RHP_TARGET_SSE42
+#define RHP_TARGET_CRC
+#include <arm_acle.h>
+#elif defined(__aarch64__) && defined(RHP_CRC32C_ARM_RUNTIME)
+#define RHP_CRC32C_ARM 1
+#define RHP_TARGET_CRC __attribute__((target("crc")))
 #include <arm_acle.h>
 #endif
 
@@ -142,13 +148,13 @@ constexpr std::uint32_t shift(const shift_t& table, std::uint32_t crc) noexcept 
 
 #if defined(RHP_CRC32C_X86)
 
-RHP_TARGET_SSE42 inline std::uint32_t step64(std::uint32_t crc, const std::byte* p) noexcept {
+RHP_TARGET_CRC inline std::uint32_t step64(std::uint32_t crc, const std::byte* p) noexcept {
     std::uint64_t v = 0;
     std::memcpy(&v, p, 8); // little-endian: the instruction takes the bytes in memory order
     return static_cast<std::uint32_t>(_mm_crc32_u64(crc, v));
 }
 
-RHP_TARGET_SSE42 inline std::uint32_t step8(std::uint32_t crc, std::byte b) noexcept {
+RHP_TARGET_CRC inline std::uint32_t step8(std::uint32_t crc, std::byte b) noexcept {
     return _mm_crc32_u8(crc, static_cast<unsigned char>(b));
 }
 
@@ -168,13 +174,13 @@ bool cpu_has_sse42() noexcept {
 
 #elif defined(RHP_CRC32C_ARM)
 
-inline std::uint32_t step64(std::uint32_t crc, const std::byte* p) noexcept {
+RHP_TARGET_CRC inline std::uint32_t step64(std::uint32_t crc, const std::byte* p) noexcept {
     std::uint64_t v = 0;
     std::memcpy(&v, p, 8);
     return __crc32cd(crc, v);
 }
 
-inline std::uint32_t step8(std::uint32_t crc, std::byte b) noexcept {
+RHP_TARGET_CRC inline std::uint32_t step8(std::uint32_t crc, std::byte b) noexcept {
     return __crc32cb(crc, static_cast<std::uint8_t>(b));
 }
 
@@ -184,7 +190,7 @@ inline std::uint32_t step8(std::uint32_t crc, std::byte b) noexcept {
 
 // `Block` bytes from each of three consecutive blocks per step, then the three combined.
 template <std::size_t Block>
-RHP_TARGET_SSE42 std::uint32_t three_blocks(const std::byte*& p, std::size_t& n, std::uint32_t crc, const shift_t& table) noexcept {
+RHP_TARGET_CRC std::uint32_t three_blocks(const std::byte*& p, std::size_t& n, std::uint32_t crc, const shift_t& table) noexcept {
     while (n >= 3 * Block) {
         std::uint32_t crc1 = 0;
         std::uint32_t crc2 = 0;
@@ -202,7 +208,7 @@ RHP_TARGET_SSE42 std::uint32_t three_blocks(const std::byte*& p, std::size_t& n,
 }
 
 // One stream: what a small frame needs, and the tail of a large one.
-RHP_TARGET_SSE42 std::uint32_t single_stream(const std::byte* p, std::size_t n, std::uint32_t crc) noexcept {
+RHP_TARGET_CRC std::uint32_t single_stream(const std::byte* p, std::size_t n, std::uint32_t crc) noexcept {
 #if defined(RHP_CRC32C_X86)
     std::uint64_t c = crc; // the 64-bit instruction keeps its register 64 bits wide between steps
     for (; n >= 8; p += 8, n -= 8) {
@@ -222,7 +228,7 @@ RHP_TARGET_SSE42 std::uint32_t single_stream(const std::byte* p, std::size_t n, 
     return crc;
 }
 
-RHP_TARGET_SSE42 std::uint32_t crc32c_hw(const std::byte* p, std::size_t n, std::uint32_t crc) noexcept {
+RHP_TARGET_CRC std::uint32_t crc32c_hw(const std::byte* p, std::size_t n, std::uint32_t crc) noexcept {
     if (n >= 3 * kShortBlock) { // a small frame goes straight to the single stream
         crc = three_blocks<kLongBlock>(p, n, crc, kShiftLong);
         crc = three_blocks<kShortBlock>(p, n, crc, kShiftShort);
@@ -237,6 +243,11 @@ RHP_TARGET_SSE42 std::uint32_t crc32c_hw(const std::byte* p, std::size_t n, std:
 std::uint32_t crc32c(bytes_view data, std::uint32_t crc) noexcept {
 #if defined(RHP_CRC32C_X86)
     static const bool hardware = cpu_has_sse42();
+    if (hardware) {
+        return ~crc32c_hw(data.data(), data.size(), ~crc);
+    }
+#elif defined(RHP_CRC32C_ARM) && defined(RHP_CRC32C_ARM_RUNTIME)
+    static const bool hardware = __builtin_cpu_supports("crc");
     if (hardware) {
         return ~crc32c_hw(data.data(), data.size(), ~crc);
     }
