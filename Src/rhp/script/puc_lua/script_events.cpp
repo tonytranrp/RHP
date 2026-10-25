@@ -2,6 +2,7 @@
 // rhp.wait_event, the C++ listeners of script events and the sandbox's counters.
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <exception>
 #include <format>
@@ -9,6 +10,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -249,10 +251,15 @@ void sandbox_impl::deliver_now(std::string_view event, event_pusher args, module
     // 1. Handlers, each as its own request. A snapshot of their keys: handlers may (un)subscribe, so
     // each is looked up again before its call (where it was, unless the list changed).
     if (const auto it = subscriptions_.find(event); it != subscriptions_.end()) {
-        std::vector<std::uint64_t> keys;
-        keys.reserve(it->second.size());
-        for (const subscription& sub : it->second) {
-            keys.push_back(sub.key);
+        std::array<std::uint64_t, 8> few{}; // the usual handful without an allocation per delivery
+        std::vector<std::uint64_t> many;
+        std::span<std::uint64_t> keys{few.data(), it->second.size()};
+        if (it->second.size() > few.size()) {
+            many.resize(it->second.size());
+            keys = many;
+        }
+        for (std::size_t i = 0; i < keys.size(); ++i) {
+            keys[i] = it->second[i].key;
         }
         for (std::size_t i = 0; i < keys.size(); ++i) {
             const auto now = subscriptions_.find(event);

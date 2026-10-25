@@ -85,10 +85,12 @@ public:
             }
             const std::scoped_lock lock{mutex()};
             auto& stack = layers();
-            const auto it = std::ranges::find(stack, this);
-            if (it == stack.end()) {
+            // From the newest end: reverts go newest first, so this finds the effect at once.
+            const auto found = std::ranges::find(stack.rbegin(), stack.rend(), this);
+            if (found == stack.rend()) {
                 return;
             }
+            const auto it = std::prev(found.base());
             if (const auto newer = std::next(it); newer != stack.end()) {
                 (*newer)->replaced_ = std::move(replaced_);
             } else if (restore) {
