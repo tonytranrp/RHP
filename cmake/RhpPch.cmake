@@ -28,6 +28,12 @@ function(rhp_use_shared_pch target group)
         if(group STREQUAL "tests")
             target_link_libraries(${pch} PRIVATE Catch2::Catch2 Rhp::core)
             list(APPEND headers <catch2/catch_test_macros.hpp>)
+            # The test executables compile position-independent as executables (-fPIE), and Clang
+            # refuses a header precompiled as library code (-fPIC).
+            if(NOT MSVC AND CMAKE_POSITION_INDEPENDENT_CODE AND CMAKE_CXX_COMPILE_OPTIONS_PIE)
+                set_target_properties(${pch} PROPERTIES POSITION_INDEPENDENT_CODE OFF)
+                target_compile_options(${pch} PRIVATE ${CMAKE_CXX_COMPILE_OPTIONS_PIE})
+            endif()
         else()
             target_link_libraries(${pch} PRIVATE Rhp::core)
             rhp_apply_platform(${pch})

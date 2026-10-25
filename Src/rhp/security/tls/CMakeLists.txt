@@ -38,3 +38,6 @@ if(RHP_ENABLE AND RHP_TLS_HAS_MBEDTLS)
 else()
     target_compile_definitions(rhp_tls PUBLIC RHP_TLS_HAS_MBEDTLS=0)
 endif()
+
+# RHP_UNITY_BUILD: the two backends name their file-local helpers alike (kWhere, kReadChunk, ...).
+set_source_files_properties(mbedtls.cpp openssl.cpp PROPERTIES SKIP_UNITY_BUILD_INCLUSION ON)
