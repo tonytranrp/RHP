@@ -1,15 +1,19 @@
 // B: calling C++ from Lua. A Rhp::lib function, variable and handle (with a method and a
 // property), next to the same work as a plain lua_CFunction registered by hand (what RHP's DSL
-// replaces); and an asynchronous binding whose result is already there.
+// replaces); and an asynchronous binding whose result is already there. "unchecked" runs the same
+// calls in a sandbox with limits.cancel_checks = kNone: the gap between raw and unchecked is what
+// the binding layer costs, the gap between unchecked and rhp what the cancel hook costs.
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
-
-#include <rhp/core/async.hpp>
+#include <string_view>
+#include <utility>
 
 #include "bench_support.hpp"
 #include <catch2/benchmark/catch_benchmark.hpp>
 #include <catch2/catch_test_macros.hpp>
 
+#include <rhp/core/async.hpp>
 #include <rhp/script/lib.hpp>
 
 namespace bench_bindings_fixture {
@@ -18,6 +22,12 @@ int add(int a, int b) {
     return a + b;
 }
 double g_speed = 1.0;
+std::size_t length(std::string_view s) {
+    return s.size();
+}
+double scale(double x, double by) {
+    return x * by;
+}
 
 struct unit_id {
     std::uint32_t v = 0;
@@ -52,16 +62,16 @@ std::uint32_t tag_number(tag_id t) {
     return t.v;
 }
 
-using bench_lib = Rhp::lib<"bench">        //
-    ::fn<"add", &add>                      //
-    ::var<"speed", &g_speed>               //
-    ::handle<"unit", unit_id, &unit_alive> //
-    ::fn<"first_unit", &first_unit>::fn<"unit_number", &unit_number>
-    ::method<"number", &unit_number>  //
-    ::property<"id", &unit_number>    //
-    ::fn<"ready_add", &ready_add>     //
-    ::handle<"tag", tag_id, &tag_alive>
-    ::fn<"first_tag", &first_tag>::method<"number", &tag_number>;
+using bench_lib = Rhp::lib<"bench">                                                                  //
+    ::fn<"add", &add>                                                                                //
+    ::fn<"length", &length>                                                                          //
+    ::fn<"scale", &scale>                                                                            //
+    ::var<"speed", &g_speed>                                                                         //
+    ::handle<"unit", unit_id, &unit_alive>                                                           //
+    ::fn<"first_unit", &first_unit>::fn<"unit_number", &unit_number>::method<"number", &unit_number> //
+    ::property<"id", &unit_number>                                                                   //
+    ::fn<"ready_add", &ready_add>                                                                    //
+    ::handle<"tag", tag_id, &tag_alive>::fn<"first_tag", &first_tag>::method<"number", &tag_number>;
 
 // The raw twin of a handle: a userdata holding the id, a methods table as __index; the property
 // version looks the key up in a C __index.
@@ -98,6 +108,18 @@ int raw_first_prop_unit(lua_State* L) {
     return 1;
 }
 
+int raw_length(lua_State* L) {
+    std::size_t len = 0;
+    const char* text = luaL_checklstring(L, 1, &len);
+    lua_pushinteger(L, static_cast<lua_Integer>(length(std::string_view{text, len})));
+    return 1;
+}
+
+int raw_scale(lua_State* L) {
+    lua_pushnumber(L, scale(luaL_checknumber(L, 1), luaL_checknumber(L, 2)));
+    return 1;
+}
+
 int raw_add(lua_State* L) {
     const auto a = static_cast<int>(luaL_checkinteger(L, 1));
     const auto b = static_cast<int>(luaL_checkinteger(L, 2));
@@ -109,7 +131,10 @@ constexpr std::string_view kCalls = R"(
 local M = {}
 function M.add() local s = 0 for i = 1, 10000 do s = bench.add(s, 1) end return s end
 function M.add_local() local add = bench.add local s = 0 for i = 1, 10000 do s = add(s, 1) end return s end
+function M.length() local length = bench.length local s = 0 for i = 1, 10000 do s = s + length("crate") end return s end
+function M.scale() local scale = bench.scale local s = 1 for i = 1, 10000 do s = scale(s, 1.0) end return s end
 function M.read_var() local s = 0 for i = 1, 10000 do s = s + bench.speed end return s end
+function M.read_var_local() local b = bench local s = 0 for i = 1, 10000 do s = s + b.speed end return s end
 function M.write_var() for i = 1, 10000 do bench.speed = i end return 0 end
 function M.handles() local s = 0 for i = 1, 10000 do s = s + bench.unit_number(bench.first_unit()) end return s end
 function M.method() local t = bench.first_tag() local s = 0 for i = 1, 10000 do s = s + t:number() end return s end
@@ -123,7 +148,10 @@ constexpr std::string_view kRawCalls = R"(
 local M = {}
 function M.add() local s = 0 for i = 1, 10000 do s = bench.add(s, 1) end return s end
 function M.add_local() local add = bench.add local s = 0 for i = 1, 10000 do s = add(s, 1) end return s end
+function M.length() local length = bench.length local s = 0 for i = 1, 10000 do s = s + length("crate") end return s end
+function M.scale() local scale = bench.scale local s = 1 for i = 1, 10000 do s = scale(s, 1.0) end return s end
 function M.read_var() local s = 0 for i = 1, 10000 do s = s + bench.speed end return s end
+function M.read_var_local() local b = bench local s = 0 for i = 1, 10000 do s = s + b.speed end return s end
 function M.method() local u = bench.first_unit() local s = 0 for i = 1, 10000 do s = s + u:number() end return s end
 function M.property() local u = bench.first_prop_unit() local s = 0 for i = 1, 10000 do s = s + u.id end return s end
 function M.ready() local s = 0 for i = 1, 10000 do s = bench.add(s, 1) end return s end
@@ -139,6 +167,10 @@ TEST_CASE("bench bindings: Rhp::lib calls next to hand-written C functions", "[b
     lua_newtable(raw.get());
     lua_pushcfunction(raw.get(), &raw_add);
     lua_setfield(raw.get(), -2, "add");
+    lua_pushcfunction(raw.get(), &raw_length);
+    lua_setfield(raw.get(), -2, "length");
+    lua_pushcfunction(raw.get(), &raw_scale);
+    lua_setfield(raw.get(), -2, "scale");
     lua_pushnumber(raw.get(), 1.0);
     lua_setfield(raw.get(), -2, "speed");
     lua_pushcfunction(raw.get(), &raw_first_unit);
@@ -176,11 +208,25 @@ TEST_CASE("bench bindings: Rhp::lib calls next to hand-written C functions", "[b
         return r->size();
     };
 
+    Rhp::script::sandbox_options fast = rhp_bench::quiet();
+    fast.limits.cancel_checks = Rhp::cancel_scope::kNone;
+    Rhp::script::sandbox unchecked{std::move(fast)};
+    REQUIRE(unchecked.install<bench_lib>());
+    const auto fast_mod = rhp_bench::load(unchecked, "bench.calls", kCalls);
+    const auto call_unchecked = [&](std::string_view fn) {
+        auto r = unchecked.call(fast_mod, fn);
+        REQUIRE(r);
+        return r->size();
+    };
+
     BENCHMARK("bindings raw: 10k calls of bench.add") {
         return call_raw("add");
     };
     BENCHMARK("bindings rhp: 10k calls of bench.add") {
         return call_box("add");
+    };
+    BENCHMARK("bindings unchecked: 10k calls of bench.add") {
+        return call_unchecked("add");
     };
     BENCHMARK("bindings raw: 10k calls of bench.add held in a local") {
         return call_raw("add_local");
@@ -188,18 +234,57 @@ TEST_CASE("bench bindings: Rhp::lib calls next to hand-written C functions", "[b
     BENCHMARK("bindings rhp: 10k calls of bench.add held in a local") {
         return call_box("add_local");
     };
+    BENCHMARK("bindings unchecked: 10k calls of bench.add held in a local") {
+        return call_unchecked("add_local");
+    };
+    BENCHMARK("bindings raw: 10k calls with a string argument") {
+        return call_raw("length");
+    };
+    BENCHMARK("bindings rhp: 10k calls with a string argument") {
+        return call_box("length");
+    };
+    BENCHMARK("bindings unchecked: 10k calls with a string argument") {
+        return call_unchecked("length");
+    };
+    BENCHMARK("bindings raw: 10k calls with number arguments") {
+        return call_raw("scale");
+    };
+    BENCHMARK("bindings rhp: 10k calls with number arguments") {
+        return call_box("scale");
+    };
+    BENCHMARK("bindings unchecked: 10k calls with number arguments") {
+        return call_unchecked("scale");
+    };
     BENCHMARK("bindings raw: 10k reads of bench.speed") {
         return call_raw("read_var");
     };
     BENCHMARK("bindings rhp: 10k reads of bench.speed") {
         return call_box("read_var");
     };
-    BENCHMARK("bindings rhp: 10k handle round trips") { return call_box("handles"); };
+    BENCHMARK("bindings unchecked: 10k reads of bench.speed") {
+        return call_unchecked("read_var");
+    };
+    // The lib held in a local: only the proxy's lookup remains (no miss in the module's _ENV).
+    BENCHMARK("bindings raw: 10k reads of a variable of a lib held in a local") {
+        return call_raw("read_var_local");
+    };
+    BENCHMARK("bindings rhp: 10k reads of a variable of a lib held in a local") {
+        return call_box("read_var_local");
+    };
+    BENCHMARK("bindings unchecked: 10k reads of a variable of a lib held in a local") {
+        return call_unchecked("read_var_local");
+    };
+    BENCHMARK("bindings rhp: 10k handle round trips") {
+        return call_box("handles");
+    };
     BENCHMARK("bindings raw: 10k method calls on a handle") {
         return call_raw("method");
     };
     BENCHMARK("bindings rhp: 10k method calls on a handle") {
         return call_box("method");
+    };
+    BENCHMARK("bindings unchecked: 10k method calls on a handle") {
+        return call_unchecked("method");
     };
     BENCHMARK("bindings rhp: 10k method calls on a handle with properties") {
         return call_box("method_with_properties");
@@ -209,6 +294,9 @@ TEST_CASE("bench bindings: Rhp::lib calls next to hand-written C functions", "[b
     };
     BENCHMARK("bindings rhp: 10k property reads on a handle") {
         return call_box("property");
+    };
+    BENCHMARK("bindings unchecked: 10k property reads on a handle") {
+        return call_unchecked("property");
     };
     // The twin is the same call done synchronously (a plain C function).
     BENCHMARK("bindings raw: 10k ready async calls") {
