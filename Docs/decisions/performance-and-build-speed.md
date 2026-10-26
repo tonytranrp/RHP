@@ -146,6 +146,38 @@ every finalizer's timing and what the test engine measures; it is one option awa
 much of the frame is left); a host option (host_options would need to carry it to each identity's
 sandbox).
 
+**`sandbox::call` and event deliveries.** Profiled with `__rdtsc` marks along the path (an empty
+call, two integer arguments, one result): about a fifth of a call converted its result (the vector's
+allocation and a `result<value>` per value), a sixth each went to the `pcall` that protects the setup
+and to looking the function up and pushing the arguments, an eighth to `lua_resume` with the
+function itself, and about a quarter to the request record (pool, `reset()`, label, hook arming,
+insertion into and removal from the scheduler's `std::map`, closing). A delivery's handler paid the
+same record costs each. What changed: a request enters `requests_` only when it first suspends (its
+map node waits in `unlisted_`; tasks are listed at once), so a call, exec, timer or handler that
+finishes in its first step never touches the map, and a finished request no longer marks the
+scheduler dirty; the handlers of one delivery run in one record and coroutine while they return
+normally (`restart_request`: each its own request id, owner, budget and policy, so a `report` undoes
+only that handler's effects through the ledger's per-request revert, as before); results that are
+nil, booleans or numbers convert in place; and `call_unprotected` runs a call's setup without the
+`pcall` when nothing in it can raise (an interned name pinned in the registry, exports without a
+metatable, scalar arguments, a spare record and coroutine, capacity in every container), leaving
+anything but a normal return with scalar results to a protected run as before. That last one means
+the main state may have no protected run while a call's coroutine runs, so nothing may raise there
+meanwhile: `rhp.spawn` now makes a new coroutine on the spawning one (a test aborted without it).
+Measured on a loaded machine (other builds and benchmarks running; min to max of the means of four
+alternating runs, main against this): a call with two arguments 402-883 ns -> 304-499 ns, an empty
+call 435-686 ns -> 385-588 ns, a delivery to 100 handlers 12.8-17.2 us -> 9.7-13.5 us, a pump
+delivering a publish to 100 handlers 17.1-21.6 us -> 11.3-15.6 us; a delivery to one handler showed
+no clear change (235-345 ns -> 257-358 ns). *Not done:* running all of a delivery's handlers in one
+`lua_resume` (a C function calling each through `lua_pcallk`): a handler may suspend, and a C frame
+under every handler would show in tracebacks, the debugger's stacks and the profiler's samples; per
+handler, the resume is a smaller part than the record. A ledger checkpoint per handler instead of a
+request id: a deferred `report` would also undo what later handlers and nested deliveries recorded
+after the mark. Skipping `arm_hook` for a reused coroutine whose hook is already off: it restarts the
+countdown a budget is measured by, and the hook functions are being reworked separately. The
+remaining costs per call are the result vector's allocation (the API returns a `value_list`),
+`lua_resume`, the operation scope's two `lua_sethook` calls and the record's bookkeeping.
+
 **The debugger with breakpoints only** runs line events in the functions whose lines hold one
 (`scope_lines`, debug.cpp): call and return events switch them, keeping the instruction countdown
 (`internals::set_line_events`), and the last answer is cached by source and line range. A C function
