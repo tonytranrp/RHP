@@ -383,7 +383,7 @@ void sandbox_impl::push_timers(lua_State* L) {
         lua_setfield(L, -2, "repeating");
         lua_pushboolean(L, e.paused ? 1 : 0);
         lua_setfield(L, -2, "paused");
-        lua_pushboolean(L, e.active && requests_.contains(e.active) ? 1 : 0);
+        lua_pushboolean(L, e.active && live(e.active) ? 1 : 0);
         lua_setfield(L, -2, "running");
         lua_rawseti(L, -2, ++n);
     }
@@ -453,7 +453,7 @@ void sandbox_impl::fire_entry(std::uint64_t key, steady::time_point now) {
             e.due = now + e.interval; // fell behind: no burst of catch-up calls
         }
     }
-    if (e.active && requests_.contains(e.active)) {
+    if (e.active && live(e.active)) {
         return; // its previous call is still suspended: no overlapping calls
     }
     ++e.runs;
