@@ -1,6 +1,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <format>
 #include <functional>
 #include <future>
 #include <memory>
@@ -636,6 +637,17 @@ TEST_CASE("host: a reply too large to cache refuses its retry instead of running
     c.exec(3, 901, "return runs");
     REQUIRE(c.wait_replies(3));
     CHECK(c.replies[2].body == value{value::array{value{1}}});
+}
+
+TEST_CASE("host+client: acks sent at once with ack_delay_ms 0", "[integration][session]") {
+    keys k;
+    const auto at = Rhp::endpoint::listen("itest.ack_now", 1);
+    running_host<loopback_cfg> host{at, k, Rhp::host_options{.ack_delay_ms = 0}};
+    Rhp::client<loopback_cfg> c{host.dial_at(at), k.as_patch(), k.signer(), Rhp::client_options{.ack_delay_ms = 0}};
+    for (int i = 0; i < 20; ++i) {
+        CHECK(c.exec<int>(std::format("return {}", i)) == i);
+    }
+    CHECK_FALSE(c.info().closed);
 }
 
 TEST_CASE("host: a full inbox or outbox loses nothing", "[integration][host]") {

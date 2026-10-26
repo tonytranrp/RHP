@@ -49,6 +49,7 @@ auto registered = host.on_blob("configs", [](const Rhp::blob_view& b) -> Rhp::re
 | `http_require_binding` | false | refuse HTTP requests whose proof isn't bound to their TLS connection (`X-RHP-Channel: tls-exporter`) |
 | `handler_errors` | `report` | what a failing timer, frame callback, event handler or task does in every identity's sandbox when the script sets no `on_error` |
 | `remote_events_per_pump` | 256 | subscribed events sent to one session per `pump()`; the rest are dropped and the next event says how many |
+| `ack_delay_ms` | 5 | how long a received frame's ack waits for an outgoing frame to carry it; 0 acks every read at once |
 
 ## `Rhp::client<Cfg>`
 
@@ -137,6 +138,7 @@ RHP supplies an awaiter, not a coroutine task type. Destroying a suspended await
 | `on_emit` | none | every `rhp.emit(value)` with request and module |
 | (events) | | `client.on(name, fn)` callbacks follow the same thread rules as `on_output` |
 | `blob_chunk` / `blob_window` | 1 MiB / 4 | blob chunk size and chunks in flight |
+| `ack_delay_ms` | 5 | how long a received frame's ack waits for an outgoing frame to carry it; 0 acks every read at once |
 | `tls` | empty | `ca_pem` + `server_name` to check the host's certificate; `cert_pem` / `key_pem` when the client listens (reverse mode) |
 
 ### Thread rules

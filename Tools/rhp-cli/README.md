@@ -108,7 +108,7 @@ Discovery requires the host's explicit `advertise()`. Discovery grants no author
 | `release confirm <channel>` / `release deactivate <channel> [--hold]` | `rhp-cli release deactivate game.balance --hold -c host:7777 -i admin.rhpid` (admin) |
 | `revoke build [--seq n] [--release id] [--key b64] [--floor channel=seq] -i id [-o out]` | `rhp-cli revoke build --floor game.balance=12 -i lead.rhpid` |
 | `revoke sign <file> -i id` / `revoke apply <file>` | `rhp-cli revoke apply revocations.1761400000.rhprev -c host:7777 -i dev.rhpid` |
-| `rollout <file> -i id [--host h:p ...] [--canary name] [--stage fraction:ms ...] [--max-failures n] [--keep-on-failure] [discovery filters] [--tls] [--insecure-lan]` | `rhp-cli rollout balance.rhprel -i admin.rhpid --stage 0.5:30000 --stage 1:0` (hosts discovered when no `--host`; default stages `0.1:30000 0.5:30000 1:0`) |
+| `rollout <file> -i id [--host h:p ...] [--canary name] [--stage fraction:ms ...] [--max-failures n] [--keep-on-failure] [discovery filters] [--tls] [--ca pem] [--server-name name] [--insecure-lan]` | `rhp-cli rollout balance.rhprel -i admin.rhpid --stage 0.5:30000 --stage 1:0` (hosts discovered when no `--host`; default stages `0.1:30000 0.5:30000 1:0`) |
 
 ## Lua tests
 

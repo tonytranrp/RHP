@@ -706,6 +706,8 @@ int main(int argc, char** argv) {
     rollout_cmd->add_flag("--keep-on-failure", keep_on_failure, "don't deactivate the release where it went when the rollout stops");
     add_discovery_options(*rollout_cmd);
     rollout_cmd->add_flag("--tls", conn.tls, "TLS even on loopback");
+    rollout_cmd->add_option("--ca", conn.ca, "validate host certificates against this CA (PEM)");
+    rollout_cmd->add_option("--server-name", conn.server_name, "expected certificate name (with --ca)");
     rollout_cmd->add_flag("--insecure-lan", conn.insecure_lan, "allow plaintext to non-loopback endpoints");
 
     std::string tune_path;
@@ -863,6 +865,15 @@ int main(int argc, char** argv) {
         Rhp::fleet_options options;
         options.insecure_lan = conn.insecure_lan;
         options.tls = conn.tls ? Rhp::net::tls_mode::kRequire : Rhp::net::tls_mode::kAuto;
+        options.client.tls.server_name = conn.server_name;
+        if (!conn.ca.empty()) {
+            auto ca = rhp_cli::read_text_file(conn.ca);
+            if (!ca) {
+                std::println(stderr, "can't read rollout CA {}", conn.ca);
+                return 1;
+            }
+            options.client.tls.ca_pem = std::move(*ca);
+        }
         auto group = signer ? std::make_unique<Rhp::fleet<cli_cfg>>(id->credential(), std::move(*signer), std::move(options))
                             : std::make_unique<Rhp::fleet<cli_cfg>>(id->credential(), std::move(options));
         if (rollout_hosts.empty()) {

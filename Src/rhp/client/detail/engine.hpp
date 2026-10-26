@@ -40,6 +40,9 @@ struct client_options {
     // many chunks may be in flight at once.
     std::size_t blob_chunk = 1u << 20;
     std::size_t blob_window = 4;
+    // How long a received frame's ack waits for an outgoing frame to carry it (session::options);
+    // 0 acks every read at once.
+    std::uint32_t ack_delay_ms = 5;
     // TLS: how the host's certificate is checked (ca_pem, server_name; empty = not checked, the
     // handshake is bound to the TLS channel instead) and, in reverse mode where the client listens,
     // its own certificate (cert_pem + key_pem; empty = ephemeral self-signed).

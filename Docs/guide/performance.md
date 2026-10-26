@@ -64,7 +64,7 @@ Ed25519 signing and checking cost tens of microseconds each. A process-wide cach
 
 - **Pipelining.** Many calls in flight cost far less than the same calls one after another. Start them with `client.async()` and collect the results afterwards ([host and client](host-and-client.md#async)).
 - **Gathered writes.** TCP and IPC links send the frames queued behind a write in flight in one gathered write (up to 16 frames). WebSocket joins them into one message. 32 pipelined calls over TCP on `127.0.0.1` take 374-401 us instead of 632-635 us.
-- **Delayed acks.** A standalone ack waits up to 5 ms for an outgoing frame to carry it, so a call and its reply are two frames instead of four. Acks still go at once for every 8th unacknowledged frame, a frame that asks for one, and a duplicate. This is `session::options::ack_delay_ms` in the session layer; hosts and clients use the default. The protocol is unchanged.
+- **Delayed acks.** A standalone ack waits up to 5 ms for an outgoing frame to carry it, so a call and its reply are two frames instead of four. Acks still go at once for every 8th unacknowledged frame, a frame that asks for one, and a duplicate. Set it with `host_options::ack_delay_ms` / `client_options::ack_delay_ms` (`session::options::ack_delay_ms` underneath; 0 acks every read at once). The protocol is unchanged.
 - **Reliable UDP** recovers loss by retransmission; on a clean link it is slower than TCP (32 pipelined calls: about 1.3 ms). Prefer TCP unless only UDP gets through.
 - **DNS-SD.** RHP's own responder answers a query with the records it asked for and puts the rest in the additional section (RFC 6763 §12). Windows now resolves a record RHP publishes in about 2.7 s (it took 24-41 s before).
 
