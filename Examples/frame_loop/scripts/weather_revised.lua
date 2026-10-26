@@ -15,7 +15,7 @@ rhp.timer(0, gust_loop)
 
 rhp.on("game.goal", function(frame)
     game.score = game.score + 1
-    print("goal at frame " .. frame .. ", score " .. game.score .. " (v2)")
+    print("goal at frame " .. frame .. ", score " .. game.score .. " (revised)")
 end)
 
 function M.gust_count() return M.gusts end
@@ -24,7 +24,7 @@ function M.on_save() return M.gusts end
 
 function M.on_restore(saved)
     M.gusts = saved or 0
-    print("weather v2 resumed at " .. M.gusts .. " gusts")
+    print("revised weather resumed at " .. M.gusts .. " gusts")
 end
 
 return M

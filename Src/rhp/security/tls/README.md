@@ -1,10 +1,10 @@
 # security/tls — layer 3
 
-TLS 1.3 for links that leave the machine. Namespace `Rhp::security::tls`; target `Rhp::tls`.
+TLS 1.3 for links that leave the machine. Namespace `Rhp::security::tls`; target `Rhp::tls` (layer 3, depends on `core` and `platform`; privately on OpenSSL and / or Mbed TLS). Options: `RHP_WITH_TLS`, `RHP_TLS_OPENSSL=AUTO|ON|OFF`, `RHP_TLS_MBEDTLS` ([configuration guide](../../../../Docs/guide/configuration.md)). Who gets TLS (non-loopback dials over network transports, `require_tls`) is decided by `session::channel_policy`.
 
 | Header | What |
 |---|---|
-| `tls.hpp` | `settings` (cert / key / CA PEM, server name), `engine` (one connection, sans-IO), `context` (makes engines), the `backend` concept, `backend_ops`, `none` |
+| `tls.hpp` | `settings` (`cert_pem`, `key_pem`, `ca_pem`, `server_name`), `engine` (one connection, sans-IO: `start`, `receive`, `send`, `close`, `established`, `binding`), `context` (`make_engine`), the `backend` concept, `backend_ops`, `none` (no TLS: non-loopback endpoints then need `insecure_lan`) |
 | `openssl.hpp` | `openssl` — the system's OpenSSL ≥ 3.0 (desktop, when CMake finds it) |
 | `mbedtls.hpp` | `mbedtls` — Mbed TLS 4.2 (mobile, and the fallback without OpenSSL) |
 | `auto_backend.hpp` | `auto_backend`: OpenSSL where built, else Mbed TLS, else `none` (`config<>::tls<>`'s default) |

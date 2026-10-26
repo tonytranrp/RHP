@@ -13,6 +13,7 @@ Rhp::host<> observe_only{endpoint, authenticator}; // no signers: only observe s
 |---|---|
 | `install<Lib>()` | make a lib visible to every identity (call from the pump thread). `kAlreadyLoaded` on a duplicate name |
 | `on_blob(sink, fn, role = admin)` | register a blob sink: `fn(const blob_view&) -> result<void>` runs on the pump thread once a whole blob (≤ `limits.max_blob`) has arrived. The role is checked before a byte is buffered |
+| `serve(manager)` | serve a [`release::manager`](releases.md): clients may apply, confirm, deactivate and inspect releases, and `pump()` pumps it. The manager must outlive the host; `kAlreadyLoaded` if one is served already |
 | `on<Event>(fn)` / `on_any(fn)` | subscribe to host events; returns a `[[nodiscard]] event::subscription` that unsubscribes when destroyed. Handlers run on the pump thread |
 | `on_script_event(name, fn)` | every `rhp.publish` of `name` (`"*"`: all, `rhp.handler_failed` included) in any identity's sandbox, as an `event::script_event` (`identity`, `module`, `event`, `args`), on the pump thread |
 | `pump()` | **call every frame.** Runs requests that arrived, resumes suspended scripts, fires timers and queued events, hands replies to the network. With `io<zero_threads>` it also polls the network |
@@ -79,6 +80,13 @@ Result-bearing operations return `Rhp::result<T>` by default (see [errors](confi
 | `cancel()` / `cancel(request)` | stops everything in flight / one request | any thread |
 | `on(name, fn)` / `off(id)` | subscribe to host events: a C++ `lua_event` of that name, or an `rhp.publish` of this identity (`"*"`: every publish); `fn` gets a `remote_event` (`name`, `module`, `args`, `dropped`) on the network thread | observe |
 | `info()` / `connected()` | `session_info {connected, closed, session, identity, granted, host_platform, tls, resumes}` / whether a session is up | |
+| `connect()` / `port()` | connect and authenticate now (otherwise the first call does) / in reverse mode, start listening and return the port | |
+| `poll()` | with `io<zero_threads>`: handle whatever the network has ready, without blocking (no-op with an I/O thread) | |
+| `tunables(prefix)` / `tune(path, value)` | list the host's lib variables with their tags / write one as a script would ([tools](tools.md#tunables)) | observe / patch |
+| `profile(action, interval)` | the sampling profiler: `"start"`, `"read"` or `"stop"` ([tools](tools.md#profiler)) | observe |
+| `debug(request)` | the debugger: breakpoints, pause, steps, stacks, variables ([tools](tools.md#over-the-wire)) | patch |
+| `release_apply(envelope, confirm)` / `release_confirm(channel)` / `release_deactivate(channel, hold)` | run a signed release on a host that [serves a manager](releases.md) | admin |
+| `release_status()` / `revoke(envelope)` | what the host's channels run / send a signed revocation list | observe |
 
 `mod` is a `module_id` or name (`"low_grav"`) within this identity. `exec<T>` converts the first returned value, or nil if none; untyped `exec` and `call` return a `value_list`. Remote load/reload/call replies wait for suspended Lua to finish. `revert_summary::clean()` checks undo failures, not the `irreversible` count; inspect both before asserting full restoration.
 
@@ -136,13 +144,28 @@ RHP supplies an awaiter, not a coroutine task type. Destroying a suspended await
 - Default `io<owned_io_thread>`: blocking calls can come from application threads; `cancel()` can run while another thread waits. Join those callers before destroying the client. Never make a blocking call from its network-thread callbacks.
 - `io<zero_threads>`: single-threaded. Call `poll()` at least once per heartbeat (2 s) while idle or the host drops the session.
 - A client destructor closes the session gracefully; the host performs final identity cleanup in its next pumps. A broken connection may first detach and resume, so link loss does not imply immediate revert.
-- If host and client share an application thread, avoid blocking calls while that thread is responsible for `host.pump()`. Use `client.async()` and alternate `host.pump()` with client I/O progress.
+- If host and client share an application thread, avoid blocking calls while that thread is responsible for `host.pump()`. Use `client.async()` and alternate `host.pump()` with client I/O progress:
+
+```cpp
+using local_cfg = Rhp::config<>::transport<Rhp::net::loopback>::io<Rhp::exec::zero_threads>;
+
+Rhp::host<local_cfg> host{Rhp::endpoint::listen("game", 1), keys, signers};
+Rhp::client<local_cfg> tool{Rhp::endpoint::dial("game", 1), id.credential(), *id.signer_key()};
+auto tick = tool.async().exec<int>("return game.tick");
+while (!tick.ready()) {   // one thread: the host and the client each make progress in turn
+    host.pump();
+    tool.poll();
+}
+auto result = std::move(tick).get();
+```
+
+The first call connects through the same turns. `Tests/bench/bench_e2e.cpp` drives a host and a client this way. Add a deadline in real code: a call that can't finish (a host that stopped pumping) otherwise loops forever.
 
 ## Events and audit
 
 Events are published on the pump thread. Subscribe with `host.on<E>(fn)` or `host.on_any(fn)`:
 
-`session_opened`, `session_resumed`, `session_closed`, `auth_failed`, `script_executed`, `blob_received`, `identity_reverted`, `handler_failed` (fields in the [reference](reference.md#host-events)). Script events are not host events: subscribe to them with `on_script_event`.
+`session_opened`, `session_resumed`, `session_closed`, `auth_failed`, `script_executed`, `blob_received`, `identity_reverted`, `handler_failed`, and `release_changed` from a served release manager (fields in the [reference](reference.md#host-events)). Script events are not host events: subscribe to them with `on_script_event`.
 
 ```cpp
 auto audit = host.on_any(Rhp::audit::file_sink{"rhp_audit.log"}); // JSON lines, flushed per line

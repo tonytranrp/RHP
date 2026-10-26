@@ -2,7 +2,7 @@
 
 **Decision**
 - CMake ≥ 3.28, Ninja Multi-Config presets (Xcode for `ios-device`), C++23.
-- CPM.cmake 0.42.3 with every pin in `cmake/Dependencies.cmake`; consumers use CPM / `add_subdirectory` pinned to a stage tag (`stage-7`) or a commit, or (Stage 8) an installed package through `find_package(rhp CONFIG)`.
+- CPM.cmake 0.42.3 with every pin in `cmake/Dependencies.cmake`; consumers use CPM / `add_subdirectory` pinned to a stage tag (`stage-11`) or a commit, or (Stage 8) an installed package through `find_package(rhp CONFIG)`.
 - Stage 8: each git pin names the commit its tag resolved to and the configure checks the checkout against it; CPM.cmake is checked against its SHA-256; Mbed TLS keeps its tarball SHA-256. RHP's targets are exported (`RhpTargets`, namespace `Rhp::`) with the third-party archives they link; third-party headers are build-tree only. See [Stage 8 decisions](stage8-packaging-performance.md).
 - Static libraries, one per module (`rhp_add_module`); pure templates header-only, `.cpp` only for dependency walls.
 - Warnings as errors (`/W4 /WX`, `-Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Werror`).

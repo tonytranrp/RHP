@@ -1,6 +1,6 @@
 # Status and TODO
 
-Last updated 2026-10-24. Stages 0–11 are implemented, merged and released (tags `stage-0` … `stage-11`). Stage 12 (a test engine for Lua scripts) is implemented on branch `stage-12-lua-test-engine`. Progress is tracked as "Stage N" only (no `v1` / `v2` naming anywhere). Known limits are in [the guide's limitations page](guide/limitations.md).
+Last updated 2026-10-24. Stages 0–12 are implemented and merged (tags `stage-0` … `stage-11`; Stage 12 is untagged, so pin a commit for it). Progress is tracked as "Stage N" only (no `v1` / `v2` naming anywhere). Known limits are in [the guide's limitations page](guide/limitations.md).
 
 ## Stage 12 — a test engine for Lua scripts
 

@@ -339,6 +339,29 @@ game_lua_tests tests -s scripts -r junit:out/lua-tests.xml -r github --coverage 
 
 `--list` lists the selected tests without running them (`--list -r json` for tools). Selection: `-f / --filter TEXT` (repeatable, `/regex/` for a regex) on full names, `--filter-out TEXT`, `-t / --tags a,b`, `--exclude-tags a,b`, `--fail-fast`, `--repeat N`. `--root DIR` makes paths in reports relative to `DIR`. `--help` lists everything.
 
+## From C++
+
+`Rhp::test::main` parses the command line. To drive a run from your own code (a game's in-editor test button, a custom CI step), build `Rhp::test::run_options` and use `Rhp::test::runner`:
+
+```cpp
+#include <iostream>
+#include <rhp/test/test.hpp>
+
+int run_shop_tests() {
+    Rhp::test::run_options options;
+    options.tests = {"tests"};
+    options.scripts = {"scripts"};
+    options.coverage = {{Rhp::test::coverage_kind::kLcov, "out/lcov.info"}}; // collect line coverage
+    Rhp::test::runner r{options, [](Rhp::script::sandbox& box) { return box.install<shop::lib>(); }};
+    auto text = Rhp::test::make_text_reporter(std::cout, false, false);
+    const Rhp::test::run_result result = r.run(*text);
+    std::ofstream{"out/lcov.info"} << Rhp::test::lcov_text(result.coverage); // the runner doesn't write files
+    return result.totals.ok() ? 0 : 1; // also result.files, result.seed, result.profile
+}
+```
+
+This needs `<fstream>` too. `runner::list()` returns the selected tests without running them; `lcov_text` / `cobertura_text` / `folded_text` turn the results into files. `Rhp::test::run_cli(args, install)` is `main` without `argc` / `argv`. Reporters: `make_text_reporter`, `make_tap_reporter`, `make_junit_reporter`, `make_json_reporter`, `make_github_reporter`.
+
 ## rhp-cli test
 
 `rhp-cli test` takes the same arguments:

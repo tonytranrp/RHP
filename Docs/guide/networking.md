@@ -10,7 +10,7 @@ using udp_cfg = Rhp::config<>::transport<Rhp::net::udp_reliable>;
 using ipc_cfg = Rhp::config<>::transport<Rhp::net::local_ipc>;
 ```
 
-Both peers use the same transport. The session layer adds TLS on top of any of them under the [usual rules](connecting.md#tls).
+Both peers use the same transport. The session layer adds TLS on top of any of them under the [usual rules](connecting.md#tls). TCP and IPC send frames queued behind a write in flight in one gathered write, and WebSocket joins them into one message, so pipelined calls (`client.async()`) share writes; reliable UDP sends a datagram per fragment and is slower than TCP on a clean link ([performance](performance.md#network)).
 
 | Transport | Endpoint | Notes |
 |---|---|---|
@@ -41,7 +41,7 @@ The provider is the `discovery<D>` slot:
 | `D` | What it does |
 |---|---|
 | `Rhp::net::mdns` (default) | Windows DNS-SD API; Apple `dns_sd`; elsewhere, and for Windows listeners bound to one address, the multicast responder below |
-| `Rhp::net::mdns_wire` | RHP's own multicast DNS-SD (RFC 6762/6763): probes the name, announces twice, then answers queries; sends goodbyes; queries with backoff; caches with TTLs. No system daemon needed (Linux, native Android executables). |
+| `Rhp::net::mdns_wire` | RHP's own multicast DNS-SD (RFC 6762/6763): probes the name, announces twice, then answers queries (the asked-for records in the answer section, the rest as additional records, RFC 6763 §12); sends goodbyes; queries with backoff; caches with TTLs. No system daemon needed (Linux, native Android executables). Windows' own resolver finds a record it publishes in about 3 s. |
 | `Rhp::net::no_discovery` | `advertise()` and browsing report `kDisabled` |
 
 Stream transports publish `_rhp._tcp`, reliable UDP publishes `_rhp._udp`. A record carries the address, port, wire revision, platform, app, build and transport name (TXT). Keys never go into a record. An Android app that needs `NsdManager` can supply its own policy with the same `Rhp::net::discovery` shape.
@@ -106,7 +106,7 @@ for (const auto& entry : group.call<double>("low_grav", "set", 1.6)) { /* host_r
 - `fleet_options::client` applies to every member. Its `on_output` / `on_emit` run on the fleet's network thread (inside the waits and `poll()` with `io<zero_threads>`, and possibly on the destroying thread while a fleet is torn down); never call the fleet from them.
 - One thread uses a fleet at a time.
 - `Rhp::discover<Cfg>(options)` is the same browse without a fleet.
-- Members: `size()`, `add(record)`, `discover(options)` (returns how many were added), `clear()`, `poll()`, `exec` / `load` / `call`. `Rhp::fleet_options` = `{client, timeout (10 s), tls (kAuto), insecure_lan}`; a fleet made without a signing key can only call loaded code and run observe scripts.
+- Members: `size()`, `add(record)`, `discover(options)` (returns how many were added), `clear()`, `poll()`, `exec` / `load` / `call`, `rollout(envelope, plan)` and `release_status()` ([releases](releases.md#rollout)). `Rhp::fleet_options` = `{client, timeout (10 s), tls (kAuto), insecure_lan}`; a fleet made without a signing key can only call loaded code and run observe scripts.
 
 The tools run the whole flow:
 

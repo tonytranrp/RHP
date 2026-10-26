@@ -80,6 +80,7 @@ You do not code any of this; it is how the session layer behaves.
 - A dialing client resumes a temporarily detached session. Once that session finally ends, or its initial dial/authentication fails, create a new client to reconnect. A dialing host retries fresh sessions; a listening client keeps serving future hosts.
 - A timed-out call may already have performed application effects. A new call gets a new request/idempotency key; do not assume repeating it is the same protocol retry.
 - Graceful client close and host goodbye end sessions without waiting for the resume grace period; application cleanup still needs host pumps.
+- A standalone ack waits up to 5 ms for an outgoing frame (usually the reply) to carry it, so a call and its reply are two frames. TCP and IPC links send frames queued behind a write in flight in one gathered write. Neither changes the protocol; see [performance](performance.md#network).
 
 ## `rhp-cli`
 
@@ -96,6 +97,8 @@ rhp-cli watch scripts -c HOST:PORT -i dev.rhpid                # save a .lua, it
 rhp-cli events game.round_over -c HOST:PORT -i dev.rhpid       # print host events until Ctrl+C
 rhp-cli sign file.lua -i dev.rhpid                             # signature for other tools
 ```
+
+Other commands have their own guides: `discover` and `fleet` ([networking](networking.md#fleets)), `release`, `revoke` and `rollout` ([releases](releases.md#rhp-cli)), `tune`, `profile` and `dap` ([tools](tools.md)), `test` ([testing scripts](testing-scripts.md#rhp-cli-test)).
 
 | Option | What |
 |---|---|
@@ -128,10 +131,21 @@ struct my_transport {
 using cfg = Rhp::config<>::transport<my_transport>; // concept-checked on this line
 ```
 
+`listen` binds at once (errors return immediately), keeps calling `on_accept` with each new `Rhp::net::link` until the returned `Rhp::net::listener` is destroyed, and reports its port through `listener::port()` (0 for transports without ports). `dial` connects asynchronously and calls `on_connect` exactly once with a link or an error.
+
+A link is a connected byte stream:
+
+| `Rhp::net::link` member | Does |
+|---|---|
+| `start(link_handler&)` | begin delivering received bytes (`on_bytes`) and the end of the stream (`on_closed`) |
+| `send(byte_buffer)` / `close()` | queue bytes / close after writing what is queued |
+| `peer()` | a readable address for logs and audit |
+| `loopback()` / `encrypted()` / `channel_binding()` | security facts the session uses; the defaults say remote, plaintext, unbound |
+
 Every transport must declare `network` (Stage 8): `true` for anything another machine can reach (the TLS address rules then apply), `false` for in-process, IPC or a cable. A transport without it doesn't compile, so none is silently treated as local. When wrapping a link, derive from `Rhp::net::link_decorator`: it forwards `loopback()`, `encrypted()` and `channel_binding()`, which the session's security depends on.
 
 Link rules: call the handler only on the `io_context`'s thread (use `io_context::post` from elsewhere), report `on_closed` exactly once and never after the link is destroyed, and write queued bytes before closing. See [`Examples/custom_transport`](../../Examples/custom_transport).
 
 ## Other transports and discovery
 
-[Stage 6 networking and fleet](networking.md) documents WebSocket binary tunneling, reliable UDP, local IPC, the HTTP REST listener, explicit DNS-SD advertisement and fleet execution. They use the existing authentication, signatures and lifecycle. Advertisement is opt-in; discovery does not authenticate an endpoint.
+[Networking and fleet](networking.md) documents WebSocket binary tunneling, reliable UDP, local IPC, the HTTP REST listener, explicit DNS-SD advertisement and fleet execution. They use the existing authentication, signatures and lifecycle. Advertisement is opt-in; discovery does not authenticate an endpoint.

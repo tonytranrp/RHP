@@ -64,6 +64,8 @@ The PSK identity name and the signer name can differ, so one person can sign wit
 
 Roles are checked twice: the host checks request permissions and bindings check their own roles. Purity is an application contract, not something the binder can prove; an untagged mutating function or an explicit lower role on a mutating binding defeats the intended observe boundary.
 
+A client signs with `Rhp::security::signing_key` (from its identity file); the host checks with `Rhp::security::trusted_signers`. Both keep a small process-wide cache (64 entries each) of recent signatures, keyed by the public key, the signature and the source's BLAKE2b-256, so a repeated script is signed and verified once. The host still looks up the named signer in its own trusted signers before it looks in the cache: an untrusted signer is refused, and another key, signature or source misses the cache and is checked in full.
+
 Signing covers `exec`, `load` and `reload` source. A signer authorizes those source bytes, not every future execution context: `call` invokes existing exports and rollback reloads stored source. The host's in-memory keyring/trusted-signers configuration is not watched for file changes; restart or reconstruct the host when updating those files.
 
 ## Hardening checklist

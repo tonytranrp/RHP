@@ -1,6 +1,6 @@
 # Limitations
 
-What RHP does not do, or does only partly, as of Stage 8. Most of these are deliberate design limits; the rest are open work tracked in [Status and TODO](../TODO.md). Read this before putting RHP in front of anyone you don't fully trust.
+What RHP does not do, or does only partly, as of Stage 12. Most of these are deliberate design limits; the rest are open work tracked in [Status and TODO](../TODO.md). Read this before putting RHP in front of anyone you don't fully trust.
 
 ## Safety and trust
 
@@ -47,7 +47,7 @@ What RHP does not do, or does only partly, as of Stage 8. Most of these are deli
 ## Networking
 
 - **Session state doesn't survive a host restart.** Resume covers a dropped connection within `limits.resume_ms` (6 s by default). A restarted host starts fresh, and identities without pins are reverted when their last session ends.
-- **Protocol revisions must match exactly.** Stage 11 speaks revision 6 (Stage 10 spoke 5, Stages 7 to 9 spoke 4). Older hosts, clients and `rhp-cli` builds are refused at connect time.
+- **Protocol revisions must match exactly.** Stages 11 and 12 speak revision 6 (Stage 10 spoke 5, Stages 7 to 9 spoke 4). Older hosts, clients and `rhp-cli` builds are refused at connect time.
 - **`io<zero_threads>` stops the network inside a stuck script.** A zero-thread host whose script is stuck in `pump()` also stops serving the network, so cancel can't reach it.
 - **Mbed TLS is serialized.** Its calls go through one process-wide lock, because its PSA core isn't thread-safe in the default build.
 - **Fleet broadcasts cover `exec`, `load` and `call`.** `rhp-cli fleet` runs `exec` only.
@@ -62,4 +62,4 @@ What RHP does not do, or does only partly, as of Stage 8. Most of these are deli
   - Real multicast cases are skipped on hosted Windows and Apple runners.
   - On hosted macOS, the three cross-process `rhp-cli` ↔ `headless_server` tests fail (the spawned host stops listening after its first connection) and are excluded until someone debugs them on a Mac.
 - **Validation is mostly Debug.** Recorded test results are Debug builds; benchmarks run Release. Long libFuzzer runs aren't part of the routine checks (CI runs one minute per target).
-- **Coroutine yields still throw on MSVC.** Elsewhere a yield is a jump (tens of nanoseconds); with the MSVC ABI it stays a C++ exception (microseconds), so `rhp.next_frame` / `rhp.sleep` loops cost more on Windows. See [benchmarks](../benchmarks.md).
+- **Coroutine yields throw in a few builds.** A yield is a jump (tens of nanoseconds) on Linux, Apple, Android and x64 Windows. It stays a C++ exception (microseconds) with the MSVC ABI outside x64, in a Windows process running with a CET shadow stack, and under ThreadSanitizer, so `rhp.next_frame` / `rhp.sleep` loops cost more there. See [performance](performance.md#coroutine-yields-rhp_lua_jump_yields).
