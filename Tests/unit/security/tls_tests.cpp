@@ -118,8 +118,9 @@ TEST_CASE("a TLS handshake with an ephemeral certificate carries data both ways"
     CAPTURE(client_backend.name, server_backend.name);
 
     tls_pair p = make_tls_pair(client_backend, server_backend);
-    REQUIRE(p.handshake());
-    INFO(p.error);
+    const bool shook = p.handshake();
+    INFO(p.error); // the TLS error, when the handshake fails
+    REQUIRE(shook);
 
     Rhp::utils::byte_buffer wire;
     REQUIRE(p.client->send(Rhp::utils::as_bytes("hello host"), wire));
@@ -150,7 +151,9 @@ TEST_CASE("close_notify ends the peer's TLS", "[tls]") {
     const tls::backend_ops backend = GENERATE_REF(Catch::Generators::from_range(all));
     CAPTURE(backend.name);
     tls_pair p = make_tls_pair(backend, backend);
-    REQUIRE(p.handshake());
+    const bool shook = p.handshake();
+    INFO(p.error);
+    REQUIRE(shook);
     Rhp::utils::byte_buffer bye;
     p.client->close(bye);
     CHECK_FALSE(bye.empty());
