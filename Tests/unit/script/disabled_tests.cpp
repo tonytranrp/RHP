@@ -59,6 +59,14 @@ TEST_CASE("disabled reload, rollback and unload report kDisabled", "[script][dis
     REQUIRE_FALSE(box.revert_all().deferred);
 }
 
+TEST_CASE("disabled compiled chunks report kDisabled", "[script][disabled]") {
+    Rhp::script::sandbox box;
+    REQUIRE(box.compile_module("mod", "return {}").error().code == Rhp::errc::kDisabled);
+    REQUIRE(box.load("mod", "return {}", Rhp::script::trusted_bytecode{"x"}).error().code == Rhp::errc::kDisabled);
+    REQUIRE(box.reload(Rhp::module_id{1}, "return {}", Rhp::script::trusted_bytecode{"x"}).error().code == Rhp::errc::kDisabled);
+    REQUIRE(Rhp::script::bytecode_build().empty());
+}
+
 TEST_CASE("disabled scheduler is inert", "[script][disabled]") {
     Rhp::script::sandbox box;
     box.pump();

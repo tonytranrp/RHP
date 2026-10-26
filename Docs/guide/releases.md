@@ -148,7 +148,7 @@ Canaries go first, then the rest in an order fixed by the release (each stage's 
 
 ## Faster restarts: the compiled-chunk cache
 
-A restore parses every module of every release it brings back. Give the manager a key and it keeps each release's Lua bytecode in the store next to its envelope (`bytecode/<id>`), so the next restart, restore or fallback loads that instead:
+A restore parses every module of every release it brings back. Give the manager a key and it keeps each release's Lua bytecode in the store next to its envelope (`bytecode/<id>`), so the next restart, restore or fallback loads that instead (a boot restoring eight 300-line modules went from about 6 ms to about 2 ms in `Tests/bench/bench_release.cpp`):
 
 ```cpp
 // A secret of this install: made once (Rhp::security::key::generate()), kept where the store's

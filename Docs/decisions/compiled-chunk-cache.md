@@ -29,6 +29,18 @@ Within one process a signed script is compiled once (`exec_cached`, the trusted-
 - **Per-module entries keyed by source hash** (shared across releases). Garbage collection would have to decode every kept release to know which modules are referenced. Per-release entries go with their release; unchanged modules are copied from the previous release's entry instead.
 - **Lua's fixed-buffer loading (`mode "B"`)**, which keeps strings in the caller's buffer: the buffer would have to outlive every function of the module. Rejected for plain `"b"`.
 
+## Measurements
+
+`Tests/bench/bench_release.cpp`, Release build, Windows MSVC, three runs on a machine busy with other builds (means; ranges across runs). Eight modules of about 300 lines (73.6 KB of source, 83.5 KB of bytecode with debug information):
+
+| Benchmark | Sources parsed | Bytecode |
+|---|---:|---:|
+| `module-load raw`: a plain `lua_State` compiling the 8 modules | 3.8 - 5.1 ms | 0.50 - 0.56 ms |
+| `module-load rhp`: a fresh sandbox loading the 8 modules (each `--isolation test` sandbox) | 4.3 - 4.7 ms | 0.69 - 1.05 ms |
+| `restore rhp`: a boot restoring a release of the 8 modules (a manager over a memory store) | 5.6 - 7.3 ms | 2.1 - 4.7 ms (2.1 - 2.5 ms in two runs of three) |
+
+What a cached restore still spends is the rest of a boot: the sandbox, the envelope's decode with its source hashes and Ed25519 signature, the entry's MAC and decode, undumping, the state written back.
+
 ## Consequences
 
 - A boot or restore of a cached release parses nothing (measured in `Tests/bench/bench_release.cpp`, see Measurements). The first load of a release with the key on costs a parse, a dump, an undump and a store write.
