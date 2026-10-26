@@ -203,6 +203,8 @@ Measured on 2026-10-25 on the same laptop (MSVC Release, pinned to one core at h
 
 Rows not listed moved by less than about 10% (within this machine's noise), apart from three. Two raw twins moved, whose code didn't change: noise. `tunables rhp: write one variable` journals every write of the benchmark into one sandbox, so its mean measures the journal's reallocations (its standard deviation is larger than its mean on both sides; the lower bounds agree). Windows yields jump now (an x64 process without a CET shadow stack); on Linux they already did.
 
+Ranked by the ratio to their raw twins after the pass, the largest left are by design rather than overhead to remove: `tunables rhp: read one variable` (370 ns, about 34x) builds a description of the variable with its tags for `rhp-cli tune`, where the raw twin reads a global; `events rhp: deliver to N handlers` (275 ns for one, then about 130 ns per handler; raw about 20 ns) runs every handler as a request of its own on a coroutine, so it can yield and a failing handler undoes only its own call; the write row is the journal described above.
+
 The biggest remaining cost of loop-heavy scripts is gone: with the default `cancel_checks = kRequests`, a loop runs at about 1.2x raw Lua (it was 1.85-2x), so `kNone` is only worth it for the last few percent.
 
 Builds (clean `windows-msvc` Debug, 16 threads, 16 GB):
