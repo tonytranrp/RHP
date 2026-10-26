@@ -58,10 +58,9 @@ function(rhp_add_module name)
     else()
         target_compile_definitions(${target} ${scope} RHP_ENABLE=0)
     endif()
-    # The shared precompiled header is built on Rhp::core: the modules below it compile without. net
-    # compiles with Asio's macros (and _WIN32_WINNT), which would change what the standard headers
-    # in the shared header mean (clang-cl refuses the mismatch outright).
-    if(arg_SOURCES AND NOT name STREQUAL "utils" AND NOT name STREQUAL "core" AND NOT name STREQUAL "net")
+    # The shared precompiled header is built on Rhp::core: the modules below it compile without.
+    # net's Asio translation units compile apart from it (rhp_net_asio, Src/rhp/net/CMakeLists.txt).
+    if(arg_SOURCES AND NOT name STREQUAL "utils" AND NOT name STREQUAL "core")
         rhp_use_shared_pch(${target} lib)
     endif()
     set_target_properties(${target} PROPERTIES EXPORT_NAME ${name} FOLDER "rhp")

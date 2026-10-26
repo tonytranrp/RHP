@@ -82,6 +82,14 @@ if(RHP_ENABLE)
             Rhp::tls
     )
 
+    # The relay is the suite's only Asio code: it compiles apart, so the rest of the suite shares the
+    # tests' precompiled header (Asio's macros would change what its standard headers mean).
+    add_library(rhp_test_datagram_relay OBJECT net/datagram_relay.cpp)
+    target_link_libraries(rhp_test_datagram_relay PRIVATE Rhp::net Rhp::asio)
+    target_include_directories(rhp_test_datagram_relay PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../support")
+    rhp_set_warnings(rhp_test_datagram_relay)
+    set_target_properties(rhp_test_datagram_relay PROPERTIES FOLDER "tests")
+
     rhp_add_test_suite(rhp_net_tests
         SOURCES
             net/loopback_tests.cpp
@@ -91,10 +99,9 @@ if(RHP_ENABLE)
             net/udp_reliable_tests.cpp
             net/local_ipc_tests.cpp
             net/mdns_tests.cpp
-            net/datagram_relay.cpp
+            $<TARGET_OBJECTS:rhp_test_datagram_relay>
         LINKS
             Rhp::net
-            Rhp::asio
     )
 
     rhp_add_test_suite(rhp_session_tests
