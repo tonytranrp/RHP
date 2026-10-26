@@ -658,6 +658,7 @@ void sandbox_impl::open_libraries() {
     }
     stack{L}.push_string(to_string(options_.caller_role));
     lua_setfield(L, -2, "role");
+    open_buffer_library(L); // rhp.buffer, and the span and buffer types (buffer.cpp)
     lua_setglobal(L, "rhp");
 
     // The token behind `original` in patch handlers.

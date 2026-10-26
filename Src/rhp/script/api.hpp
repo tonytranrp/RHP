@@ -130,31 +130,55 @@ value handle(role caller, utils::type_list<Ms...>) {
     return o.done();
 }
 
-template <utils::type_list_like Handles, class Members, class Lib>
+// A view type: its fields as variables are described ({name, type, writable, min?, ...}).
+template <utils::type_list_like Handles, class V, class... Fs>
+value view(role caller, utils::type_list<Fs...>) {
+    value::array fields;
+    const auto field = [&]<class F>(std::type_identity<F>) {
+        if constexpr (std::is_same_v<typename F::owner_type, typename V::type>) {
+            object o;
+            o.set("name", value{std::string{F::name}})
+                .set("type", value{stubs::detail::field_type<Handles, F>()})
+                .set("writable", value{F::shape == 1 && F::writable && allows(caller, role::kPatch)});
+            describe_tags<typename F::meta>(o);
+            fields.push_back(o.done());
+        }
+    };
+    (field(std::type_identity<Fs>{}), ...);
+    object o;
+    o.set("name", value{std::string{V::name}}).set("fields", value{std::move(fields)});
+    return o.done();
+}
+
+template <utils::type_list_like Handles, class Members, class Fields, class Lib>
 struct lib_describer;
 
-template <utils::type_list_like Handles, class Members, utils::fixed_string Name, class... Entries>
-struct lib_describer<Handles, Members, lib<Name, Entries...>> {
+template <utils::type_list_like Handles, class Members, class Fields, utils::fixed_string Name, class... Entries>
+struct lib_describer<Handles, Members, Fields, lib<Name, Entries...>> {
     static value describe(std::string_view path, role caller) {
         value::array functions;
         value::array variables;
         value::array handles;
+        value::array views;
         value::array subs;
-        (add<Entries>(path, caller, functions, variables, handles, subs), ...);
+        (add<Entries>(path, caller, functions, variables, handles, views, subs), ...);
         object o;
         o.set("name", value{std::string{Name.view()}})
             .set("path", value{std::string{path}})
             .set("functions", value{std::move(functions)})
             .set("variables", value{std::move(variables)})
-            .set("handles", value{std::move(handles)})
-            .set("libs", value{std::move(subs)});
+            .set("handles", value{std::move(handles)});
+        if (!views.empty()) {
+            o.set("views", value{std::move(views)});
+        }
+        o.set("libs", value{std::move(subs)});
         return o.done();
     }
 
 private:
     template <class Entry>
     static void add(std::string_view path, role caller, value::array& functions, value::array& variables, value::array& handles,
-                    value::array& subs) {
+                    value::array& views, value::array& subs) {
         using script::detail::entry_kind;
         if constexpr (Entry::kind == entry_kind::kFn) {
             if (allows(caller, Entry::required)) {
@@ -169,8 +193,11 @@ private:
             variables.push_back(o.done());
         } else if constexpr (Entry::kind == entry_kind::kHandle) {
             handles.push_back(handle<Handles, Entry>(caller, Members{}));
+        } else if constexpr (Entry::kind == entry_kind::kView) {
+            views.push_back(view<Handles, Entry>(caller, Fields{}));
         } else if constexpr (Entry::kind == entry_kind::kSub) {
-            subs.push_back(lib_describer<Handles, Members, typename Entry::lib>::describe(std::string{path} + "." + std::string{Entry::name}, caller));
+            subs.push_back(
+                lib_describer<Handles, Members, Fields, typename Entry::lib>::describe(std::string{path} + "." + std::string{Entry::name}, caller));
         }
     }
 };
@@ -181,7 +208,7 @@ private:
 template <lib_type L>
 [[nodiscard]] value describe(role caller = role::kAdmin) {
     using handles = script::detail::handles_of_t<L>;
-    return detail::lib_describer<handles, script::detail::members_of_t<L>, L>::describe(L::name, caller);
+    return detail::lib_describer<handles, script::detail::members_of_t<L>, script::detail::fields_in_t<L>, L>::describe(L::name, caller);
 }
 
 } // namespace Rhp::script::api

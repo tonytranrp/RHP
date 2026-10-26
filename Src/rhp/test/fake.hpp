@@ -103,7 +103,11 @@ R make_return(const std::vector<value>* vals, std::string_view path) {
     using U = std::remove_cvref_t<R>;
     static const std::vector<value> none{};
     const std::vector<value>& v = vals != nullptr ? *vals : none;
-    if constexpr (is_async_v<U>) {
+    if constexpr (std::is_lvalue_reference_v<R>) {
+        // A struct view's object by reference: one default object per result type, for the fake's views.
+        static U object{};
+        return object;
+    } else if constexpr (is_async_v<U>) {
         using T = typename U::value_type;
         if constexpr (std::is_void_v<T>) {
             return U::completed(result<void>{});
@@ -229,6 +233,18 @@ template <class Root, utils::fixed_string Prefix, utils::fixed_string N, class H
 struct fake_entry<Root, Prefix, script::detail::handle_entry<N, H, IsAlive>> {
     static constexpr auto path = concat_fixed<N, utils::fixed_string{"?alive"}>();
     using type = script::detail::handle_entry<N, H, &alive<path, H>::call>;
+};
+
+// View types and their fields stay as they are: a fake's view bindings return an empty span, a null
+// pointer (nil) or one default object.
+template <class Root, utils::fixed_string Prefix, utils::fixed_string N, class T>
+struct fake_entry<Root, Prefix, script::detail::view_entry<N, T>> {
+    using type = script::detail::view_entry<N, T>;
+};
+
+template <class Root, utils::fixed_string Prefix, utils::fixed_string N, auto Member, bool ReadOnly, class... Tags>
+struct fake_entry<Root, Prefix, script::detail::field_entry<N, Member, ReadOnly, Tags...>> {
+    using type = script::detail::field_entry<N, Member, ReadOnly, Tags...>;
 };
 
 template <class Root, class Self>

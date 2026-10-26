@@ -8,6 +8,7 @@
 #include <rhp/core/error.hpp>
 #include <rhp/core/result.hpp>
 #include <rhp/core/value.hpp>
+#include <rhp/script/views.hpp>
 
 // The Lua state type, forward-declared so no RHP header ever includes lua.h. Lua is compiled as
 // C++ (cmake/lua/lua_cxx.cpp), so this matches upstream's declaration with C++ linkage.
@@ -41,6 +42,7 @@ enum class arg_kind : std::uint8_t {
     kInteger, // a number with an integer value (2.0 too)
     kNumber,  // any number
     kString,  // a string (its bytes stay in Lua)
+    kSpan,    // a typed view or byte buffer (its memory found now), or a string's bytes
     kOther    // not read here (the caller reads it another way: a handle)
 };
 
@@ -50,10 +52,17 @@ union arg_slot {
         const char* data;
         std::size_t size;
     };
+    struct bytes {
+        const void* data;
+        std::size_t size;  // bytes
+        std::uint8_t elem; // an elem_kind
+        bool string;       // a Lua string (elem is meaningless)
+    };
     bool boolean;
     std::int64_t integer;
     double number;
     text string;
+    bytes view;
 };
 
 // Non-owning view of a Lua stack: the single wall between RHP's templates and the Lua C API.
@@ -136,6 +145,25 @@ public:
     // Pushes a copy of `size` bytes as a userdata of the handle type defined with `type_tag`.
     // Returns false and pushes nothing when no lib in this state defined that type.
     [[nodiscard]] bool push_handle(const void* type_tag, const void* data, std::size_t size) const;
+
+    // ---- typed views and struct views (views.hpp; puc_lua/views.cpp) ----------------------------
+    // Pushes a host view (a span or struct view a binding returned) and returns where its
+    // view_source goes (init.source_size bytes); attach_view_source(source) on the view on top then
+    // owns it (destroyed with the view), resolves it once and raises the binding's error, or
+    // replaces the view with nil when a struct view's binding returned null.
+    [[nodiscard]] void* push_host_view(const detail::host_view_init& init) const;
+    void attach_view_source(detail::view_source* source) const;
+    // The memory of the span argument at `index` for one call: a typed view, a byte buffer or a Lua
+    // string (request.bytes), or a table of numbers copied into a temporary left on the stack
+    // (request.tables). A writable request journals a host view's range first (needs kPatch).
+    [[nodiscard]] result<detail::span_arg> to_span(int index, const detail::span_request& request) const;
+    // The object a struct view of the type registered under `key` stands for (nil: nullptr when
+    // `nil_ok`).
+    [[nodiscard]] result<void*> to_object(int index, std::string_view key, std::string_view name, bool nil_ok) const;
+    // Creates (once per state) the metatable of a struct view type and adds its fields; a type
+    // another lib defined gets the fields it lacks (one defined differently: kAlreadyLoaded), a
+    // name taken by another C++ type fails with kAlreadyLoaded.
+    [[nodiscard]] result<void> define_view_type(const detail::view_type_info& type, const detail::field_desc* fields, std::size_t count) const;
 
     // ---- registry references -----------------------------------------------------------------
     [[nodiscard]] int ref() const; // pops the top value, returns a reference to it

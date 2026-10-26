@@ -10,11 +10,13 @@
 #include <map>
 #include <memory>
 #include <regex>
+#include <span>
 #include <sstream>
 #include <string>
 #include <string_view>
 #include <vector>
 
+#include "embedded_fixtures.hpp"
 #include <catch2/catch_test_macros.hpp>
 
 #include <rhp/core/error.hpp>
@@ -25,8 +27,6 @@
 #include <rhp/script/sandbox.hpp>
 #include <rhp/test/test.hpp>
 #include <rhp/utils/scope_guard.hpp>
-
-#include "embedded_fixtures.hpp"
 
 namespace fs = std::filesystem;
 using Rhp::test::status;
@@ -860,6 +860,46 @@ TEST_CASE("fake of a lib records calls instead of reaching the program", "[test]
     CHECK(strict->outcome == status::kError);
     CHECK(strict->message.find("not mocked") != std::string::npos);
     CHECK_FALSE(Rhp::test::fake_registry::instance().strict());
+}
+
+namespace runner_tests_fixture {
+
+struct fake_point {
+    float x = 1;
+    float y = 2;
+};
+
+inline float g_fake_samples[3] = {1, 2, 3};
+inline fake_point g_fake_point{};
+
+inline std::span<float> fake_samples() {
+    return g_fake_samples;
+}
+
+inline fake_point* fake_find(int) {
+    return &g_fake_point;
+}
+
+inline fake_point& fake_main() {
+    return g_fake_point;
+}
+
+using view_lib = Rhp::lib<"fviews">::view<"point", fake_point>::field<"x", &fake_point::x>::field<"y", &fake_point::y> //
+    ::fn<"samples", &fake_samples>::fn<"find", &fake_find>::fn<"main", &fake_main>;
+
+} // namespace runner_tests_fixture
+
+TEST_CASE("fake of a lib with views returns empty spans nil and default objects", "[test][fake][views]") {
+    Rhp::script::sandbox box;
+    REQUIRE(box.install<Rhp::test::fake<view_lib>>());
+    const Rhp::utils::scope_guard forget{[]() noexcept { Rhp::test::fake_registry::instance().reset(); }};
+    const auto r = box.exec("local p = fviews.main() p.x = 5 return #fviews.samples(), fviews.find(1) == nil, p.x, fviews.main().y");
+    REQUIRE(r.has_value());
+    CHECK(*r == Rhp::script::value_list{Rhp::value{0}, Rhp::value{true}, Rhp::value{5.0}, Rhp::value{2.0}});
+    CHECK(g_fake_point.x == 1.0f); // nothing reached the program
+    // A view calls its binding again on every access: two calls and three field accesses.
+    CHECK(Rhp::test::fake_registry::instance().calls("fviews.main").size() == 5);
+    CHECK(box.revert_all().clean());
 }
 
 namespace runner_tests_fixture {

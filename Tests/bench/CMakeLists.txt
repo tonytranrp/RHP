@@ -18,6 +18,7 @@ add_executable(rhp_bench
     bench_testing.cpp
     bench_release.cpp
     bench_gc.cpp
+    bench_views.cpp
 )
 # Raw-Lua twins need lua.h: the bench is the one place outside Rhp::script that includes it.
 target_link_libraries(rhp_bench PRIVATE Rhp::rhp Rhp::lua Catch2::Catch2WithMain)

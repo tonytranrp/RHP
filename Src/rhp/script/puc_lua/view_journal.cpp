@@ -1,0 +1,230 @@
+// The journal of script writes to host memory through views (typed views and struct views).
+//
+// One layer per (target memory, code that wrote it): the first write of a module's request (or
+// handler call) to a span or an object makes a layer, an effect in that sandbox's ledger; every
+// write keeps the original of the elements (or bytes, for objects) it changes, copied the first time
+// that layer writes them. Undoing the layer puts those originals back.
+//
+// Layers of the same target (the same binding called with the same arguments) stack process-wide,
+// like var_layers: undoing a layer hands each original to the next newer layer that also wrote that
+// element instead of restoring it, so the memory always ends up as if the undone writes never
+// happened, whatever order modules (or sandboxes) are reverted in. Undo finds the memory again
+// through its own copy of the view's source: memory that moved (a vector that grew) is restored where
+// it is now; memory that is gone (a dead handle, a null pointer) has nothing to restore.
+
+#include <algorithm>
+#include <atomic>
+#include <bit>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <rhp/script/detail/context.hpp>
+#include <rhp/script/ledger.hpp>
+#include <rhp/script/puc_lua/views_impl.hpp>
+#include <rhp/script/views.hpp>
+
+namespace Rhp::script::detail {
+
+namespace {
+
+class region_layer;
+
+struct layer_group {
+    std::vector<region_layer*> layers; // oldest first
+};
+
+struct journal_registry {
+    std::mutex mutex;
+    std::vector<std::unique_ptr<layer_group>> groups;
+};
+
+journal_registry& registry() {
+    static journal_registry r;
+    return r;
+}
+
+// Bumped whenever a layer goes away: a node's cached layer is valid while it is unchanged.
+std::atomic<std::uint64_t>& epoch() {
+    static std::atomic<std::uint64_t> e{1};
+    return e;
+}
+
+class region_layer final : public effect {
+public:
+    region_layer(std::unique_ptr<view_source> source, const context* ctx, effect_owner owner, std::size_t unit)
+        : source_(std::move(source)), ctx_(ctx), owner_(owner), unit_(unit) {}
+
+    region_layer(const region_layer&) = delete;
+    region_layer& operator=(const region_layer&) = delete;
+
+    ~region_layer() override { detach(false); }
+
+    void undo() override { detach(true); }
+
+    [[nodiscard]] const view_source& source() const noexcept { return *source_; }
+    [[nodiscard]] bool owned_by(const context* ctx, const effect_owner& owner) const noexcept { return ctx_ == ctx && owner_ == owner; }
+
+    [[nodiscard]] bool has(std::size_t unit) const noexcept { return unit / 64 < mask_.size() && ((mask_[unit / 64] >> (unit % 64)) & 1u) != 0; }
+
+    // Keeps the originals of the units in [offset, offset + len) it doesn't hold yet.
+    void keep(const std::byte* root, std::size_t root_size, std::size_t offset, std::size_t len) {
+        if (len == 0) {
+            return;
+        }
+        const std::size_t first = offset / unit_;
+        const std::size_t last = (offset + len - 1) / unit_;
+        if (last >= units()) {
+            grow(std::max(last + 1, (root_size + unit_ - 1) / unit_));
+        }
+        for (std::size_t u = first; u <= last; ++u) {
+            std::uint64_t& word = mask_[u / 64];
+            const std::uint64_t bit = std::uint64_t{1} << (u % 64);
+            if ((word & bit) == 0) {
+                std::memcpy(orig_.data() + u * unit_, root + u * unit_, unit_);
+                word |= bit;
+            }
+        }
+    }
+
+    void attach(layer_group* group) noexcept { group_ = group; }
+
+private:
+    [[nodiscard]] std::size_t units() const noexcept { return orig_.size() / unit_; }
+
+    void grow(std::size_t units) {
+        orig_.resize(units * unit_);
+        mask_.resize((units + 63) / 64);
+    }
+
+    void detach(bool restore) noexcept {
+        if (group_ == nullptr) {
+            return;
+        }
+        journal_registry& reg = registry();
+        const std::scoped_lock lock{reg.mutex};
+        auto& layers = group_->layers;
+        const auto me = std::ranges::find(layers, this);
+        // Hand each original to the next newer layer that wrote the same unit: it restores it.
+        for (std::size_t w = 0; w < mask_.size(); ++w) {
+            for (std::uint64_t bits = mask_[w]; bits != 0; bits &= bits - 1) {
+                const std::size_t u = w * 64 + static_cast<std::size_t>(std::countr_zero(bits));
+                for (auto newer = me == layers.end() ? me : std::next(me); newer != layers.end(); ++newer) {
+                    if ((*newer)->has(u)) {
+                        std::memcpy((*newer)->orig_.data() + u * unit_, orig_.data() + u * unit_, unit_);
+                        mask_[w] &= ~(std::uint64_t{1} << (u % 64));
+                        break;
+                    }
+                }
+            }
+        }
+        if (restore && std::ranges::any_of(mask_, [](std::uint64_t w) { return w != 0; })) {
+            // The memory where it is now; gone memory has nothing to restore.
+            if (const result<region> now = source_->resolve()) {
+                for (std::size_t w = 0; w < mask_.size(); ++w) {
+                    for (std::uint64_t bits = mask_[w]; bits != 0; bits &= bits - 1) {
+                        const std::size_t u = w * 64 + static_cast<std::size_t>(std::countr_zero(bits));
+                        if ((u + 1) * unit_ <= now->size) {
+                            std::memcpy(now->data + u * unit_, orig_.data() + u * unit_, unit_);
+                        }
+                    }
+                }
+            }
+        }
+        if (me != layers.end()) {
+            layers.erase(me);
+        }
+        if (layers.empty()) {
+            const layer_group* gone = group_;
+            std::erase_if(reg.groups, [gone](const std::unique_ptr<layer_group>& g) { return g.get() == gone; });
+        }
+        group_ = nullptr;
+        epoch().fetch_add(1, std::memory_order_acq_rel);
+    }
+
+    std::unique_ptr<view_source> source_;
+    const context* ctx_;
+    effect_owner owner_;
+    std::size_t unit_;
+    std::vector<std::byte> orig_;     // the originals, unit by unit
+    std::vector<std::uint64_t> mask_; // which units this layer wrote
+    layer_group* group_ = nullptr;    // null once detached
+};
+
+// The group of layers writing the same memory as `source` (registry lock held).
+layer_group* group_of(journal_registry& reg, const view_source& source) noexcept {
+    for (const auto& g : reg.groups) {
+        if (!g->layers.empty() && g->layers.front()->source().same(source)) {
+            return g.get();
+        }
+    }
+    return nullptr;
+}
+
+// Journal unit of a root: an element of a span, a byte of an object.
+std::size_t unit_of(const view_node& root) noexcept {
+    return root.shape == node_shape::kSpan ? elem_size(root.elem) : 1;
+}
+
+} // namespace
+
+bool journal_touch(context& ctx, journal_cache& cache, const place& p, std::size_t offset, std::size_t len) {
+    const effect_owner owner = ctx.current_owner();
+    auto* layer = static_cast<region_layer*>(cache.layer);
+    if (layer == nullptr || cache.epoch != epoch().load(std::memory_order_acquire) || cache.ctx != &ctx || !(cache.owner == owner)) {
+        layer = nullptr;
+        const view_node& root = *p.root;
+        journal_registry& reg = registry();
+        {
+            const std::scoped_lock lock{reg.mutex};
+            if (layer_group* g = group_of(reg, *root.source)) {
+                for (auto it = g->layers.rbegin(); it != g->layers.rend(); ++it) {
+                    if ((*it)->owned_by(&ctx, owner)) {
+                        layer = *it;
+                        break;
+                    }
+                }
+            }
+        }
+        if (layer == nullptr) {
+            auto made = std::make_unique<region_layer>(root.source->clone(), &ctx, owner, unit_of(root));
+            region_layer* raw = made.get();
+            {
+                const std::scoped_lock lock{reg.mutex};
+                layer_group* g = group_of(reg, *root.source);
+                if (g == nullptr) {
+                    g = reg.groups.emplace_back(std::make_unique<layer_group>()).get();
+                }
+                g->layers.push_back(raw);
+                raw->attach(g);
+            }
+            // Recorded in the running code's ledger; a sandbox that is closing undoes (and destroys)
+            // what is recorded at once.
+            if (ctx.record_effect(std::string{root.label}, std::move(made)) == 0) {
+                cache = journal_cache{};
+                return false;
+            }
+            layer = raw;
+        }
+        cache = journal_cache{layer, epoch().load(std::memory_order_acquire), &ctx, owner};
+    }
+    layer->keep(p.root_data, p.root_size, offset, len);
+    return true;
+}
+
+std::size_t journal_layers() noexcept {
+    journal_registry& reg = registry();
+    const std::scoped_lock lock{reg.mutex};
+    std::size_t n = 0;
+    for (const auto& g : reg.groups) {
+        n += g->layers.size();
+    }
+    return n;
+}
+
+} // namespace Rhp::script::detail

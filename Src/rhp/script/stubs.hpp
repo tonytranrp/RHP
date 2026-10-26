@@ -37,6 +37,12 @@ concept named_lua_type = requires {
 
 namespace detail {
 
+// A typed view's LuaLS type: rhp.span<number> for floating point elements, rhp.span<integer> else.
+template <class E>
+[[nodiscard]] std::string span_type_name() {
+    return std::is_floating_point_v<E> ? "rhp.span<number>" : "rhp.span<integer>";
+}
+
 // The LuaLS type of a parameter or single result. Handles is the root lib's handles_of_t, so a
 // handle declared in any sub-lib maps to its name.
 template <utils::type_list_like Handles, class T>
@@ -46,6 +52,12 @@ template <utils::type_list_like Handles, class T>
         return std::format("{}?", type_name<Handles, typename U::value_type>());
     } else if constexpr (script::detail::is_handle_v<Handles, U>) {
         return std::string{script::detail::find_handle_t<Handles, U>::name};
+    } else if constexpr (script::detail::is_span_v<U>) {
+        return span_type_name<std::remove_cv_t<typename U::element_type>>();
+    } else if constexpr (script::detail::is_view_v<Handles, U>) {
+        return std::string{script::detail::find_view_t<Handles, U>::name};
+    } else if constexpr (std::is_pointer_v<U> && script::detail::is_view_v<Handles, std::remove_cv_t<std::remove_pointer_t<U>>>) {
+        return std::format("{}?", script::detail::find_view_t<Handles, std::remove_cv_t<std::remove_pointer_t<U>>>::name); // nil when null
     } else if constexpr (std::same_as<U, bool>) {
         return "boolean";
     } else if constexpr (script::detail::lua_integer<U>) {
@@ -146,9 +158,66 @@ void append_handle_class(std::string& out, role caller, utils::type_list<Ms...>)
     out += '\n';
 }
 
-template <utils::type_list_like Handles, class Members, class... Hs>
+// " [0, 10] m/s: what it is for" from a variable's or field's tags (empty without any).
+template <class Meta>
+[[nodiscard]] std::string described() {
+    std::string out;
+    if constexpr (Meta::has_range) {
+        out += std::format(" [{}, {}]", *Meta::lower(), *Meta::upper());
+    }
+    if (!Meta::unit().empty()) {
+        out += std::format(" {}", Meta::unit());
+    }
+    if (!Meta::doc().empty()) {
+        std::string doc{Meta::doc()};
+        for (char& c : doc) {
+            c = c == '\n' || c == '\r' ? ' ' : c; // one annotation line
+        }
+        out += std::format("{} {}", out.empty() ? "" : ":", doc);
+    }
+    return out;
+}
+
+// The LuaLS type of a view type's field: its value, a span for an array, the nested view's name.
+template <utils::type_list_like Handles, class F>
+[[nodiscard]] std::string field_type() {
+    using M = typename F::value_type;
+    if constexpr (F::shape == 2) {
+        return span_type_name<typename script::detail::array_traits<M>::element>();
+    } else if constexpr (F::shape == 3) {
+        return type_name<Handles, M>();
+    } else if constexpr (std::is_enum_v<M>) {
+        return "integer";
+    } else {
+        return type_name<Handles, M>();
+    }
+}
+
+// One class per view type, with its fields: writable ones (for a caller with kPatch) are plain,
+// the rest read-only; an array or struct field is read-only itself (its elements or fields aren't).
+template <utils::type_list_like Handles, class V, class... Fs>
+void append_view_class(std::string& out, role caller, utils::type_list<Fs...>) {
+    out += std::format("---@class {}\n", V::name);
+    const auto field = [&]<class F>(std::type_identity<F>) {
+        if constexpr (std::is_same_v<typename F::owner_type, typename V::type>) {
+            const bool writable = F::shape == 1 && F::writable && allows(caller, role::kPatch);
+            out += std::format("---@field {} {}{}{}\n", F::name, field_type<Handles, F>(), writable ? "" : " read-only", described<typename F::meta>());
+        }
+    };
+    (field(std::type_identity<Fs>{}), ...);
+    out += '\n';
+}
+
+template <utils::type_list_like Handles, class Members, class Fields, class... Hs>
 void append_handle_classes([[maybe_unused]] std::string& out, [[maybe_unused]] role caller, utils::type_list<Hs...>) {
-    (append_handle_class<Handles, Hs>(out, caller, Members{}), ...);
+    const auto one = [&]<class H>(std::type_identity<H>) {
+        if constexpr (H::kind == script::detail::entry_kind::kHandle) {
+            append_handle_class<Handles, H>(out, caller, Members{});
+        } else {
+            append_view_class<Handles, H>(out, caller, Fields{});
+        }
+    };
+    (one(std::type_identity<Hs>{}), ...);
 }
 
 template <utils::type_list_like Handles, class Lib>
@@ -167,26 +236,6 @@ struct lib_writer<Handles, lib<Name, Entries...>> {
     }
 
 private:
-    // " [0, 10] m/s: what it is for" from a variable's tags (empty without any).
-    template <class Meta>
-    static std::string described() {
-        std::string out;
-        if constexpr (Meta::has_range) {
-            out += std::format(" [{}, {}]", *Meta::lower(), *Meta::upper());
-        }
-        if (!Meta::unit().empty()) {
-            out += std::format(" {}", Meta::unit());
-        }
-        if (!Meta::doc().empty()) {
-            std::string doc{Meta::doc()};
-            for (char& c : doc) {
-                c = c == '\n' || c == '\r' ? ' ' : c; // one annotation line
-            }
-            out += std::format("{} {}", out.empty() ? "" : ":", doc);
-        }
-        return out;
-    }
-
     template <class Entry>
     static void field(std::string& out, std::string_view path, role caller) {
         using script::detail::entry_kind;
@@ -241,7 +290,7 @@ template <lib_type L>
 [[nodiscard]] std::string generate(role caller = role::kAdmin) {
     using handles = script::detail::handles_of_t<L>;
     std::string out;
-    detail::append_handle_classes<handles, script::detail::members_of_t<L>>(out, caller, handles{});
+    detail::append_handle_classes<handles, script::detail::members_of_t<L>, script::detail::fields_in_t<L>>(out, caller, handles{});
     detail::lib_writer<handles, L>::append(out, L::name, caller);
     detail::trim_trailing_blank(out);
     return out;
@@ -396,7 +445,119 @@ function rhp.api() end
 ---@param value any
 function rhp.emit(value) end
 
----Number of pump() calls so far.
+---Byte buffers this script owns (never journaled: script state, like a table).
+---@class rhp.buffer_lib
+rhp.buffer = {}
+
+---A buffer of `size` bytes, each `fill` (default 0).
+---@param size integer
+---@param fill? integer
+---@return rhp.buffer
+function rhp.buffer.new(size, fill) end
+
+---A buffer holding a copy of a string's, a buffer's or a span's bytes.
+---@param bytes string|rhp.buffer|rhp.span<number>|rhp.span<integer>
+---@return rhp.buffer
+function rhp.buffer.from(bytes) end
+
+---Elements of C++ memory (or of a buffer), read and written in place: v[i] (1-based, bounds-checked), #v, pairs(v). Writes to C++ memory need the patch role and are undone with the module.
+---@class rhp.span<T>: { [integer]: T }
+---@operator len: integer
+local span = {}
+
+---@param i integer
+---@return T
+function span:get(i) end
+
+---@param i integer
+---@param value T
+function span:set(i, value) end
+
+---Elements i..j (default: to the end) sharing the memory.
+---@param i integer
+---@param j? integer
+---@return rhp.span<T>
+function span:slice(i, j) end
+
+---Sets elements i..j (default: all) to `value`.
+---@param value T
+---@param i? integer
+---@param j? integer
+function span:fill(value, i, j) end
+
+---Copies a span's, a buffer's or a table's elements here, from element `pos` (default 1).
+---@param source rhp.span<number>|rhp.span<integer>|rhp.buffer|T[]
+---@param pos? integer
+function span:copy(source, pos) end
+
+---Elements i..j (default: all) as a new table.
+---@param i? integer
+---@param j? integer
+---@return T[]
+function span:totable(i, j) end
+
+---The element type: "f32", "u8", "i64", ...
+---@return string
+function span:kind() end
+
+---Whether elements may be set.
+---@return boolean
+function span:writable() end
+
+---Bytes a script owns: b[i] is a byte (1-based); numbers of every width at a byte position, little ("le", default) or big ("be") endian.
+---@class rhp.buffer: rhp.span<integer>
+local buffer = {}
+
+---Bytes i..j (default: to the end) sharing the memory.
+---@param i integer
+---@param j? integer
+---@return rhp.buffer
+function buffer:slice(i, j) end
+
+---A typed view of the bytes from `pos` (default 1): `count` elements (default: as many as fit) of "i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64", "f32", "f64" or "byte".
+---@param kind string
+---@param pos? integer
+---@param count? integer
+---@return rhp.span<number>|rhp.span<integer>
+function buffer:view(kind, pos, count) end
+
+---Bytes i..j (default: all) as a string.
+---@param i? integer
+---@param j? integer
+---@return string
+function buffer:tostring(i, j) end
+
+---@param pos integer
+---@param len integer
+---@return string
+function buffer:read_string(pos, len) end
+
+---@param pos integer
+---@param s string
+---@return integer next
+function buffer:write_string(pos, s) end
+
+---string.pack(fmt, ...) written at `pos`.
+---@param pos integer
+---@param fmt string
+---@param ... any
+---@return integer next
+function buffer:pack(pos, fmt, ...) end
+
+---string.unpack(fmt, ...) of the bytes from `pos`: the values, then the position after them.
+---@param pos integer
+---@param fmt string
+---@return any ...
+function buffer:unpack(pos, fmt) end
+
+)lua";
+    for (const std::string_view kind : {"i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64", "f32", "f64"}) {
+        const std::string_view type = kind.front() == 'f' ? "number" : "integer";
+        out += std::format("---@param pos integer\n---@param order? \"le\"|\"be\"\n---@return {}\nfunction buffer:read_{}(pos, order) end\n\n", type, kind);
+        out += std::format("---@param pos integer\n---@param value {}\n---@param order? \"le\"|\"be\"\n---@return integer next\nfunction buffer:write_{}(pos, value, order) end\n\n",
+                           type, kind);
+    }
+    out += R"lua(---Number of pump() calls so far.
 ---@return integer
 function rhp.frame() end
 
