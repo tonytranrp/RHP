@@ -19,6 +19,7 @@ local function fib(n) if n < 2 then return n end return fib(n - 1) + fib(n - 2) 
 function M.fib() return fib(22) end
 function M.table() local t = {} for i = 1, 10000 do t[i] = i end local s = 0 for _, v in ipairs(t) do s = s + v end return s end
 function M.strings() local p = {} for i = 1, 1000 do p[#p + 1] = tostring(i) end return #table.concat(p, ",") end
+function M.small_tables() local s = 0 for i = 1, 10000 do local t = {x = i, y = i} s = s + t.x end return s end
 function M.closures() local s = 0 for i = 1, 10000 do local f = function() return i end s = s + f() end return s end
 function M.coroutines() local co = coroutine.wrap(function() for i = 1, 1000 do coroutine.yield(i) end end) local s = 0 for _ = 1, 1000 do s = s + co() end return s end
 function M.pcall_errors() local n = 0 for _ = 1, 1000 do if not pcall(error, "x") then n = n + 1 end end return n end
@@ -102,6 +103,15 @@ TEST_CASE("bench lua: script work raw and in a sandbox", "[bench][lua]") {
     };
     BENCHMARK("lua rhp: 1k tostring and concat") {
         return call_box("strings");
+    };
+    BENCHMARK("lua raw: 10k small tables") {
+        return call_raw("small_tables");
+    };
+    BENCHMARK("lua rhp: 10k small tables") {
+        return call_box("small_tables");
+    };
+    BENCHMARK("lua unchecked: 10k small tables") {
+        return call_unchecked("small_tables");
     };
     BENCHMARK("lua raw: 10k closures") {
         return call_raw("closures");

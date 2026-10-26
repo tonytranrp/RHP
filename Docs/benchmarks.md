@@ -30,7 +30,7 @@ Always benchmark a Release build (`RelWithDebInfo` on MSVC inlines less). On a l
 
 | Group | RHP side | Raw twin |
 |---|---|---|
-| `lua` | module functions called through `sandbox::call`: an arithmetic loop, recursion, tables, strings, closures, coroutines, `pcall` errors; `exec` of a one-liner | the same Lua on a `lua_State` with the standard libraries |
+| `lua` | module functions called through `sandbox::call`: an arithmetic loop, recursion, tables, 10k small tables, strings, closures, coroutines, `pcall` errors; `exec` of a one-liner | the same Lua on a `lua_State` with the standard libraries |
 | `bindings` | `Rhp::lib` function calls (through the lib and held in a local; integer, number and string arguments), variable reads (through the lib's global and a lib held in a local), journaled writes plus their revert, handle round trips, methods and properties; most also `unchecked` | a hand-written `lua_CFunction` and a plain table field |
 | `patch` | an unpatched patch point; patched by a Lua handler, with and without `original` | a direct call through a function pointer; `lua_pcall` of the handler |
 | `events` | `lua_event::fire` with nobody listening and with 1 / 10 / 100 handlers; a `pump()` delivering an `rhp.publish` | calling the same number of Lua functions |
@@ -40,6 +40,7 @@ Always benchmark a Release build (`RelWithDebInfo` on MSVC inlines less). On a l
 | `security` | BLAKE2b-256, Ed25519 sign and verify of 4 KiB | |
 | `e2e` | a signed `exec` and a `call` from a client to a host over loopback, both on one thread (`io<zero_threads>`) | the same `exec` on a sandbox directly (`e2e local`) |
 | `testing` (Stage 12) | the same loop and `fib(22)` with the exact instruction meter, with line coverage, and both; the test runner over a file with no tests, 100 empty tests (measured and `--no-measure`), and one test doing 10k lib calls (plain and through `spy.on`), 10k plain checks, 10k `assert.equals`, 10k `expect().to.equal` | the same Lua on a plain `lua_State`; a state compiling the framework; 100 `pcall`s of empty functions |
+| `gc` (hidden: run `"[gc]"`) | not a `BENCHMARK`: times every `pump()` of 1000 frame callbacks that make garbage, with no live heap and with 200k live tables, in both collector modes, with `collect_idle` of 0 / 250 / 1000 us after each frame, and prints p50 / p99 / p99.9 / max / mean (the median of 7 interleaved rounds) | |
 | `tools` (Stage 11) | the same loop and `fib(22)` with no tool, with a breakpoint armed elsewhere / on a line number the loop runs / inside the module, and with the profiler sampling every 1000 and 100 instructions; a tunable read and a `tune` write | the same Lua on a plain `lua_State`; a plain global read and write |
 
 ## Results

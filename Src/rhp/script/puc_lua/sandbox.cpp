@@ -365,9 +365,10 @@ int module_tostring(lua_State* L) {
 struct sandbox_impl::active_scope {
     sandbox_impl& self;
     effect_owner previous;
+    run_budget* previous_budget;
 
     active_scope(sandbox_impl& s, run_budget* budget, lua_State* thread, request_record* request, const effect_owner& owner)
-        : self(s), previous(s.current_) {
+        : self(s), previous(s.current_), previous_budget(s.budget_) {
         if (self.running_.empty()) {
             self.cancel_running_.store(false, std::memory_order_release);
         }
@@ -376,6 +377,9 @@ struct sandbox_impl::active_scope {
             self.meter_run_started_ = steady::now();
         }
         self.running_.push_back(active_run{budget, thread, request, self.timed_ ? steady::now() : steady::time_point{}, checked});
+        if (budget != nullptr) {
+            self.budget_ = budget;
+        }
         self.current_ = owner;
         if (checked) {
             self.enter_checked();
@@ -392,6 +396,7 @@ struct sandbox_impl::active_scope {
         }
         const bool checked = top.checked;
         self.running_.pop_back();
+        self.budget_ = previous_budget;
         self.current_ = previous;
         if (self.metering_ && self.running_.empty()) {
             self.credit_hook_progress(self.state_);
@@ -448,6 +453,7 @@ struct sandbox_impl::operation_scope {
 sandbox_impl::sandbox_impl(sandbox_options options)
     : options_(std::move(options)),
       memory_(options_.memory),
+      small_(options_.memory),
       timed_(options_.limits.wall_ms != 0),
       thread_(std::this_thread::get_id()) {
     // Room for every spare up front: putting a finished request back never allocates (or throws).
@@ -465,6 +471,10 @@ sandbox_impl::sandbox_impl(sandbox_options options)
     scratch_ = ids_.next();
     current_ = effect_owner{scratch_};
     auto opened = protect(state_, [this] {
+        if (options_.gc != gc_mode::kIncremental) { // a new Lua 5.5 state starts incremental
+            (void)lua_gc(state_, LUA_GCGEN);
+            gc_mode_ = options_.gc;
+        }
         open_libraries();
         open_stage7_libraries();
         module_record scratch;
@@ -759,6 +769,27 @@ void sandbox_impl::leave_checked() noexcept {
     }
 }
 
+void sandbox_impl::free_block(void* block, std::size_t size) noexcept {
+    if (small_alloc::fits(size)) {
+        small_.deallocate(block);
+    } else if (memory_ == nullptr) {
+        std::free(block);
+    } else {
+        memory_->deallocate(block, size, kAlignment);
+    }
+}
+
+void* sandbox_impl::heap_allocate(std::size_t size) noexcept {
+    if (memory_ == nullptr) {
+        return std::malloc(size);
+    }
+    try {
+        return memory_->allocate(size, kAlignment);
+    } catch (...) {
+        return nullptr;
+    }
+}
+
 void* sandbox_impl::allocate(void* ud, void* ptr, std::size_t old_size, std::size_t new_size) noexcept {
     auto& self = *static_cast<sandbox_impl*>(ud);
     const std::size_t old_tag = old_size;
@@ -767,11 +798,7 @@ void* sandbox_impl::allocate(void* ud, void* ptr, std::size_t old_size, std::siz
     }
     if (new_size == 0) {
         if (ptr != nullptr) {
-            if (self.memory_ == nullptr) {
-                std::free(ptr);
-            } else {
-                self.memory_->deallocate(ptr, old_size, kAlignment);
-            }
+            self.free_block(ptr, old_size);
             self.memory_used_ -= old_size;
             ++self.frees_;
         }
@@ -780,10 +807,7 @@ void* sandbox_impl::allocate(void* ud, void* ptr, std::size_t old_size, std::siz
     const std::size_t kind = ptr == nullptr ? alloc_kind_of(old_tag) : kAllocKinds;
     if (new_size > old_size) {
         const std::uint64_t limit = self.options_.limits.memory;
-        run_budget* budget = nullptr; // innermost run with its own budget
-        for (auto it = self.running_.rbegin(); it != self.running_.rend() && budget == nullptr; ++it) {
-            budget = it->budget;
-        }
+        run_budget* const budget = self.budget_; // innermost run with its own budget
         if (budget != nullptr && budget->sticky == sticky_stop::kMemory) {
             return nullptr;
         }
@@ -794,17 +818,48 @@ void* sandbox_impl::allocate(void* ud, void* ptr, std::size_t old_size, std::siz
             return nullptr;
         }
     }
+    // Where a block lives follows from its size alone (Lua passes it back on every call): up to
+    // small_alloc::kMaxSize in the small-object slabs, larger ones on the C heap or memory_.
     void* block = nullptr;
-    if (self.memory_ == nullptr) {
+    const bool was_small = ptr != nullptr && small_alloc::fits(old_size);
+    if (small_alloc::fits(new_size)) {
+        if (was_small && (new_size < old_size || small_alloc::same_class(old_size, new_size))) {
+            // Stays where it is: the same class, or smaller (a slab block is freed by its address,
+            // whatever size it is freed as, so shrinking in place never fails).
+            if (!small_alloc::same_class(old_size, new_size)) {
+                if (void* moved = self.small_.allocate(new_size)) { // a smaller class when there is room
+                    std::memcpy(moved, ptr, new_size);
+                    self.small_.deallocate(ptr);
+                    ptr = moved;
+                }
+            }
+            block = ptr;
+        } else {
+            block = self.small_.allocate(new_size);
+            if (block == nullptr) {
+                return nullptr; // `ptr` is untouched
+            }
+            if (ptr != nullptr) {
+                std::memcpy(block, ptr, std::min(old_size, new_size));
+                self.free_block(ptr, old_size);
+            }
+        }
+    } else if (was_small) {
+        block = self.heap_allocate(new_size);
+        if (block == nullptr) {
+            return nullptr;
+        }
+        std::memcpy(block, ptr, old_size);
+        self.small_.deallocate(ptr);
+    } else if (self.memory_ == nullptr) {
         // The C heap, like Lua's own allocator: a block grows or shrinks in place when it can.
         block = std::realloc(ptr, new_size);
         if (block == nullptr) {
             return nullptr; // `ptr` is untouched
         }
     } else {
-        try {
-            block = self.memory_->allocate(new_size, kAlignment);
-        } catch (...) {
+        block = self.heap_allocate(new_size);
+        if (block == nullptr) {
             return nullptr;
         }
         if (ptr != nullptr) {
@@ -2564,6 +2619,27 @@ void sandbox_impl::pump() {
     drain();
 }
 
+result<bool> sandbox_impl::collect_idle(std::chrono::microseconds budget) {
+    if (budget <= std::chrono::microseconds::zero()) {
+        return false;
+    }
+    bool finished = false;
+    auto stepped = protect(state_, [&] {
+        const steady::time_point deadline = steady::now() + budget;
+        do {
+            const int step = lua_gc(state_, LUA_GCSTEP, std::size_t{0});
+            if (step < 0) {
+                break; // the collector is stopped (a finalizer called this)
+            }
+            finished = step == 1;
+        } while (!finished && gc_mode_ == gc_mode::kIncremental && steady::now() < deadline);
+    });
+    if (!stepped) {
+        return std::unexpected{std::move(stepped).error()};
+    }
+    return finished;
+}
+
 std::size_t sandbox_impl::suspended() const noexcept {
     return static_cast<std::size_t>(std::ranges::count_if(requests_, [](const auto& entry) { return !entry.second->running; }));
 }
@@ -2781,6 +2857,10 @@ void sandbox::cancel(request_id request) noexcept {
 
 void sandbox::pump() {
     impl_->pump();
+}
+
+result<bool> sandbox::collect_idle(std::chrono::microseconds budget) {
+    return impl_->collect_idle(budget);
 }
 
 request_id sandbox::last_request() const noexcept {

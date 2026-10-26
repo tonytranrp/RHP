@@ -99,6 +99,53 @@ runs on a busy machine moved by up to 30%; thread cycle counts (`QueryThreadCycl
 300 runs, binaries alternating) still moved unchanged raw rows by 10-15% between two builds (code
 layout), hence the twins inside one binary.
 
+**Lua's allocator.** Every Lua allocation went through `malloc` / `realloc` / `free` (or the pmr
+resource) after walking the run stack for the innermost budget. The innermost budget is now cached
+(`budget_`, kept by `active_scope`), and blocks up to 128 bytes come from `small_alloc`
+(`puc_lua/small_alloc.{hpp,cpp}`): per-size-class slabs of 4 KiB, carved from 64 KiB regions aligned
+to 4 KiB (from the pmr resource when one is given, else the aligned global `operator new`), so an
+allocation pops a slab's free list or bumps its never-used part, and a free finds its slab by
+masking its address. The classes were measured: a Lua 5.5 table is 48 bytes, a closure with one
+upvalue 40, an upvalue 40, a short string 24 + length + 1, small array and node parts 13-48; every
+8 bytes up to 64, then 80 / 96 / 112 / 128 (every 16 where blocks need 16-byte alignment). Where a
+block lives follows from the size Lua passes back, so nothing is looked up; a small block shrinking
+to another class moves when there is room and otherwise stays (a slab frees by address), so a
+shrink never fails. Accounting, the limit, the sticky stop and the meter are in Lua's sizes,
+unchanged. A slab that empties goes to a pool of empty slabs, which every class takes from first;
+a region whose slabs are all empty is given back once the pool holds 8 spare slabs besides it (a
+live set hovering at a region boundary doesn't get and free a region over and over). Keeping each
+class's last slab instead (no pool round trip when a class's live count touches zero) was tried
+and dropped: one kept slab per class could pin a region each after a peak. No pooling under AddressSanitizer
+(`__SANITIZE_ADDRESS__` / `__has_feature`), so a use after free in a Lua object is still caught.
+On a loaded machine, as the ratio to the raw twin (`luaL_newstate`'s `realloc`) within each of
+four alternating runs: `10k closures` 1.16-1.32x -> 0.62-0.80x (unchecked 1.06-1.38x ->
+0.42-0.68x), the new `10k small tables` 0.49-0.65x, `exec return 1` 1.24-1.48x -> 0.82-0.90x; table
+fill (its arrays are large blocks), strings, calls, the scheduler and the requests moved within
+noise. *Rejected:* free lists that never give
+memory back (simpler, but a script's peak would stay with the sandbox until it closes); a header
+word per block for its slab (8 bytes on 40-byte objects); slabs aligned to their own size through the
+C heap (MSVC's aligned `malloc` costs a whole alignment per block: 2x for 4 KiB slabs); pooling under
+ASan with poisoning (more code than the pass-through it replaces, for a build that measures nothing).
+
+**Garbage collection.** A new `lua_State` collects incrementally (only the standalone `lua`
+interpreter switches to generational), so sandboxes always have; `sandbox_options::gc` now picks
+the mode at creation (default unchanged: incremental). `sandbox::collect_idle(budget)` gives the
+collector slack time: in incremental mode `LUA_GCSTEP` steps until the budget is spent or the
+cycle ends; in generational mode one step, since a step there is a whole minor collection and a
+second one in a row finds nothing new. Measured with the hidden `[gc]` case (1000 frame callbacks
+making garbage, 200k live tables, medians of 7 interleaved rounds, two runs on a loaded machine):
+incremental p99 / max pump 9.4-16.7 / 34.7-44.5 ms, with `collect_idle(250us)` 5.8-6.6 / 8.6-9.4
+ms for 0.44 ms of idle work and a higher median pump (cycles back to back keep the write barriers
+on); generational 9.1-9.4 / 13.2-16.4 ms with the lowest mean (1.25-1.59 ms against 1.57-2.62),
+and with idle steps 2.3-2.9 / 3.3-6.0 ms but 1.6-1.8 ms of idle work per frame (each minor
+collection walks the 200k-entry table the scripts write to). With no live heap the modes are within
+noise. So `collect_idle` is an explicit call (the application knows its frame's slack; `pump()`
+doesn't), and the default mode stays incremental: generational won on this one workload, on a
+noisy machine, by an amount that depends on how old data is written, and a mode change moves
+every finalizer's timing and what the test engine measures; it is one option away. *Not done:* stepping inside `pump()` when it ran little (pump can't tell how
+much of the frame is left); a host option (host_options would need to carry it to each identity's
+sandbox).
+
 **The debugger with breakpoints only** runs line events in the functions whose lines hold one
 (`scope_lines`, debug.cpp): call and return events switch them, keeping the instruction countdown
 (`internals::set_line_events`), and the last answer is cached by source and line range. A C function

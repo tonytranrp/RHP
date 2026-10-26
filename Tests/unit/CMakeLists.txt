@@ -142,6 +142,7 @@ endif()
 if(RHP_ENABLE)
     rhp_add_test_suite(rhp_script_tests
         SOURCES
+            script/allocator_tests.cpp
             script/async_tests.cpp
             script/binding_tests.cpp
             script/bytecode_tests.cpp

@@ -59,10 +59,11 @@ struct run_meter {
     std::array<std::uint64_t, kAllocKinds> objects{}; // new objects by alloc_kind
 };
 
-// Lua's garbage collector mode (sandbox::set_gc_mode). Measurements compare only within one mode.
+// Lua's garbage collector mode (sandbox_options::gc, sandbox::set_gc_mode). Measurements compare
+// only within one mode.
 enum class gc_mode : std::uint8_t {
-    kIncremental,
-    kGenerational // Lua 5.5's default
+    kIncremental, // a new lua_State's mode, and a sandbox's by default
+    kGenerational // the standalone lua interpreter's
 };
 
 // ---- coverage (sandbox::start_coverage) ---------------------------------------------------------------

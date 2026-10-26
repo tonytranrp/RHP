@@ -12,6 +12,7 @@ if(RHP_ENABLE)
         puc_lua/async.cpp
         puc_lua/lib_proxy.cpp
         puc_lua/sandbox.cpp
+        puc_lua/small_alloc.cpp
         puc_lua/schedule.cpp
         puc_lua/script_events.cpp
         puc_lua/stack.cpp

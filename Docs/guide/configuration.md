@@ -125,7 +125,8 @@ Passed to the constructors at run time: [`Rhp::host_options`](host-and-client.md
 |---|---|
 | `caller_role` | role of the identity (local default: patch) |
 | `limits` | as above |
-| `memory` | a `std::pmr::memory_resource*` for every Lua allocation; when null, the C heap (`malloc` / `realloc` / `free`, as Lua's own allocator: blocks grow in place). `limits.memory` applies either way |
+| `memory` | a `std::pmr::memory_resource*` for every Lua allocation; when null, the C heap (`malloc` / `realloc` / `free`, as Lua's own allocator: blocks grow in place). Blocks up to 128 bytes come from the sandbox's small-object slabs, carved from 64 KiB regions taken from the same place. `limits.memory` applies either way, in the bytes Lua asked for |
+| `gc` | Lua's collector mode from the start: `gc_mode::kIncremental` (default, a new `lua_State`'s) or `kGenerational`; `sandbox::set_gc_mode` switches it later. See [performance](performance.md#garbage-collection) |
 | `output` / `on_output` | receive `print()` lines (with request and module for `on_output`) |
 | `on_emit` | receive `rhp.emit` values |
 | `on_result` | receive the final result of requests that suspended |

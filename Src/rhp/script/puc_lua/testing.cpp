@@ -346,8 +346,10 @@ int bridge_gc_mode(lua_State* L) {
     int previous = 0;
     if (m == "incremental") {
         previous = lua_gc(L, LUA_GCINC);
+        impl_of(L).note_gc_mode(gc_mode::kIncremental);
     } else if (m == "generational") {
         previous = lua_gc(L, LUA_GCGEN);
+        impl_of(L).note_gc_mode(gc_mode::kGenerational);
     } else {
         return luaL_argerror(L, 1, "expected 'incremental' or 'generational'");
     }
@@ -783,7 +785,11 @@ result<void> sandbox_impl::collect_garbage(int cycles) {
 }
 
 result<void> sandbox_impl::set_gc_mode(gc_mode mode) {
-    return protect(state_, [this, mode] { (void)lua_gc(state_, mode == gc_mode::kGenerational ? LUA_GCGEN : LUA_GCINC); });
+    auto set = protect(state_, [this, mode] { (void)lua_gc(state_, mode == gc_mode::kGenerational ? LUA_GCGEN : LUA_GCINC); });
+    if (set) {
+        note_gc_mode(mode);
+    }
+    return set;
 }
 
 // ---- coverage --------------------------------------------------------------------------------------
