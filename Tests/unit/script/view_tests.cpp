@@ -292,6 +292,31 @@ TEST_CASE("span writes of two modules reverted out of order leave the right valu
     CHECK(fx::g_ints == std::array<std::int32_t, 4>{10, 20, 30, 40});
 }
 
+TEST_CASE("journaled writes across pages of a large span hand originals on", "[script][views]") {
+    sandbox box = make_box();
+    fx::g_samples.assign(100000, 0.0f);
+    for (std::size_t i = 0; i < fx::g_samples.size(); ++i) {
+        fx::g_samples[i] = static_cast<float>(i);
+    }
+    const std::vector<float> original = fx::g_samples;
+    // a writes every 997th element, b every 1009th and a stretch across a page boundary; both
+    // touch some of the same elements.
+    const auto a = box.load("tests.views.big_a", "local v = vt.samples() for i = 1, #v, 997 do v[i] = -1 end v[1020] = -1 v[1030] = -1");
+    const auto b = box.load("tests.views.big_b", "local v = vt.samples() for i = 1, #v, 1009 do v[i] = -2 end for i = 1000, 1100 do v[i] = -2 end");
+    REQUIRE(a.has_value());
+    REQUIRE(b.has_value());
+    CHECK(fx::g_samples[0] == -2.0f);
+    CHECK(fx::g_samples[997] == -1.0f);
+    CHECK(fx::g_samples[1019] == -2.0f);
+    REQUIRE(box.revert(*a)); // b's writes stay, a's alone go back
+    CHECK(fx::g_samples[0] == -2.0f);
+    CHECK(fx::g_samples[997] == 997.0f);
+    CHECK(fx::g_samples[1019] == -2.0f);
+    CHECK(fx::g_samples[1994] == 1994.0f);
+    REQUIRE(box.revert(*b));
+    CHECK(fx::g_samples == original);
+}
+
 TEST_CASE("a span write in a failed exec is undone with it", "[script][views]") {
     sandbox box = make_box();
     CHECK(fails(box, "vt.samples()[2] = 99 error('boom')").message.find("boom") != std::string::npos);
