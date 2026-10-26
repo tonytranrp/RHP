@@ -2,7 +2,9 @@
 // transport, on one thread (io<zero_threads> on both ends, so no scheduler noise): what one remote
 // call costs in CPU, next to the same script run on the sandbox directly.
 #include <chrono>
+#include <cstddef>
 #include <utility>
+#include <vector>
 
 #include "bench_support.hpp"
 #include <catch2/benchmark/catch_benchmark.hpp>
@@ -66,5 +68,48 @@ TEST_CASE("bench e2e: remote calls over loopback on one thread", "[bench][e2e]")
     REQUIRE(box.install<e2e_lib>());
     BENCHMARK("e2e local: the same exec on a sandbox") {
         return *box.exec<int>("return benche2e.add(1, 2)");
+    };
+}
+
+TEST_CASE("bench e2e: pipelined calls over TCP on one thread", "[bench][e2e]") {
+    using tcp_cfg = Rhp::config<>::io<Rhp::exec::zero_threads>::logger<Rhp::core::null_logger>;
+    const auto admin = Rhp::security::key::generate();
+    const auto developer = Rhp::security::ed25519_secret_key::generate();
+    REQUIRE(admin);
+    REQUIRE(developer);
+    const auto at = Rhp::endpoint::listen("127.0.0.1", 0);
+    Rhp::host<tcp_cfg> host{at, Rhp::security::keyring{{"admin", *admin, Rhp::role::kAdmin}}, Rhp::security::trusted_signers{{"dev", developer->public_key()}}};
+    REQUIRE(host.install<e2e_lib>());
+    const auto port = host.port();
+    REQUIRE(port);
+    Rhp::client<tcp_cfg> client{at.reversed().with_port(*port), Rhp::security::psk_identity{"admin", *admin}, Rhp::security::signing_key{"dev", *developer}};
+
+    const auto finish = [&](auto& p) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{10};
+        while (!p.ready()) {
+            host.pump();
+            client.poll();
+            if (std::chrono::steady_clock::now() > deadline) {
+                FAIL("a benchmark request didn't finish");
+            }
+        }
+        return std::move(p).get();
+    };
+    auto mod = client.async().load("bench.e2e.tcp", "local M = {} function M.add(a, b) return benche2e.add(a, b) end return M");
+    const auto loaded = finish(mod);
+    REQUIRE(loaded);
+
+    // 32 calls sent before any reply is read: the frames queue behind each other on both sockets.
+    BENCHMARK("e2e rhp: 32 pipelined module calls over TCP on 127.0.0.1") {
+        std::vector<decltype(client.async().call(*loaded, "add", 1, 2))> calls;
+        calls.reserve(32);
+        for (int i = 0; i < 32; ++i) {
+            calls.push_back(client.async().call(*loaded, "add", i, 1));
+        }
+        std::size_t n = 0;
+        for (auto& p : calls) {
+            n += finish(p)->size();
+        }
+        return n;
     };
 }

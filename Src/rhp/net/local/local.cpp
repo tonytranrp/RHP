@@ -1,10 +1,12 @@
 #include <array>
 #include <chrono>
+#include <cstddef>
 #include <deque>
 #include <filesystem>
 #include <format>
 #include <optional>
 #include <utility>
+#include <vector>
 
 #include <asio/io_context.hpp>
 #include <asio/post.hpp>
@@ -65,6 +67,7 @@ struct stream_state : std::enable_shared_from_this<stream_state> {
     link_handler* handler = nullptr;
     std::array<std::byte, 65536> input{};
     std::deque<utils::byte_buffer> writes;
+    std::vector<asio::const_buffer> gather; // the front buffers one write sends (see tcp.cpp)
     bool writing = false;
     bool closing = false;
     bool closed = false;
@@ -101,9 +104,16 @@ struct stream_state : std::enable_shared_from_this<stream_state> {
     }
 
     void write() {
+        constexpr std::size_t kMaxGather = 16;
         writing = true;
-        const auto bytes = writes.front().view();
-        asio::async_write(socket, asio::buffer(bytes.data(), bytes.size()), [self = shared_from_this()](const std::error_code& ec, std::size_t) {
+        gather.clear();
+        for (const auto& b : writes) {
+            gather.emplace_back(b.view().data(), b.size());
+            if (gather.size() == kMaxGather) {
+                break;
+            }
+        }
+        asio::async_write(socket, gather, [self = shared_from_this()](const std::error_code& ec, std::size_t) {
             self->writing = false;
             if (self->closed) {
                 return;
@@ -112,7 +122,7 @@ struct stream_state : std::enable_shared_from_this<stream_state> {
                 self->finish(make_error(errc::kTransport, ec.message(), self->peer));
                 return;
             }
-            self->writes.pop_front();
+            self->writes.erase(self->writes.begin(), self->writes.begin() + static_cast<std::ptrdiff_t>(self->gather.size()));
             if (!self->writes.empty()) {
                 self->write();
             } else if (self->closing) {
