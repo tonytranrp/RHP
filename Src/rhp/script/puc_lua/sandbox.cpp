@@ -86,6 +86,10 @@ constexpr std::uint32_t kDefaultCheckInterval = 1'000;
 // Finished requests whose map node, record and coroutine wait for reuse: enough for a frame's worth
 // of handler calls without holding on to a burst.
 constexpr std::size_t kSpareRequests = 64;
+// sandbox::call's interned function names (call_keys_), and the most arguments a call without the
+// protected setup takes (a pooled coroutine has room for them without growing its stack).
+constexpr std::size_t kCallKeys = 32;
+constexpr std::size_t kUnprotectedArgs = 8;
 constexpr const char* kModuleProxyKey = "rhp.module";             // metatable of require() proxies
 constexpr const char* kModuleProxiesKey = "rhp.module_proxies";   // registry: module id → its proxy
 constexpr const char* kRequestThreadsKey = "rhp.request_threads"; // registry: weak set of request coroutines
@@ -129,6 +133,42 @@ result<void> protect(lua_State* L, F&& fn) {
 
 std::uint32_t source_hash(std::string_view source) noexcept {
     return utils::crc32c(utils::bytes_view{reinterpret_cast<const std::byte*>(source.data()), source.size()});
+}
+
+// Nil, booleans and numbers: values that cross between C++ and Lua without an allocation.
+bool is_scalar(int lua_type_id) noexcept {
+    return lua_type_id == LUA_TNIL || lua_type_id == LUA_TBOOLEAN || lua_type_id == LUA_TNUMBER;
+}
+
+bool is_scalar(const value& v) noexcept {
+    const value::kind k = v.type();
+    return k == value::kind::kNil || k == value::kind::kBool || k == value::kind::kInteger || k == value::kind::kNumber;
+}
+
+// What stack::push_value pushes for a scalar (no stack check: the caller made room).
+void push_scalar(lua_State* L, const value& v) noexcept {
+    switch (v.type()) {
+    case value::kind::kBool: lua_pushboolean(L, *v.get_if<bool>() ? 1 : 0); break;
+    case value::kind::kInteger: lua_pushinteger(L, static_cast<lua_Integer>(*v.get_if<std::int64_t>())); break;
+    case value::kind::kNumber: lua_pushnumber(L, static_cast<lua_Number>(*v.get_if<double>())); break;
+    default: lua_pushnil(L); break;
+    }
+}
+
+// Appends what stack::to_value makes of the scalar at `index`; false (nothing appended) for anything else.
+bool append_scalar(value_list& out, lua_State* L, int index) {
+    switch (lua_type(L, index)) {
+    case LUA_TNIL: out.emplace_back(); return true;
+    case LUA_TBOOLEAN: out.emplace_back(lua_toboolean(L, index) != 0); return true;
+    case LUA_TNUMBER:
+        if (lua_isinteger(L, index) != 0) {
+            out.emplace_back(static_cast<std::int64_t>(lua_tointeger(L, index)));
+        } else {
+            out.emplace_back(static_cast<double>(lua_tonumber(L, index)));
+        }
+        return true;
+    default: return false;
+    }
 }
 
 // ---- Lua-side builtins ---------------------------------------------------------------------------
@@ -460,6 +500,7 @@ sandbox_impl::sandbox_impl(sandbox_options options)
     spare_requests_.reserve(kSpareRequests);
     spare_threads_.reserve(kSpareRequests);
     unlisted_.reserve(kSpareRequests); // runs nested deeper than this grow it (start_request may allocate anyway)
+    call_keys_.reserve(kCallKeys);
     state_ = lua_newstate(&sandbox_impl::allocate, this, luaL_makeseed(nullptr));
     if (state_ == nullptr) {
         throw std::bad_alloc{};
@@ -1430,8 +1471,12 @@ void sandbox_impl::abandon_request(request_id id, std::string_view why) {
     abandon_requests([id](const request_record& r) { return r.id == id; }, why);
 }
 
-request_record& sandbox_impl::start_request(request_kind kind, const effect_owner& owner, std::string_view label, int nargs, bool from_operation) {
-    lua_State* L = state_;
+request_record& sandbox_impl::start_request(request_kind kind, const effect_owner& owner, std::string_view label, int nargs, bool from_operation,
+                                            lua_State* host) {
+    // Where a new coroutine is made and registered: the main state, or the running coroutine that
+    // asks (rhp.spawn), so an allocation that fails raises there, never on the main state while a
+    // request runs (a call may run with the main state outside any protected run: call_unprotected).
+    lua_State* L = host != nullptr ? host : state_;
     const request_id id = request_ids_.next();
     // A finished request's map node and record when one is spare, else new ones (made in the map and
     // taken out again: every record lives in a node, listed or not).
@@ -1446,7 +1491,7 @@ request_record& sandbox_impl::start_request(request_kind kind, const effect_owne
     request_record& req = *node.mapped();
     req.label.assign(label);
 
-    luaL_checkstack(L, 5, "rhp: request setup"); // every caller runs protected on the main state (spawn checked it)
+    luaL_checkstack(L, 5, "rhp: request setup"); // callers on the main state run protected (or made room first: call_unprotected)
     lua_State* co = nullptr;
     if (!spare_threads_.empty()) {
         std::tie(co, req.thread_ref) = spare_threads_.back();
@@ -1597,6 +1642,12 @@ std::optional<result<value_list>> sandbox_impl::step(request_record& req, int na
     if (req.start_error) {
         return complete(req, std::unexpected{*req.start_error}, kept);
     }
+    int nresults = 0;
+    const int status = resume_request(req, nargs, nresults);
+    return finish_step(req, status, nresults, kept);
+}
+
+int sandbox_impl::resume_request(request_record& req, int nargs, int& nresults) {
     req.sliced = false;
     req.wake_frame = 0;
     req.wake_time.reset();
@@ -1608,13 +1659,16 @@ std::optional<result<value_list>> sandbox_impl::step(request_record& req, int na
     req.running = true;
     lua_State* from = running_.empty() || running_.back().thread == nullptr ? state_ : running_.back().thread;
     int status = LUA_OK;
-    int nresults = 0;
     {
         const active_scope scope{*this, &req.budget, req.thread, &req, req.owner};
         status = lua_resume(req.thread, from, nargs, &nresults);
         credit_hook_progress(req.thread);
     }
     req.running = false;
+    return status;
+}
+
+std::optional<result<value_list>> sandbox_impl::finish_step(request_record& req, int status, int nresults, bool* kept) {
     const sticky_stop stop = req.budget.sticky;
 
     if (status == LUA_YIELD) {
@@ -1661,7 +1715,7 @@ result<value_list> sandbox_impl::complete(request_id id, result<int> outcome) {
     return complete(*it->second, std::move(outcome));
 }
 
-result<value_list> sandbox_impl::complete(request_record& req, result<int> outcome, bool* kept) {
+result<value_list> sandbox_impl::complete(request_record& req, result<int> outcome, bool* kept, value_list* results) {
     // Out of the scheduler first: nothing below (a fault abandoning its module's requests) may find
     // it. A record the caller wants to keep stays in unlisted_ until it is known to be reusable.
     const bool keepable = kept != nullptr && !req.listed;
@@ -1678,7 +1732,7 @@ result<value_list> sandbox_impl::complete(request_record& req, result<int> outco
     if (!outcome) {
         out = std::unexpected{std::move(outcome).error()};
     } else if (req.kind == request_kind::kExec || req.kind == request_kind::kCall) {
-        out = collect_results(req.thread, 1, *outcome);
+        out = results != nullptr ? std::move(*results) : collect_results(req.thread, 1, *outcome);
     } else if (req.kind == request_kind::kLoad) {
         out = mod != nullptr ? complete_load(*mod, req.owner.revision, req.thread) : fail(errc::kNotFound, "the module was unloaded");
     } else if (req.kind == request_kind::kTask) {
@@ -1857,18 +1911,8 @@ value_list sandbox_impl::collect_results(lua_State* L, int first, int last) {
     out.reserve(static_cast<std::size_t>(std::max(0, last - first + 1)));
     const stack s{L};
     for (int i = first; i <= last; ++i) {
-        // Scalars in place (what stack::to_value makes of them, without a result<value> each).
-        switch (lua_type(L, i)) {
-        case LUA_TNIL: out.emplace_back(); continue;
-        case LUA_TBOOLEAN: out.emplace_back(lua_toboolean(L, i) != 0); continue;
-        case LUA_TNUMBER:
-            if (lua_isinteger(L, i) != 0) {
-                out.emplace_back(static_cast<std::int64_t>(lua_tointeger(L, i)));
-            } else {
-                out.emplace_back(static_cast<double>(lua_tonumber(L, i)));
-            }
-            continue;
-        default: break;
+        if (append_scalar(out, L, i)) {
+            continue; // without a result<value> each
         }
         auto v = s.to_value(i);
         if (v) {
@@ -2461,6 +2505,10 @@ result<value_list> sandbox_impl::call(module_id id, std::string_view function, s
     if (mod->state != module_state::kActive) {
         return fail(errc::kInvalidArgument, std::format("module '{}' is {}", mod->name, mod->state), mod->name);
     }
+    if (auto quick = call_unprotected(*mod, function, args)) {
+        drain();
+        return std::move(*quick);
+    }
     result<value_list> out = value_list{};
     auto glue = protect(state_, [&] {
         lua_State* L = state_;
@@ -2475,6 +2523,7 @@ result<value_list> sandbox_impl::call(module_id id, std::string_view function, s
             lua_settop(L, base);
             return;
         }
+        remember_call_key(function); // its next call can look it up unprotected
         luaL_checkstack(L, static_cast<int>(args.size()) + 2, "rhp: too many arguments");
         for (const auto& arg : args) {
             stack{L}.push_value(arg);
@@ -2491,6 +2540,130 @@ result<value_list> sandbox_impl::call(module_id id, std::string_view function, s
     }
     drain();
     return out;
+}
+
+// What makes this safe outside a protected run: before lua_resume nothing allocates (the name is an
+// interned key pinned in the registry, the exports table has no metatable so no __index runs, the
+// arguments are scalars pushed into room checked first, a spare record and coroutine are at hand and
+// every C++ container used has capacity), and lua_resume is a protected call itself. After it, only a
+// normal return with scalar results is completed here (no Lua allocation; the result vector is
+// reserved first); an error, a stop, a suspension or other results finish inside a protected run.
+std::optional<result<value_list>> sandbox_impl::call_unprotected(module_record& mod, std::string_view function, std::span<const value> args) {
+    lua_State* L = state_;
+    const int nargs = static_cast<int>(args.size());
+    if (args.size() > kUnprotectedArgs || spare_requests_.empty() || spare_threads_.empty() || unlisted_.size() == unlisted_.capacity() ||
+        running_.size() == running_.capacity() || cancel_ids_pending_.load(std::memory_order_acquire) ||
+        spare_requests_.back().mapped()->label.capacity() < mod.name.size() + 1 + function.size() ||
+        !std::ranges::all_of(args, [](const value& v) { return is_scalar(v); })) {
+        return std::nullopt;
+    }
+    const int key = call_key(function);
+    if (key == kNoRef || lua_checkstack(L, nargs + 8) == 0) {
+        return std::nullopt;
+    }
+    const int base = lua_gettop(L);
+    lua_rawgeti(L, LUA_REGISTRYINDEX, mod.live.exports_ref);
+    if (lua_type(L, -1) != LUA_TTABLE || lua_getmetatable(L, -1) != 0) {
+        lua_settop(L, base);
+        return std::nullopt;
+    }
+    lua_rawgeti(L, LUA_REGISTRYINDEX, key);
+    lua_rawget(L, -2);
+    lua_remove(L, -2);
+    if (lua_type(L, -1) != LUA_TFUNCTION) {
+        lua_settop(L, base);
+        return std::nullopt; // the protected path reports it
+    }
+    for (const value& arg : args) {
+        push_scalar(L, arg);
+    }
+
+    const slice_scope slice{*this};
+    request_record& req = start_request(request_kind::kCall, effect_owner{mod.id, mod.live.revision}, mod.name, nargs, true);
+    req.label.push_back('.'); // within the capacity checked above
+    req.label.append(function);
+    std::optional<result<value_list>> done;
+    int status = LUA_OK;
+    int nresults = 0;
+    // From here an unusual case finishes protected: `stage` says what is left to do.
+    enum class stage : std::uint8_t {
+        kStep,   // not started: a start error, or a cancel queued meanwhile (step decides)
+        kFinish, // resumed: finish_step decides
+        kDone
+    } left = stage::kStep;
+    if (!req.start_error && !cancel_ids_pending_.load(std::memory_order_acquire)) {
+        status = resume_request(req, nargs, nresults);
+        left = stage::kFinish;
+        if (status == LUA_OK && req.budget.sticky == sticky_stop::kNone) {
+            bool scalars = true;
+            for (int i = 1; i <= nresults && scalars; ++i) {
+                scalars = is_scalar(lua_type(req.thread, i));
+            }
+            value_list values;
+            if (scalars) {
+                try {
+                    values.reserve(static_cast<std::size_t>(nresults));
+                } catch (const std::bad_alloc&) { // no Lua call in this try: completed protected below
+                    scalars = false;
+                }
+            }
+            if (scalars) {
+                for (int i = 1; i <= nresults; ++i) {
+                    (void)append_scalar(values, req.thread, i);
+                }
+                done = complete(req, nresults, nullptr, &values);
+                left = stage::kDone;
+            }
+        }
+    }
+    if (left != stage::kDone) {
+        auto glue = protect(L, [&] {
+            if (left == stage::kStep) {
+                done = step(req, nargs);
+            } else {
+                done = finish_step(req, status, nresults, nullptr);
+            }
+        });
+        if (!glue) {
+            done = std::unexpected{std::move(glue).error()};
+            release_kept(req); // a record the failed run never got to (compares addresses only)
+        }
+    }
+    if (!done) {
+        return result<value_list>{value_list{}}; // suspended: on_result reports it
+    }
+    return std::move(*done);
+}
+
+int sandbox_impl::call_key(std::string_view function) const noexcept {
+    for (const auto& [name, ref] : call_keys_) {
+        if (name == function) {
+            return ref;
+        }
+    }
+    return kNoRef;
+}
+
+void sandbox_impl::remember_call_key(std::string_view function) {
+    if (call_key(function) != kNoRef) {
+        return;
+    }
+    std::string name;
+    try {
+        name.assign(function);
+    } catch (const std::bad_alloc&) { // no Lua call in this try: the call just isn't remembered
+        return;
+    }
+    stack{state_}.push_string(function); // the caller runs protected
+    const int ref = luaL_ref(state_, LUA_REGISTRYINDEX);
+    if (call_keys_.size() < kCallKeys) {
+        call_keys_.emplace_back(std::move(name), ref); // reserved in the constructor: no allocation
+        return;
+    }
+    auto& slot = call_keys_[call_keys_next_];
+    call_keys_next_ = (call_keys_next_ + 1) % kCallKeys;
+    luaL_unref(state_, LUA_REGISTRYINDEX, slot.second);
+    slot = {std::move(name), ref};
 }
 
 revert_report sandbox_impl::revert_module(module_record& mod) {
