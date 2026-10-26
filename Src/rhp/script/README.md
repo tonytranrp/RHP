@@ -13,7 +13,7 @@ The script engine: PUC Lua 5.5 (built as C++), the `Rhp::lib<>` binding DSL, pat
 | `testing.hpp` | test tools (Stage 12): `run_meter` (exact instructions, allocations, peak, objects by kind), `coverage_report`, `gc_mode`, `testing_options` for `sandbox::enable_testing` (the `__rhp_test` bridge, a host callback, fake `os.time`) |
 | `ledger.hpp` | `effect`, `ledger` (owner-keyed undo log), `revert_report` |
 | `marshal.hpp` | `push` / `pull` between C++ and the Lua stack; `pushable`, `pullable`, `Rhp::convertible` |
-| `stack.hpp` | `stack`: the only wall between templates and the Lua C API (all out of line): `run_protected`, `call`, push / to / check helpers |
+| `stack.hpp` | `stack`: the only wall between templates and the Lua C API (all out of line): `run_protected`, `call`, push / to / check helpers, `read_args` (a plain binding's arguments in one call: `arg_kind`, `arg_slot`) |
 | `api.hpp` | `api::describe<L>(role)`: a lib as a value tree (functions, variables, handles, sub-libs; LuaLS type names) for `sandbox::api()`, `rhp.api()` and test fakes; no Lua needed |
 | `stubs.hpp` | `stubs::generate<L>(role)` / `write<L>` / `rhp_api(role)`: LuaLS annotations from a lib type, filtered by role; no Lua needed |
 | `detail/` | trampolines and lib builder (`installable`), patch layers, variable layers (`var_layers`, `lock_free_var`), patch point and event registries, sandbox context |
@@ -39,12 +39,16 @@ auto bad = box.exec("game.gravity = 10");   // fails: outside Rhp::range, nothin
 
 ```text
 Lua: game.spawn("crate", 1)
-  → lib proxy __index → C closure call_fn<Handles, Entry> (upvalue: "game.spawn")
+  → lib proxy __index (the members table: a raw hit) → C closure call_fn<Handles, Entry> (upvalue: "game.spawn")
   → role check → pull args (handles first, then Rhp::convert) → invoke C++
   → C++ exceptions become Lua errors (raised after the try block)
   → ledger records undo<F>(result) for the current module → push results
   (an Rhp::async<T> result: the request suspends until it arrives, then the same steps)
 ```
+
+- **Plain bindings** (`plain_binding_v`: synchronous, no `undo<G>` / `irreversible`, every parameter a bool, integer, floating point number, `std::string_view` / `std::string` or handle, by value or const reference) take `call_plain`: one `stack::read_args` reads every plain argument by type into `arg_slot`s (no `result<T>` per argument), handles are pulled as usual, then the call, exceptions and `push_return` as above. An argument that doesn't fit sends the call down the general path (`invoke_fn`), which raises the error it always has: the two paths can't disagree. A new kind of plain argument is a `plain_arg<T>` specialization plus a case in `stack::read_args`.
+- **Lib proxies** (`puc_lua/lib_proxy.cpp`): a locked userdata whose `__index` is the members table (functions, sub-libs: a raw hit after one table-valued metamethod), whose metatable's `__index` is `lib_var_index` (variables: one C call, the getter run in its frame); `__newindex` calls the setter. The test bridge reaches the getters and setters as upvalue 1 of those two C functions (`testing.cpp`).
+- Handle properties (`get_property`) are C functions without upvalues, labelled at compile time (`static_label`): the handle's `__index` (`handle_index`, `stack.cpp`) runs one in its own frame, the handle at index 1, instead of a nested `lua_call`.
 
 ## Requests and the frame
 

@@ -63,6 +63,42 @@ a per-thread cache of the top layer, checked against a version that every push a
 safe; measured, it made no difference to a call into a Lua handler (79-85 ns either way: the
 uncontended lock is a small part of it, the handler's request and pcall the rest), so it isn't in.
 
+**Binding calls and lib members.** A *plain* binding (synchronous, no `undo<G>` / `irreversible`,
+every parameter a bool, integer, floating point number, `std::string_view` / `std::string` or handle)
+takes `call_plain`: one out-of-line `stack::read_args` reads every plain argument by type into an
+`arg_slot` (no `Rhp::result<T>` per argument), handles are pulled as before, then the call,
+exceptions and `push_return` as on the general path. An argument that doesn't fit falls back to the
+general path, which raises the error it always did, so the two can't disagree (a test calls both
+with every kind of bad argument). Properties are C functions without upvalues with a compile-time
+label, run in their handle's `__index` frame instead of a nested `lua_call`; `lib_var_index` takes
+the key where the VM left it. Measured in one binary (twins forced down the general path, so code
+layout is the same): two `int` arguments -27%, a method with only its handle -6% to -13%, a handle
+and an `int` -4% to -11%. Across binaries the call rows moved -20% to -30%, properties -8% to -10%;
+variable reads did not move beyond noise. *Remaining cost:* a plain call of `add` is about 1.3-1.4x
+a hand-written `lua_CFunction` without the cancel hook: the trampoline's frame, the out-of-line reader,
+two API calls per argument (the type, then the value: `luaL_checkinteger` makes one and also takes
+`"1"`), the push through `stack`. A function lookup through a lib is a table-valued metamethod (the
+proxy is userdata); in a module, the lib's own name is a miss in the module's `_ENV` and a hit in its
+`__index` (the sandbox's environment, not the binding layer). A variable read is a C call (about
+100 cycles more than a table field): raw-Lua models of the proxy (the current shape; one C `__index` for everything; the current
+shape without the getter check) put the floor there. *Rejected:* a table as the lib proxy, with
+functions as its own fields (a lookup with no metamethod): Lua calls `__newindex` only for absent
+keys, so `game.spawn = f` would replace a shared function without a journal entry. One C `__index`
+on the proxy for variables and functions: no faster for reads, and every function lookup becomes a C
+call. Calling any upvalue-free C getter in place without checking it (about 15% off a read in the
+model): a test's swapped-in C closure would read `lib_var_index`'s upvalues (a crash for one like
+`string.gmatch`'s iterator). Caching variable values in the lib: C++ writes them at any time,
+including inside a binding the script just called. Copying `ro` members of `const` objects into the
+lib: a `const T*` template argument can point at a mutable variable, so the copy could go stale (an
+explicit constant entry would be sound; it would be new API, stubs, `api()` and test-bridge work).
+Handle metatables looked up by the address of their static key (`lua_rawgetp` on the registry):
+slower, since Lua hashes a light userdata with a modulo by the table size, more than its string cache
+and a short-string lookup. Declaring Lua API functions in headers so templates call
+`lua_tointegerx` directly: it breaks the `stack` wall and `RHP_ENABLE=OFF`. *Measuring:* wall-clock
+runs on a busy machine moved by up to 30%; thread cycle counts (`QueryThreadCycleTime`, the lowest of
+300 runs, binaries alternating) still moved unchanged raw rows by 10-15% between two builds (code
+layout), hence the twins inside one binary.
+
 **The debugger with breakpoints only** runs line events in the functions whose lines hold one
 (`scope_lines`, debug.cpp): call and return events switch them, keeping the instruction countdown
 (`internals::set_line_events`), and the last answer is cached by source and line range. A C function
