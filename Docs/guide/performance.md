@@ -78,11 +78,11 @@ Ed25519 signing and checking cost tens of microseconds each. A process-wide cach
 
 | Option | Default | Effect |
 |---|---|---|
-| `RHP_PCH` | on for top-level desktop builds, off for cross builds and clang-cl | one shared precompiled header for the libraries above `core` and one for the test suites |
+| `RHP_PCH` | on for top-level desktop builds, off for cross builds and clang-cl | one shared precompiled header for the libraries above `core`, one for the test suites and one for the examples, rhp-cli and fuzz drivers, with the standard and RHP core/utils headers |
 | `RHP_UNITY_BUILD` | off | unity files (16 sources each): about a third less wall time on clean builds, slower edits. CI's `linux-clang` and `windows-msvc` jobs use it |
 | link job pool | top-level Ninja builds | links share a pool sized by memory; linking every test at once otherwise runs out of memory |
 
-A clean `windows-msvc` Debug build of everything takes about 111 s on a 16-thread laptop (106 s with `RHP_UNITY_BUILD`). A source that forgets an `#include` may still compile under the shared PCH; CI's `linux-clang-asan` job builds without it.
+A clean `windows-msvc` Debug build of everything takes about 75 s on a 16-thread laptop (it was about 100 s before RHP's core headers joined the precompiled headers and the compile-fail fixtures left the default build; 180 s before the first optimization pass). A source that forgets an `#include` may still compile under the shared PCH; CI's `linux-clang-asan` job builds without it.
 
 ## Measuring your own case
 

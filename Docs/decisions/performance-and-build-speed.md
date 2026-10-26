@@ -33,9 +33,14 @@ order by sorting their keys); an event's handler keys in an inline array; an alr
 asynchronous result is pushed without the shared call a suspension needs; lib variables of small
 trivially copyable types are read with an atomic load (RHP's writes store atomically too; without
 `std::atomic_ref` reads keep the lock); a reverted variable write finds its layer from the newest end
-(reverts were O(n^2)). *Not done:* resetting `request_record` field by field (about 10% of a frame
-callback, but it would break "reset() resets every field" with no portable compile-time guard); a
-lock-free patch-point fast path. A layer found for a thread can only be removed by that thread, so
+(reverts were O(n^2)). `request_record` is `request_state` plus its three pooled strings: `reset()`
+assigns the state whole and clears the strings, and a `static_assert` on the sizes keeps every new
+field inside `request_state` (the guard a field-by-field reset lacked). A binding call reads its label
+and context only when an error, an undo record or an async call needs them (observe bindings skip the
+role check); lib variable getters, C functions without upvalues, run in the proxy's frame instead of
+a nested `lua_call`; `Rhp::async<T>::completed()` keeps its outcome inline (no shared state, mutex or
+`std::function` for an operation that is already over); event delivery looks the subscription list
+up again only after a subscription was added or removed. *Not done:* a lock-free patch-point fast path. A layer found for a thread can only be removed by that thread, so
 a per-thread cache of the top layer, checked against a version that every push and remove bumps, is
 safe; measured, it made no difference to a call into a Lua handler (79-85 ns either way: the
 uncontended lock is a small part of it, the handler's request and pcall the rest), so it isn't in.
@@ -59,10 +64,21 @@ is recorded. The TCP and IPC links send the frames queued behind a write in flig
 write (up to 16; WebSocket already joins them into one message): 32 pipelined calls over TCP on
 127.0.0.1 take 374-401 us instead of 632-635 us. *Measured and left out:* a local queue for posts made on the
 running thread (one reactor post per batch instead of one each: module calls, signed execs and 32
-pipelined calls over TCP and UDP all stayed within run-to-run noise), and reliable-UDP ack coalescing (deferring
-a data packet's ACK to the end of the I/O round so a reply or the next ACK carries it was measured:
-32 pipelined calls took 1.33-1.35 ms against 1.27-1.28 ms, since each datagram is its own receive
-completion and the deferred ACK runs before the next one arrives).
+pipelined calls over TCP and UDP all stayed within run-to-run noise), and posting each reliable-UDP
+ACK to the end of the I/O round (1.33-1.35 ms against 1.27-1.28 ms: each datagram was its own
+receive completion, so the posted ACK ran before the next one arrived). What works instead: a
+receive drains the datagrams already waiting (up to 64) and then acknowledges once per peer, unless
+a packet sent meanwhile carried the ACK; queued sends share packets (the payload is a byte stream);
+an in-order packet with nothing buffered goes straight to the handler. 32 pipelined calls over
+reliable UDP: 1.30-1.35 ms -> 0.72-0.78 ms. Sending each burst from a posted flush (frames sent in
+one turn share datagrams) was left out: a reply would wait for the host's next pump. A sequenced
+frame's payload moves into the session's resend window and is sent from there (one copy fewer).
+
+**Frame MAC.** Keyed BLAKE2b hashes the padded key as its first block, and Monocypher compresses it
+once message bytes follow. Every frame starts with the frame magic, so a sealer keeps the state
+after the key and the magic and copies it per frame: identical MACs, one compression fewer of the
+2-3 a call's frame takes (the MACs were about a quarter of a remote call). A module call over
+loopback: 12.4-12.9 us -> 11.0-11.1 us together with the binding changes.
 
 **Signatures.** Ed25519 is deterministic: a process-wide cache of recent script signatures, and of
 signatures found valid, keyed by the public key, the signature and the source's BLAKE2b-256, makes a
@@ -85,13 +101,18 @@ Measured on a clean MSVC Debug build (16 threads, 16 GB): the time went to parsi
 memory when every test executable linked at once.
 
 - **One shared precompiled header per group** (`RHP_PCH`, `cmake/RhpPch.cmake`): the libraries above
-  core and the test suites reuse one PCH each. A PCH per target cost more than it saved (31 PCH
-  compiles, about 190 MB each); `<rhp/rhp.hpp>` stays out (it slowed every PCH). Headers come in
+  core, the test suites, and the apps (examples, rhp-cli, the fuzz replay drivers) reuse one PCH each,
+  with the standard headers and RHP's core and utils headers (those alone: -27% over 24 sources). A
+  PCH per target cost more than it saved (31 PCH compiles, about 190 MB each); `<rhp/rhp.hpp>` stays
+  out (it slowed every PCH). Headers come in
   force-included, so CI's `linux-clang-asan` job builds without it. `rhp_net` and the test suites
   that link Asio compile without it (Asio's macros and `_WIN32_WINNT` can change what the standard
   headers mean), and it is off for clang-cl (it refuses a PCH built with other `/D` macros) and for
   cross builds (not measured there).
 - **Catch2 as unity files** (always: it is built once per tree).
+- **The compile-fail fixtures build in their tests**: one test (`compile_fail.fixtures_compile`)
+  builds every as-is fixture in one build run, and the failing builds wait for it; in the default
+  build the 34 objects were 13% of the work. The fuzz replay main compiles once.
 - **Links share a Ninja job pool** sized by memory (top-level builds): a link takes 1-2 s alone and
   13-22 s when every core links at once.
 - **`RHP_UNITY_BUILD`** (off; CI's `linux-clang` and `windows-msvc` jobs use it): sources whose
