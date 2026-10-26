@@ -502,7 +502,7 @@ TEST_CASE("host+client: zero_threads on both ends", "[integration][threads]") {
     using quiet_cfg = loopback_cfg::io<Rhp::exec::zero_threads>;
     keys k;
     const auto at = Rhp::endpoint::listen("itest.zero", 1);
-    running_host<quiet_cfg> host{at, k};                      // pump() polls the network
+    running_host<quiet_cfg> host{at, k};                                  // pump() polls the network
     Rhp::client<quiet_cfg> c{host.dial_at(at), k.as_patch(), k.signer()}; // calls run the network while waiting
     CHECK(c.exec<int>("return 7") == 7);
     CHECK(c.exec<int>("rhp.wait(2) return 8") == 8);
@@ -807,7 +807,9 @@ TEST_CASE("host+client: a throwing completion callback does not end the session"
     Rhp::client<loopback_cfg> c{host.dial_at(at), k.as_patch(), k.signer()};
     REQUIRE(c.connect());
     std::atomic<bool> ran{false};
-    c.async().exec("return 1").then([&](Rhp::result<std::vector<value>>) {
+    // The sleep keeps the reply out until then() has attached the callback, so the network thread
+    // runs it (a result already in runs it on the caller's thread, where the throw would escape then()).
+    c.async().exec("rhp.sleep(20) return 1").then([&](Rhp::result<std::vector<value>>) {
         ran = true;
         throw std::runtime_error{"an application bug"};
     });
