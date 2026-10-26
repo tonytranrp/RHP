@@ -146,6 +146,22 @@ const Rhp::rollout_report report = group.rollout(envelope_bytes, plan);
 
 Canaries go first, then the rest in an order fixed by the release (each stage's fraction is cumulative, in [0, 1]; an unknown canary or a fraction outside that range is refused before any host is touched). Each stage's hosts apply the release health-watched, are watched for the stage's `observe` time (a host whose release fails rolls it back on its own; one that stops answering counts as failed; hosts the release isn't meant for, or that run a newer release in the channel, are skipped; a host that refuses it as superseded otherwise rolled it back or quarantined it earlier and counts as failed), then confirmed (only if it is still this release's candidate). When more than `max_failures` hosts fail, the rollout stops and, unless `rollback_on_failure` is false, deactivates the release on the hosts this run applied it to where it still runs (bound to its id). The report has one entry per member: `confirmed`, `already`, `skipped`, `failed`, `rolled_back` or `pending` (its stage wasn't reached); `completed` needs every stage passed and at least one host running the release.
 
+## Faster restarts: the compiled-chunk cache
+
+A restore parses every module of every release it brings back. Give the manager a key and it keeps each release's Lua bytecode in the store next to its envelope (`bytecode/<id>`), so the next restart, restore or fallback loads that instead:
+
+```cpp
+// A secret of this install: made once (Rhp::security::key::generate()), kept where the store's
+// writers can't read it (the OS keychain, a protected config file), never shared with clients.
+options.bytecode_key = *Rhp::security::key::from_file("config/rhp_bytecode.key");
+```
+
+- Lua doesn't check bytecode, and bytecode crafted by someone else escapes the sandbox. So every entry carries a keyed BLAKE2b-256 MAC under that key, checked before anything in it is read; it is also bound to the release id, each module's source hash and the Lua build (`Rhp::release::compiled_build()`). Releases still pass every check before their bytecode is looked at.
+- Anything wrong with an entry (another key, an edited or truncated file, another Lua build, bytecode Lua refuses) throws it away: the sources are parsed and a fresh entry is written. `releases.bytecode_cache_stats()` counts loads, compiles, writes and discards, with the reason for the latest discard.
+- Without a key nothing is cached and nothing cached is read. Envelopes from clients are always parsed as text; bytecode never comes from the wire.
+- Debug information is kept: tracebacks, the debugger, the profiler and coverage see the same lines as with the source.
+- Whoever can read the key can make this host run anything: keep it out of the store's folder, or don't set one. Entries go away with their releases.
+
 ## What the store protects against
 
 The state document is checksummed (BLAKE2b-256) and every write goes through a temporary file and a rename, so a torn or corrupted write is noticed instead of trusted. It is not authenticated: someone who can write the store can lower floors, point a channel at an older signed release or delete revocations. Signatures are still checked on every restore, so only signed releases ever run. Keep the store where only the program can write.

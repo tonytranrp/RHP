@@ -140,7 +140,32 @@ struct sandbox_stats {
     std::uint64_t async_compensated = 0;
     std::uint64_t async_dropped = 0;
     std::size_t paused = 0; // requests the debugger paused
+    // Modules (and reloads) given trusted bytecode (sandbox::load with a trusted_bytecode): loaded
+    // from it, or refused by Lua (another Lua build, truncated, compiled under another name) and
+    // parsed from their source instead.
+    std::uint64_t bytecode_loaded = 0;
+    std::uint64_t bytecode_rejected = 0;
 };
+
+// Lua bytecode a sandbox may load in place of parsing a module's source (sandbox::load / reload):
+// whoever makes one vouches that this program compiled it (sandbox::compile_module) and that nothing
+// could change it since. Lua doesn't verify bytecode: a forged chunk escapes the sandbox. Never
+// wrap bytecode a client sent, or read from somewhere others can write without authenticating it
+// (the release store MACs its cache). The view must stay valid during the call.
+class trusted_bytecode {
+public:
+    constexpr explicit trusted_bytecode(std::string_view bytes) noexcept : bytes_(bytes) {}
+    [[nodiscard]] constexpr std::string_view bytes() const noexcept { return bytes_; }
+
+private:
+    std::string_view bytes_;
+};
+
+// What Lua bytecode depends on in this build: Lua's release number, its bytecode header (format;
+// sizes of int, Instruction, lua_Integer, lua_Number) and the dump of a probe chunk, so a change to
+// the compiler or to the dump format shows. Bytecode made by a build whose bytecode_build() differs
+// must not be loaded. Computed once; empty with RHP_ENABLE=0 (no Lua) or if it couldn't be made.
+[[nodiscard]] std::string_view bytecode_build();
 
 namespace detail {
 struct async_inbox;
@@ -292,6 +317,19 @@ public:
     result<revision_id> reload(module_id mod, std::string_view source);
     // Reloads the source of the revision `steps` before the current one (1 = the previous one).
     result<revision_id> rollback(module_id mod, std::size_t steps = 1);
+
+    // ---- compiled chunks ----------------------------------------------------------------------
+    // Compiles `source` (text only) as module `name` is compiled by load() and returns its bytecode
+    // (lua_dump, debug information kept: tracebacks, the debugger and coverage see the same lines).
+    // Runs nothing. kCompile on a syntax error, kInvalidArgument for a name load() refuses.
+    result<std::string> compile_module(std::string_view name, std::string_view source);
+    // load / reload taking `code`, bytecode compile_module made of this name and source, instead of
+    // parsing `source` (which stays the module's source: rollback, module_info::source_hash).
+    // Bytecode Lua refuses (another Lua build, truncated, made for another name) is set aside and
+    // the source parsed instead (stats().bytecode_rejected). See trusted_bytecode: never pass
+    // bytecode that came from the wire. A reload deferred while a script runs parses the source.
+    result<module_id> load(std::string_view name, std::string_view source, trusted_bytecode code);
+    result<revision_id> reload(module_id mod, std::string_view source, trusted_bytecode code);
 
     // Calls an exported function of an active module. A runtime error faults the module.
     result<value_list> call(module_id mod, std::string_view function, std::span<const value> args = {});

@@ -22,6 +22,7 @@
 #include <rhp/release/trust.hpp>
 #include <rhp/script/lib.hpp>
 #include <rhp/script/sandbox.hpp>
+#include <rhp/security/key.hpp>
 
 namespace Rhp::release {
 
@@ -57,6 +58,23 @@ struct manager_options {
     std::function<std::chrono::system_clock::time_point()> wall_clock{};           // for validity windows; empty: system_clock::now
     script::clock_fn clock{};                                                      // script time and health windows; empty: steady_clock::now
     std::function<void(std::string_view channel, std::string_view line)> output{}; // print() of the channels' scripts
+    // The compiled-chunk cache (bytecode.hpp): with a key, the Lua bytecode of every release a channel
+    // runs is kept in the store next to its envelope, MAC'd under this key, and later loads (a restart,
+    // a fallback) load it instead of parsing the sources. A host-local secret (16..64 bytes, e.g.
+    // security::key::generate() kept in the OS keychain), never shared with clients nor kept where
+    // the store's writers can read it: whoever holds it can make bytecode this host runs unchecked.
+    // Empty (the default): nothing is cached, every load parses.
+    security::key bytecode_key{};
+};
+
+// The compiled-chunk cache (manager_options::bytecode_key), as manager::bytecode_cache_stats reports it.
+struct bytecode_stats {
+    std::uint64_t loaded = 0;         // modules loaded from cached bytecode (their sources weren't parsed)
+    std::uint64_t compiled = 0;       // modules compiled here for the cache (no entry yet, or one thrown away)
+    std::uint64_t stored = 0;         // entries written
+    std::uint64_t discarded = 0;      // entries thrown away, the sources parsed instead: a MAC that doesn't match (another key, an edit), truncated or malformed, another Lua build, another release's, bytecode Lua refused
+    std::uint64_t store_failures = 0; // entries that couldn't be written (the release runs all the same)
+    std::optional<error> last_discarded{}; // why the latest entry was thrown away
 };
 
 // A release a channel holds, as status reports it.
@@ -214,6 +232,9 @@ public:
     [[nodiscard]] script::sandbox* sandbox(std::string_view channel) noexcept;
 
     [[nodiscard]] const manager_options& options() const noexcept;
+
+    // What the compiled-chunk cache did so far (all zero without manager_options::bytecode_key).
+    [[nodiscard]] bytecode_stats bytecode_cache_stats() const;
 
 private:
     result<void> install_lib(std::string_view name, result<void> (*fn)(script::sandbox&));

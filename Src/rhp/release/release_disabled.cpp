@@ -12,6 +12,7 @@
 
 #include <rhp/core/error.hpp>
 #include <rhp/core/result.hpp>
+#include <rhp/release/bytecode.hpp>
 #include <rhp/release/manager.hpp>
 #include <rhp/release/release.hpp>
 
@@ -24,6 +25,22 @@ error disabled(std::string_view where) {
 }
 
 } // namespace
+
+std::string compiled_store_key(const release_id& id) {
+    return "bytecode/" + to_hex(id);
+}
+
+security::digest256 compiled_build() {
+    return {};
+}
+
+result<std::vector<std::byte>> seal_compiled(const compiled_release&, const security::key&) {
+    return std::unexpected{disabled("release.bytecode")};
+}
+
+result<compiled_release> open_compiled(std::span<const std::byte>, const security::key&) {
+    return std::unexpected{disabled("release.bytecode")};
+}
 
 result<release> make_release(manifest, std::vector<std::string>) {
     return std::unexpected{disabled("release.make")};
@@ -135,6 +152,10 @@ Rhp::subscription manager::on_event(std::function<void(const release_event&)>) {
 
 script::sandbox* manager::sandbox(std::string_view) noexcept {
     return nullptr;
+}
+
+bytecode_stats manager::bytecode_cache_stats() const {
+    return {};
 }
 
 const manager_options& manager::options() const noexcept {

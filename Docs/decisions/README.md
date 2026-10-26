@@ -23,4 +23,5 @@ One file per decision topic, named by topic (no numbers). Each records **what** 
 | Stage 10 release manifests, persistence and rollout | [stage10-releases.md](stage10-releases.md) |
 | Stage 11 debugger, profiler and tunables | [stage11-tools.md](stage11-tools.md) |
 | Stage 12 test engine for Lua scripts | [stage12-test-engine.md](stage12-test-engine.md) |
+| Compiled-chunk cache (release bytecode across restarts) | [compiled-chunk-cache.md](compiled-chunk-cache.md) |
 | Performance and build speed (the overall optimization pass) | [performance-and-build-speed.md](performance-and-build-speed.md) |

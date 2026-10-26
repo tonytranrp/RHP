@@ -62,6 +62,22 @@ result<revision_id> sandbox::reload(module_id, std::string_view) {
     return disabled();
 }
 
+result<std::string> sandbox::compile_module(std::string_view, std::string_view) {
+    return disabled();
+}
+
+result<module_id> sandbox::load(std::string_view, std::string_view, trusted_bytecode) {
+    return disabled();
+}
+
+result<revision_id> sandbox::reload(module_id, std::string_view, trusted_bytecode) {
+    return disabled();
+}
+
+std::string_view bytecode_build() {
+    return {};
+}
+
 result<revision_id> sandbox::rollback(module_id, std::size_t) {
     return disabled();
 }

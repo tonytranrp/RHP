@@ -8,7 +8,8 @@ Signed releases that a program keeps and brings back after a restart (Stage 10).
 | `release.hpp` | `release` (manifest + sources + signatures), `make_release`, `sign`, `encode_release` / `decode_release` (`.rhprel`); `revocation_list` (release ids, keys, `seq_floor`s), `signed_revocations`, `make_revocations`, `encode_revocations` / `decode_revocations` (`.rhprev`) |
 | `trust.hpp` | `trust`: release signer keys with channel patterns and a threshold (`add`, `parse`, `from_file`, `set_threshold`, `verify`); `channel_matches` |
 | `store.hpp` | the `storage` concept (`read`, `write`, `remove`, `keys`), `any_store`, `memory_store`, `directory_store` |
-| `manager.hpp` | `manager`: channels (sandboxes it owns), `install<L>`, `restore`, `apply` (`confirm_mode` `kNow` / `kHealth` / `kManual`), `confirm`, `deactivate`, `revoke`, `status`, `pump`, `on_event`; `manager_options`, `channel_status`, `apply_result`, `restore_report`, `release_event` |
+| `bytecode.hpp` | the compiled-chunk cache's entries (`bytecode/<hex id>` beside the envelope): `compiled_release`, `compiled_module`, `seal_compiled` / `open_compiled` (keyed BLAKE2b-256 MAC, `kBytecodeMacDomain`), `compiled_build`, `compiled_store_key` |
+| `manager.hpp` | `manager`: channels (sandboxes it owns), `install<L>`, `restore`, `apply` (`confirm_mode` `kNow` / `kHealth` / `kManual`), `confirm`, `deactivate`, `revoke`, `status`, `pump`, `on_event`; `manager_options`, `channel_status`, `apply_result`, `restore_report`, `release_event`; `manager_options::bytecode_key` and `bytecode_cache_stats()` (the compiled-chunk cache) |
 
 ```cpp
 Rhp::release::manager releases{*Rhp::release::trust::from_file("rhp_release_signers.pub"),
@@ -31,4 +32,5 @@ Clients reach it through `client.release_apply` / `release_confirm` / `release_d
 - A channel's floor only rises. Rolling back, deactivating and quarantining never lower it. Revocations only add up.
 - A swap has no gap: modules reload in place, and a failure leaves the old release running. A candidate that keeps failing to be confirmed across restarts (`max_boot_attempts`) is quarantined.
 - The manager is single-threaded (the pump thread), refused from a channel's own scripts, and not moved while a host serves it. Its sandboxes follow the sandbox rules. `host.serve` pumps it and answers the wire ops on the host's pump thread.
+- Cached bytecode (`manager_options::bytecode_key`) is read only after its MAC checks out under the host's key, and only for a release that just passed `check`; it is bound to the release id, each module's hash and `compiled_build()`. Any mismatch discards the entry and parses the sources (`bytecode_cache_stats`). No key: nothing is written or read. Never load bytecode that came over the wire ([decision](../../../Docs/decisions/compiled-chunk-cache.md)).
 - `detail/codec.hpp` is private to this folder. With `RHP_ENABLE=OFF` manifests, the store and trust still build; making, checking and running releases report `kDisabled` (`release_disabled.cpp`).
