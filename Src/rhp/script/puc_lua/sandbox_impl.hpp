@@ -578,8 +578,10 @@ private:
     // and get one from where_of() when they fail.
     // A request enters requests_ (the scheduler's map) only when it first suspends; until then its
     // map node waits in unlisted_ (tasks, which start at a later pump(), are listed at once). Most
-    // requests finish in their first step and never touch the map.
-    request_record& start_request(request_kind kind, const effect_owner& owner, std::string_view label, int nargs, bool from_operation);
+    // requests finish in their first step and never touch the map. `host`: where a new coroutine is
+    // made when the pool has none (rhp.spawn passes its own coroutine; default the main state).
+    request_record& start_request(request_kind kind, const effect_owner& owner, std::string_view label, int nargs, bool from_operation,
+                                  lua_State* host = nullptr);
     // The next handler of one delivery in the record and coroutine the previous one finished in
     // (both unlisted and idle): a new request id, owner and state, the same coroutine (re-armed).
     request_record& restart_request(request_record& req, request_kind kind, const effect_owner& owner, int nargs);
@@ -590,8 +592,19 @@ private:
     // `kept` (deliveries): a request that finishes normally keeps its record and coroutine for the
     // caller's next handler (restart_request) and sets *kept; anything else recycles them as usual.
     std::optional<result<value_list>> step(request_record& req, int nargs, bool* kept = nullptr);
+    // step's two halves after its checks: one lua_resume (returns its status), and what follows it.
+    int resume_request(request_record& req, int nargs, int& nresults);
+    std::optional<result<value_list>> finish_step(request_record& req, int status, int nresults, bool* kept);
     result<value_list> complete(request_id id, result<int> outcome);
-    result<value_list> complete(request_record& req, result<int> outcome, bool* kept = nullptr);
+    // `results`: an exec's or a call's results already converted (call_unprotected).
+    result<value_list> complete(request_record& req, result<int> outcome, bool* kept = nullptr, value_list* results = nullptr);
+    // sandbox::call without the protected run around its setup, when nothing before or after its
+    // lua_resume can raise or throw (sandbox.cpp says when). nullopt: not taken, nothing done.
+    std::optional<result<value_list>> call_unprotected(module_record& mod, std::string_view function, std::span<const value> args);
+    // The registry ref of an exported function's name sandbox::call looked up before (kNoRef if none);
+    // remember_call_key (protected) interns one.
+    [[nodiscard]] int call_key(std::string_view function) const noexcept;
+    void remember_call_key(std::string_view function);
     // The map node of an unlisted record (empty if it isn't in unlisted_).
     [[nodiscard]] std::map<request_id, std::unique_ptr<request_record>>::node_type take_unlisted(const request_record& req) noexcept;
     // A request suspends for the first time: into requests_.
@@ -727,6 +740,10 @@ private:
     // Records of requests that run but never suspended (and a delivery's idle record between two
     // handlers): their nodes wait here instead of in requests_, innermost last.
     std::vector<decltype(requests_)::node_type> unlisted_;
+    // Names of exported functions sandbox::call found, interned and pinned in the registry (name, ref):
+    // a call of one again looks it up without allocating (call_unprotected). Bounded; replaced in turn.
+    std::vector<std::pair<std::string, int>> call_keys_;
+    std::size_t call_keys_next_ = 0;
     std::vector<std::pair<lua_State*, int>> spare_threads_; // (thread, registry ref)
     std::uint32_t checked_depth_ = 0;                       // operations and checked request runs active (enter_checked)
     // The earliest frame / script time a suspended request wakes at, so an idle pump() doesn't walk

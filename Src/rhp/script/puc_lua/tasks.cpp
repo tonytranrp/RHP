@@ -191,7 +191,8 @@ void sandbox_impl::spawn(lua_State* L) {
         stack{L}.raise(make_error(errc::kLimitExceeded, std::format("{} arguments are too many", nargs), "rhp.spawn"));
     }
     lua_xmove(L, state_, nargs + 1);
-    request_record& req = start_request(request_kind::kTask, effect_owner{current_.module, current_.revision}, {}, nargs, false);
+    // Its coroutine, if the pool has none, is made on this one: an allocation that fails raises here.
+    request_record& req = start_request(request_kind::kTask, effect_owner{current_.module, current_.revision}, {}, nargs, false, L);
     req.start_args = nargs;
     req.wake_frame = frame_ + 1; // never inside the spawner: at the next pump()
     req.task_key = key;

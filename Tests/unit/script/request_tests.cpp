@@ -44,7 +44,14 @@ inline bool last_pending() {
     return g_box != nullptr && g_box->pending(g_box->last_request());
 }
 
-using req_lib = Rhp::lib<"req">::var<"a", &g_a>::var<"b", &g_b>::var<"c", &g_c>::var<"d", &g_d>::fn<"fire_inner", &fire_inner>::fn<"last_pending", &last_pending>;
+// Cancels the request the last operation started (the call running it).
+inline void cancel_last() {
+    if (g_box != nullptr) {
+        g_box->cancel(g_box->last_request());
+    }
+}
+
+using req_lib = Rhp::lib<"req">::var<"a", &g_a>::var<"b", &g_b>::var<"c", &g_c>::var<"d", &g_d>::fn<"fire_inner", &fire_inner>::fn<"last_pending", &last_pending>::fn<"cancel_last", &cancel_last>;
 
 struct capture {
     std::vector<Rhp::request_id> requests; // print()s, by request
@@ -196,6 +203,154 @@ TEST_CASE("a call is pending while it runs and while it waits", "[script][reques
     box.pump();
     CHECK_FALSE(box.pending(id));
     CHECK(box.suspended() == 0);
+    fx::g_box = nullptr;
+}
+
+// The first call of a function looks its name up protected; later ones may skip the protected setup.
+// Every outcome must be the same either way, so each case runs a few times.
+TEST_CASE("a call made again has the same results and failures", "[script][requests]") {
+    fx::capture out;
+    Rhp::limits limits;
+    limits.instructions = 200'000;
+    sandbox box = fx::make_box(out, limits);
+    const auto mod = box.load("tests.req.again", R"lua(
+        local M = {}
+        function M.add(a, b) return a + b end
+        function M.many(a, b, c) return a, b == true, c, nil, 2.5 end
+        function M.text(s) return "got " .. tostring(s), {1, 2, x = 3} end
+        function M.boom() local t = nil return t.x end
+        function M.spin() while true do end end
+        function M.wait(n) rhp.wait(1) return n * 2 end
+        return M
+    )lua");
+    REQUIRE(mod.has_value());
+    for (int round = 0; round < 3; ++round) {
+        CAPTURE(round);
+        CHECK(*box.call(*mod, "add", std::vector<Rhp::value>{Rhp::value{2}, Rhp::value{3}}) == value_list{Rhp::value{5}});
+        CHECK(*box.call(*mod, "many", std::vector<Rhp::value>{Rhp::value{1.5}, Rhp::value{true}, Rhp::value{}}) ==
+              value_list{Rhp::value{1.5}, Rhp::value{true}, Rhp::value{}, Rhp::value{}, Rhp::value{2.5}});
+        const auto text = box.call(*mod, "text", std::vector<Rhp::value>{Rhp::value{7}});
+        REQUIRE(text.has_value());
+        REQUIRE(text->size() == 2);
+        CHECK(text->at(0) == Rhp::value{"got 7"});
+        CHECK(text->at(1).is_map());
+        CHECK(*box.call(*mod, "text", std::vector<Rhp::value>{Rhp::value{"x"}}) != value_list{});
+        CHECK(box.call(*mod, "nothing").error().code == errc::kNotFound);
+        const auto waited = box.call(*mod, "wait", std::vector<Rhp::value>{Rhp::value{4}});
+        REQUIRE(waited.has_value());
+        CHECK(waited->empty());
+        const Rhp::request_id id = box.last_request();
+        CHECK(box.pending(id));
+        box.pump();
+        box.pump();
+        CHECK_FALSE(box.pending(id));
+        CHECK(box.suspended() == 0);
+    }
+    const auto spun = box.call(*mod, "spin");
+    CHECK(spun.error().code == errc::kBudgetExceeded);
+    CHECK(box.status(*mod)->state == module_state::kFaulted); // a failed call faults its module
+    REQUIRE(box.reload(*mod, R"lua(
+        local M = {}
+        function M.boom() local t = nil return t.x end
+        function M.ok() return 1 end
+        return M
+    )lua"));
+    CHECK(*box.call(*mod, "ok") == value_list{Rhp::value{1}});
+    CHECK(*box.call(*mod, "ok") == value_list{Rhp::value{1}});
+    const auto boom = box.call(*mod, "boom");
+    REQUIRE_FALSE(boom.has_value());
+    CHECK(boom.error().where == "tests.req.again.boom");
+    CHECK_FALSE(boom.error().traceback.empty());
+    CHECK(box.status(*mod)->state == module_state::kFaulted);
+}
+
+TEST_CASE("a call through exports with an __index finds the function every time", "[script][requests]") {
+    fx::capture out;
+    sandbox box = fx::make_box(out);
+    const auto mod = box.load("tests.req.meta", R"lua(
+        local base = {}
+        function base.get(n) return n + 1 end
+        return setmetatable({}, {__index = base})
+    )lua");
+    REQUIRE(mod.has_value());
+    for (int i = 0; i < 3; ++i) {
+        CHECK(*box.call(*mod, "get", std::vector<Rhp::value>{Rhp::value{i}}) == value_list{Rhp::value{i + 1}});
+    }
+}
+
+TEST_CASE("a call that runs out of memory fails the same way when made again", "[script][requests]") {
+    fx::capture out;
+    Rhp::limits limits;
+    limits.memory = 2u * 1024u * 1024u;
+    sandbox box = fx::make_box(out, limits);
+    constexpr std::string_view kHog = R"lua(
+        local M = {}
+        function M.small() return 1 end
+        function M.hog() local t = {} for i = 1, 1e7 do t[i] = ("x"):rep(64) .. i end end
+        return M
+    )lua";
+    const auto mod = box.load("tests.req.hog", kHog);
+    REQUIRE(mod.has_value());
+    for (int round = 0; round < 3; ++round) {
+        CAPTURE(round);
+        CHECK(*box.call(*mod, "small") == value_list{Rhp::value{1}});
+        const auto hog = box.call(*mod, "hog");
+        REQUIRE_FALSE(hog.has_value());
+        CHECK(hog.error().code == errc::kMemoryExceeded);
+        CHECK(box.status(*mod)->state == module_state::kFaulted);
+        REQUIRE(box.reload(*mod, kHog));
+    }
+}
+
+// A call may run with the main state outside any protected run, so nothing a script does may raise
+// there: rhp.spawn makes its coroutine on the spawning one.
+TEST_CASE("a call that spawns until memory runs out fails cleanly when made again", "[script][requests]") {
+    fx::capture out;
+    Rhp::limits limits;
+    limits.memory = 1024u * 1024u;
+    sandbox box = fx::make_box(out, limits);
+    constexpr std::string_view kSpawner = R"lua(
+        local M = {}
+        function M.small() return 1 end
+        function M.spawn_all() for i = 1, 1e6 do rhp.spawn(function() end) end end
+        return M
+    )lua";
+    const auto mod = box.load("tests.req.spawner", kSpawner);
+    REQUIRE(mod.has_value());
+    for (int round = 0; round < 3; ++round) {
+        CAPTURE(round);
+        CHECK(*box.call(*mod, "small") == value_list{Rhp::value{1}});
+        const auto spawned = box.call(*mod, "spawn_all");
+        REQUIRE_FALSE(spawned.has_value());
+        CHECK(spawned.error().code == errc::kMemoryExceeded);
+        box.pump();
+        CHECK(box.stats().tasks == 0); // its module faulted: the tasks went with it
+        REQUIRE(box.reload(*mod, kSpawner));
+    }
+}
+
+constexpr std::string_view kCancelModule = R"lua(
+    local M = {}
+    function M.quick() return 1 end
+    function M.stop() req.cancel_last() local i = 0 while true do i = i + 1 end end
+    return M
+)lua";
+
+TEST_CASE("a call cancelled while it runs stops with the cancelled code", "[script][requests]") {
+    fx::capture out;
+    sandbox box = fx::make_box(out);
+    fx::g_box = &box;
+    const auto mod = box.load("tests.req.cancel", kCancelModule);
+    REQUIRE(mod.has_value());
+    for (int round = 0; round < 3; ++round) {
+        CAPTURE(round);
+        CHECK(*box.call(*mod, "quick") == value_list{Rhp::value{1}});
+        const auto stopped = box.call(*mod, "stop");
+        REQUIRE_FALSE(stopped.has_value());
+        CHECK(stopped.error().code == errc::kCancelled);
+        CHECK(box.status(*mod)->state == module_state::kFaulted);
+        REQUIRE(box.reload(*mod, kCancelModule));
+    }
     fx::g_box = nullptr;
 }
 
