@@ -65,7 +65,7 @@ Done when: *a stranger can install RHP with `find_package`, the reproduced threa
 - [ ] **Apple DNS-SD backend** (`net/mdns/native.cpp`): built by hosted CI (macOS, iOS simulator, iOS device), never run against real multicast: the multicast cases are left out on Apple runners. Run it on a Mac / iPhone.
 - [ ] Real multicast cases are left out on hosted Windows and Apple runners. `[multicast]` tests use the real LAN (and on Windows the system DNS-SD service); they are serialized under ctest and carry the label `multicast` (`ctest -LE multicast` leaves them out).
 - [ ] **TLS: one OpenSSL-client / Mbed TLS-server handshake failed once** (`a TLS handshake with an ephemeral certificate carries data both ways`, hosted `windows-clang-cl`, 2026-10-25); the rerun passed, and 150 local runs of every backend pair passed. The test now prints the TLS error when the handshake fails; if it happens again, start from that message (the ephemeral certificates are random, so a rarely occurring encoding is the first suspect).
-- [ ] **ARM CRC32C at run time: verify on devices.** Linux and Android arm64 builds check the CPU at run time (`__builtin_cpu_supports("crc")`, enabled by a configure check in `Src/rhp/utils/CMakeLists.txt`: NDK 29 passes it); the path is built (android-arm64) but has not run on an ARM device. iOS uses the tables (`__ARM_FEATURE_CRC32` isn't defined for `arm64-apple-ios`, and Xcode's runtime may lack `__aarch64_cpu_features`); MSVC ARM64 isn't handled.
+- [ ] **ARM CRC32C at run time: verify on devices.** Verified on Android (Galaxy SM-S948U1, arm64-v8a, API 37, 2026-10-26: the runtime check compiled in, the CPU reports `crc32`, the CRC32C vector and split tests pass); Linux arm64 hardware, iOS and MSVC ARM64 remain. Linux and Android arm64 builds check the CPU at run time (`__builtin_cpu_supports("crc")`, enabled by a configure check in `Src/rhp/utils/CMakeLists.txt`: NDK 29 passes it); the path is built (android-arm64) but has not run on an ARM device. iOS uses the tables (`__ARM_FEATURE_CRC32` isn't defined for `arm64-apple-ios`, and Xcode's runtime may lack `__aarch64_cpu_features`); MSVC ARM64 isn't handled.
 - [ ] Verify macOS and iOS (simulator and device) on real hardware; update `decisions/platforms-and-toolchains.md` afterwards.
 - [ ] Release-build validation and long libFuzzer runs (recorded checks are Debug builds and replay drivers).
 - [ ] Branch hygiene: completed stage branches (`stage-0-scaffold` … `stage-7-scheduling-events`, `stage-6-finish`, `codex/stage6`) and the agent worktree branch can be pruned once their PRs are merged; inspect the live remote refs first.
@@ -78,6 +78,20 @@ Done when: *a stranger can install RHP with `find_package`, the reproduced threa
 Process for every stage: one branch + PR per stage, conventional commits (`feat:`, `fix:`, `test:`, `docs:`, `ci:`), rebase-merge only when told to.
 
 ## Recorded validation
+
+### Lua speed pass (2026-10-26)
+
+Debug builds of the `perf-lua-engine` branch on this Windows/WSL host and on a phone:
+
+| Check | Result |
+|---|---|
+| `windows-msvc` | 916/916 |
+| `windows-msvc`, `RHP_ENABLE=OFF` | 227/227 |
+| `linux-clang` (WSL) | 904/904 |
+| `linux-clang-asan` (WSL) | 902/902 after the misaligned-span fix (UBSan found it) |
+| `linux-clang-tsan` (WSL) | 902/902 |
+| `android-arm64` on a Galaxy SM-S948U1 (API 37) over adb | all 20 executables (14 suites, 6 fuzz replay drivers) pass |
+| Release benchmarks, quiet machine | [benchmarks](benchmarks.md#lua-speed-pass) |
 
 ### Stage 8 (2026-10-24)
 
