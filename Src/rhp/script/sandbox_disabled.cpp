@@ -132,6 +132,10 @@ void sandbox::cancel(request_id) noexcept {}
 
 void sandbox::pump() {}
 
+result<bool> sandbox::collect_idle(std::chrono::microseconds) {
+    return disabled();
+}
+
 request_id sandbox::last_request() const noexcept {
     return {};
 }

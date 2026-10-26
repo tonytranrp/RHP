@@ -34,6 +34,7 @@
 #include <rhp/script/detail/context.hpp>
 #include <rhp/script/detail/event_registry.hpp>
 #include <rhp/script/ledger.hpp>
+#include <rhp/script/puc_lua/small_alloc.hpp>
 #include <rhp/script/sandbox.hpp>
 #include <rhp/script/stack.hpp>
 
@@ -402,6 +403,9 @@ public:
     void cancel() noexcept;
     void cancel(request_id request) noexcept;
     void pump();
+    result<bool> collect_idle(std::chrono::microseconds budget);
+    // set_gc_mode and the test bridge's gc_mode() report the mode they switched to.
+    void note_gc_mode(gc_mode mode) noexcept { gc_mode_ = mode; }
     [[nodiscard]] request_id last_request() const noexcept { return last_request_; }
     [[nodiscard]] std::size_t suspended() const noexcept;
     [[nodiscard]] bool pending(request_id request) const noexcept { return requests_.contains(request); }
@@ -473,6 +477,10 @@ public:
     void unsubscribe(const std::string& event, std::uint64_t key) noexcept;
 
     static void* allocate(void* ud, void* ptr, std::size_t old_size, std::size_t new_size) noexcept;
+    // allocate's two homes: a block of `size` bytes back to small_ or (larger) to the C heap or
+    // memory_; a new block too large for small_.
+    void free_block(void* block, std::size_t size) noexcept;
+    [[nodiscard]] void* heap_allocate(std::size_t size) noexcept;
     // The hook: count events (limits, cancels, time slices, profiler samples) and, while the debugger
     // needs them, line events.
     static void count_hook(lua_State* L, lua_Debug* ar);
@@ -652,7 +660,16 @@ private:
 
     sandbox_options options_;
     std::pmr::memory_resource* memory_; // nullptr: the C heap (realloc)
+    // Blocks up to small_alloc::kMaxSize, in regions from memory_. A member, so it outlives the
+    // destructor's lua_close (which gives every block back) and then gives back the regions.
+    small_alloc small_;
     std::size_t memory_used_ = 0;
+    // The innermost run with a budget of its own (what a memory stop is charged to), kept by
+    // active_scope so the allocator doesn't walk running_.
+    run_budget* budget_ = nullptr;
+    // What lua_gc was last switched to through RHP (collect_idle); an admin script's collectgarbage()
+    // can change the mode behind it, which only makes collect_idle step more or less than it could.
+    gc_mode gc_mode_ = gc_mode::kIncremental;
     // Allocation counters (sandbox::meter): always on, a few increments per allocation.
     std::size_t peak_ = 0;
     std::uint64_t allocations_ = 0;

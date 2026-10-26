@@ -56,6 +56,26 @@ On x64 Windows 1k yields went from 2.95 ms to 104 us. A C++ binding that yields 
 | `sandbox::call` | a few hundred nanoseconds over a raw `lua_pcall` (a pooled request, a ledger owner, result conversion) | call once per frame, not per object |
 | idle `pump()` | under 100 ns; idle timers and sleeping tasks cost nothing until due | nothing to do |
 
+## Garbage collection
+
+Lua's memory goes through the sandbox's allocator: blocks up to 128 bytes (tables, closures, upvalues, short strings, small arrays: nearly every allocation of table, closure and string heavy code) come from per-size-class slabs, so an allocation or a free is a pointer pop or push; larger blocks use the C heap or your `sandbox_options::memory` resource. `limits.memory` and the meter count the bytes Lua asked for, as before. A sandbox holds a 64 KiB region for its slabs from the first allocation and gives regions back when they empty (keeping a few spare slabs). Under AddressSanitizer there is no pooling, so a use after free in a Lua object is still reported.
+
+The collector itself runs inside the scripts that allocate: when a frame's scripts allocate enough, that frame pays for a collector step, and on a large heap the slowest frames are the ones that hit the expensive parts of a cycle. Two settings move that cost:
+
+- **`sandbox::collect_idle(budget)`**: call it when the frame has time to spare (after `pump()`, before the frame's deadline). In incremental mode it runs collector steps until the budget is spent or the cycle ends, so the frames' own steps find less to do; in generational mode it runs one step (a minor collection, or one increment of a major one) whatever the budget.
+- **`sandbox_options::gc`** / **`set_gc_mode`**: `kIncremental` (the default) or `kGenerational`. Generational minor collections are cheap while little old data changes, but every minor collection walks every old table a script wrote to since the last one: a large table that is written every frame is walked every frame.
+
+Measured with `rhp_bench "[gc]"` (1000 frame callbacks that each make a small table and a string, 200k live tables, one in 64 calls stored into them; Windows on a loaded machine, two runs, each the median of 7 rounds of 1000 frames):
+
+| Collector | pump p50 | pump p99 | pump max | idle step (mean) | pump + idle (mean) |
+|---|---:|---:|---:|---:|---:|
+| incremental (default) | 0.98-1.96 ms | 9.4-16.7 ms | 34.7-44.5 ms | - | 1.57-2.62 ms |
+| incremental + `collect_idle(250us)` | 1.56-1.72 ms | 5.8-6.6 ms | 8.6-9.4 ms | 0.44 ms | 2.20-2.28 ms |
+| generational | 0.94-1.33 ms | 9.1-9.4 ms | 13.2-16.4 ms | - | 1.25-1.59 ms |
+| generational + `collect_idle(250us)` | 0.92-1.53 ms | 2.3-2.9 ms | 3.3-6.0 ms | 1.59-1.82 ms | 2.67-3.33 ms |
+
+Idle steps cut the slowest frames by 3-5x in both modes, for more collector work in total (incremental: cycles run back to back, so the scripts' write barriers are on more of the time; generational: each step is a whole minor collection, here walking the 200k-entry table the callbacks write to). With no live heap every row is within noise of the others. Try `collect_idle` with a budget your frame can spare and compare the frame times your game sees; `kGenerational` is worth measuring for a large heap whose old data mostly stays put.
+
 ## Signed scripts
 
 Ed25519 signing and checking cost tens of microseconds each. A process-wide cache keeps the 64 most recent script signatures a client made and the 64 most recent ones a host found valid, keyed by public key, signature and the source's BLAKE2b-256. Sending the same source again signs and verifies once: a repeated signed `exec` of a one-line script went from 168 us to 18 us. A host still checks that it trusts the signer before it looks in the cache; a different key, signature or source misses.

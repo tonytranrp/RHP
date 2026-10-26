@@ -238,6 +238,8 @@ struct sandbox_options {
     // pump() or game-code event fire it failed in (it may re-enter the sandbox); empty = one
     // "[handler failed] ..." line through on_output / output.
     std::function<void(const handler_failure&)> on_handler_error{};
+    // Lua's garbage collector mode from the start (set_gc_mode switches it later).
+    gc_mode gc = gc_mode::kIncremental;
 };
 
 namespace detail {
@@ -374,6 +376,14 @@ public:
     // One frame: delivers queued events, fires due timers, resumes suspended requests whose wait
     // is over (within limits.slice_us when set), and applies faults and deferred operations.
     void pump();
+
+    // Gives Lua's garbage collector time the frame has to spare (after pump(), when the frame is
+    // ahead of its deadline), so less of its work lands inside the next frame's scripts. Incremental
+    // mode: collector steps until `budget` is spent or the cycle ends (a step can overrun the budget
+    // by its own length). Generational mode: one step, a minor collection or one increment of a major
+    // one, whatever the budget (0 does nothing). True when a collection cycle ended. Finalizers
+    // (__gc) may run. Pump thread.
+    result<bool> collect_idle(std::chrono::microseconds budget);
 
     // The request the latest exec / load / call / reload started.
     [[nodiscard]] request_id last_request() const noexcept;
