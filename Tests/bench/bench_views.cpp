@@ -48,7 +48,7 @@ particle& the_particle() {
 using bench_lib = Rhp::lib<"bench">                                                                                                          //
     ::fn<"floats", &floats>::fn<"sum", &sum>                                                                                                 //
     ::view<"particle", particle>::field<"x", &particle::x>::field<"y", &particle::y>::field<"vx", &particle::vx>::field<"vy", &particle::vy> //
-    ::fn<"particle", &the_particle>;
+    ::fn<"get_particle", &the_particle>;
 
 // The raw twin of a typed view: a userdata holding the pointer and the length, a C __index and
 // __newindex that check the index and convert the element.
@@ -151,8 +151,11 @@ function M.write() local v = bench.floats() for i = 1, #v do v[i] = i end return
 function M.write_buffer() local v = B for i = 1, #v do v[i] = i end return 0 end
 function M.sum_cpp() return bench.sum(bench.floats()) end
 function M.sum_cpp_table() return bench.sum(T) end
-function M.fields() local p = bench.particle() for i = 1, 10000 do p.x = p.x + p.vx end return p.x end
+function M.fields() local p = bench.get_particle() for i = 1, 10000 do p.x = p.x + p.vx end return p.x end
 function M.fields_table() local p = P for i = 1, 10000 do p.x = p.x + p.vx end return p.x end
+function M.field_reads() local p, s = bench.get_particle(), 0 for i = 1, 10000 do s = s + p.vx end return s end
+function M.field_reads_table() local p, s = P, 0 for i = 1, 10000 do s = s + p.vx end return s end
+function M.write10() local v = bench.floats() for k = 1, 10 do for i = 1, #v do v[i] = i end end return 0 end
 function M.read_buffer() local b, s = U, 0 for i = 1, 4 * 10000, 4 do s = s + b:read_u32(i) end return s end
 function M.read_string() local b, s, unpack = S, 0, string.unpack for i = 1, 4 * 10000, 4 do s = s + unpack('<I4', b, i) end return s end
 return M
@@ -165,8 +168,11 @@ function M.sum_table() local s = 0 for i = 1, #T do s = s + T[i] end return s en
 function M.write() local v = bench.floats() for i = 1, #v do v[i] = i end return 0 end
 function M.write_buffer() local v = bench.buffer() for i = 1, #v do v[i] = i end return 0 end
 function M.sum_cpp() return bench.sum(T) end
-function M.fields() local p = bench.particle() for i = 1, 10000 do p.x = p.x + p.vx end return p.x end
+function M.fields() local p = bench.get_particle() for i = 1, 10000 do p.x = p.x + p.vx end return p.x end
 function M.fields_table() local p = P for i = 1, 10000 do p.x = p.x + p.vx end return p.x end
+function M.field_reads() local p, s = bench.get_particle(), 0 for i = 1, 10000 do s = s + p.vx end return s end
+function M.field_reads_table() local p, s = P, 0 for i = 1, 10000 do s = s + p.vx end return s end
+function M.write10() local v = bench.floats() for k = 1, 10 do for i = 1, #v do v[i] = i end end return 0 end
 function M.read_string() local b, s, unpack = S, 0, string.unpack for i = 1, 4 * 10000, 4 do s = s + unpack('<I4', b, i) end return s end
 return M
 )";
@@ -194,7 +200,7 @@ TEST_CASE("bench views: spans struct views and buffers next to raw userdata and 
     lua_pushcfunction(R, &raw_sum);
     lua_setfield(R, -2, "sum");
     lua_pushcfunction(R, &raw_particle_fn);
-    lua_setfield(R, -2, "particle");
+    lua_setfield(R, -2, "get_particle");
     lua_setglobal(R, "bench");
     luaL_newmetatable(R, "raw.floats");
     lua_pushcfunction(R, &raw_floats_index);
@@ -285,6 +291,18 @@ U = rhp.buffer.from(S)
     BENCHMARK("views raw: 10k field reads and writes") {
         return call_raw("fields");
     };
+    BENCHMARK("views raw: 10k field reads of a table") {
+        return call_raw("field_reads_table");
+    };
+    BENCHMARK("views raw: 10k field reads") {
+        return call_raw("field_reads");
+    };
+    BENCHMARK("views rhp: 10k field reads") {
+        return call_box("field_reads");
+    };
+    BENCHMARK("views unchecked: 10k field reads") {
+        return call_unchecked("field_reads");
+    };
     // The raw twin reads a string with string.unpack, RHP a buffer with read_u32.
     BENCHMARK("views raw: 10k u32 reads") {
         return call_raw("read_string");
@@ -311,6 +329,13 @@ U = rhp.buffer.from(S)
     BENCHMARK("views unchecked: write 10k floats through a span") {
         const auto n = call_unchecked("write");
         return n + unchecked.revert_to("bench")->undone;
+    };
+    BENCHMARK("views raw: write 10k floats through a span 10 times") {
+        return call_raw("write10");
+    };
+    BENCHMARK("views rhp: write 10k floats through a span 10 times") {
+        const auto n = call_box("write10");
+        return n + box.revert_to("bench")->undone;
     };
     BENCHMARK("views rhp: 10k field reads and writes") {
         const auto n = call_box("fields");

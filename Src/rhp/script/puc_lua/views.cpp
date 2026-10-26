@@ -32,9 +32,9 @@ namespace {
 // The node, padded so a payload after it is aligned for anything.
 constexpr std::size_t kNodeSize = (sizeof(view_node) + alignof(std::max_align_t) - 1) / alignof(std::max_align_t) * alignof(std::max_align_t);
 
-constexpr const char* kFieldsField = "__rhp_fields"; // a view type's fields: name -> light userdata (field_desc)
-constexpr const char* kOrderField = "__rhp_order";   // their names in declaration order
-constexpr const char* kTypeTagField = "__rhp_type";  // the C++ type (view_type_info::type_tag)
+constexpr const char* kFieldsField = "__rhp_fields";     // a view type's fields: name -> light userdata (field_desc)
+constexpr const char* kOrderField = "__rhp_order";       // their names in declaration order
+constexpr const char* kTypeTagField = "__rhp_view_type"; // the C++ type (view_type_info::type_tag; not a handle's __rhp_type)
 
 [[noreturn]] void raise(lua_State* L, error err) {
     stack{L}.raise(err);
@@ -134,7 +134,7 @@ int write_at(lua_State* L, view_node& n, int key, int value) {
         raise_elem(L, value, n.elem, e, std::string{n.label});
     }
     const std::size_t at = (static_cast<std::size_t>(i) - 1) * es;
-    if (before_write(L, n, p, at, es, n.label)) {
+    if (before_write(L, n, p, at, es)) {
         std::memcpy(p.data + at, converted, es);
     }
     return 0;
@@ -262,7 +262,7 @@ int seq_fill(lua_State* L) {
     if (const elem_error e = to_elem(L, 2, n.elem, converted); e != elem_error::kNone) {
         raise_elem(L, 2, n.elem, e, std::string{n.label});
     }
-    if (last > first && before_write(L, n, p, first * es, (last - first) * es, n.label)) {
+    if (last > first && before_write(L, n, p, first * es, (last - first) * es)) {
         for (std::size_t i = first; i < last; ++i) {
             std::memcpy(p.data + i * es, converted, es);
         }
@@ -323,7 +323,7 @@ int seq_copy(lua_State* L) {
         raise(L, errc::kOutOfRange, std::format("{} elements from {} don't fit [1, {}]", count, pos, dest_count), n.label);
     }
     const std::size_t at = (static_cast<std::size_t>(pos) - 1) * es;
-    if (count > 0 && before_write(L, n, p, at, count * es, n.label)) {
+    if (count > 0 && before_write(L, n, p, at, count * es)) {
         std::memmove(p.data + at, from, count * es);
     }
     return 0;
@@ -444,7 +444,7 @@ int object_newindex(lua_State* L) {
     }
     auto* at = static_cast<std::byte*>(f->address(p.data));
     const std::size_t size = elem_size(f->elem);
-    if (before_write(L, *n, p, static_cast<std::size_t>(at - p.data), size, field_label(*n, *f))) {
+    if (before_write(L, *n, p, static_cast<std::size_t>(at - p.data), size, f)) {
         std::memcpy(at, converted, size);
     }
     return 0;
@@ -483,6 +483,7 @@ int object_next(lua_State* L) {
     lua_Integer next = 1;
     if (!lua_isnoneornil(L, 2)) {
         const lua_Integer n = static_cast<lua_Integer>(lua_rawlen(L, order));
+        next = n + 1; // a key that is no field ends the walk
         for (lua_Integer i = 1; i <= n; ++i) {
             lua_rawgeti(L, order, i);
             const bool found = lua_rawequal(L, -1, 2) != 0;
@@ -565,7 +566,39 @@ result<place> locate(const view_node& n) {
     return fail(errc::kRuntime, "not a view");
 }
 
+bool find_place(const view_node& n, place& out) noexcept {
+    switch (n.origin) {
+    case node_origin::kInline: out = place{n.data, n.count, nullptr, nullptr, 0}; return true;
+    case node_origin::kHost: {
+        region r;
+        if (!n.source->find(r)) {
+            return false;
+        }
+        out = place{r.data, r.size, &n, r.data, r.size};
+        return true;
+    }
+    case node_origin::kParent: {
+        if (!find_place(*n.parent, out)) {
+            return false;
+        }
+        const std::size_t size = n.shape == node_shape::kObject ? n.type->size : n.count * elem_size(n.elem);
+        if (n.offset > out.size || size > out.size - n.offset) {
+            return false;
+        }
+        out.data += n.offset;
+        out.size = size;
+        return true;
+    }
+    }
+    return false;
+}
+
 place locate_or_raise(lua_State* L, const view_node& n) {
+    place found;
+    if (find_place(n, found)) [[likely]] {
+        return found;
+    }
+    // Asked again for the reason (the binding is a lookup: calling it twice changes nothing).
     result<place> p = locate(n);
     if (!p) {
         error err = std::move(p).error();
@@ -577,21 +610,23 @@ place locate_or_raise(lua_State* L, const view_node& n) {
     return *p;
 }
 
-bool before_write(lua_State* L, view_node& writer, const place& p, std::size_t offset, std::size_t len, std::string_view what) {
+bool before_write(lua_State* L, view_node& writer, const place& p, std::size_t offset, std::size_t len, const field_desc* field) {
     if (p.root == nullptr) {
         return true; // a script's own buffer
     }
     const stack s{L};
     context& ctx = s.context();
-    if (!allows(ctx.caller_role(), role::kPatch)) {
-        raise(L, errc::kForbidden, std::format("writing host memory needs role {}", role::kPatch), what);
+    const auto what = [&] { return field != nullptr ? field_label(writer, *field) : std::string{writer.label}; };
+    // A node that journaled in this sandbox already passed the check (the role is the sandbox's).
+    if (writer.cache.ctx != &ctx && !allows(ctx.caller_role(), role::kPatch)) {
+        raise(L, errc::kForbidden, std::format("writing host memory needs role {}", role::kPatch), what());
     }
     std::optional<error> failed;
     bool ok = false;
     try {
         ok = journal_touch(ctx, writer.cache, p, static_cast<std::size_t>(p.data - p.root_data) + offset, len);
     } catch (const std::exception& e) {
-        failed = make_error(errc::kMemoryExceeded, std::format("journaling the write failed: {}", e.what()), std::string{what});
+        failed = make_error(errc::kMemoryExceeded, std::format("journaling the write failed: {}", e.what()), what());
     }
     if (failed) {
         raise(L, std::move(*failed));
@@ -718,15 +753,12 @@ bool read_span_arg(lua_State* L, int index, arg_slot& out) noexcept {
             return true;
         }
         const view_node* n = to_span_node(L, index);
-        if (n == nullptr) {
-            return false;
-        }
-        const result<place> p = locate(*n);
-        if (!p) {
+        place p;
+        if (n == nullptr || !find_place(*n, p)) {
             return false; // the general path raises the error
         }
-        out.view.data = p->data;
-        out.view.size = p->size;
+        out.view.data = p.data;
+        out.view.size = p.size;
         out.view.elem = static_cast<std::uint8_t>(n->elem);
         out.view.string = false;
         return true;
@@ -744,35 +776,63 @@ std::pair<std::size_t, std::size_t> range_args(lua_State* L, int i_index, std::s
     return {static_cast<std::size_t>(i) - 1, static_cast<std::size_t>(j)};
 }
 
-void set_sequence_metamethods(lua_State* L, int mt, int methods, bool gc) {
-    mt = lua_absindex(L, mt);
-    methods = lua_absindex(L, methods);
-    if (gc) { // only host views own something to destroy (a buffer's bytes are its own)
-        lua_pushcfunction(L, &node_gc);
-        lua_setfield(L, mt, "__gc");
-    }
+namespace {
+
+// Typed views index elements (a C __index: integers are elements, names methods).
+void set_span_metamethods(lua_State* L, int mt, int methods) {
+    lua_pushcfunction(L, &node_gc); // a host view owns its source
+    lua_setfield(L, mt, "__gc");
     lua_pushvalue(L, methods);
     lua_pushcclosure(L, &node_index, 1);
     lua_setfield(L, mt, "__index");
     lua_pushcfunction(L, &node_newindex);
     lua_setfield(L, mt, "__newindex");
-    lua_pushcfunction(L, &node_len);
-    lua_setfield(L, mt, "__len");
     lua_pushcfunction(L, &node_pairs);
     lua_setfield(L, mt, "__pairs");
+    const luaL_Reg span_only[] = {
+        {"get", &seq_get},
+        {"set", &seq_set},
+        {"totable", &seq_totable},
+        {"kind", &seq_kind},
+        {"writable", &seq_writable},
+        {nullptr, nullptr},
+    };
+    for (const luaL_Reg* r = span_only; r->name != nullptr; ++r) {
+        lua_pushcfunction(L, r->func);
+        lua_setfield(L, methods, r->name);
+    }
+}
+
+// Buffers are read and written through methods: __index is the methods table itself (a method
+// lookup is the VM's table lookup, no C call); b[i] = v raises.
+int buffer_newindex(lua_State* L) {
+    raise(L, errc::kInvalidArgument, "a buffer is read and written through its methods (b:write_u8(pos, v)) or a view (b:view(\"u8\")[i] = v)",
+          "rhp.buffer");
+}
+
+} // namespace
+
+void set_sequence_metamethods(lua_State* L, int mt, int methods, bool buffer) {
+    mt = lua_absindex(L, mt);
+    methods = lua_absindex(L, methods);
+    if (buffer) {
+        lua_pushvalue(L, methods);
+        lua_setfield(L, mt, "__index");
+        lua_pushcfunction(L, &buffer_newindex);
+        lua_setfield(L, mt, "__newindex");
+    } else {
+        set_span_metamethods(L, mt, methods);
+    }
+    lua_pushcfunction(L, &node_len);
+    lua_setfield(L, mt, "__len");
     lua_pushcfunction(L, &node_eq);
     lua_setfield(L, mt, "__eq");
     lua_pushliteral(L, "locked");
     lua_setfield(L, mt, "__metatable");
     const luaL_Reg shared[] = {
-        {"get", &seq_get},
-        {"set", &seq_set},
         {"slice", &seq_slice},
         {"fill", &seq_fill},
         {"copy", &seq_copy},
-        {"totable", &seq_totable},
-        {"kind", &seq_kind},
-        {"writable", &seq_writable},
         {nullptr, nullptr},
     };
     for (const luaL_Reg* r = shared; r->name != nullptr; ++r) {
@@ -792,7 +852,7 @@ void define_span_type(lua_State* L) {
     lua_pushcfunction(L, &span_tostring);
     lua_setfield(L, mt, "__tostring");
     lua_createtable(L, 0, 8);
-    set_sequence_metamethods(L, mt, -1, true);
+    set_sequence_metamethods(L, mt, -1, false);
     lua_pop(L, 2);
 }
 

@@ -27,6 +27,7 @@ namespace Rhp::script::api {
 //    functions = {{name, params = {"integer", ...}, returns = {"entity"}, async, role, undo, irreversible}},
 //    variables = {{name, type, writable, min?, max?, step?, unit?, doc?}},
 //    handles = {{name, methods = {<function>...}, properties = {{name, type, role}}}},
+//    views = {{name, fields = {{name, type, writable, min?, max?, step?, unit?, doc?}}}}, (only when the lib declares one)
 //    libs = {<sub-lib>...}}
 //
 // A method's params leave out the handle itself. Handles are listed on the lib that declares them.

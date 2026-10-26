@@ -156,6 +156,8 @@ public:
     // The memory now, or why there is none (kStaleHandle: a handle argument is dead, or the binding
     // returned a null pointer; the binding's own error otherwise). Never throws.
     [[nodiscard]] virtual result<region> resolve() const noexcept = 0;
+    // The same without saying why not (every access: no error is made when there is memory).
+    [[nodiscard]] virtual bool find(region& out) const noexcept = 0;
     // A copy kept by the journal (it outlives the Lua view).
     [[nodiscard]] virtual std::unique_ptr<view_source> clone() const = 0;
     // Same binding, same arguments: the same memory (the journal stacks their writes together).
