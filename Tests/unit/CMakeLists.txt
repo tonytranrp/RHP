@@ -154,6 +154,7 @@ if(RHP_ENABLE)
             script/method_tests.cpp
             script/patch_point_tests.cpp
             script/reload_tests.cpp
+            script/request_tests.cpp
             script/require_tests.cpp
             script/sandbox_tests.cpp
             script/schedule_tests.cpp

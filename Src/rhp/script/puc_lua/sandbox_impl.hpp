@@ -138,6 +138,7 @@ struct request_state {
     int thread_ref = kNoRef;
     run_budget budget;
     bool running = false;
+    bool listed = false;         // in requests_ (it suspended, or it's a task); while it runs, in unlisted_
     bool checked = false;        // armed for cancels and limits when it started (start_request; rearm_all keeps it)
     bool suspended_once = false; // its result goes to on_result
     bool sliced = false;         // the hook yielded it at the end of a time slice
@@ -408,7 +409,9 @@ public:
     void note_gc_mode(gc_mode mode) noexcept { gc_mode_ = mode; }
     [[nodiscard]] request_id last_request() const noexcept { return last_request_; }
     [[nodiscard]] std::size_t suspended() const noexcept;
-    [[nodiscard]] bool pending(request_id request) const noexcept { return requests_.contains(request); }
+    [[nodiscard]] bool pending(request_id request) const noexcept { return live(request); }
+    // A request that is suspended or running (one that never suspended isn't in requests_).
+    [[nodiscard]] bool live(request_id request) const noexcept;
     [[nodiscard]] std::uint64_t frame() const noexcept { return frame_; }
     [[nodiscard]] std::size_t memory_used() const noexcept { return memory_used_; }
     [[nodiscard]] const ledger& effects() const noexcept { return ledger_; }
@@ -573,11 +576,28 @@ private:
     // into a new coroutine; step runs it until it finishes (the result), fails, or suspends (nullopt).
     // `label` names the request in errors; handlers (timers, frame callbacks, events, tasks) pass none
     // and get one from where_of() when they fail.
+    // A request enters requests_ (the scheduler's map) only when it first suspends; until then its
+    // map node waits in unlisted_ (tasks, which start at a later pump(), are listed at once). Most
+    // requests finish in their first step and never touch the map.
     request_record& start_request(request_kind kind, const effect_owner& owner, std::string_view label, int nargs, bool from_operation);
+    // The next handler of one delivery in the record and coroutine the previous one finished in
+    // (both unlisted and idle): a new request id, owner and state, the same coroutine (re-armed).
+    request_record& restart_request(request_record& req, request_kind kind, const effect_owner& owner, int nargs);
+    // An idle record kept for a next handler that never came: its coroutine and node go back to the pools.
+    void release_kept(request_record& req) noexcept;
     // Where a failure of `req` happened when the script gives no location.
     [[nodiscard]] std::string where_of(const request_record& req) const;
-    std::optional<result<value_list>> step(request_record& req, int nargs);
+    // `kept` (deliveries): a request that finishes normally keeps its record and coroutine for the
+    // caller's next handler (restart_request) and sets *kept; anything else recycles them as usual.
+    std::optional<result<value_list>> step(request_record& req, int nargs, bool* kept = nullptr);
     result<value_list> complete(request_id id, result<int> outcome);
+    result<value_list> complete(request_record& req, result<int> outcome, bool* kept = nullptr);
+    // The map node of an unlisted record (empty if it isn't in unlisted_).
+    [[nodiscard]] std::map<request_id, std::unique_ptr<request_record>>::node_type take_unlisted(const request_record& req) noexcept;
+    // A request suspends for the first time: into requests_.
+    void list_request(request_record& req) noexcept;
+    // Makes `req` request `id` and moves the function and `nargs` arguments on the main stack into `co`.
+    void prepare_request(request_record& req, lua_State* co, request_kind kind, const effect_owner& owner, request_id id, int nargs);
     result<value_list> complete_load(module_record& mod, revision_id revision, lua_State* thread);
     // Ends suspended requests matching `pred` without faulting anyone (their module is going away).
     template <class Pred>
@@ -704,6 +724,9 @@ private:
     std::map<request_id, std::unique_ptr<request_record>> requests_;
     // Finished requests' map nodes (record included) and coroutines, reused by start_request.
     std::vector<decltype(requests_)::node_type> spare_requests_;
+    // Records of requests that run but never suspended (and a delivery's idle record between two
+    // handlers): their nodes wait here instead of in requests_, innermost last.
+    std::vector<decltype(requests_)::node_type> unlisted_;
     std::vector<std::pair<lua_State*, int>> spare_threads_; // (thread, registry ref)
     std::uint32_t checked_depth_ = 0;                       // operations and checked request runs active (enter_checked)
     // The earliest frame / script time a suspended request wakes at, so an idle pump() doesn't walk

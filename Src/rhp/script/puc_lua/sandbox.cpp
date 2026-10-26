@@ -459,6 +459,7 @@ sandbox_impl::sandbox_impl(sandbox_options options)
     // Room for every spare up front: putting a finished request back never allocates (or throws).
     spare_requests_.reserve(kSpareRequests);
     spare_threads_.reserve(kSpareRequests);
+    unlisted_.reserve(kSpareRequests); // runs nested deeper than this grow it (start_request may allocate anyway)
     state_ = lua_newstate(&sandbox_impl::allocate, this, luaL_makeseed(nullptr));
     if (state_ == nullptr) {
         throw std::bad_alloc{};
@@ -1412,6 +1413,7 @@ void sandbox_impl::abandon_requests(Pred pred, std::string_view why) {
             continue;
         }
         request_record& req = *node.mapped();
+        req.listed = false;
         const result<value_list> outcome = fail(errc::kCancelled, std::string{why}, where_of(req));
         close_thread(req, true);
         request_ended(req, &outcome, true);
@@ -1430,29 +1432,24 @@ void sandbox_impl::abandon_request(request_id id, std::string_view why) {
 
 request_record& sandbox_impl::start_request(request_kind kind, const effect_owner& owner, std::string_view label, int nargs, bool from_operation) {
     lua_State* L = state_;
-    // A finished request's map node and record when one is spare, else new ones.
+    const request_id id = request_ids_.next();
+    // A finished request's map node and record when one is spare, else new ones (made in the map and
+    // taken out again: every record lives in a node, listed or not).
     decltype(requests_)::node_type node;
-    std::unique_ptr<request_record> fresh;
-    request_record* req = nullptr;
     if (!spare_requests_.empty()) {
         node = std::move(spare_requests_.back());
         spare_requests_.pop_back();
-        req = node.mapped().get();
-        req->reset();
+        node.mapped()->reset();
     } else {
-        fresh = std::make_unique<request_record>();
-        req = fresh.get();
+        node = requests_.extract(requests_.emplace(id, std::make_unique<request_record>()).first);
     }
-    req->id = request_ids_.next();
-    req->kind = kind;
-    req->owner = owner;
-    req->owner.request = req->id;
-    req->label.assign(label);
+    request_record& req = *node.mapped();
+    req.label.assign(label);
 
     luaL_checkstack(L, 5, "rhp: request setup"); // every caller runs protected on the main state (spawn checked it)
     lua_State* co = nullptr;
     if (!spare_threads_.empty()) {
-        std::tie(co, req->thread_ref) = spare_threads_.back();
+        std::tie(co, req.thread_ref) = spare_threads_.back();
         spare_threads_.pop_back();
     } else {
         co = lua_newthread(L);
@@ -1461,45 +1458,115 @@ request_record& sandbox_impl::start_request(request_kind kind, const effect_owne
         lua_pushboolean(L, 1);
         lua_rawset(L, -3);
         lua_pop(L, 1);
-        req->thread_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+        req.thread_ref = luaL_ref(L, LUA_REGISTRYINDEX);
     }
-    // Requests check for cancel() (handlers only when a limit or cancel_scope::kEverything asks).
-    // A handler started while a checked run is active is part of that run's work (an event fired
-    // synchronously by its code): it checks too.
-    req->checked = checks_requests() && (checked_kind(kind) || checked_depth_ != 0);
-    arm_hook(co, hook_everywhere() || req->checked);
     try {
-        // lua_xmove never grows the destination: a new coroutine has room for about 20 values.
-        if (lua_checkstack(co, nargs + 1) == 0) {
-            req->start_error = make_error(errc::kLimitExceeded, std::format("{} arguments don't fit a coroutine stack", nargs));
-        }
-        req->thread = co;
-        if (req->start_error) {
-            lua_pop(L, nargs + 1); // the request ends at its first step
-        } else {
-            lua_xmove(L, co, nargs + 1); // the function and its arguments
-        }
-        if (node) {
-            node.key() = req->id;
+        prepare_request(req, co, kind, owner, id, nargs);
+        node.key() = id;
+        if (kind == request_kind::kTask) {
+            // A task starts at a later pump(): the scheduler must see it now.
+            req.listed = true;
             requests_.insert(std::move(node)); // reuses the node: no allocation
+            requests_dirty_ = true;
         } else {
-            requests_.emplace(req->id, std::move(fresh));
+            unlisted_.push_back(std::move(node)); // reserved in the constructor (deeper nesting grows it)
         }
     } catch (...) { // out of memory part way: the coroutine is emptied and kept (the pool has room: it was just taken from, or reserved)
         lua_settop(co, 0);
         if (spare_threads_.size() < spare_threads_.capacity()) {
-            spare_threads_.emplace_back(co, req->thread_ref);
+            spare_threads_.emplace_back(co, req.thread_ref);
         } else {
-            luaL_unref(L, LUA_REGISTRYINDEX, req->thread_ref);
+            luaL_unref(L, LUA_REGISTRYINDEX, req.thread_ref);
         }
         throw;
     }
 
     if (from_operation) {
-        last_request_ = req->id;
+        last_request_ = id;
     }
-    requests_dirty_ = true;
-    return *req;
+    return req;
+}
+
+void sandbox_impl::prepare_request(request_record& req, lua_State* co, request_kind kind, const effect_owner& owner, request_id id, int nargs) {
+    req.id = id;
+    req.kind = kind;
+    req.owner = owner;
+    req.owner.request = id;
+    // Requests check for cancel() (handlers only when a limit or cancel_scope::kEverything asks).
+    // A handler started while a checked run is active is part of that run's work (an event fired
+    // synchronously by its code): it checks too.
+    req.checked = checks_requests() && (checked_kind(kind) || checked_depth_ != 0);
+    arm_hook(co, hook_everywhere() || req.checked);
+    // lua_xmove never grows the destination: a new coroutine has room for about 20 values.
+    if (lua_checkstack(co, nargs + 1) == 0) {
+        req.start_error = make_error(errc::kLimitExceeded, std::format("{} arguments don't fit a coroutine stack", nargs));
+    }
+    req.thread = co;
+    if (req.start_error) {
+        lua_pop(state_, nargs + 1); // the request ends at its first step
+    } else {
+        lua_xmove(state_, co, nargs + 1); // the function and its arguments
+    }
+}
+
+request_record& sandbox_impl::restart_request(request_record& req, request_kind kind, const effect_owner& owner, int nargs) {
+    lua_State* co = req.thread;
+    const int ref = req.thread_ref;
+    req.reset();
+    req.thread = co; // release_kept still finds the coroutine if the rest throws
+    req.thread_ref = ref;
+    prepare_request(req, co, kind, owner, request_ids_.next(), nargs);
+    return req;
+}
+
+void sandbox_impl::release_kept(request_record& req) noexcept {
+    auto node = take_unlisted(req); // compares addresses only: `req` may be a record already recycled
+    if (node.empty()) {
+        return;
+    }
+    if (req.thread != nullptr) {
+        close_thread(req, false);
+    }
+    if (spare_requests_.size() < kSpareRequests) {
+        spare_requests_.push_back(std::move(node)); // reserved in the constructor: no allocation
+    }
+}
+
+std::map<request_id, std::unique_ptr<request_record>>::node_type sandbox_impl::take_unlisted(const request_record& req) noexcept {
+    for (auto it = unlisted_.end(); it != unlisted_.begin();) {
+        --it;
+        if (it->mapped().get() == &req) {
+            auto node = std::move(*it);
+            unlisted_.erase(it);
+            return node;
+        }
+    }
+    return {};
+}
+
+void sandbox_impl::list_request(request_record& req) noexcept {
+    requests_dirty_ = true; // suspended with a new wake
+    if (req.listed) {
+        return;
+    }
+    auto node = take_unlisted(req);
+    if (node.empty()) {
+        return;
+    }
+    node.key() = req.id;
+    requests_.insert(std::move(node)); // reuses the node: no allocation
+    req.listed = true;
+    // A profiler or debugger that started while it ran re-armed the listed coroutines only (rearm_all).
+    if (!hook_dirty_) {
+        sync_hook(req.thread, hook_everywhere() || req.checked);
+    }
+}
+
+bool sandbox_impl::live(request_id request) const noexcept {
+    if (requests_.contains(request)) {
+        return true;
+    }
+    return std::ranges::any_of(running_, [request](const active_run& run) { return run.request != nullptr && run.request->id == request; });
 }
 
 std::string sandbox_impl::where_of(const request_record& req) const {
@@ -1520,12 +1587,15 @@ std::string sandbox_impl::where_of(const request_record& req) const {
     return {};
 }
 
-std::optional<result<value_list>> sandbox_impl::step(request_record& req, int nargs) {
+std::optional<result<value_list>> sandbox_impl::step(request_record& req, int nargs, bool* kept) {
+    if (kept != nullptr) {
+        *kept = false;
+    }
     if (take_cancel(req.id)) {
-        return complete(req.id, std::unexpected{make_error(errc::kCancelled, "script cancelled")}); // never resumed again
+        return complete(req, std::unexpected{make_error(errc::kCancelled, "script cancelled")}, kept); // never resumed again
     }
     if (req.start_error) {
-        return complete(req.id, std::unexpected{*req.start_error});
+        return complete(req, std::unexpected{*req.start_error}, kept);
     }
     req.sliced = false;
     req.wake_frame = 0;
@@ -1545,7 +1615,6 @@ std::optional<result<value_list>> sandbox_impl::step(request_record& req, int na
         credit_hook_progress(req.thread);
     }
     req.running = false;
-    requests_dirty_ = true; // suspended with a new wake, or done
     const sticky_stop stop = req.budget.sticky;
 
     if (status == LUA_YIELD) {
@@ -1555,16 +1624,19 @@ std::optional<result<value_list>> sandbox_impl::step(request_record& req, int na
                 req.wake_frame = frame_ + 1; // a time slice ran out, or a plain coroutine.yield()
             }
             req.suspended_once = true;
+            list_request(req); // the scheduler resumes it from now on (sets requests_dirty_)
             return std::nullopt;
         }
-        return complete(req.id, std::unexpected{sticky_error(stop)});
+        return complete(req, std::unexpected{sticky_error(stop)}, kept);
     }
+    // Done: nothing it leaves behind wakes sooner than requests_next_* say (what it woke, a joiner or a
+    // waiter, set requests_dirty_ itself).
     if (status == LUA_OK) {
         // A stop wins even if the script swallowed it with pcall and returned normally.
         if (stop != sticky_stop::kNone) {
-            return complete(req.id, std::unexpected{sticky_error(stop)});
+            return complete(req, std::unexpected{sticky_error(stop)}, kept);
         }
-        return complete(req.id, nresults);
+        return complete(req, nresults, kept);
     }
     // The dead coroutine's stack is still intact: take the traceback before the error object
     // (unless memory ran out: building it would need more).
@@ -1578,16 +1650,29 @@ std::optional<result<value_list>> sandbox_impl::step(request_record& req, int na
     if (stop != sticky_stop::kNone) {
         err.code = sticky_error(stop).code;
     }
-    return complete(req.id, std::unexpected{std::move(err)});
+    return complete(req, std::unexpected{std::move(err)}, kept);
 }
 
 result<value_list> sandbox_impl::complete(request_id id, result<int> outcome) {
-    auto node = requests_.extract(id);
-    if (node.empty()) {
+    const auto it = requests_.find(id);
+    if (it == requests_.end()) {
         return fail(errc::kNotFound, std::format("no request {}", id));
     }
-    request_record& req = *node.mapped();
-    module_record* mod = record(req.owner.module);
+    return complete(*it->second, std::move(outcome));
+}
+
+result<value_list> sandbox_impl::complete(request_record& req, result<int> outcome, bool* kept) {
+    // Out of the scheduler first: nothing below (a fault abandoning its module's requests) may find
+    // it. A record the caller wants to keep stays in unlisted_ until it is known to be reusable.
+    const bool keepable = kept != nullptr && !req.listed;
+    decltype(requests_)::node_type node;
+    if (req.listed) {
+        node = requests_.extract(req.id);
+        req.listed = false;
+    } else if (!keepable) {
+        node = take_unlisted(req);
+    }
+    module_record* mod = req.kind == request_kind::kLoad ? record(req.owner.module) : nullptr;
 
     result<value_list> out = value_list{};
     if (!outcome) {
@@ -1618,8 +1703,14 @@ result<value_list> sandbox_impl::complete(request_id id, result<int> outcome) {
     const bool cancelled_task = t != nullptr && t->cancel_requested;
     // The coroutine closes (its to-be-closed variables run) and the request ends (a task's record
     // gets its outcome, joiners wake) before any policy undoes effects: undoing a task's own ledger
-    // entry must not turn its failure into a cancellation.
-    close_thread(req, !out.has_value());
+    // entry must not turn its failure into a cancellation. A coroutine that returned normally to a
+    // caller that keeps it is only emptied: the caller's next handler runs in it.
+    const bool reuse = keepable && out.has_value() && !closing_lua_ && lua_status(req.thread) == LUA_OK;
+    if (reuse) {
+        lua_settop(req.thread, 0);
+    } else {
+        close_thread(req, !out.has_value());
+    }
     request_ended(req, &out, false);
     if (!out) {
         if (req.kind == request_kind::kExec) {
@@ -1637,7 +1728,14 @@ result<value_list> sandbox_impl::complete(request_id id, result<int> outcome) {
     if (req.suspended_once) {
         finished_.emplace_back(req.id, out);
     }
-    if (spare_requests_.size() < kSpareRequests) {
+    if (reuse) {
+        *kept = true;
+        return out;
+    }
+    if (keepable) {
+        node = take_unlisted(req);
+    }
+    if (!node.empty() && spare_requests_.size() < kSpareRequests) {
         spare_requests_.push_back(std::move(node)); // reserved in the constructor: no allocation
     }
     return out;
@@ -1759,6 +1857,19 @@ value_list sandbox_impl::collect_results(lua_State* L, int first, int last) {
     out.reserve(static_cast<std::size_t>(std::max(0, last - first + 1)));
     const stack s{L};
     for (int i = first; i <= last; ++i) {
+        // Scalars in place (what stack::to_value makes of them, without a result<value> each).
+        switch (lua_type(L, i)) {
+        case LUA_TNIL: out.emplace_back(); continue;
+        case LUA_TBOOLEAN: out.emplace_back(lua_toboolean(L, i) != 0); continue;
+        case LUA_TNUMBER:
+            if (lua_isinteger(L, i) != 0) {
+                out.emplace_back(static_cast<std::int64_t>(lua_tointeger(L, i)));
+            } else {
+                out.emplace_back(static_cast<double>(lua_tonumber(L, i)));
+            }
+            continue;
+        default: break;
+        }
         auto v = s.to_value(i);
         if (v) {
             out.push_back(std::move(*v));

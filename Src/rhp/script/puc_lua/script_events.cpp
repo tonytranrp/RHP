@@ -23,6 +23,7 @@
 #include <rhp/script/puc_lua/builtins.hpp>
 #include <rhp/script/puc_lua/sandbox_impl.hpp>
 #include <rhp/utils/fixed_string.hpp>
+#include <rhp/utils/scope_guard.hpp>
 
 namespace Rhp::script::detail {
 
@@ -254,6 +255,16 @@ void sandbox_impl::deliver_now(std::string_view event, event_pusher args, module
     // 1. Handlers, each as its own request. A snapshot of their keys: handlers may (un)subscribe, so
     // each is looked up again before its call (where it was, unless the list changed), and the list
     // itself again once a subscription was added or removed.
+    // One batch: a handler that returns normally leaves its record and coroutine to the next one
+    // (restart_request: a request id, owner, budget and policy of its own, so a failure still undoes
+    // only that call's effects). One that suspends keeps them as its own request; one that fails
+    // closes them; the next handler then starts a new record.
+    request_record* batch = nullptr;
+    const utils::scope_guard release{[this, &batch]() noexcept {
+        if (batch != nullptr) {
+            release_kept(*batch);
+        }
+    }};
     if (const auto it = subscriptions_.find(event); it != subscriptions_.end()) {
         std::array<std::uint64_t, 16> few{}; // the usual handful without an allocation per delivery
         std::vector<std::uint64_t> many;
@@ -284,14 +295,20 @@ void sandbox_impl::deliver_now(std::string_view event, event_pusher args, module
             lua_rawgeti(state_, LUA_REGISTRYINDEX, sub.fn_ref);
             stack s{state_};
             const int nargs = args(s);
-            request_record& req = start_request(request_kind::kEvent, sub.owner, {}, nargs, false);
+            request_record& req = batch != nullptr ? restart_request(*batch, request_kind::kEvent, sub.owner, nargs)
+                                                   : start_request(request_kind::kEvent, sub.owner, {}, nargs, false);
+            batch = &req; // from here on the guard owns it until step decides
             req.handler_seq = sub.once ? 0 : sub.seq;
             req.policy = sub.policy;
             req.source.assign(event);
             if (sub.once) {
                 (void)ledger_.revert_entry(sub.seq); // spent once its call starts (the function is on the coroutine)
             }
-            (void)step(req, nargs);
+            bool kept = false;
+            (void)step(req, nargs, &kept);
+            if (!kept) {
+                batch = nullptr; // listed (it suspended) or recycled (it failed)
+            }
         }
     }
     // 2. Waiters: they resume at the next resume pass with the arguments. One at a time, so a
