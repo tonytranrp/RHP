@@ -46,7 +46,7 @@ def _keygen(name: str) -> int:
     path = name + ".rhpid"
     if os.path.exists(path):
         print("%s exists; not overwriting it" % path, file=sys.stderr)
-        return 2
+        return 1  # as rhp-cli keygen: 1 for a failure, 2 for a usage error
     text = '# RHP identity (keep it private)\nname = "%s"\npsk = "%s"\nsigning_key = "%s"\n' % (
         name, base64.b64encode(psk).decode(), base64.b64encode(seed).decode())
     with open(path, "w", encoding="utf-8", newline="\n") as fh:

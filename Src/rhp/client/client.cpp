@@ -83,6 +83,7 @@ public:
           io_(setup_.shared_io != nullptr ? *setup_.shared_io : *owned_io_) {
         options_.limits = setup_.limits;
         options_.codec = setup_.codec;
+        options_.ack_delay_ms = setup_.options.ack_delay_ms;
         options_.platform = std::string{platform::kOsName};
         options_.resumable = setup_.limits.resume_ms != 0;
         if (auto policy = session::channel_policy::make(setup_.ep, setup_.transport.network, setup_.tls, setup_.options.tls)) {

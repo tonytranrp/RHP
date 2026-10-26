@@ -5,7 +5,7 @@
 | Header | What |
 |---|---|
 | `host.hpp` | `Rhp::host<Cfg>`: `install<Lib>()`, `pump()`, `on<E>()` / `on_any()`, `on_script_event()`, `on_blob()`, `serve(release::manager&)`, `set_enabled()` / `enabled()`, `port()`, `gateway_port()`, `advertise()`, `discovery_status()`, `sessions()`, `identities()` |
-| `detail/engine.hpp` | `host_options` (idempotency cache, inbox capacity, `tls`, `gateway`, `http_require_binding`, `handler_errors`, `remote_events_per_pump`), `blob_view` / `blob_fn`, the type-erased `setup` and the engine's free functions |
+| `detail/engine.hpp` | `host_options` (idempotency cache, inbox capacity, `tls`, `gateway`, `http_require_binding`, `handler_errors`, `remote_events_per_pump`, `ack_delay_ms`), `blob_view` / `blob_fn`, the type-erased `setup` and the engine's free functions |
 | `detail/releases.hpp` | the bridge `serve` uses: answers the release ops with a `release::manager` (`releases.cpp`) |
 | `gateway.cpp`, `detail/gateway.hpp` (private, not installed) | the HTTP listener: routing, per-key logical sessions, the replay guard; the engine implements its `gateway_sink` |
 

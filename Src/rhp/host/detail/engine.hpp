@@ -52,6 +52,9 @@ struct host_options {
     // Subscribed events (client.on) sent to one session per pump(); the rest are dropped and the
     // next delivery says how many. This bounds the rate, not the backlog of a detached session.
     std::size_t remote_events_per_pump = 256;
+    // How long a received frame's ack waits for an outgoing frame to carry it (session::options);
+    // 0 acks every read at once.
+    std::uint32_t ack_delay_ms = 5;
 };
 
 // A whole blob as a sink sees it (host.on_blob). Views are valid during the sink call only.

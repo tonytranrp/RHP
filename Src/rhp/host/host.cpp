@@ -316,6 +316,7 @@ public:
         sample_clock();
         session_options_.limits = setup_.limits;
         session_options_.codec = setup_.codec;
+        session_options_.ack_delay_ms = setup_.options.ack_delay_ms;
         session_options_.platform = std::string{platform::kOsName};
         session_options_.resumable = setup_.limits.resume_ms != 0;
         if (auto seed = platform::random_array<8>()) {
