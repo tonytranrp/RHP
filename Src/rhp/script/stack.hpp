@@ -35,6 +35,27 @@ enum class type_kind : std::int8_t {
     kThread
 };
 
+// How stack::read_args reads one argument of a plain binding (detail/lib_builder.hpp).
+enum class arg_kind : std::uint8_t {
+    kBool,    // a boolean
+    kInteger, // a number with an integer value (2.0 too)
+    kNumber,  // any number
+    kString,  // a string (its bytes stay in Lua)
+    kOther    // not read here (the caller reads it another way: a handle)
+};
+
+// One argument read by stack::read_args: the member its arg_kind names.
+union arg_slot {
+    struct text {
+        const char* data;
+        std::size_t size;
+    };
+    bool boolean;
+    std::int64_t integer;
+    double number;
+    text string;
+};
+
 // Non-owning view of a Lua stack: the single wall between RHP's templates and the Lua C API.
 // Every member is defined out of line in puc_lua/stack.cpp, so binding code instantiated in user
 // translation units never needs lua.h.
@@ -86,6 +107,10 @@ public:
     [[nodiscard]] std::optional<std::string_view> to_string(int index) const noexcept; // strings only, no coercion
     // nil, booleans, numbers, strings and (acyclic, <= 64 deep) tables. Functions etc. fail.
     [[nodiscard]] result<value> to_value(int index) const;
+    // Arguments 1..count, read as `kinds` says into `out` in one call (the plain binding
+    // trampoline's reader): by type only, exactly as to_bool / to_integer / to_number / to_string
+    // read them. False at the first one that doesn't fit (`out` is then partly written).
+    [[nodiscard]] bool read_args(const arg_kind* kinds, arg_slot* out, int count) const noexcept;
 
     // ---- upvalues of the running C closure ---------------------------------------------------
     [[nodiscard]] std::string_view upvalue_string(int n) const noexcept;
@@ -94,7 +119,9 @@ public:
     // ---- typed userdata (opaque handles) -------------------------------------------------------
     // Creates (once per state) the metatable registered under `key` for one C++ handle type.
     // `type_tag` identifies the C++ type; reusing a key with a different tag fails with kAlreadyLoaded.
-    // eq / tostring become __eq / __tostring. __name is set to `display_name`.
+    // eq / tostring become __eq / __tostring. __name is set to `display_name`. The metatable is also
+    // found by the address of `key`'s characters: push_userdata / to_userdata given that same key
+    // object (a static, as bindings pass) skip hashing the name.
     [[nodiscard]] result<void> define_userdata_type(std::string_view key, std::string_view display_name, const void* type_tag,
                                                     c_function eq, c_function tostring) const;
     // Pushes a new userdata of `size` bytes with the metatable registered under `key`.
