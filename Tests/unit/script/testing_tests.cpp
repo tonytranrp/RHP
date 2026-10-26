@@ -225,6 +225,11 @@ TEST_CASE("swapped lib members module exports and handle members come back with 
     // A module export, through its require() proxy.
     CHECK(*box.exec("local m = require('tt.exports') __rhp_test.swap(m, 'greet', function() return 'stubbed' end) return m.greet()") ==
           value_list{value{"stubbed"}});
+    // The originals a swap hands back still work when called from Lua (a property's getter with its
+    // handle); the swaps stay until revert_to, below.
+    CHECK(*box.exec("local e = ttest.make(4) local hp = __rhp_test.swap(e, 'hp', function(self) return 0 end) "
+                    "local hit = __rhp_test.swap(e, 'hit', function(self, d) return 0 end) return hp(e), hit(e, 1), e.hp") ==
+          value_list{value{40}, value{39}, value{0}});
     // A handle's method and property (every handle of the type).
     CHECK(*box.exec("local e = ttest.make(3) __rhp_test.swap(e, 'hit', function(self, d) return 99 end) "
                     "__rhp_test.swap(e, 'hp', function(self) return -1 end) return e:hit(1), e.hp") == value_list{value{99}, value{-1}});
