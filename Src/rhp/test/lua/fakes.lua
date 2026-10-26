@@ -60,6 +60,7 @@ T.after_test = function()
 end
 
 local handle_types = {} -- name -> {methods = table, properties = {name = type}, next_id = n}
+local view_types = {} -- name -> its fields ({name, type, ...}): a fake view is a table of them
 
 local function default_of(type_name)
     if type_name == nil then
@@ -77,10 +78,20 @@ local function default_of(type_name)
         return ""
     elseif type_name == "boolean" then
         return false
+    elseif sub(type_name, 1, 9) == "rhp.span<" then
+        return {} -- an empty typed view: #v is 0
     end
     local h = handle_types[type_name]
     if h then
         return h.new()
+    end
+    local fields = view_types[type_name]
+    if fields then
+        local view = {}
+        for _, f in ipairs(fields) do
+            view[f.name] = default_of(f.type)
+        end
+        return view
     end
     return nil
 end
@@ -259,6 +270,9 @@ function T.install_fakes(api, opts)
     local function handles_of(desc)
         for _, h in ipairs(desc.handles or {}) do
             define_handle(h, strict)
+        end
+        for _, v in ipairs(desc.views or {}) do
+            view_types[v.name] = v.fields or {}
         end
         for _, s in ipairs(desc.libs or {}) do
             handles_of(s)

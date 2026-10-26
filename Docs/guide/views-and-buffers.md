@@ -149,6 +149,6 @@ A buffer is read and written through its methods (its `__index` is the methods t
 
 ## Tools and `RHP_ENABLE=OFF`
 
-Stubs annotate spans as `rhp.span<number>` / `rhp.span<integer>`, struct views as a `---@class` per view type with its fields, and `rhp.buffer`; `api()` lists view types under `views`. `Rhp::test::fake<L>` keeps view types and fields; its view bindings return an empty span, `nil` or one default object. With `RHP_ENABLE=OFF` the DSL, `api::describe` and the stubs still build; nothing runs (`install` reports `kDisabled`).
+Stubs annotate spans as `rhp.span<number>` / `rhp.span<integer>`, struct views as a `---@class` per view type with its fields, and `rhp.buffer`; `api()` lists view types under `views`. `Rhp::test::fake<L>` keeps view types and fields; its view bindings return an empty span, `nil` or one default object. Libs faked from an API description (`rhp-cli test --api`) return an empty table for a span and a table of default field values for a view type. A test's `__rhp_test.swap` replaces a view binding like any lib function. With `RHP_ENABLE=OFF` the DSL, `api::describe` and the stubs still build; nothing runs (`install` reports `kDisabled`).
 
 The design, the undo strategy and what was measured are in [the decision](../decisions/views-and-buffers.md); numbers in [benchmarks](../benchmarks.md#typed-views-struct-views-and-buffers).
