@@ -2,6 +2,8 @@
 // sandbox::call). The ratio is what RHP's request machinery and hooks cost on script code itself.
 // "unchecked" runs the same calls with limits.cancel_checks = kNone: no cancel hook, so the gap
 // between rhp and unchecked is what being cancellable costs.
+#include <cstddef>
+#include <string>
 #include <string_view>
 #include <utility>
 
@@ -24,6 +26,7 @@ function M.closures() local s = 0 for i = 1, 10000 do local f = function() retur
 function M.coroutines() local co = coroutine.wrap(function() for i = 1, 1000 do coroutine.yield(i) end end) local s = 0 for _ = 1, 1000 do s = s + co() end return s end
 function M.pcall_errors() local n = 0 for _ = 1, 1000 do if not pcall(error, "x") then n = n + 1 end end return n end
 function M.empty() return 0 end
+function M.text() return "text" end
 return M
 )";
 
@@ -70,6 +73,22 @@ TEST_CASE("bench lua: script work raw and in a sandbox", "[bench][lua]") {
     };
     BENCHMARK("lua unchecked: empty function call") {
         return call_unchecked("empty");
+    };
+    // A string result: sandbox::call finishes it inside a protected run (call_unprotected takes
+    // scalars only). The raw twin copies the string out too.
+    BENCHMARK("lua raw: call returning a string") {
+        lua_getglobal(raw.get(), "M");
+        lua_getfield(raw.get(), -1, "text");
+        lua_remove(raw.get(), -2);
+        REQUIRE(lua_pcall(raw.get(), 0, 1, 0) == LUA_OK);
+        std::size_t n = 0;
+        const char* s = lua_tolstring(raw.get(), -1, &n);
+        const std::string r{s, n};
+        lua_pop(raw.get(), 1);
+        return r.size();
+    };
+    BENCHMARK("lua rhp: call returning a string") {
+        return call_box("text");
     };
     BENCHMARK("lua raw: 100k arithmetic loop") {
         return call_raw("loop");
