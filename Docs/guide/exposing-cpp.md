@@ -44,7 +44,7 @@ Rules of the road:
 - The lib proxy is locked: writing an unknown, function or `ro` member raises `kInvalidArgument`; reading an unknown member gives `nil`.
 - A C++ exception thrown by a binding becomes a Lua error; the original `Rhp::error` comes back to C++ callers.
 - A bound function must return. Lua's instruction hook cannot interrupt a long C++ call. Application-owned variables, handle storage and function dependencies must outlive every sandbox that uses them; RHP does not synchronize application access to those variables.
-- Arguments may be values or const references; mutable reference parameters and reference results are rejected by `installable`. `std::string_view` arguments borrow Lua storage for the binding call only: copy them if retained. A patch point's default must return an owning value (`std::string`, not `std::string_view` or `const char*`): a Lua override's result lives in a Lua string that is unrooted once the handler returns, so borrowed results are rejected at compile time.
+- Arguments may be values or const references; mutable reference parameters are rejected by `installable`, and so are reference results except to a declared `::view` type (a struct view, below). `std::string_view` arguments borrow Lua storage for the binding call only: copy them if retained. A patch point's default must return an owning value (`std::string`, not `std::string_view` or `const char*`): a Lua override's result lives in a Lua string that is unrooted once the handler returns, so borrowed results are rejected at compile time.
 - Speed: a binding with no `Rhp::undo<>` / `Rhp::irreversible`, no `Rhp::async<T>` result and only `bool`, integer, floating point, `std::string_view` / `std::string` and handle parameters takes a shorter call path (its arguments are read in one step); the errors, roles and results are the same as on the general path. A lib function held in a local (`local add = game.add`) saves the lookup through the lib on every call. Reading a lib variable is a C call each time (the C++ value may change at any moment): a value a hot loop reads many times is cheaper read once into a local.
 
 An inverse must undo exactly the recorded operation. For a void-returning binding, the inverse can receive the original arguments:
@@ -93,6 +93,36 @@ print(e.hp)
 - A name is used once per handle across the lib tree (compile time) and across libs installed into one sandbox (`install` fails with `kAlreadyLoaded` and adds no member; handle types it declared stay defined).
 - Properties return exactly one value: no tuples, no `Rhp::async`, nothing to undo (compile errors otherwise). A handle type with several names in different libs is pushed (by events, by other libs) under the first name a sandbox saw.
 - Handles delivered by events or returned by any lib carry the same members. Stubs list them under the handle's `---@class`.
+
+## Views of C++ memory: spans and struct views
+
+Arrays and objects a script should work on in place are handed out as views instead of copies; every script write through one is journaled and undone with the module ([the full guide](views-and-buffers.md)):
+
+```cpp
+std::span<float> height_map();             // a typed view: h[i], #h, h:slice(i, j), ...
+float average(std::span<const float> v);   // takes a view (no copy), a table or a buffer view
+transform* transform_of(entity_id e);      // nullptr: nil
+
+using game_lib = Rhp::lib<"game">
+    ::handle<"entity", entity_id, &is_alive>
+    ::fn<"height_map", &height_map>
+    ::fn<"average", &average>
+    ::view<"transform", transform>                                   // a standard-layout struct
+    ::field<"layer", &transform::layer, Rhp::range<0, 31>>          // t.layer = 3 (journaled, range enforced)
+    ::ro_field<"id", &transform::id>                                 // read-only
+    ::property<"transform", &transform_of>;                          // e.transform -> a struct view
+```
+
+| Entry or type | Meaning |
+|---|---|
+| a result `std::span<T>` / `std::span<const T>` | a typed view (`T` arithmetic but `bool`, or `std::byte`); `const`: read-only |
+| a result `T*` / `T&` (or `const`) of a `::view` type | a struct view of the object (`nullptr`: nil); `const`: read-only |
+| `view<"name", T>` | declares a struct view type (standard layout); its name is a Lua type name like a handle's |
+| `field<"name", &T::m, tags...>` / `ro_field<...>` | a field of the view type of `&T::m`: a number, bool or enum (the variable tags apply), an array of span elements (a typed view), or a struct of another view type (a nested view) |
+| a parameter `std::span<const T>` / `std::span<T>` | a typed view of `T` without copying, a table (copied, read-only spans only), for one-byte `T` a buffer or a string; C++ writes to a mutable host span are journaled |
+| a parameter `T`, `const T&`, `const T*` of a `::view` type | a struct view of that type |
+
+A view keeps no pointer: each access calls its binding again with the arguments it was made with (handles checked first), so a kept view reads memory that moved and raises `kStaleHandle` when it is gone. A binding returning a view is therefore a lookup: no `undo<>` / `irreversible`, no `Rhp::async<T>`, and its parameters own their data. Scripts get byte buffers of their own from `rhp.buffer` ([buffers](views-and-buffers.md#buffers-rhpbuffer)).
 
 ## Asynchronous bindings: `Rhp::async<T>`
 

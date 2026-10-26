@@ -6,6 +6,7 @@ How to use RHP, what it supports, and how to configure and connect it. For *why*
 |---|---|
 | [Getting started](getting-started.md) | add RHP to a CMake project, build, run the first host and client |
 | [Exposing C++ to Lua](exposing-cpp.md) | `Rhp::lib`, `undo`, patch points, events, custom types |
+| [Typed views, struct views and buffers](views-and-buffers.md) | arrays and objects scripts read and write in place (`std::span<T>`, `::view` / `::field`), journaled and undone; `rhp.buffer` |
 | [Writing scripts](writing-scripts.md) | the `rhp` Lua API, modules, reload, undo, scheduling |
 | [Scheduling and events](scheduling-and-events.md) | a walkthrough: per-frame work, background tasks, script events, C++ and tool listeners, handler failures |
 | [Host and client](host-and-client.md) | the C++ API of `Rhp::host` / `Rhp::client`, async calls, blobs, audit |
@@ -43,7 +44,7 @@ A running C++ program (the **host**) accepts Lua scripts from a **client** (your
 | Area | Supported |
 |---|---|
 | Scripting | Lua 5.5 sandbox per identity; modules with their own `_ENV`; `exec`, `load`, `call`, `reload`, `rollback`, `checkpoint` / `revert_to`, `revert`, `unload`, `pin` / `unpin`, `revert_all`; `require`; coroutine scheduler (`rhp.wait`, `rhp.next_frame`, `rhp.sleep`, `rhp.timer`); frame callbacks and timer control (`rhp.every_frame(s)`, `rhp.after`, `rhp.every`, pause / resume / reschedule); background tasks (`rhp.spawn`); script events (`rhp.publish`, `rhp.once`, `rhp.wait_event`); a failing handler is reported and undoes only its own call; `on_save` / `on_restore` state hand-over; scripts wait for asynchronous bindings without blocking the game |
-| C++ binding | `Rhp::lib<>` with `fn`, `var`, `ro`, `handle`, `sub`, and `method` / `property` on handles; asynchronous bindings returning `Rhp::async<T>`; `undo<>`, `irreversible`, `requires_role<>`; `Rhp::patch_point<>`; `Rhp::lua_event<>`; custom types through `Rhp::convert<T>`; LuaLS stub generation |
+| C++ binding | `Rhp::lib<>` with `fn`, `var`, `ro`, `handle`, `sub`, and `method` / `property` on handles; asynchronous bindings returning `Rhp::async<T>`; typed views of `std::span<T>` and struct views (`view` / `field` / `ro_field`) read and written in place, journaled; `rhp.buffer` byte buffers; `undo<>`, `irreversible`, `requires_role<>`; `Rhp::patch_point<>`; `Rhp::lua_event<>`; custom types through `Rhp::convert<T>`; LuaLS stub generation |
 | Transports | in-process loopback, TCP, WebSocket binary tunnel, reliable UDP, local IPC; custom transports through `net::transport` |
 | Network tooling | authenticated HTTP/1.1 gateway with signed answers and optional channel binding; opt-in DNS-SD discovery; `Rhp::fleet<Cfg>` `exec`/`load`/`call` broadcasts with one outcome per host, on one shared network thread |
 | Directions | normal (client dials host) and **reverse** (host dials a listening client: phones, NAT) |

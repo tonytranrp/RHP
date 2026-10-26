@@ -22,7 +22,7 @@ build/bench/Tests/bench/Release/rhp_bench "[bench]" --benchmark-samples 50 --ben
 python Tools/bench/summarize.py bench.xml
 ```
 
-`Tools/bench/compare.py before.xml after.xml` diffs two runs and reports a change only when the confidence intervals don't overlap and the means differ by more than 5% (`--threshold`). The `unchecked` side runs the same work with `limits.cancel_checks = kNone`. Groups can be run alone: `"[lua]"`, `"[bindings]"`, `"[patch]"`, `"[events]"`, `"[scheduler]"`, `"[requests]"`, `"[wire]"`, `"[security]"`, `"[e2e]"`, `"[tools]"`, `"[testing]"`.
+`Tools/bench/compare.py before.xml after.xml` diffs two runs and reports a change only when the confidence intervals don't overlap and the means differ by more than 5% (`--threshold`). The `unchecked` side runs the same work with `limits.cancel_checks = kNone`. Groups can be run alone: `"[lua]"`, `"[bindings]"`, `"[patch]"`, `"[events]"`, `"[scheduler]"`, `"[requests]"`, `"[wire]"`, `"[security]"`, `"[e2e]"`, `"[tools]"`, `"[testing]"`, `"[views]"`.
 
 Always benchmark a Release build (`RelWithDebInfo` on MSVC inlines less). On a laptop or a hybrid-core CPU, pin the process to one performance core and keep the machine idle; even then, treat differences under 10% as noise unless they repeat. ctest only runs a two-sample smoke pass (`bench.smoke`) so the suite keeps compiling and running.
 
@@ -41,6 +41,7 @@ Always benchmark a Release build (`RelWithDebInfo` on MSVC inlines less). On a l
 | `e2e` | a signed `exec` and a `call` from a client to a host over loopback, both on one thread (`io<zero_threads>`) | the same `exec` on a sandbox directly (`e2e local`) |
 | `testing` (Stage 12) | the same loop and `fib(22)` with the exact instruction meter, with line coverage, and both; the test runner over a file with no tests, 100 empty tests (measured and `--no-measure`), and one test doing 10k lib calls (plain and through `spy.on`), 10k plain checks, 10k `assert.equals`, 10k `expect().to.equal` | the same Lua on a plain `lua_State`; a state compiling the framework; 100 `pcall`s of empty functions |
 | `gc` (hidden: run `"[gc]"`) | not a `BENCHMARK`: times every `pump()` of 1000 frame callbacks that make garbage, with no live heap and with 200k live tables, in both collector modes, with `collect_idle` of 0 / 250 / 1000 us after each frame, and prints p50 / p99 / p99.9 / max / mean (the median of 7 interleaved rounds) | |
+| `views` | a typed view of a 10k-float `std::vector` (summed, written and reverted), a buffer's typed view, the span handed to C++, a struct view's fields, `buffer:read_u32`; most also `unchecked` | a raw userdata with a hand-written `__index` / `__newindex` over the same memory (and a plain table), a C function summing a table, a raw userdata finding fields by name (and a table's fields), `string.unpack` |
 | `tools` (Stage 11) | the same loop and `fib(22)` with no tool, with a breakpoint armed elsewhere / on a line number the loop runs / inside the module, and with the profiler sampling every 1000 and 100 instructions; a tunable read and a `tune` write | the same Lua on a plain `lua_State`; a plain global read and write |
 
 ## Results
@@ -246,3 +247,28 @@ Builds (clean `windows-msvc` Debug, 16 threads, `main` and the branch alternatin
 |---|---:|---:|
 | build wall time | 98.6 / 100.1 s | 76.8 / 72.5 s |
 | `compile_fail.fixtures_compile` (the as-is fixtures, now in the tests) | (in the build) | 17 s of the ctest run |
+
+## Typed views, struct views and buffers
+
+Measured on 2026-10-25, MSVC 19.51 Release on the same laptop while other builds ran (40 samples, four runs): the raw twins moved by up to 50% between runs, so each row gives the range of the means over the last three runs. What the views do is in [the decision](decisions/views-and-buffers.md).
+
+| Benchmark | Raw twin | RHP | RHP / raw |
+|---|---:|---:|---:|
+| sum 10k floats through a span (raw: a userdata with a C `__index`) | 514-558 us | 379-554 us | 0.7-1.0x |
+| sum 10k floats in a table (plain Lua, for scale) | 92-128 us | | |
+| write 10k floats into a buffer view | 353-647 us | 448-759 us | 0.8-2.2x |
+| write 10k floats through a span (one journal entry, then `revert_to`) | 343-527 us | 679-782 us | 1.35-2.3x |
+| write 10k floats through a span 10 times (then `revert_to`) | 3.94-4.17 ms | 6.12-6.38 ms | 1.5-1.6x |
+| sum 10k floats in C++ (raw: a C function summing a table; RHP: a `std::span<const float>` parameter) | 37-42 us | 5.2-6.3 us | 0.12-0.17x |
+| sum a 10k table in C++ (copied into a span for the call) | | 108-133 us | |
+| 10k field reads (raw: a userdata finding fields by name) | 438-525 us | 412-638 us | 0.8-1.5x |
+| 10k field reads of a table (for scale) | 59-91 us | | |
+| 10k field reads and writes (then `revert_to`) | 1.06-1.37 ms | 1.59-1.87 ms | 1.2-1.7x |
+| 10k field reads and writes of a table (for scale) | 114-161 us | | |
+| 10k u32 reads (raw: `string.unpack` of a string; RHP: `buffer:read_u32`) | 357-448 us | 674-735 us | 1.6-2.1x |
+
+- **Reads** cost what a hand-written userdata costs: every access is a C call (`__index`), the view's binding called again (a vector's `data()` / `size()` here) and the element pushed. A table is still about 4x faster to index from Lua: a view is for memory C++ owns, not for script data.
+- **Writes** to C++ memory add the journal: one entry per request and target, then per write an owner check, a bit test and, the first time an element is written, a copy of its original (about 20 ns a write over the raw twin in the 10-pass row). Buffers aren't journaled.
+- **Handing a span to C++** costs one argument read, whatever its length: about 7x less than a C function reading the same numbers out of a table, and the C++ side reads contiguous memory.
+- A struct view's field is a C call too: about a raw userdata's cost, 5-10x a table field.
+- Measured and changed on the way: a buffer method's error label was formatted on every call (u32 reads 3.1x raw -> 1.6-2.1x); buffers now have their methods table as `__index` (a method lookup is a table lookup, not a C call; `b[i]` is gone, `b:view("u8")[i]` indexes bytes); every access found the memory through `Rhp::result<>`s (`find` returns a bool, the error is made only on failure); a field write formatted its label (`"transform.x"`) for the journal check before it was needed.
