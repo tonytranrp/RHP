@@ -58,7 +58,10 @@ a duplicate; the protocol is unchanged); the host's cancel-enforcement timer run
 is recorded. The TCP and IPC links send the frames queued behind a write in flight in one gathered
 write (up to 16; WebSocket already joins them into one message): 32 pipelined calls over TCP on
 127.0.0.1 take 374-401 us instead of 632-635 us. *Not done:* a local post queue in `io_context` (a
-threading review for a few microseconds on zero-thread hosts), reliable-UDP ack coalescing.
+threading review for a few microseconds on zero-thread hosts), reliable-UDP ack coalescing (deferring
+a data packet's ACK to the end of the I/O round so a reply or the next ACK carries it was measured:
+32 pipelined calls took 1.33-1.35 ms against 1.27-1.28 ms, since each datagram is its own receive
+completion and the deferred ACK runs before the next one arrives).
 
 **Signatures.** Ed25519 is deterministic: a process-wide cache of recent script signatures, and of
 signatures found valid, keyed by the public key, the signature and the source's BLAKE2b-256, makes a

@@ -10,6 +10,8 @@
 #include <catch2/benchmark/catch_benchmark.hpp>
 #include <catch2/catch_test_macros.hpp>
 
+#include <rhp/net/tcp/tcp.hpp>
+#include <rhp/net/udp_reliable/udp_reliable.hpp>
 #include <rhp/rhp.hpp>
 
 namespace bench_e2e_fixture {
@@ -71,18 +73,21 @@ TEST_CASE("bench e2e: remote calls over loopback on one thread", "[bench][e2e]")
     };
 }
 
-TEST_CASE("bench e2e: pipelined calls over TCP on one thread", "[bench][e2e]") {
-    using tcp_cfg = Rhp::config<>::io<Rhp::exec::zero_threads>::logger<Rhp::core::null_logger>;
+// 32 calls sent before any reply is read, over a network transport on 127.0.0.1: the frames queue
+// behind each other on both ends.
+template <class Transport>
+void pipelined(const char* name) {
+    using net_cfg = Rhp::config<>::transport<Transport>::template io<Rhp::exec::zero_threads>::template logger<Rhp::core::null_logger>;
     const auto admin = Rhp::security::key::generate();
     const auto developer = Rhp::security::ed25519_secret_key::generate();
     REQUIRE(admin);
     REQUIRE(developer);
     const auto at = Rhp::endpoint::listen("127.0.0.1", 0);
-    Rhp::host<tcp_cfg> host{at, Rhp::security::keyring{{"admin", *admin, Rhp::role::kAdmin}}, Rhp::security::trusted_signers{{"dev", developer->public_key()}}};
-    REQUIRE(host.install<e2e_lib>());
+    Rhp::host<net_cfg> host{at, Rhp::security::keyring{{"admin", *admin, Rhp::role::kAdmin}}, Rhp::security::trusted_signers{{"dev", developer->public_key()}}};
+    REQUIRE(host.template install<e2e_lib>());
     const auto port = host.port();
     REQUIRE(port);
-    Rhp::client<tcp_cfg> client{at.reversed().with_port(*port), Rhp::security::psk_identity{"admin", *admin}, Rhp::security::signing_key{"dev", *developer}};
+    Rhp::client<net_cfg> client{at.reversed().with_port(*port), Rhp::security::psk_identity{"admin", *admin}, Rhp::security::signing_key{"dev", *developer}};
 
     const auto finish = [&](auto& p) {
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{10};
@@ -95,12 +100,11 @@ TEST_CASE("bench e2e: pipelined calls over TCP on one thread", "[bench][e2e]") {
         }
         return std::move(p).get();
     };
-    auto mod = client.async().load("bench.e2e.tcp", "local M = {} function M.add(a, b) return benche2e.add(a, b) end return M");
+    auto mod = client.async().load("bench.e2e.net", "local M = {} function M.add(a, b) return benche2e.add(a, b) end return M");
     const auto loaded = finish(mod);
     REQUIRE(loaded);
 
-    // 32 calls sent before any reply is read: the frames queue behind each other on both sockets.
-    BENCHMARK("e2e rhp: 32 pipelined module calls over TCP on 127.0.0.1") {
+    BENCHMARK(name) {
         std::vector<decltype(client.async().call(*loaded, "add", 1, 2))> calls;
         calls.reserve(32);
         for (int i = 0; i < 32; ++i) {
@@ -112,4 +116,9 @@ TEST_CASE("bench e2e: pipelined calls over TCP on one thread", "[bench][e2e]") {
         }
         return n;
     };
+}
+
+TEST_CASE("bench e2e: pipelined calls over network transports on one thread", "[bench][e2e]") {
+    pipelined<Rhp::net::tcp>("e2e rhp: 32 pipelined module calls over TCP on 127.0.0.1");
+    pipelined<Rhp::net::udp_reliable>("e2e rhp: 32 pipelined module calls over reliable UDP on 127.0.0.1");
 }
