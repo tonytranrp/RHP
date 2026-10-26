@@ -57,8 +57,9 @@ and its reply are two frames instead of four (still at once for every 8th frame,
 a duplicate; the protocol is unchanged); the host's cancel-enforcement timer runs only while a cancel
 is recorded. The TCP and IPC links send the frames queued behind a write in flight in one gathered
 write (up to 16; WebSocket already joins them into one message): 32 pipelined calls over TCP on
-127.0.0.1 take 374-401 us instead of 632-635 us. *Not done:* a local post queue in `io_context` (a
-threading review for a few microseconds on zero-thread hosts), reliable-UDP ack coalescing (deferring
+127.0.0.1 take 374-401 us instead of 632-635 us. *Measured and left out:* a local queue for posts made on the
+running thread (one reactor post per batch instead of one each: module calls, signed execs and 32
+pipelined calls over TCP and UDP all stayed within run-to-run noise), and reliable-UDP ack coalescing (deferring
 a data packet's ACK to the end of the I/O round so a reply or the next ACK carries it was measured:
 32 pipelined calls took 1.33-1.35 ms against 1.27-1.28 ms, since each datagram is its own receive
 completion and the deferred ACK runs before the next one arrives).
