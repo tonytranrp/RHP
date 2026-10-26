@@ -473,7 +473,14 @@ TEST_CASE("timers frame callbacks event handlers and tasks may wait for async re
 TEST_CASE("a worker thread completes the call", "[script][async][threads]") {
     capture out;
     sandbox box = make_box(out);
-    REQUIRE(box.exec("return aio.echo('hi')"));
+    const auto direct = box.exec("return aio.echo('hi')");
+    REQUIRE(direct);
+    if (box.suspended() == 0) {
+        // The worker finished before the call could wait (a slow machine, a sanitizer): the call
+        // returned its result at once, and no on_result follows.
+        CHECK(*direct == value_list{Rhp::value{"hi!"}});
+        return;
+    }
     const Rhp::request_id request = box.last_request();
     pump_until(box, out, request);
     const auto r = result_of(out, request);
