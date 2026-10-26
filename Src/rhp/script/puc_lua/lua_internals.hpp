@@ -12,7 +12,20 @@
 struct lua_State;
 struct lua_Debug;
 
+// cmake/lua/lua_cxx.cpp (the Lua translation unit): a count hook checked at safe points.
+void rhp_lua_sethook_safepoints(lua_State* L, void (*hook)(lua_State*, lua_Debug*), int count);
+int rhp_lua_hook_at_safepoints(lua_State* L);
+
 namespace Rhp::script::detail::internals {
+
+// Sets L's count hook to fire at safe points only: loop back-edges (charged their loop body's length)
+// and Lua calls (charged 1), once `count` is used up. Straight-line code isn't counted, so the count is
+// a bound for cancels and limits, not an exact instruction count (lua_sethook gives that). L has no
+// hook mask while it waits (lua_gethookmask is 0), and code runs as fast as with no hook.
+void set_safepoint_hook(lua_State* L, void (*hook)(lua_State*, lua_Debug*), int count) noexcept;
+
+// Whether L's count hook is one set_safepoint_hook set (its count is then lua_gethookcount).
+[[nodiscard]] bool hook_at_safepoints(lua_State* L) noexcept;
 
 // Instructions L ran since its count hook last fired (or was set), and restarts the countdown so they
 // aren't reported twice. 0 while L's hook doesn't count.

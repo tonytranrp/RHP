@@ -5,9 +5,9 @@
 namespace Rhp {
 
 // Which script runs check, every limits::cancel_check_instructions Lua instructions, for cancel().
-// The check is a hook that traps every Lua instruction while it is armed (a tight loop runs about
-// half as fast), so by default only requests pay for it. The instruction, wall-time and time-slice
-// limits arm it for every run whatever this says.
+// The check is a count hook that runs at safe points (loop back-edges and Lua calls), so armed code
+// runs within a few percent of raw Lua; by default only requests pay even that. The instruction,
+// wall-time and time-slice limits arm it for every run whatever this says.
 enum class cancel_scope : std::uint8_t {
     // Nothing checks: cancel() and a client's cancel stop a request only before it starts or
     // resumes (a suspended one), never while its code runs. The fastest; for trusted scripts.
@@ -24,7 +24,7 @@ enum class cancel_scope : std::uint8_t {
 // 0 usually means unlimited / off (some fields differ: see each). Defaults follow the decided policy:
 // unlimited, run to completion.
 struct limits {
-    std::uint64_t instructions = 0; // total per run; once hit, sticky for the rest of that run
+    std::uint64_t instructions = 0; // total per run, counted at safe points (each loop iteration its body's length, each Lua call 1); once hit, sticky for the rest of that run
     std::uint64_t memory = 0;       // bytes per lua_State; once hit, sticky for the rest of that run
     std::uint32_t wall_ms = 0;      // time spent running (not suspended) per run or handler call
     std::uint32_t slice_us = 0;     // opt-in time slicing per pump(); 0 = run to completion

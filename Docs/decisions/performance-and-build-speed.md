@@ -20,6 +20,24 @@ cancel (`lua_sethook` walks `L->ci` while the VM changes it: a data race, and TS
 *Consequence:* the include list must follow onelua.c when Lua is updated (an `#error` on the
 release number says so).
 
+**Safe points (the Lua speed pass, superseding the line above about patching).** Even counted down
+inline, a count hook still made the VM trap before every instruction (and reload its base after
+each), about 1.1-1.5x raw Lua on loops and calls. A cancel or a limit needs a bound, not an exact
+count: straight-line code is bounded by its function's size, so only loops and calls can run long.
+`cmake/RhpLua.cmake` now copies `lvm.c` into the build tree with four charges added (`dojump` with a
+negative offset, `OP_FORLOOP`, `OP_TFORLOOP`, function entry), each replacement required to match
+exactly once (configure fails on a Lua update that moves one). `internals::set_safepoint_hook` sets
+the hook function and count with no mask, so the VM runs as without a hook; when a charge uses the
+count up, the hook is armed for one instruction (`LUA_MASKCOUNT` plus a bit above lua_sethook's byte)
+and fires through upstream's `luaG_traceexec`, so errors, yields and `CIST_HOOKYIELD` are unchanged;
+`rhp_lua_traceexec` then returns to safe points. *Semantics:* `limits.instructions` charges a loop
+iteration its body's length and a call 1 (forward branches inside a loop are over-counted,
+straight-line code outside loops isn't counted); the meter, the profiler and line events keep exact
+per-instruction counting (`sandbox_impl::install_hook`). An unchecked run pays one subtraction per
+loop iteration. *Alternatives:* keeping upstream untouched (the earlier choice: about 1.1-1.5x);
+weighting calls by their function's size (over-counts functions that return early, and recursion is
+already bounded by the call charge); arming from another thread on cancel (the data race above).
+
 **Coroutine yields on x64 MSVC jump** (see [lua-runtime](lua-runtime.md)): the CRT's `longjmp`
 skips unwinding when the jump buffer's frame is cleared after `setjmp`. A process with a CET shadow
 stack can't take that jump (measured: it dies), so `RDSSP` decides once per process and yields

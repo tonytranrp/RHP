@@ -111,3 +111,48 @@ TEST_CASE("instruction budget stops a runaway script", "[script][limits]") {
     REQUIRE_FALSE(stubborn.has_value());
     CHECK(stubborn.error().code == errc::kBudgetExceeded);
 }
+
+// Cancels and limits are checked at safe points (loop back-edges and Lua calls, cmake/lua/lua_cxx.cpp):
+// every shape of loop and recursion without a loop must reach one.
+TEST_CASE("an instruction budget stops every kind of loop and call chain", "[script][limits]") {
+    Rhp::limits limits;
+    limits.instructions = 50'000;
+    sandbox box = make_box(limits);
+
+    const char* const runaways[] = {
+        "while true do end",
+        "repeat local x = 1 until false",
+        "::top:: goto top",
+        "for i = 1, math.maxinteger do end",
+        "for i = 1.0, math.huge do end",
+        "for _ in function() return 1 end do end",
+        "local function f(n) return f(n + 1) end return f(1)",
+        "local function f(n) if n == 0 then return 1 end return f(n - 1) + f(n - 1) end return f(40)",
+    };
+    for (const char* source : runaways) {
+        CAPTURE(source);
+        const auto r = box.exec(source);
+        REQUIRE_FALSE(r.has_value());
+        CHECK(r.error().code == errc::kBudgetExceeded);
+    }
+}
+
+TEST_CASE("an instruction budget counts each loop iteration's instructions", "[script][limits]") {
+    Rhp::limits limits;
+    limits.instructions = 100'000;
+    sandbox box = make_box(limits);
+
+    // About 4 instructions an iteration: 1000 iterations fit, 100000 don't.
+    CHECK(box.exec<int>("local s = 0 for i = 1, 1000 do s = s + i * 2 end return s") == 1001000);
+    const auto r = box.exec("local s = 0 for i = 1, 100000 do s = s + i * 2 end return s");
+    REQUIRE_FALSE(r.has_value());
+    CHECK(r.error().code == errc::kBudgetExceeded);
+}
+
+TEST_CASE("cancel stops recursion that never loops", "[script][limits]") {
+    sandbox box = make_box();
+
+    const auto r = exec_cancelled(box, "local function f(n) if n == 0 then return 1 end return f(n - 1) + f(n - 1) end return f(60)");
+    REQUIRE_FALSE(r.has_value());
+    CHECK(r.error().code == errc::kCancelled);
+}
