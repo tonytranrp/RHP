@@ -24,11 +24,11 @@ A client's `cancel()` stops a running script through Lua's count hook. Which run
 
 | Value | Who checks for `cancel()` | Cost on loop-heavy Lua |
 |---|---|---|
-| `kRequests` (default) | `exec` / `load` / `call` / `reload` / `rollback`, `rhp.spawn` tasks, and code they call | about 1.2x raw Lua |
-| `kEverything` | also timers, frame callbacks, event handlers and patch handlers hit from game code | about 1.2x raw Lua on every handler too |
+| `kRequests` (default) | `exec` / `load` / `call` / `reload` / `rollback`, `rhp.spawn` tasks, and code they call | about raw Lua (0-8%) |
+| `kEverything` | also timers, frame callbacks, event handlers and patch handlers hit from game code | about raw Lua on every handler too |
 | `kNone` | nothing: a cancel stops a request only before it starts or resumes | raw Lua |
 
-A count that isn't due is counted down inline, so the default costs about 20%, not the 85-100% it cost before the [optimization pass](../benchmarks.md#overall-optimization-pass). `kNone` now buys only the last few percent; keep the default unless you have measured a need. Setting `limits.instructions`, `wall_ms` or `slice_us` arms the hook for every run whatever `cancel_checks` says.
+The hook counts at safe points (each loop iteration and each Lua call; straight-line code runs as with no hook), so the default costs a few percent at most, not the 85-100% it cost before the [optimization pass](../benchmarks.md#overall-optimization-pass) or the 10-45% before the [Lua speed pass](../benchmarks.md#lua-speed-pass). `kNone` buys almost nothing now; keep the default. Setting `limits.instructions`, `wall_ms` or `slice_us` arms the hook for every run whatever `cancel_checks` says.
 
 ```cpp
 using trusted_cfg = Rhp::config<>::limits<Rhp::limits{.cancel_checks = Rhp::cancel_scope::kNone}>;

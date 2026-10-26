@@ -248,6 +248,37 @@ Builds (clean `windows-msvc` Debug, 16 threads, `main` and the branch alternatin
 | build wall time | 98.6 / 100.1 s | 76.8 / 72.5 s |
 | `compile_fail.fixtures_compile` (the as-is fixtures, now in the tests) | (in the build) | 17 s of the ctest run |
 
+## Lua speed pass
+
+Measured on 2026-10-26, MSVC Release on the same laptop with nothing else running, pinned to one core at high priority: `main` before the pass and the branch alternating (main, branch, branch, main; 40 samples each), each cell the lowest of the two means. What changed: the cancel / limit hook counts at safe points (loop back-edges and calls) instead of trapping every instruction; a small-object allocator for Lua's blocks; a plain trampoline for bindings without undo or async; requests enter the scheduler's map only when they suspend and a delivery's handlers share one coroutine; a compiled-chunk cache for releases (opt-in, see [compiled-chunk cache](decisions/compiled-chunk-cache.md)). The decisions are in [performance and build speed](decisions/performance-and-build-speed.md).
+
+| Benchmark | Before | After | Change | RHP / raw before | RHP / raw after |
+|---|---:|---:|---:|---:|---:|
+| lua rhp: fib(22) | 1.74 ms | 1.15 ms | -34% | 1.46x | 0.95x |
+| lua rhp: 100k arithmetic loop | 994 us | 870 us | -12% | 1.12x | 1.08x |
+| lua rhp: 10k closures | 1.37 ms | 785 us | -43% | 1.19x | 0.65x |
+| lua rhp: 10k table fill and ipairs | 391 us | 314 us | -20% | 1.21x | 0.97x |
+| lua rhp: 1k tostring and concat | 149 us | 141 us | -5% | 1.08x | 1.01x |
+| lua rhp: 1k coroutine yields | 113 us | 98 us | -13% | 0.95x | 0.82x |
+| lua rhp: empty function call (`sandbox::call`) | 364 ns | 328 ns | -10% | 3.37x | 3.26x |
+| lua rhp: exec return 1 | 1.25 us | 828 ns | -34% | | |
+| requests rhp: call with two arguments | 326 ns | 243 ns | -26% | | |
+| requests rhp: reload of a small module | 5.4 us | 3.9 us | -28% | | |
+| bindings rhp: 10k calls of bench.add | 703 us | 551 us | -22% | 2.17x | 1.82x |
+| bindings rhp: 10k calls of bench.add held in a local | 553 us | 351 us | -36% | 1.72x | 1.16x |
+| bindings rhp: 10k reads of bench.speed | 648 us | 519 us | -20% | 4.70x | 4.38x |
+| bindings rhp: 10k property reads on a handle | 1.11 ms | 883 us | -20% | 2.13x | 1.82x |
+| bindings rhp: 10k handle round trips | 1.98 ms | 1.35 ms | -32% | | |
+| events rhp: deliver to 10 / 100 handlers | 1.22 / 10.6 us | 947 ns / 8.66 us | -22% / -18% | 6.03x / 5.62x | 4.75x / 4.82x |
+| events rhp: pump delivering a publish to 100 handlers | 12.1 us | 9.84 us | -19% | | |
+| scheduler rhp: pump with 1000 frame callbacks | 169 us | 147 us | -13% | | |
+| tools-off rhp: fib(22) (the default cancel hook) | 1.72 ms | 1.25 ms | -27% | 1.40x | 1.07x |
+| test-run rhp: 100 empty tests | 13 ms | 11.3 ms | -13% | | |
+| expect rhp: 10k expect().to.equal | 16.1 ms | 11.8 ms | -27% | | |
+| e2e rhp: signed exec of a one-line script | 15.1 us | 13.9 us | -8% | | |
+
+Within noise (under +-10% and not the same direction in both rounds): the patch, wire, security and e2e call rows, the profiler and the armed debugger (they keep exact per-instruction counting), `pcall` errors, ready async calls, method calls on a handle, delivery to one handler (+5%), resuming 1000 tasks (+6%), journaled var writes (+5%) and tunable writes (+9%). Lib variable reads remain about 4.4x a table field: each is a metamethod C call ([decision](decisions/performance-and-build-speed.md)). The compiled-chunk cache restores a release of eight 300-line modules in about 2 ms instead of about 6 ms, and the test runner's `--isolation test` loads each module's bytecode instead of parsing it again (about 0.7-1.0 ms instead of 4.3-4.7 ms per sandbox for eight modules).
+
 ## Typed views, struct views and buffers
 
 Measured on 2026-10-25, MSVC 19.51 Release on the same laptop while other builds ran (40 samples, four runs): the raw twins moved by up to 50% between runs, so each row gives the range of the means over the last three runs. What the views do is in [the decision](decisions/views-and-buffers.md).
