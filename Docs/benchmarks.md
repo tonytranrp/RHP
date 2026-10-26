@@ -217,3 +217,31 @@ Builds (clean `windows-msvc` Debug, 16 threads, 16 GB):
 | Catch2 (108 sources) | about 450 s | about 110 s (unity) |
 | linking, summed | 364-399 s | 110 s (job pool) |
 | full ctest run (16 cores) | 77 s | 42-62 s |
+
+## Follow-up pass: profiled hot paths
+
+Measured on 2026-10-25, same laptop and method (MSVC Release, one core, high priority, 40 samples): `main` before the pass and the branch, each run twice in alternating order; each side's number is the lower of its two means. A profile (Visual Studio's sampling collector on a RelWithDebInfo build) showed where a remote call's time went: frame MACs about a quarter, then system calls and allocation; Lua itself a few percent. What changed is in [the decision](decisions/performance-and-build-speed.md).
+
+| Benchmark | Before | After | Change |
+|---|---:|---:|---:|
+| e2e rhp: call of a module function | 12.4-12.9 us | 11.0-11.1 us | -11% to -14% |
+| e2e rhp: signed exec of a one-line script | 17.8-17.9 us | 16.3-16.6 us | -7% to -9% |
+| e2e rhp: 32 pipelined module calls over TCP on 127.0.0.1 | 377-378 us | 309-315 us | -16% to -18% |
+| e2e rhp: 32 pipelined module calls over reliable UDP on 127.0.0.1 | 1.30-1.35 ms | 720-783 us | -42% to -45% |
+| bindings rhp: 10k ready async calls | 2.09 ms | 1.28 ms | -39% |
+| bindings rhp: 10k reads of bench.speed | 705-832 us | 627-664 us | -11% to -20% |
+| bindings rhp: 10k calls of bench.add (held in a local) | 642-664 us | 564-574 us | -12% to -14% |
+| bindings rhp: 10k method calls on a handle | 710-733 us | 647-649 us | -9% to -12% |
+| events rhp: deliver to 1 / 10 / 100 handlers | 270 ns / 1.68 us / 13.4 us | 219 ns / 1.2 us / 10.5 us | -19% / -29% / -21% |
+| events rhp: pump delivering a publish to 10 / 100 handlers | 2.6 / 17.4 us | 1.97 / 13.1 us | -24% / -25% |
+| scheduler rhp: pump with 10000 frame callbacks | 2.58 ms | 2.19 ms | -15% |
+| scheduler rhp: resume 10000 tasks | 2.33-2.81 ms | 2.26-2.29 ms | about -10% |
+
+The raw twins of the bindings rows, whose code didn't change, moved by up to 15% between the two binaries (code layout), so changes under about 10% are within noise.
+
+Builds (clean `windows-msvc` Debug, 16 threads, `main` and the branch alternating):
+
+| | Before | After |
+|---|---:|---:|
+| build wall time | 98.6 / 100.1 s | 76.8 / 72.5 s |
+| `compile_fail.fixtures_compile` (the as-is fixtures, now in the tests) | (in the build) | 17 s of the ctest run |

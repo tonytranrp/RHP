@@ -96,11 +96,14 @@ TEST_CASE("pending: get after the result is in", "[client][pending]") {
 
 TEST_CASE("pending: get blocks until another thread completes it", "[client][pending]") {
     call<std::string> c;
-    std::jthread network{[state = c.state] {
-        std::this_thread::sleep_for(20ms);
+    std::promise<void> checked; // the network thread completes only after the first check (no timing race)
+    std::jthread network{[state = c.state, go = checked.get_future()] {
+        go.wait();
+        std::this_thread::sleep_for(5ms);
         state->complete(std::string{"done"});
     }};
     CHECK_FALSE(c.handle.wait_for(1ms));
+    checked.set_value();
     CHECK(std::move(c.handle).get() == std::string{"done"});
 }
 
