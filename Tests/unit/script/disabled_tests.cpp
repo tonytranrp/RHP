@@ -1,14 +1,20 @@
 // Built only with RHP_ENABLE=OFF: the sandbox is an inert stub and patch points are direct calls.
+#include <span>
+#include <string>
 #include <string_view>
 
 #include <catch2/catch_test_macros.hpp>
 
 #include <rhp/core/error.hpp>
 #include <rhp/core/ids.hpp>
+#include <rhp/core/role.hpp>
+#include <rhp/core/value.hpp>
+#include <rhp/script/api.hpp>
 #include <rhp/script/lib.hpp>
 #include <rhp/script/lua_event.hpp>
 #include <rhp/script/patch_point.hpp>
 #include <rhp/script/sandbox.hpp>
+#include <rhp/script/stubs.hpp>
 
 namespace disabled_tests_fixtures {
 
@@ -83,7 +89,42 @@ namespace disabled_tests_fixtures {
 
 inline constexpr Rhp::lua_event<"tests.disabled.ping", int, std::string_view> ping{};
 
+struct spot {
+    float x = 0;
+    float y = 0;
+};
+
+inline float g_samples[4] = {};
+inline spot g_spot{};
+
+inline std::span<float> samples() {
+    return g_samples;
+}
+
+inline spot& the_spot() {
+    return g_spot;
+}
+
+inline float total(std::span<const float> v) {
+    return v.empty() ? 0.0f : v[0];
+}
+
+using view_lib = Rhp::lib<"off_views">::view<"spot", spot>::field<"x", &spot::x>::ro_field<"y", &spot::y> //
+    ::fn<"samples", &samples>::fn<"spot_at", &the_spot>::fn<"total", &total>;
+
 } // namespace disabled_tests_fixtures
+
+TEST_CASE("disabled views and spans still describe themselves", "[script][disabled]") {
+    using namespace disabled_tests_fixtures;
+    STATIC_REQUIRE(Rhp::script::installable<view_lib>);
+    Rhp::script::sandbox box;
+    REQUIRE(box.install<view_lib>().error().code == Rhp::errc::kDisabled);
+    const std::string stubs = Rhp::script::stubs::generate<view_lib>(Rhp::role::kPatch);
+    CHECK(stubs.find("---@class spot\n---@field x number\n---@field y number read-only\n") != std::string::npos);
+    CHECK(stubs.find("---@return rhp.span<number>\nfunction off_views.samples() end") != std::string::npos);
+    const Rhp::value desc = Rhp::script::api::describe<view_lib>();
+    REQUIRE(desc.find("views") != nullptr);
+}
 
 TEST_CASE("disabled lua_event fire is a no-op", "[script][disabled]") {
     using namespace disabled_tests_fixtures;
