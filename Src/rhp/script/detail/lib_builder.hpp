@@ -223,8 +223,9 @@ struct return_traits<Handles, Rhp::async<T>> {
 };
 
 // Pushes a binding's result; returns the number of Lua results. Rhp::result errors are raised.
-template <class Handles, class R>
-int push_return(stack& s, std::string_view label, R& r) {
+// `label` is a string or a binding_label (read only when an error needs it).
+template <class Handles, class R, class Label>
+int push_return(stack& s, const Label& label, R& r) {
     if constexpr (is_tuple_v<R>) {
         std::apply([&](const auto&... items) { (push_arg<Handles>(s, items), ...); }, r);
         return static_cast<int>(std::tuple_size_v<R>);
@@ -232,7 +233,7 @@ int push_return(stack& s, std::string_view label, R& r) {
         if (!r) {
             error err = r.error();
             if (err.where.empty()) {
-                err.where = std::string{label};
+                err.where = std::string{std::string_view{label}};
             }
             s.raise(err);
         }
@@ -301,8 +302,15 @@ using storage_t = std::remove_cvref_t<T>;
 template <class T>
 using capture_t = std::conditional_t<std::is_same_v<storage_t<T>, std::string_view>, std::string, storage_t<T>>;
 
+// A binding's label (upvalue 1 of its closure), read from Lua only when something needs it: an
+// error, or an undo record. The common successful call never touches it.
+struct binding_label {
+    const stack& s;
+    operator std::string_view() const noexcept { return s.upvalue_string(1); } // NOLINT(google-explicit-constructor)
+};
+
 template <class Handles, class Entry, std::size_t... Is>
-int invoke_fn(stack& s, context& ctx, std::string_view label, std::index_sequence<Is...>) {
+int invoke_fn(stack& s, binding_label label, std::index_sequence<Is...>) {
     using args = typename Entry::traits::args;
     using R = typename Entry::traits::return_type;
     constexpr bool keep_args = Entry::feed == undo_feed::kArgs;
@@ -336,11 +344,11 @@ int invoke_fn(stack& s, context& ctx, std::string_view label, std::index_sequenc
     } catch (const Rhp::exception& e) {
         thrown = e.err();
     } catch (const std::exception& e) {
-        thrown = make_error(errc::kRuntime, e.what(), std::string{label});
+        thrown = make_error(errc::kRuntime, e.what(), std::string{std::string_view{label}});
     }
     if (thrown) {
         if (thrown->where.empty()) {
-            thrown->where = std::string{label};
+            thrown->where = std::string{std::string_view{label}};
         }
         s.raise(*thrown);
     }
@@ -354,16 +362,16 @@ int invoke_fn(stack& s, context& ctx, std::string_view label, std::index_sequenc
         if constexpr (Entry::feed == undo_feed::kResult) {
             using V = undo_input_t<Entry::function>;
             if constexpr (is_result_v<R>) {
-                ctx.record_effect(std::string{label}, std::make_unique<undo_call_effect<Entry::undo_tag::function, V>>(**out));
+                s.context().record_effect(std::string{std::string_view{label}}, std::make_unique<undo_call_effect<Entry::undo_tag::function, V>>(**out));
             } else {
-                ctx.record_effect(std::string{label}, std::make_unique<undo_call_effect<Entry::undo_tag::function, V>>(*out));
+                s.context().record_effect(std::string{std::string_view{label}}, std::make_unique<undo_call_effect<Entry::undo_tag::function, V>>(*out));
             }
         } else if constexpr (Entry::feed == undo_feed::kArgs) {
-            ctx.record_effect(std::string{label},
+            s.context().record_effect(std::string{std::string_view{label}},
                               std::make_unique<undo_call_effect<Entry::undo_tag::function, capture_t<utils::at_t<args, Is>>...>>(
                                   *std::get<Is>(pulled)...));
         } else if constexpr (Entry::is_irreversible) {
-            ctx.record_effect(std::string{label}, std::make_unique<irreversible_effect>());
+            s.context().record_effect(std::string{std::string_view{label}}, std::make_unique<irreversible_effect>());
         }
     }
 
@@ -541,22 +549,25 @@ int start_async(stack& s, context& ctx, std::string_view label, std::index_seque
 template <class Handles, class Entry>
 int call_fn(lua_State* L) {
     stack s{L};
-    context& ctx = s.context();
-    const std::string_view label = s.upvalue_string(1);
-    if (!allows(ctx.caller_role(), Entry::required)) {
-        s.raise(forbidden(label, Entry::required));
+    if constexpr (Entry::required != role::kObserve) { // every caller has observe
+        if (!allows(s.context().caller_role(), Entry::required)) {
+            s.raise(forbidden(s.upvalue_string(1), Entry::required));
+        }
     }
     if constexpr (Entry::is_async) {
+        context& ctx = s.context();
+        const std::string_view label = s.upvalue_string(1);
         const int results = start_async<Handles, Entry>(s, ctx, label, std::make_index_sequence<Entry::traits::arity>{});
         if (results >= 0) {
             return results;
         }
         yield_async(L); // nothing here has a destructor: the yield may jump
     } else {
-        return invoke_fn<Handles, Entry>(s, ctx, label, std::make_index_sequence<Entry::traits::arity>{});
+        return invoke_fn<Handles, Entry>(s, binding_label{s}, std::make_index_sequence<Entry::traits::arity>{});
     }
 }
 
+// Reads no upvalues and raises nothing that needs a label: the lib proxy calls it in its own frame.
 template <class Handles, class Entry>
 int get_var(lua_State* L) {
     stack s{L};
@@ -625,15 +636,13 @@ private:
             s.push_function(&call_fn<Handles, Entry>, 1);
             s.set_field(members, Entry::name);
         } else if constexpr (Entry::kind == entry_kind::kVar) {
-            s.push_string(path);
-            s.push_function(&get_var<Handles, Entry>, 1);
+            s.push_function(&get_var<Handles, Entry>, 0); // no upvalues: lib_var_index calls it in place
             s.set_field(getters, Entry::name);
             s.push_string(path);
             s.push_function(&set_var<Handles, Entry>, 1);
             s.set_field(setters, Entry::name);
         } else if constexpr (Entry::kind == entry_kind::kRo) {
-            s.push_string(path);
-            s.push_function(&get_var<Handles, Entry>, 1);
+            s.push_function(&get_var<Handles, Entry>, 0); // no upvalues: lib_var_index calls it in place
             s.set_field(getters, Entry::name);
         } else if constexpr (Entry::kind == entry_kind::kSub) {
             lib_builder<typename Entry::lib, Handles>::push(s, path);

@@ -6,8 +6,10 @@
 #include <format>
 #include <limits>
 #include <map>
+#include <memory>
 #include <system_error>
 #include <utility>
+#include <vector>
 
 #include <asio/ip/udp.hpp>
 #include <asio/steady_timer.hpp>
@@ -78,8 +80,14 @@ struct udp_service : std::enable_shared_from_this<udp_service> {
     std::array<std::byte, rudp::kMaxPacket + 1> buffer{}; // one receive is outstanding at a time
     udp::endpoint from;
     utils::byte_buffer scratch;
+    // While a receive drains the socket, peers that got packets owe their ACK until the drain ends:
+    // one ACK then covers them all (cumulative + selective), unless a packet sent meanwhile carried it.
+    bool draining = false;
+    std::vector<std::shared_ptr<peer_state>> owing;
 
     void receive();
+    void process(std::size_t n);
+    void flush_acks();
     void dispatch(const rudp::packet& in, const udp::endpoint& source);
 
     void send(const udp::endpoint& to, const rudp::packet_header& header, utils::bytes_view payload = {}) {
@@ -126,6 +134,7 @@ struct peer_state : std::enable_shared_from_this<peer_state> {
     bool closing = false; // close() asked: FIN follows the queued bytes
     bool closed = false;
     bool fin_sent = false;
+    bool ack_owed = false; // packets received this drain that no sent packet has acknowledged yet
     link_handler* handler = nullptr;
     connect_fn connected; // the dialer's pending callback
     asio::steady_timer timer;
@@ -159,7 +168,20 @@ struct peer_state : std::enable_shared_from_this<peer_state> {
         return {kind, token, seq, recv_seq - 1, sack};
     }
 
-    void send(rudp::packet_kind kind, std::uint64_t seq = 0, utils::bytes_view payload = {}) { service->send(remote, header(kind, seq), payload); }
+    // Every packet's header carries the latest ACK, so any send settles what is owed.
+    void send(rudp::packet_kind kind, std::uint64_t seq = 0, utils::bytes_view payload = {}) {
+        ack_owed = false;
+        service->send(remote, header(kind, seq), payload);
+    }
+
+    // Acknowledges received packets: at the end of the socket drain in progress, else now.
+    void owe_ack() {
+        if (!service->draining) {
+            send(rudp::packet_kind::kAck);
+        } else if (!std::exchange(ack_owed, true)) {
+            service->owing.push_back(shared_from_this());
+        }
+    }
 
     void finish(error why) {
         if (std::exchange(closed, true)) {
@@ -191,13 +213,17 @@ struct peer_state : std::enable_shared_from_this<peer_state> {
                 finish(make_error(errc::kLimitExceeded, "UDP sequence exhausted", kWhere));
                 return;
             }
-            const auto& front = queue.front();
-            const auto n = std::min(rudp::kMaxPayload, front.size() - queue_offset);
+            // The payload is a byte stream: a packet takes bytes from as many queued sends as fit, so
+            // sends queued behind a full window (pipelined calls) share packets.
             queued_packet entry{rudp::packet_kind::kData, {}, clock::now(), 1};
-            entry.payload.append(front.view().subspan(queue_offset, n));
-            if ((queue_offset += n) == front.size()) {
-                queue.pop_front();
-                queue_offset = 0;
+            while (entry.payload.size() < rudp::kMaxPayload && !queue.empty()) {
+                const auto& front = queue.front();
+                const auto n = std::min(rudp::kMaxPayload - entry.payload.size(), front.size() - queue_offset);
+                entry.payload.append(front.view().subspan(queue_offset, n));
+                if ((queue_offset += n) == front.size()) {
+                    queue.pop_front();
+                    queue_offset = 0;
+                }
             }
             const auto seq = send_seq++;
             send(entry.kind, seq, entry.payload.view());
@@ -450,14 +476,17 @@ void peer_state::ingest(const rudp::packet& in) {
     if (closed || h.kind == rudp::packet_kind::kAck) {
         return;
     }
-    if (h.seq >= recv_seq && h.seq - recv_seq < rudp::kWindow) {
+    if (h.seq == recv_seq && h.kind == rudp::packet_kind::kData && received.empty() && handler != nullptr) {
+        ++recv_seq; // in order with nothing buffered: straight to the handler, no copy
+        handler->on_bytes(in.payload);
+    } else if (h.seq >= recv_seq && h.seq - recv_seq < rudp::kWindow) {
         queued_packet entry{h.kind, {}, {}, 0};
         entry.payload.append(in.payload);
         received.try_emplace(h.seq, std::move(entry));
         deliver();
     }
     if (!closed) {
-        send(rudp::packet_kind::kAck); // duplicates and out-of-window packets are re-acknowledged too
+        owe_ack(); // duplicates and out-of-window packets are re-acknowledged too
     }
 }
 
@@ -488,12 +517,45 @@ void udp_service::receive() {
         }
         // Other errors (ICMP port unreachable reported on Windows, oversized datagrams) are per packet.
         if (!ec) {
-            if (const auto in = rudp::decode_packet({self->buffer.data(), n})) {
-                self->dispatch(*in, self->from);
+            // Then the datagrams already waiting (a bounded number, so one busy socket can't hold the
+            // thread), and one ACK per peer for all of them.
+            constexpr int kMaxDrain = 64;
+            self->draining = true;
+            self->process(n);
+            for (int i = 0; i < kMaxDrain && self->socket.is_open(); ++i) {
+                std::error_code more;
+                const std::size_t m = self->socket.receive_from(asio::buffer(self->buffer), self->from, 0, more);
+                if (more == asio::error::would_block || more == asio::error::try_again) {
+                    break;
+                }
+                if (!more) {
+                    self->process(m);
+                }
             }
+            self->draining = false;
+            self->flush_acks();
         }
-        self->receive();
+        if (self->socket.is_open()) {
+            self->receive();
+        }
     });
+}
+
+void udp_service::process(std::size_t n) {
+    if (const auto in = rudp::decode_packet({buffer.data(), n})) {
+        dispatch(*in, from);
+    }
+}
+
+void udp_service::flush_acks() {
+    auto peers_owing = std::move(owing);
+    owing.clear();
+    for (const auto& peer : peers_owing) {
+        if (peer->ack_owed && !peer->closed) {
+            peer->send(rudp::packet_kind::kAck);
+        }
+        peer->ack_owed = false;
+    }
 }
 
 void udp_service::dispatch(const rudp::packet& in, const udp::endpoint& source) {

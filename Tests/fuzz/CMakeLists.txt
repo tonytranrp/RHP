@@ -1,11 +1,17 @@
 # Fuzz targets (frame · envelope · msgpack · sandbox_escape · network · release). Each builds as a replay driver that
 # ctest runs (seeds + deterministic mutations) and, with RHP_FUZZ=ON (Clang), also as a libFuzzer
 # executable `rhp_fuzz_<name>` for long runs: see README.md.
+# The replay driver's main, compiled once for every target.
+add_library(rhp_fuzz_replay_main OBJECT replay_main.cpp)
+rhp_set_warnings(rhp_fuzz_replay_main)
+set_target_properties(rhp_fuzz_replay_main PROPERTIES FOLDER "tests/fuzz")
+
 function(rhp_add_fuzz name)
     cmake_parse_arguments(PARSE_ARGV 1 arg "" "SOURCE" "LINKS")
-    add_executable(rhp_fuzz_${name}_replay ${arg_SOURCE} replay_main.cpp)
+    add_executable(rhp_fuzz_${name}_replay ${arg_SOURCE} $<TARGET_OBJECTS:rhp_fuzz_replay_main>)
     target_link_libraries(rhp_fuzz_${name}_replay PRIVATE ${arg_LINKS})
     rhp_set_warnings(rhp_fuzz_${name}_replay)
+    rhp_use_shared_pch(rhp_fuzz_${name}_replay apps)
     set_target_properties(rhp_fuzz_${name}_replay PROPERTIES FOLDER "tests/fuzz")
     add_test(NAME fuzz.${name} COMMAND rhp_fuzz_${name}_replay --iterations 3000)
     set_tests_properties(fuzz.${name} PROPERTIES LABELS fuzz TIMEOUT 600)

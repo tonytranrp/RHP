@@ -18,6 +18,15 @@ namespace {
 int lib_var_index(lua_State* L) {
     lua_pushvalue(L, 2);
     if (lua_rawget(L, lua_upvalueindex(1)) == LUA_TFUNCTION) {
+        // RHP's getters are C functions without upvalues (get_var): one runs in this frame, which is
+        // cheaper than a nested lua_call. Anything else (a test's swapped getter) is called.
+        if (const lua_CFunction get = lua_tocfunction(L, -1); get != nullptr) {
+            if (lua_getupvalue(L, -1, 1) == nullptr) {
+                lua_pop(L, 1);
+                return get(L);
+            }
+            lua_pop(L, 1);
+        }
         lua_call(L, 0, 1);
         return 1;
     }
