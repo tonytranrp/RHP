@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
@@ -7,6 +8,7 @@
 #include <functional>
 #include <limits>
 #include <optional>
+#include <span>
 #include <string_view>
 #include <tuple>
 #include <type_traits>
@@ -15,6 +17,7 @@
 #include <rhp/core/async.hpp>
 #include <rhp/core/result.hpp>
 #include <rhp/core/role.hpp>
+#include <rhp/script/views.hpp>
 #include <rhp/utils/fixed_string.hpp>
 #include <rhp/utils/function_traits.hpp>
 #include <rhp/utils/type_list.hpp>
@@ -242,8 +245,10 @@ enum class entry_kind : std::uint8_t {
     kRo,
     kHandle,
     kSub,
-    kMethod,  // a function called on a handle: e:move(1, 2)
-    kProperty // a read-only value of a handle: e.x
+    kMethod,   // a function called on a handle: e:move(1, 2)
+    kProperty, // a read-only value of a handle: e.x
+    kView,     // a struct type scripts read and write in place: t.x = 1
+    kField     // a field of a view type
 };
 
 // ---- function bindings -------------------------------------------------------------------------
@@ -299,6 +304,10 @@ inline constexpr bool borrowed_v<std::tuple<Ts...>> = (borrowed_v<std::remove_cv
 
 template <class A, class B>
 inline constexpr bool borrowed_v<std::pair<A, B>> = borrowed_v<std::remove_cvref_t<A>> || borrowed_v<std::remove_cvref_t<B>>;
+
+// A span views memory it doesn't own (a script's buffer, or C++ memory a view found for one call).
+template <class E, std::size_t N>
+inline constexpr bool borrowed_v<std::span<E, N>> = true;
 
 template <class List>
 inline constexpr bool owning_params_v = false;
@@ -366,6 +375,58 @@ consteval undo_feed undo_feed_of() {
 template <auto F, class... Tags>
 concept valid_fn_tags = (undo_count_v<Tags...> + count_tag_v<irreversible, Tags...> <= 1) && (role_count_v<Tags...> <= 1) &&
                         (undo_feed_of<F, typename undo_of<Tags...>::type>() != undo_feed::kInvalid);
+
+// ---- spans -------------------------------------------------------------------------------------------
+
+template <class T>
+inline constexpr bool is_span_v = false;
+
+template <class E, std::size_t N>
+inline constexpr bool is_span_v<std::span<E, N>> = true;
+
+// A span crosses as a typed view: a span element (const or not), dynamic extent.
+template <class T>
+consteval bool span_type_ok() {
+    using U = std::remove_cvref_t<T>;
+    if constexpr (is_span_v<U>) {
+        using E = typename U::element_type;
+        return U::extent == std::dynamic_extent && !std::is_volatile_v<E> && span_element<std::remove_const_t<E>>;
+    } else {
+        return true;
+    }
+}
+
+template <class List>
+inline constexpr bool span_params_ok_v = false;
+
+template <class... Args>
+inline constexpr bool span_params_ok_v<utils::type_list<Args...>> = (span_type_ok<Args>() && ...);
+
+// A binding's result as a view: a span (a typed view), or a pointer or reference (a struct view
+// when its type is a declared ::view; known at install). Rhp::result<> is peeled.
+template <class R>
+struct view_candidate : std::bool_constant<is_span_v<std::remove_cv_t<R>> || std::is_pointer_v<std::remove_cv_t<R>> || std::is_lvalue_reference_v<R>> {};
+
+template <class T>
+struct view_candidate<std::expected<T, error>> : view_candidate<T> {};
+
+// Every span a binding takes or returns has a span element; a binding returning a span is called
+// again on every access of its view, so it has nothing to undo and never waits.
+template <auto F, class... Tags>
+consteval bool spans_ok() {
+    using R = utils::return_type_t<decltype(F)>;
+    using U = typename unwrap_result<std::remove_cvref_t<R>>::type;
+    if constexpr (!span_params_ok_v<utils::args_t<decltype(F)>> || !span_type_ok<U>()) {
+        return false;
+    } else if constexpr (is_span_v<std::remove_cv_t<U>>) {
+        return undo_count_v<Tags...> + count_tag_v<irreversible, Tags...> == 0 && !is_async_v<std::remove_cvref_t<R>>;
+    } else {
+        return true;
+    }
+}
+
+template <auto F, class... Tags>
+concept span_binding_ok = spans_ok<F, Tags...>();
 
 template <class Tag>
 struct role_value {
@@ -449,10 +510,11 @@ struct sub_entry {
     using lib = Lib;
 };
 
-// Methods and properties live on their handle, not in the lib: they never clash with lib names.
+// Methods, properties and fields live on their handle or view type, not in the lib: they never clash
+// with lib names.
 template <class Entry>
 consteval bool lib_name_free(std::string_view name) {
-    return Entry::kind == entry_kind::kMethod || Entry::kind == entry_kind::kProperty || Entry::name != name;
+    return Entry::kind == entry_kind::kMethod || Entry::kind == entry_kind::kProperty || Entry::kind == entry_kind::kField || Entry::name != name;
 }
 
 template <class... Entries>
@@ -531,6 +593,109 @@ consteval bool member_free(std::string_view name) {
     return (!member_clash<Entries, Self>(name) && ...);
 }
 
+// ---- struct views ------------------------------------------------------------------------------------
+
+// A view type is a standard-layout class: its fields sit at fixed offsets, so a view finds a field
+// from the object's address and a journaled write restores just that field's bytes.
+template <class T>
+concept view_struct = std::is_class_v<T> && std::same_as<T, std::remove_cv_t<T>> && std::is_standard_layout_v<T> && !std::is_polymorphic_v<T>;
+
+template <utils::fixed_string Name, class T>
+struct view_entry {
+    static constexpr entry_kind kind = entry_kind::kView;
+    static constexpr utils::fixed_string fixed_name = Name;
+    static constexpr std::string_view name = fixed_name.view();
+    using type = T;
+};
+
+template <class M>
+struct member_traits {};
+
+template <class M, class C>
+struct member_traits<M C::*> {
+    using owner = C;
+    using value = M;
+};
+
+template <auto Member>
+concept member_object = std::is_member_object_pointer_v<decltype(Member)>;
+
+template <auto Member>
+using member_owner_t = typename member_traits<decltype(Member)>::owner;
+
+template <auto Member>
+using member_value_t = typename member_traits<decltype(Member)>::value;
+
+template <class T>
+inline constexpr bool is_std_array_v = false;
+
+template <class E, std::size_t N>
+inline constexpr bool is_std_array_v<std::array<E, N>> = true;
+
+// What a field is to a view: 1 a value (number, bool, enum), 2 an array of span elements (read as a
+// span view), 3 a struct (a nested view; its type must be a declared ::view), 0 unsupported.
+template <class M>
+consteval int field_shape_of() {
+    using U = std::remove_cv_t<M>;
+    if constexpr (std::is_arithmetic_v<U> || std::is_enum_v<U>) {
+        return (std::is_floating_point_v<U> && sizeof(U) != 4 && sizeof(U) != 8) || sizeof(U) > 8 ? 0 : 1;
+    } else if constexpr (std::is_bounded_array_v<U>) {
+        return std::rank_v<U> == 1 && span_element<std::remove_cv_t<std::remove_extent_t<U>>> ? 2 : 0;
+    } else if constexpr (is_std_array_v<U>) {
+        return span_element<std::remove_cv_t<typename U::value_type>> ? 2 : 0;
+    } else if constexpr (std::is_class_v<U>) {
+        return view_struct<U> ? 3 : 0;
+    } else {
+        return 0;
+    }
+}
+
+template <auto Member>
+concept field_member = member_object<Member> && view_struct<member_owner_t<Member>> && (field_shape_of<member_value_t<Member>>() != 0);
+
+template <utils::fixed_string Name, auto Member, bool ReadOnly, class... Tags>
+struct field_entry {
+    static constexpr entry_kind kind = entry_kind::kField;
+    static constexpr utils::fixed_string fixed_name = Name;
+    static constexpr std::string_view name = fixed_name.view();
+    static constexpr auto member = Member;
+    using owner_type = member_owner_t<Member>;
+    using value_type = std::remove_cv_t<member_value_t<Member>>;
+    static constexpr int shape = field_shape_of<member_value_t<Member>>();
+    // A const member is read-only whatever the entry says.
+    static constexpr bool writable = !ReadOnly && !std::is_const_v<member_value_t<Member>>;
+    using meta = var_meta<value_type, Tags...>;
+};
+
+// Range and step only on number fields (a value, not bool or an enum): the variable tags' rules.
+template <auto Member, class... Tags>
+consteval bool field_tags_ok() {
+    using M = std::remove_cv_t<member_value_t<Member>>;
+    if constexpr (field_shape_of<M>() == 1 && !std::is_enum_v<M>) {
+        return valid_var_tags<M, Tags...>;
+    } else {
+        return valid_ro_tags<Tags...> && var_tag_count_v<1, Tags...> + var_tag_count_v<2, Tags...> == 0;
+    }
+}
+
+template <auto Member, class... Tags>
+concept valid_field_tags = field_tags_ok<Member, Tags...>();
+
+template <class Entry, class Owner>
+consteval bool field_clash(std::string_view name) {
+    if constexpr (Entry::kind == entry_kind::kField) {
+        return std::is_same_v<typename Entry::owner_type, Owner> && Entry::name == name;
+    } else {
+        return false;
+    }
+}
+
+// No field of the same view type has this name yet (in this lib; install checks the tree).
+template <class Owner, class... Entries>
+consteval bool field_free(std::string_view name) {
+    return (!field_clash<Entries, Owner>(name) && ...);
+}
+
 } // namespace detail
 
 // ---- the lib DSL -------------------------------------------------------------------------------------
@@ -565,7 +730,7 @@ struct lib {
 
     template <utils::fixed_string N, auto F, detail::fn_tag... Tags>
         requires(utils::is_identifier(N.view()) && detail::name_free<Entries...>(N.view())) && detail::bindable_function<F> &&
-                    detail::valid_fn_tags<F, Tags...> && detail::async_binding_ok<F>
+                    detail::valid_fn_tags<F, Tags...> && detail::async_binding_ok<F> && detail::span_binding_ok<F, Tags...>
     using fn = lib<Name, Entries..., detail::fn_entry<N, F, Tags...>>;
 
     // A variable scripts read and (kPatch) write, journaled. Tags make it a described tunable:
@@ -593,15 +758,38 @@ struct lib {
     // A function called on a handle (e:move(1, 2), label "entity:move"). Takes the fn tags.
     template <utils::fixed_string N, auto F, detail::fn_tag... Tags>
         requires(utils::is_identifier(N.view()) && detail::member_free<detail::self_t<F>, Entries...>(N.view())) &&
-                    detail::method_function<F> && detail::valid_fn_tags<F, Tags...> && detail::async_binding_ok<F>
+                    detail::method_function<F> && detail::valid_fn_tags<F, Tags...> && detail::async_binding_ok<F> &&
+                    detail::span_binding_ok<F, Tags...>
     using method = lib<Name, Entries..., detail::method_entry<N, F, Tags...>>;
 
     // A read-only value of a handle (e.hp, label "entity.hp"): F(handle) -> value. Only
     // requires_role<> applies.
     template <utils::fixed_string N, auto F, detail::fn_tag... Tags>
         requires(utils::is_identifier(N.view()) && detail::member_free<detail::self_t<F>, Entries...>(N.view())) &&
-                    detail::property_function<F, Tags...>
+                    detail::property_function<F, Tags...> && detail::span_binding_ok<F, Tags...>
     using property = lib<Name, Entries..., detail::property_entry<N, F, Tags...>>;
+
+    // A struct type scripts read and write in place (views.hpp): a binding returning T* / T& (or
+    // const) gives a view of the object, its ::field<>s read and written through it. T is a
+    // standard-layout class; the name is its Lua type name, unique like a handle's.
+    template <utils::fixed_string N, class T>
+        requires(utils::is_identifier(N.view()) && detail::name_free<Entries...>(N.view())) && detail::view_struct<T>
+    using view = lib<Name, Entries..., detail::view_entry<N, T>>;
+
+    // A field of a view type (the class of &T::member): t.name reads it, t.name = v writes it (kPatch,
+    // journaled; a const member is read-only). A number, bool or enum; an array of span elements (a
+    // span view: t.m[3] = 1); or a struct of another declared view type (a nested view). Number
+    // fields take the variable tags (Rhp::range<> enforced on writes), the others unit<> and doc<>.
+    template <utils::fixed_string N, auto Member, detail::var_tag... Tags>
+        requires detail::field_member<Member> && (utils::is_identifier(N.view()) && detail::field_free<detail::member_owner_t<Member>, Entries...>(N.view())) &&
+                     detail::valid_field_tags<Member, Tags...>
+    using field = lib<Name, Entries..., detail::field_entry<N, Member, false, Tags...>>;
+
+    // A field scripts only read.
+    template <utils::fixed_string N, auto Member, detail::ro_tag... Tags>
+        requires detail::field_member<Member> && (utils::is_identifier(N.view()) && detail::field_free<detail::member_owner_t<Member>, Entries...>(N.view())) &&
+                     detail::valid_ro_tags<Tags...>
+    using ro_field = lib<Name, Entries..., detail::field_entry<N, Member, true, Tags...>>;
 };
 
 namespace detail {

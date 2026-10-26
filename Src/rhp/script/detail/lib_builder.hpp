@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <exception>
 #include <expected>
@@ -8,11 +9,13 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <tuple>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 #include <rhp/core/async.hpp>
 #include <rhp/core/result.hpp>
@@ -23,6 +26,7 @@
 #include <rhp/script/lib.hpp>
 #include <rhp/script/marshal.hpp>
 #include <rhp/script/stack.hpp>
+#include <rhp/script/views.hpp>
 #include <rhp/utils/fixed_string.hpp>
 #include <rhp/utils/type_list.hpp>
 
@@ -46,7 +50,14 @@ inline constexpr auto handle_key_v = concat_fixed<utils::fixed_string{"rhp.handl
 template <class H>
 inline constexpr char handle_type_tag_v = 0;
 
-// ---- collecting handles across a lib tree --------------------------------------------------------
+// Registry key of a struct view type's metatable: "rhp.view.<name>".
+template <class Entry>
+inline constexpr auto view_key_v = concat_fixed<utils::fixed_string{"rhp.view."}, Entry::fixed_name>();
+
+// ---- collecting handles (and view types) across a lib tree ---------------------------------------
+//
+// `Handles` below is every ::handle and ::view entry of the tree: the types a binding's parameters
+// and results may name. find_handle_t / find_view_t pick one kind.
 
 template <class Entry>
 struct handles_of_entry {
@@ -59,6 +70,11 @@ struct handles_of;
 template <utils::fixed_string N, class H, auto IsAlive>
 struct handles_of_entry<handle_entry<N, H, IsAlive>> {
     using type = utils::type_list<handle_entry<N, H, IsAlive>>;
+};
+
+template <utils::fixed_string N, class T>
+struct handles_of_entry<view_entry<N, T>> {
+    using type = utils::type_list<view_entry<N, T>>;
 };
 
 template <class Lib>
@@ -74,22 +90,46 @@ struct handles_of<lib<Name, Entries...>> {
 template <class Lib>
 using handles_of_t = typename handles_of<Lib>::type;
 
-// The handle entry for C++ type T in Handles, or void.
-template <class Handles, class T>
-struct find_handle {
+// The entry of kind K for C++ type T in Handles, or void.
+template <class Handles, class T, entry_kind K>
+struct find_typed {
     using type = void;
 };
 
-template <class T, class Entry, class... Rest>
-struct find_handle<utils::type_list<Entry, Rest...>, T> {
-    using type = std::conditional_t<std::is_same_v<typename Entry::type, T>, Entry, typename find_handle<utils::type_list<Rest...>, T>::type>;
+template <class T, entry_kind K, class Entry, class... Rest>
+struct find_typed<utils::type_list<Entry, Rest...>, T, K> {
+    using type = std::conditional_t<Entry::kind == K && std::is_same_v<typename Entry::type, T>, Entry,
+                                    typename find_typed<utils::type_list<Rest...>, T, K>::type>;
 };
 
+// The handle entry for C++ type T in Handles, or void.
 template <class Handles, class T>
-using find_handle_t = typename find_handle<Handles, std::remove_cvref_t<T>>::type;
+using find_handle_t = typename find_typed<Handles, std::remove_cvref_t<T>, entry_kind::kHandle>::type;
 
 template <class Handles, class T>
 inline constexpr bool is_handle_v = !std::is_void_v<find_handle_t<Handles, T>>;
+
+// The view entry for C++ type T in Handles, or void.
+template <class Handles, class T>
+using find_view_t = typename find_typed<Handles, std::remove_cvref_t<T>, entry_kind::kView>::type;
+
+template <class Handles, class T>
+inline constexpr bool is_view_v = !std::is_void_v<find_view_t<Handles, T>>;
+
+// A parameter a struct view stands in for: the view's type by value, by const reference or as a
+// const pointer (nil: nullptr). 0 none, 1 by value, 2 const reference, 3 const pointer.
+template <class Handles, class T>
+consteval int view_param_kind() {
+    if constexpr (std::is_lvalue_reference_v<T>) {
+        using U = std::remove_reference_t<T>;
+        return std::is_const_v<U> && is_view_v<Handles, U> ? 2 : 0;
+    } else if constexpr (std::is_pointer_v<std::remove_cv_t<T>>) {
+        using U = std::remove_pointer_t<std::remove_cv_t<T>>;
+        return std::is_const_v<U> && is_view_v<Handles, U> ? 3 : 0;
+    } else {
+        return !std::is_reference_v<T> && is_view_v<Handles, T> && std::is_copy_constructible_v<std::remove_cv_t<T>> ? 1 : 0;
+    }
+}
 
 // ---- handles on the Lua stack ----------------------------------------------------------------------
 
@@ -149,15 +189,48 @@ struct arg_traits {
             return false;
         }
     }();
+    // std::span<E> / std::span<const E>: a typed view, a buffer or (read-only) a table (span_type_ok).
+    static constexpr bool span = is_span_v<U>;
+    static constexpr int view = view_param_kind<Handles, T>();
     static constexpr bool by_value_or_const_ref = !std::is_reference_v<T> || std::is_const_v<std::remove_reference_t<T>>;
-    static constexpr bool pull_ok = by_value_or_const_ref && (handle || optional_handle || pullable<U>);
+    static constexpr bool pull_ok = by_value_or_const_ref && (handle || optional_handle || span || view != 0 || pullable<U>);
     static constexpr bool push_ok = handle || optional_handle || pushable<U>;
 };
 
+// How a pulled argument is held for the call: a struct view's object by const reference stays a
+// reference (no copy); everything else is held by value.
 template <class Handles, class T>
-result<std::remove_cvref_t<T>> pull_arg(stack& s, int index) {
+using pulled_t = std::conditional_t<view_param_kind<Handles, T>() == 2, std::reference_wrapper<const std::remove_cvref_t<T>>, std::remove_cvref_t<T>>;
+
+template <class Handles, class T>
+result<pulled_t<Handles, T>> pull_arg(stack& s, int index) {
     using U = std::remove_cvref_t<T>;
-    if constexpr (is_handle_v<Handles, U>) {
+    if constexpr (is_span_v<U>) {
+        using E = typename U::element_type;
+        using V = std::remove_const_t<E>;
+        constexpr bool writable = !std::is_const_v<E>;
+        const span_request request{elem_kind_of<V>(), writable, byte_element<V>, !writable};
+        auto got = s.to_span(index, request);
+        if (!got) {
+            return std::unexpected{std::move(got).error()};
+        }
+        return U{static_cast<E*>(got->data), got->count};
+    } else if constexpr (constexpr int view = view_param_kind<Handles, T>(); view != 0) {
+        using V = std::conditional_t<view == 3, std::remove_const_t<std::remove_pointer_t<U>>, std::remove_const_t<U>>;
+        using Entry = find_view_t<Handles, V>;
+        auto object = s.to_object(index, view_key_v<Entry>.view(), Entry::name, view == 3);
+        if (!object) {
+            return std::unexpected{std::move(object).error()};
+        }
+        const V* p = static_cast<const V*>(*object);
+        if constexpr (view == 1) {
+            return V{*p};
+        } else if constexpr (view == 2) {
+            return std::cref(*p);
+        } else {
+            return p;
+        }
+    } else if constexpr (is_handle_v<Handles, U>) {
         return pull_handle<find_handle_t<Handles, U>>(s, index);
     } else if constexpr (arg_traits<Handles, U>::optional_handle) {
         if (s.is_none_or_nil(index)) {
@@ -274,14 +347,30 @@ int push_return(stack& s, const Label& label, R& r) {
 template <class Entry>
 inline constexpr bool is_member_v = Entry::kind == entry_kind::kMethod || Entry::kind == entry_kind::kProperty;
 
+template <class T>
+inline constexpr bool is_vector_v = false;
+
+template <class E, class A>
+inline constexpr bool is_vector_v<std::vector<E, A>> = true;
+
+// Direct-initializes a capture (a std::string from a std::string_view argument is explicit; a span's
+// elements are copied into a vector).
+template <class Captured, class A>
+Captured capture_value(A&& a) {
+    if constexpr (is_vector_v<Captured> && is_span_v<std::remove_cvref_t<A>>) {
+        return Captured(a.begin(), a.end());
+    } else {
+        return Captured(std::forward<A>(a));
+    }
+}
+
 // Effect recorded by a binding tagged Rhp::undo<G>: calls G with the captured values.
 template <auto G, class... Captured>
 class undo_call_effect final : public effect {
 public:
-    // Direct-initializes each capture (a std::string from a std::string_view argument is explicit).
     template <class... A>
         requires(sizeof...(A) == sizeof...(Captured))
-    explicit undo_call_effect(A&&... captured) : captured_(Captured(std::forward<A>(captured))...) {}
+    explicit undo_call_effect(A&&... captured) : captured_(capture_value<Captured>(std::forward<A>(captured))...) {}
 
     void undo() override { std::apply(G, captured_); }
 
@@ -298,9 +387,20 @@ public:
 template <class T>
 using storage_t = std::remove_cvref_t<T>;
 
-// What an undo keeps of an argument: views into Lua strings are copied, they die with the call.
 template <class T>
-using capture_t = std::conditional_t<std::is_same_v<storage_t<T>, std::string_view>, std::string, storage_t<T>>;
+struct capture_of {
+    using type = std::conditional_t<std::is_same_v<storage_t<T>, std::string_view>, std::string, storage_t<T>>;
+};
+
+template <class E, std::size_t N>
+struct capture_of<std::span<E, N>> {
+    using type = std::vector<std::remove_const_t<E>>;
+};
+
+// What an undo keeps of an argument: views into Lua strings are copied, they die with the call (and
+// so are a span's elements); a struct view's object by const reference is copied.
+template <class T>
+using capture_t = typename capture_of<std::remove_cvref_t<T>>::type;
 
 // A binding's label (upvalue 1 of its closure), read from Lua only when something needs it: an
 // error, or an undo record. The common successful call never touches it.
@@ -323,7 +423,7 @@ int invoke_fn(stack& s, Label label, std::index_sequence<Is...>) {
     using R = typename Entry::traits::return_type;
     constexpr bool keep_args = Entry::feed == undo_feed::kArgs;
 
-    std::tuple<result<storage_t<utils::at_t<args, Is>>>...> pulled{
+    std::tuple<result<pulled_t<Handles, utils::at_t<args, Is>>>...> pulled{
         pull_arg<Handles, utils::at_t<args, Is>>(s, static_cast<int>(Is) + 1)...};
     std::optional<error> bad;
     ((bad || std::get<Is>(pulled) ? void() : void(bad = arg_error(std::get<Is>(pulled).error(), label, Is + 1, is_member_v<Entry>))), ...);
@@ -333,9 +433,9 @@ int invoke_fn(stack& s, Label label, std::index_sequence<Is...>) {
 
     const auto arg = [&]<std::size_t I>() -> decltype(auto) {
         if constexpr (keep_args) {
-            return static_cast<storage_t<utils::at_t<args, I>>&>(*std::get<I>(pulled));
+            return static_cast<pulled_t<Handles, utils::at_t<args, I>>&>(*std::get<I>(pulled));
         } else {
-            return static_cast<storage_t<utils::at_t<args, I>>&&>(*std::get<I>(pulled));
+            return static_cast<pulled_t<Handles, utils::at_t<args, I>>&&>(*std::get<I>(pulled));
         }
     };
 
@@ -447,6 +547,22 @@ struct plain_arg<std::string> {
     }
 };
 
+// A read-only span: a typed view of the same element type, or for a one-byte element a byte buffer,
+// a byte view or a Lua string. Tables, mutable spans and every mismatch take the general path.
+template <span_element E>
+struct plain_arg<std::span<const E>> {
+    static constexpr arg_kind kind = arg_kind::kSpan;
+    static bool take(const arg_slot& slot, std::span<const E>& out) noexcept {
+        const auto k = static_cast<elem_kind>(slot.view.elem);
+        const bool fits = slot.view.string ? byte_element<E> : (k == elem_kind_of<E>() || (byte_element<E> && is_byte_kind(k)));
+        if (!fits) {
+            return false;
+        }
+        out = std::span<const E>{static_cast<const E*>(slot.view.data), slot.view.size / sizeof(E)};
+        return true;
+    }
+};
+
 // Taken by value or const reference.
 template <class T>
 inline constexpr bool by_value_or_const_ref_v = !std::is_reference_v<T> || std::is_const_v<std::remove_reference_t<T>>;
@@ -551,6 +667,202 @@ int call_plain(stack& s, Label label, [[maybe_unused]] std::index_sequence<Is...
     } else {
         return push_return<Handles>(s, label, *out);
     }
+}
+
+// ---- bindings returning views ------------------------------------------------------------------------
+
+// What a binding's result is as a view (Rhp::result<> peeled): a span (a typed view of its
+// elements), a pointer or reference to a declared view type (a struct view), or neither.
+template <class Handles, class R>
+struct view_result {
+    static constexpr view_shape shape = view_shape::kSpan;
+    static constexpr bool is_view = false;
+};
+
+template <class Handles, class T>
+struct view_result<Handles, std::expected<T, error>> : view_result<Handles, T> {};
+
+template <class Handles, class E>
+struct view_result<Handles, std::span<E>> {
+    static constexpr view_shape shape = view_shape::kSpan;
+    static constexpr bool is_view = span_element<std::remove_const_t<E>>;
+    static constexpr bool writable = !std::is_const_v<E>;
+    static constexpr elem_kind elem = elem_kind_of<std::remove_const_t<E>>();
+};
+
+template <class Handles, class T>
+struct view_result<Handles, T*> {
+    using object = std::remove_cv_t<T>;
+    static constexpr view_shape shape = view_shape::kObject;
+    static constexpr bool is_view = is_view_v<Handles, object>;
+    static constexpr bool writable = !std::is_const_v<T>;
+    static constexpr elem_kind elem = elem_kind::kU8;
+};
+
+template <class Handles, class T>
+struct view_result<Handles, T* const> : view_result<Handles, T*> {};
+
+template <class Handles, class T>
+struct view_result<Handles, T&> : view_result<Handles, T*> {};
+
+template <class Handles, class E>
+struct view_result<Handles, const std::span<E>> : view_result<Handles, std::span<E>> {};
+
+template <class Handles, class Entry>
+inline constexpr bool returns_view_v = view_result<Handles, typename Entry::traits::return_type>::is_view;
+
+// The memory a view binding's result points at.
+template <class R>
+result<region> view_region(R&& r) {
+    using U = std::remove_cvref_t<R>;
+    if constexpr (is_result_v<U>) {
+        if (!r) {
+            return std::unexpected{r.error()};
+        }
+        return view_region(*r);
+    } else if constexpr (is_span_v<U>) {
+        using E = std::remove_const_t<typename U::element_type>;
+        return region{reinterpret_cast<std::byte*>(const_cast<E*>(r.data())), r.size_bytes()};
+    } else if constexpr (std::is_pointer_v<U>) {
+        if (r == nullptr) {
+            return fail(errc::kStaleHandle, "the object is gone (its binding returned null)");
+        }
+        using T = std::remove_cv_t<std::remove_pointer_t<U>>;
+        return region{reinterpret_cast<std::byte*>(const_cast<T*>(r)), sizeof(T)};
+    } else {
+        static_assert(std::is_lvalue_reference_v<R>, "a struct view comes from a pointer or a reference");
+        return region{reinterpret_cast<std::byte*>(const_cast<std::remove_cv_t<U>*>(std::addressof(r))), sizeof(U)};
+    }
+}
+
+// Sets `out` when a handle argument of a view binding died since the view was made.
+template <class Handles, class T>
+void check_alive(const T& v, std::optional<error>& out) {
+    if (out) {
+        return;
+    }
+    if constexpr (is_handle_v<Handles, T>) {
+        using H = find_handle_t<Handles, T>;
+        if (!std::invoke(H::is_alive, v)) {
+            out = make_error(errc::kStaleHandle, std::format("{} is no longer valid", H::name));
+        }
+    } else if constexpr (arg_traits<Handles, T>::optional_handle) {
+        using H = find_handle_t<Handles, typename T::value_type>;
+        if (v && !std::invoke(H::is_alive, *v)) {
+            out = make_error(errc::kStaleHandle, std::format("{} is no longer valid", H::name));
+        }
+    }
+}
+
+// One address per binding.
+template <class Entry>
+inline constexpr char binding_tag_v = 0;
+
+// A host view's source: the binding and copies of the arguments it was called with. Every access
+// calls the binding again (handle arguments checked first), so the view never holds a pointer that
+// could dangle.
+template <class Handles, class Entry, class... Captured>
+class binding_source final : public view_source {
+public:
+    template <class... A>
+        requires(sizeof...(A) == sizeof...(Captured))
+    explicit binding_source(A&&... captured) : args_(capture_value<Captured>(std::forward<A>(captured))...) {}
+
+    [[nodiscard]] result<region> resolve() const noexcept override {
+        try {
+            std::optional<error> stale;
+            std::apply([&](const Captured&... a) { (check_alive<Handles>(a, stale), ...); }, args_);
+            if (stale) {
+                return std::unexpected{std::move(*stale)};
+            }
+            return std::apply(
+                [](const Captured&... a) -> result<region> {
+                    decltype(auto) r = std::invoke(Entry::function, a...);
+                    return view_region<decltype(r)>(static_cast<decltype(r)&&>(r));
+                },
+                args_);
+        } catch (const Rhp::exception& e) {
+            return std::unexpected{e.err()};
+        } catch (const std::exception& e) {
+            return fail(errc::kRuntime, e.what());
+        } catch (...) { // C++ only in here (no Lua call): nothing else may escape a noexcept function
+            return fail(errc::kRuntime, "the binding threw an unknown exception");
+        }
+    }
+
+    [[nodiscard]] std::unique_ptr<view_source> clone() const override { return std::unique_ptr<view_source>{new binding_source(*this)}; }
+
+    [[nodiscard]] bool same(const view_source& other) const noexcept override {
+        if (other.binding() != binding()) {
+            return false;
+        }
+        if constexpr ((std::equality_comparable<Captured> && ...)) {
+            try {
+                return static_cast<const binding_source&>(other).args_ == args_;
+            } catch (...) { // a throwing operator==: not known to be the same memory
+                return false;
+            }
+        } else {
+            return &other == this;
+        }
+    }
+
+    [[nodiscard]] const void* binding() const noexcept override { return &binding_tag_v<Entry>; }
+
+private:
+    binding_source(const binding_source&) = default;
+
+    std::tuple<Captured...> args_;
+};
+
+template <class Handles, class Entry>
+consteval host_view_init view_init_of() {
+    using V = view_result<Handles, typename Entry::traits::return_type>;
+    host_view_init init{};
+    init.shape = V::shape;
+    init.elem = V::elem;
+    init.writable = V::writable;
+    return init;
+}
+
+// A view type as views know it: its name, registry key and size (its fields are in its metatable).
+template <class V>
+struct view_type_of {
+    static constexpr view_type_info info{V::name, view_key_v<V>.view(), &handle_type_tag_v<typename V::type>, sizeof(typename V::type)};
+    static const view_type_info* get() noexcept { return &info; }
+};
+
+// Calls a binding that returns a view and pushes the view (nil for a null pointer): a userdata
+// holding a binding_source with copies of the arguments. Errors raise at the call, as on the
+// general path.
+template <class Handles, class Entry, class Label, std::size_t... Is>
+int call_view(stack& s, Label label, std::index_sequence<Is...>) {
+    using args = typename Entry::traits::args;
+    using source = binding_source<Handles, Entry, capture_t<utils::at_t<args, Is>>...>;
+    static_assert(alignof(source) <= alignof(std::max_align_t));
+
+    std::tuple<result<pulled_t<Handles, utils::at_t<args, Is>>>...> pulled{
+        pull_arg<Handles, utils::at_t<args, Is>>(s, static_cast<int>(Is) + 1)...};
+    std::optional<error> bad;
+    ((bad || std::get<Is>(pulled) ? void() : void(bad = arg_error(std::get<Is>(pulled).error(), label, Is + 1, is_member_v<Entry>))), ...);
+    if (bad) {
+        s.raise(*bad);
+    }
+
+    host_view_init init = view_init_of<Handles, Entry>();
+    init.source_size = sizeof(source);
+    init.source_align = alignof(source);
+    init.label = std::string_view{label};
+    if constexpr (view_result<Handles, typename Entry::traits::return_type>::shape == view_shape::kObject) {
+        using V = find_view_t<Handles, typename view_result<Handles, typename Entry::traits::return_type>::object>;
+        init.type = view_type_of<V>::get();
+    }
+    // The userdata first (pushing may raise: nothing to clean up yet), then the source in it; the
+    // first resolution reports the binding's errors here and turns a null pointer into nil.
+    void* where = s.push_host_view(init);
+    auto* made = std::construct_at(static_cast<source*>(where), std::move(*std::get<Is>(pulled))...);
+    s.attach_view_source(made);
+    return 1;
 }
 
 // ---- asynchronous bindings ------------------------------------------------------------------------
@@ -733,6 +1045,8 @@ int call_fn(lua_State* L) {
             return results;
         }
         yield_async(L); // nothing here has a destructor: the yield may jump
+    } else if constexpr (returns_view_v<Handles, Entry>) {
+        return call_view<Handles, Entry>(s, binding_label{s}, std::make_index_sequence<Entry::traits::arity>{});
     } else if constexpr (plain_binding_v<Handles, Entry>) {
         return call_plain<Handles, Entry>(s, binding_label{s}, std::make_index_sequence<Entry::traits::arity>{});
     } else {
@@ -754,7 +1068,11 @@ int get_property(lua_State* L) {
             s.raise(forbidden(label{}, M::required));
         }
     }
-    return call_plain<Handles, M>(s, label{}, std::make_index_sequence<M::traits::arity>{});
+    if constexpr (returns_view_v<Handles, M>) {
+        return call_view<Handles, M>(s, label{}, std::make_index_sequence<M::traits::arity>{});
+    } else {
+        return call_plain<Handles, M>(s, label{}, std::make_index_sequence<M::traits::arity>{});
+    }
 }
 
 // Reads no upvalues and raises nothing that needs a label: the lib proxy calls it in its own frame.
@@ -913,20 +1231,153 @@ template <class... Hs>
 struct handle_definer<utils::type_list<Hs...>> {
     static result<void> define([[maybe_unused]] stack& s) {
         result<void> r{};
-        ((r = r ? s.define_userdata_type(handle_key_v<Hs>.view(), Hs::name, &handle_type_tag_v<typename Hs::type>,
-                                         &handle_eq<Hs>, &handle_tostring<Hs>)
-                : r),
-         ...);
+        const auto one = [&]<class H>(std::type_identity<H>) {
+            if constexpr (H::kind == entry_kind::kHandle) {
+                if (r) {
+                    r = s.define_userdata_type(handle_key_v<H>.view(), H::name, &handle_type_tag_v<typename H::type>, &handle_eq<H>,
+                                               &handle_tostring<H>);
+                }
+            }
+        };
+        (one(std::type_identity<Hs>{}), ...);
         return r;
     }
 };
 
-// Runs in protected mode (sandbox::install): defines the handle types, then pushes the lib proxy.
+// ---- struct view types and their fields ---------------------------------------------------------------
+
+template <class Entry>
+struct fields_in_entry {
+    using type = utils::type_list<>;
+};
+
+template <utils::fixed_string N, auto Member, bool ReadOnly, class... Tags>
+struct fields_in_entry<field_entry<N, Member, ReadOnly, Tags...>> {
+    using type = utils::type_list<field_entry<N, Member, ReadOnly, Tags...>>;
+};
+
+template <class Lib>
+struct fields_in;
+
+template <class Lib>
+struct fields_in_entry<sub_entry<Lib>> {
+    using type = typename fields_in<Lib>::type;
+};
+
+template <utils::fixed_string Name, class... Entries>
+struct fields_in<lib<Name, Entries...>> {
+    using type = utils::concat_t<utils::type_list<>, typename fields_in_entry<Entries>::type...>;
+};
+
+// Every ::field across a lib tree.
+template <class Lib>
+using fields_in_t = typename fields_in<Lib>::type;
+
+// Where a field is inside an object of its type.
+template <auto Member>
+void* field_address(void* object) noexcept {
+    using C = member_owner_t<Member>;
+    return const_cast<void*>(static_cast<const volatile void*>(std::addressof(static_cast<C*>(object)->*Member)));
+}
+
+template <class T>
+struct array_traits {};
+
+template <class E, std::size_t N>
+struct array_traits<E[N]> {
+    using element = std::remove_cv_t<E>;
+    static constexpr std::size_t count = N;
+};
+
+template <class E, std::size_t N>
+struct array_traits<std::array<E, N>> {
+    using element = std::remove_cv_t<E>;
+    static constexpr std::size_t count = N;
+};
+
+template <class Handles, class F>
+consteval field_desc make_field() {
+    using M = typename F::value_type;
+    field_desc d{};
+    d.name = F::name;
+    d.writable = F::writable;
+    d.address = &field_address<F::member>;
+    if constexpr (F::shape == 2) {
+        d.shape = field_shape::kArray;
+        d.elem = elem_kind_of<typename array_traits<M>::element>();
+        d.count = array_traits<M>::count;
+    } else if constexpr (F::shape == 3) {
+        d.shape = field_shape::kObject;
+        d.nested = &view_type_of<find_view_t<Handles, M>>::get;
+    } else {
+        d.shape = field_shape::kValue;
+        d.elem = elem_kind_of<M>();
+        if constexpr (F::meta::has_range) {
+            d.ranged = true;
+            d.min = *F::meta::lower();
+            d.max = *F::meta::upper();
+        }
+    }
+    return d;
+}
+
+// The fields of view type V (a view_entry) among the tree's Fields, in declaration order.
+template <class Handles, class Fields, class V>
+struct view_fields;
+
+template <class Handles, class... Fs, class V>
+struct view_fields<Handles, utils::type_list<Fs...>, V> {
+    template <class F>
+    static constexpr bool mine = std::is_same_v<typename F::owner_type, typename V::type>;
+    static constexpr std::size_t count = (std::size_t{0} + ... + (mine<Fs> ? 1u : 0u));
+
+    static consteval std::array<field_desc, count> make() {
+        std::array<field_desc, count> out{};
+        std::size_t i = 0;
+        const auto one = [&]<class F>(std::type_identity<F>) {
+            if constexpr (mine<F>) {
+                out[i++] = make_field<Handles, F>();
+            }
+        };
+        (one(std::type_identity<Fs>{}), ...);
+        return out;
+    }
+
+    static constexpr std::array<field_desc, count> fields = make();
+};
+
+template <class Handles, class Fields, class List>
+struct view_definer;
+
+template <class Handles, class Fields, class... Hs>
+struct view_definer<Handles, Fields, utils::type_list<Hs...>> {
+    // Defines every view type of the tree with its fields (a type another lib defined gets the
+    // fields it lacks; a field defined differently fails with kAlreadyLoaded).
+    static result<void> define([[maybe_unused]] stack& s) {
+        result<void> r{};
+        const auto one = [&]<class V>(std::type_identity<V>) {
+            if constexpr (V::kind == entry_kind::kView) {
+                if (r) {
+                    using fields = view_fields<Handles, Fields, V>;
+                    r = s.define_view_type(view_type_of<V>::info, fields::fields.data(), fields::fields.size());
+                }
+            }
+        };
+        (one(std::type_identity<Hs>{}), ...);
+        return r;
+    }
+};
+
+// Runs in protected mode (sandbox::install): defines the handle and view types, then pushes the
+// lib proxy.
 template <class Lib>
 int install_lib_tree(lua_State* L) {
     stack s{L};
     using handles = handles_of_t<Lib>;
     if (auto defined = handle_definer<handles>::define(s); !defined) {
+        s.raise(defined.error());
+    }
+    if (auto defined = view_definer<handles, fields_in_t<Lib>, handles>::define(s); !defined) {
         s.raise(defined.error());
     }
     member_installer<handles, members_of_t<Lib>>::install(s);
@@ -945,11 +1396,39 @@ struct params_ok;
 template <class... Args, class Handles>
 struct params_ok<utils::type_list<Args...>, Handles> : std::bool_constant<(arg_traits<Handles, Args>::pull_ok && ...)> {};
 
+// A view binding is called again on every access with copies of its arguments: they own their data
+// (no span, no struct view parameter), and the binding has nothing to undo and never waits.
+template <class List, class Handles>
+inline constexpr bool owning_view_params_v = false;
+
+template <class... Args, class Handles>
+inline constexpr bool owning_view_params_v<utils::type_list<Args...>, Handles> =
+    ((!is_span_v<std::remove_cvref_t<Args>> && view_param_kind<Handles, Args>() == 0) && ...);
+
+template <class Entry, class Handles>
+consteval bool view_binding_ok() {
+    if constexpr (!returns_view_v<Handles, Entry>) {
+        return true;
+    } else {
+        return !Entry::is_async && Entry::feed == undo_feed::kNone && !Entry::is_irreversible &&
+               owning_view_params_v<typename Entry::traits::args, Handles>;
+    }
+}
+
 template <utils::fixed_string N, auto F, class... Tags, class Handles>
 struct entry_installable<fn_entry<N, F, Tags...>, Handles>
     : std::bool_constant<params_ok<utils::args_t<decltype(F)>, Handles>::value &&
-                         return_traits<Handles, std::remove_cvref_t<utils::return_type_t<decltype(F)>>>::ok &&
-                         !std::is_reference_v<utils::return_type_t<decltype(F)>>> {};
+                         (returns_view_v<Handles, fn_entry<N, F, Tags...>>
+                              ? view_binding_ok<fn_entry<N, F, Tags...>, Handles>()
+                              : return_traits<Handles, std::remove_cvref_t<utils::return_type_t<decltype(F)>>>::ok &&
+                                    !std::is_reference_v<utils::return_type_t<decltype(F)>>)> {};
+
+// A field belongs to a view type declared in the tree; a struct field's type is declared too.
+template <utils::fixed_string N, auto Member, bool ReadOnly, class... Tags, class Handles>
+struct entry_installable<field_entry<N, Member, ReadOnly, Tags...>, Handles>
+    : std::bool_constant<is_view_v<Handles, member_owner_t<Member>> &&
+                         (field_entry<N, Member, ReadOnly, Tags...>::shape != 3 ||
+                          is_view_v<Handles, typename field_entry<N, Member, ReadOnly, Tags...>::value_type>)> {};
 
 template <utils::fixed_string N, auto F, class... Tags, class Handles>
 struct entry_installable<method_entry<N, F, Tags...>, Handles>
@@ -1009,15 +1488,30 @@ struct members_distinct<utils::type_list<Ms...>> {
     static constexpr bool value = ((uses<Ms>() == 1) && ...);
 };
 
+// A field name is used once per view type across the whole tree.
+template <class Fields>
+struct fields_distinct;
+
+template <class... Fs>
+struct fields_distinct<utils::type_list<Fs...>> {
+    template <class F>
+    static consteval std::size_t uses() {
+        return (std::size_t{0} + ... + ((std::is_same_v<typename F::owner_type, typename Fs::owner_type> && F::name == Fs::name) ? 1u : 0u));
+    }
+    static constexpr bool value = ((uses<Fs>() == 1) && ...);
+};
+
 } // namespace Rhp::script::detail
 
 namespace Rhp::script {
 
-// Every binding's parameter and result type crosses the Lua boundary (as a handle or through
-// Rhp::convert), handle names/types are unique across the whole lib tree, and every method or
-// property belongs to a handle of the tree under a name of its own.
+// Every binding's parameter and result type crosses the Lua boundary (as a handle, a span, a struct
+// view or through Rhp::convert), handle and view type names/types are unique across the whole lib
+// tree, every method or property belongs to a handle of the tree under a name of its own, and every
+// field to a view type of the tree.
 template <class L>
 concept installable = lib_type<L> && detail::lib_installable<L, detail::handles_of_t<L>>::value &&
-                      detail::handles_distinct<detail::handles_of_t<L>>::value && detail::members_distinct<detail::members_of_t<L>>::value;
+                      detail::handles_distinct<detail::handles_of_t<L>>::value && detail::members_distinct<detail::members_of_t<L>>::value &&
+                      detail::fields_distinct<detail::fields_in_t<L>>::value;
 
 } // namespace Rhp::script

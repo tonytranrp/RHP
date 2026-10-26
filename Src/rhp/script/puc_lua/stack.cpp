@@ -13,6 +13,7 @@
 
 #include <rhp/script/detail/context.hpp>
 #include <rhp/script/puc_lua/sandbox_impl.hpp>
+#include <rhp/script/puc_lua/views_impl.hpp>
 #include <rhp/script/stack.hpp>
 
 namespace Rhp::script {
@@ -328,6 +329,11 @@ bool stack::read_args(const arg_kind* kinds, arg_slot* out, int count) const noe
                 return false;
             }
             out[i].string.data = lua_tolstring(state_, index, &out[i].string.size);
+            break;
+        case arg_kind::kSpan:
+            if (!detail::read_span_arg(state_, index, out[i])) {
+                return false;
+            }
             break;
         case arg_kind::kOther: break;
         }

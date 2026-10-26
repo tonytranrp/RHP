@@ -166,6 +166,7 @@ if(RHP_ENABLE)
             script/task_tests.cpp
             script/testing_tests.cpp
             script/tools_tests.cpp
+            script/view_tests.cpp
             script/yield_tests.cpp
         LINKS
             Rhp::script

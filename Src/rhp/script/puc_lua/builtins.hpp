@@ -47,6 +47,10 @@ int lua_rhp_api(lua_State* L);
 // testing.cpp: coroutine.wrap (the standard one, crediting the meter like the guarded resume).
 int lua_coroutine_wrap(lua_State* L);
 
+// buffer.cpp: sets rhp.buffer in the table on top of the stack and defines the span and buffer
+// types (typed views and byte buffers, views.cpp).
+void open_buffer_library(lua_State* L);
+
 // The reserved event every failed handler call is published as (to Lua and C++ listeners).
 inline constexpr const char* kHandlerFailedEvent = "rhp.handler_failed";
 

@@ -10,6 +10,7 @@ set(rhp_script_private_deps "")
 if(RHP_ENABLE)
     list(APPEND rhp_script_sources
         puc_lua/async.cpp
+        puc_lua/buffer.cpp
         puc_lua/lib_proxy.cpp
         puc_lua/sandbox.cpp
         puc_lua/small_alloc.cpp
@@ -22,6 +23,8 @@ if(RHP_ENABLE)
         puc_lua/testing.cpp
         puc_lua/lua_internals.cpp
         puc_lua/tools.cpp
+        puc_lua/view_journal.cpp
+        puc_lua/views.cpp
     )
     list(APPEND rhp_script_private_deps Rhp::lua)
 else()
@@ -42,6 +45,7 @@ rhp_add_module(script
         stubs.hpp
         testing.hpp
         tunables.hpp
+        views.hpp
         detail/context.hpp
         detail/event_registry.hpp
         detail/lib_builder.hpp
