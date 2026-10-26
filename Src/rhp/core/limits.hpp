@@ -24,7 +24,7 @@ enum class cancel_scope : std::uint8_t {
 // 0 usually means unlimited / off (some fields differ: see each). Defaults follow the decided policy:
 // unlimited, run to completion.
 struct limits {
-    std::uint64_t instructions = 0; // total per run, counted at safe points (each loop iteration its body's length, each Lua call 1); once hit, sticky for the rest of that run
+    std::uint64_t instructions = 0; // total per run, counted at safe points (each loop iteration its body's length, each Lua call 1: an arithmetic loop counts up to ~1.7x the instructions it runs); once hit, sticky for the rest of that run
     std::uint64_t memory = 0;       // bytes per lua_State; once hit, sticky for the rest of that run
     std::uint32_t wall_ms = 0;      // time spent running (not suspended) per run or handler call
     std::uint32_t slice_us = 0;     // opt-in time slicing per pump(); 0 = run to completion

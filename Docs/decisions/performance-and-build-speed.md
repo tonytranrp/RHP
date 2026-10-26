@@ -31,8 +31,10 @@ the hook function and count with no mask, so the VM runs as without a hook; when
 count up, the hook is armed for one instruction (`LUA_MASKCOUNT` plus a bit above lua_sethook's byte)
 and fires through upstream's `luaG_traceexec`, so errors, yields and `CIST_HOOKYIELD` are unchanged;
 `rhp_lua_traceexec` then returns to safe points. *Semantics:* `limits.instructions` charges a loop
-iteration its body's length and a call 1 (forward branches inside a loop are over-counted,
-straight-line code outside loops isn't counted); the meter, the profiler and line events keep exact
+iteration its body's length and a call 1 (forward branches inside a loop and the `MMBIN`
+fallback after each arithmetic instruction, skipped when the operands are numbers, are over-counted:
+an arithmetic loop is charged up to about 1.5-1.7x what it runs; straight-line code outside loops
+isn't counted); the meter, the profiler and line events keep exact
 per-instruction counting (`sandbox_impl::install_hook`). An unchecked run pays one subtraction per
 loop iteration. *Alternatives:* keeping upstream untouched (the earlier choice: about 1.1-1.5x);
 weighting calls by their function's size (over-counts functions that return early, and recursion is
