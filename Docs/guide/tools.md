@@ -49,7 +49,16 @@ rhp-cli tune -c 127.0.0.1:7777 -i dev.rhpid game
 rhp-cli tune -c 127.0.0.1:7777 -i dev.rhpid game.speed 6.5
 ```
 
-In the REPL, `tunables [prefix]` lists them and `tune <path> <value>` sets one. Over the wire, `client.tunables(prefix)` and `client.tune(path, value)` do the same (ops `tunables` and `tune`).
+In the REPL, `tunables [prefix]` lists them and `tune <path> <value>` sets one. Over the wire, `client.tunables(prefix)` and `client.tune(path, value)` do the same (ops `tunables` and `tune`):
+
+```cpp
+if (auto list = client.tunables("game")) {
+    for (const Rhp::tunable_message& t : *list) {
+        std::println("{} = {} {}", t.path, Rhp::json::to_text(t.current), t.unit); // also type, writable, min, max, step, doc
+    }
+}
+auto set = client.tune("game.speed", Rhp::value{6.5}); // kOutOfRange outside [0, 10]
+```
 
 ## Profiler
 
@@ -125,7 +134,7 @@ Values are rendered without running Lua. Strings are quoted and shortened to 120
 
 A paused request keeps everything it holds: its effects, its module, any task joined on it. `cancel(request)` ends it like any request. Reverting or unloading its module abandons it, and the debugger forgets it. Its wall-time limit doesn't run while it waits, but a client waiting for its result may time out.
 
-**What it costs.** With no breakpoint, step or pause set, the debugger costs nothing. While one is set, every Lua line of the sandbox's scripts runs the line hook (a table lookup for the source), so scripts run slower until `set_breakpoints(source, {})` or `debug_reset()`. Instruction limits, cancels and the profiler keep working while it watches. The [benchmarks](../benchmarks.md#stage-11-tools) measure both.
+**What it costs.** With no breakpoint, step or pause set, the debugger costs nothing. With breakpoints only, line events run only in the functions whose lines hold a breakpoint (calls and returns switch them on and off), so code elsewhere runs at about its normal speed; call-heavy code still pays a call and a return event per call. A step or a pause watches every line until it ends. Clear breakpoints when you are done (`set_breakpoints(source, {})` or `debug_reset()`). Instruction limits, cancels and the profiler keep working while it watches. Numbers: [performance](performance.md#tools) and [benchmarks](../benchmarks.md#overall-optimization-pass).
 
 ### From rhp-cli
 
@@ -162,7 +171,24 @@ Sources map to modules through `--root`: a breakpoint in `scripts/game/combat.lu
 
 ### Over the wire
 
-`client.debug(request)` sends a `wire::debug_request`. Its `action` is one of `break` (source, lines), `pause`, `paused`, `continue` / `into` / `over` / `out` (request), `stack` (request), `variables` (request, frame, scope, path), `evaluate` (request, frame, expression) or `reset`. Subscribe to `rhp.debug` with `client.on` to hear when a script pauses. Debugging needs `kPatch`, because pausing a script changes what it does. Every session that sets breakpoints or pauses is a debugging session; when the last of them ends, the host resets the debugger and the paused scripts run on. `reset` from any session does it at once.
+`client.debug(request)` sends a `wire::debug_request`. Its `action` is one of `break` (source, lines), `pause`, `paused`, `continue` / `into` / `over` / `out` (request), `stack` (request), `variables` (request, frame, scope, path), `evaluate` (request, frame, expression) or `reset`. Subscribe to `rhp.debug` with `client.on` to hear when a script pauses:
+
+```cpp
+auto paused = client.on("rhp.debug", [](const Rhp::remote_event& e) { /* network thread: e.args[0] has kind, request, source, line */ });
+Rhp::debug_request set;
+set.action = "break";
+set.source = "game.combat";
+set.lines = {40};
+auto kept = client.debug(set);                  // debug_reply: kept->lines
+// ... later, with the request id an rhp.debug event (or the "paused" action) reported:
+Rhp::debug_request look;
+look.action = "variables";
+look.request = request_id;
+look.scope = "locals";
+auto vars = client.debug(look);                 // vars->variables
+```
+
+Debugging needs `kPatch`, because pausing a script changes what it does. Every session that sets breakpoints or pauses is a debugging session; when the last of them ends, the host resets the debugger and the paused scripts run on. `reset` from any session does it at once.
 
 The actions that change what scripts do (`break`, `pause`, `continue`, the steps, `reset`) are audited like an `exec`: an `event::script_executed` with op `debug`. Reading (`paused`, `stack`, `variables`, `evaluate`), `tunables` and `profile` aren't.
 

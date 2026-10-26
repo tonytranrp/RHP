@@ -1,39 +1,42 @@
 # Src/rhp — the library
 
-One folder per module. Each module is its own CMake target (`Rhp::<module>`), declared with `rhp_add_module()` from `cmake/RhpModule.cmake`.
+One folder per module. Each module is its own CMake target (`Rhp::<module>`), declared with `rhp_add_module()` from `cmake/RhpModule.cmake`, and installed by it. `Rhp::rhp` / `<rhp/rhp.hpp>` is the umbrella. How to use the library: [Docs/guide](../../Docs/guide/README.md).
+
+## Layers
+
+The order lives in [CMakeLists.txt](CMakeLists.txt); the real dependency graph is each module's `DEPS` / `PRIVATE_DEPS`.
+
+| Layer | Module | Depends on | Third-party (PRIVATE, `.cpp` only) |
+|---|---|---|---|
+| 0 | [`utils`](utils) | — | — |
+| 1 | [`core`](core) | `utils` | — |
+| 2 | [`platform`](platform) | `core` | OS libraries (`bcrypt` on Windows) |
+| 2 | [`wire`](wire) | `core` | — (own MessagePack codec) |
+| 3 | [`net`](net) | `core`, `platform` | Asio; `dnsapi` / `iphlpapi` (Windows), `dns_sd` (Apple) |
+| 3 | [`security`](security) | `wire`, `platform` | Monocypher |
+| 3 | [`tls`](security/tls) (`security/tls/`) | `core`, `platform` | OpenSSL (system, ≥ 3.0) and/or Mbed TLS 4.2 |
+| 3 | [`exec`](exec) | `core`, `Threads` | — (header-only) |
+| 3 | [`script`](script) | `core` | Lua 5.5 |
+| 3 | [`event`](event) | `core` | — |
+| 4 | [`audit`](audit) | `event` | — |
+| 4 | [`session`](session) | `net`, `security`, `tls`, `exec`, `wire` | — |
+| 4 | [`release`](release) | `script`, `security`, `wire`, `platform`, `core` | — |
+| 4 | [`test`](test) | `script`, `platform`, `core` | — (its Lua framework is embedded at configure time) |
+| 5 | [`config`](config) | `net`, `security`, `tls`, `exec`, `wire` | — (header-only) |
+| 5 | [`host`](host) | `config`, `session`, `script`, `event`, `release` | — |
+| 5 | [`client`](client) | `config`, `session` | — (never Lua: `release` and `test` stay out) |
 
 ## Rules
 
-1. **Layers only point down.** A module may depend only on modules in a lower layer, and only by `DEPS` in its `CMakeLists.txt`.
-
-   | Layer | Modules |
-   |---|---|
-   | 0 | `utils` |
-   | 1 | `core` |
-   | 2 | `wire`, `platform` |
-   | 3 | `net`, `security`, `tls` (`security/tls/`), `exec`, `script`, `event` |
-   | 4 | `session`, `audit` |
-   | 5 | `config`, `host`, `client` |
-
+1. **Layers only point down.** A module depends only on lower layers, and only through `DEPS` / `PRIVATE_DEPS` in its `CMakeLists.txt`. Declaration order alone enforces nothing.
 2. **Folder = namespace.** `rhp/script/` is `Rhp::script`; `rhp/script/detail/` is `Rhp::script::detail` and is never used outside its module.
-3. **Lowercase paths.** Everything here is an include path and Linux/Android/iOS file systems are case-sensitive.
-4. **Third-party headers stay in `.cpp` files.** Lua, Asio, crypto and TLS headers never appear in a `.hpp` here.
-5. **No OS `#ifdef`s outside `platform/` and backend `.cpp` files** (`net/local`, `net/mdns`). Compiler-specific pragmas are allowed where unavoidable.
-6. **Files are listed explicitly** in each `CMakeLists.txt` — no globbing.
-7. **`.cpp` files exist for a reason:** a dependency wall, a heavy table, or code that shouldn't be in every includer.
-8. `rhp.hpp` includes every public header; keep it in sync when adding one.
-9. **Layer 4–5 code stays out of templates.** `Rhp::host<Cfg>` / `Rhp::client<Cfg>` type-erase their config into function pointers and run engines compiled once (`host.cpp`, `client.cpp`); the session layer only sees abstract interfaces.
-
-| Module | Layer | Third-party (PRIVATE, `.cpp` only) |
-|---|---|---|
-| `utils`, `core` | 0, 1 | — |
-| `platform` | 2 | OS headers (`bcrypt`, `sys/random.h`) |
-| `wire` | 2 | — (own MessagePack codec) |
-| `net` | 3 | Asio; DNS-SD / IPC OS APIs |
-| `security` | 3 | Monocypher |
-| `tls` (`security/tls/`) | 3 | OpenSSL (system) and/or Mbed TLS 4.2 |
-| `exec` | 3 | — (header-only) |
-| `script` | 3 | Lua |
-| `event` | 3 | — |
-| `session`, `audit` | 4 | — |
-| `config`, `host`, `client` | 5 | — |
+3. **Lowercase paths.** Everything here is an include path, and Linux, Android and iOS file systems are case-sensitive.
+4. **Third-party headers stay in `.cpp` files.** Lua, Asio, Monocypher and TLS headers never appear in a `.hpp` here (Asio is also allowed in native test backends). Lua and Monocypher are compiled as C++ through wrapper `.cpp`s; Mbed TLS is the one C build (`cmake/RhpMbedtls.cmake`).
+5. **No OS `#ifdef`s** outside `platform/` (`os.hpp`, `random.cpp`, `files.cpp`, `process.cpp`) and the backend `.cpp`s of `net/local` and `net/mdns`. Compiler and CPU checks (`crc32c.cpp`) are allowed where unavoidable.
+6. **Files are listed explicitly** in each `CMakeLists.txt`: no `file(GLOB)`.
+7. **A `.cpp` exists for a reason:** a dependency wall, a heavy table, an explicit instantiation (`event/hub.cpp`), or code that shouldn't be in every includer.
+8. **`rhp.hpp` includes every public header** (directly, or through `test/test.hpp`, `script/sandbox.hpp` and `event/hub.hpp`); keep it in sync.
+9. **Public headers** are ASCII only (ctest `hygiene.ascii_headers`), write `(std::numeric_limits<T>::max)()` so they survive `<windows.h>` without `NOMINMAX`, and include `<rhp/build_config.hpp>` (generated by `cmake/RhpBuildConfig.cmake`) when they branch on `RHP_ENABLE`, `RHP_TLS_HAS_*` or `RHP_PLATFORM_*`. No per-header fallbacks.
+10. **Layer 4–5 code stays out of templates.** `Rhp::host<Cfg>`, `Rhp::client<Cfg>` and `Rhp::fleet<Cfg>` type-erase their config into a `setup` and run engines compiled once (`host.cpp`, `client.cpp`, `fleet.cpp`); the session layer only sees abstract interfaces.
+11. **`RHP_ENABLE=OFF` must build and pass.** Hosts and clients become inert stubs that report `kDisabled`, patch points become direct calls, and Lua, Asio and Monocypher are not fetched.
+12. **No version names** in identifiers, files, folders or tags: progress is "Stage N" (`RHP_STAGE`). The only numbers are the wire's `kProtocolRevision` and per-module `revision` counters.

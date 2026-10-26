@@ -8,4 +8,6 @@
 - The per-link timer runs only for the next deadline; an idle link costs nothing.
 - Receiving: up to 64 out-of-order packets are kept; bytes are delivered in order after `start()`.
 - A listening socket keeps at most 1024 live links. FIN follows the queued data; a receiver keeps up to 4096 FIN tombstones for 12 s so a lost final ACK can still be answered after the link is gone.
+- Each data packet is acknowledged as it arrives. Deferring ACKs to the end of an I/O round was measured slower (every datagram is its own receive completion) and left out.
+- Port 0 listens on any free port (`host.port()` says which). DNS-SD publishes it under `_rhp._udp`.
 - The CRC catches corruption only. ACKs aren't authenticated (an on-path attacker can stall a link, as with TCP); the session MAC or TLS rejects any injected data.

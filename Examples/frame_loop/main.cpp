@@ -132,12 +132,12 @@ int main() {
     }
 
     // 1. A module with a forever loop that waits between gusts (started by a timer).
-    const auto weather_v1 = script("weather.lua");
-    const auto weather_v2 = script("weather_v2.lua");
-    if (!weather_v1 || !weather_v2) {
+    const auto weather_first = script("weather.lua");
+    const auto weather_revised = script("weather_revised.lua");
+    if (!weather_first || !weather_revised) {
         return 1;
     }
-    const auto weather = box.load("weather", *weather_v1);
+    const auto weather = box.load("weather", *weather_first);
     if (!weather) {
         return fail("load weather", weather.error());
     }
@@ -162,7 +162,7 @@ int main() {
         }
         if (frame == kReloadFrame) {
             gusts_before_reload = first_int(box.call(*weather, "gust_count"));
-            const auto revision = box.reload(*weather, *weather_v2);
+            const auto revision = box.reload(*weather, *weather_revised);
             if (!revision) {
                 return fail("reload weather", revision.error());
             }

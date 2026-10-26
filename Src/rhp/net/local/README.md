@@ -8,4 +8,9 @@
 | POSIX | an absolute socket path | created mode 0600; cleanup removes only the listener's own device/inode, never a pre-existing file. Put it in an application-private directory. |
 | Linux, Android | `@name`: an abstract socket | no file at all; both ends check the peer's UID (`SO_PEERCRED`), which pathname sockets also get on Linux |
 
-Busy Windows pipes are retried for up to five seconds without blocking the reactor. The transport reports `loopback()`, so the TLS address rules treat it as local; `require_tls` still adds TLS.
+```cpp
+using cfg = Rhp::config<>::transport<Rhp::net::local_ipc>;
+Rhp::host<cfg> host{Rhp::endpoint::listen("my_game", 0), keys, signers}; // \\.\pipe\rhp.my_game; "@my_game" or "/run/user/1000/my_game.sock" on POSIX
+```
+
+Busy Windows pipes are retried for up to five seconds without blocking the reactor. The transport reports `loopback()`, so the TLS address rules treat it as local; `require_tls` still adds TLS. Frames queued behind a write in flight go out in one gathered write, as on TCP.

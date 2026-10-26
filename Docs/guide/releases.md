@@ -45,6 +45,18 @@ A host that serves a manager (`host.serve`) shows no channels in `release_status
 
 Without a host, call `releases.pump()` every frame and `releases.apply(envelope)` yourself (a release file shipped with an update, downloaded at startup).
 
+From a client (an admin identity) the same operations go over the wire:
+
+```cpp
+std::vector<std::byte> envelope = read_file("balance.rhprel");      // your own file reading
+auto applied = admin.release_apply(envelope, "health");              // "now", "health" or "manual"
+if (applied) {
+    std::println("{} seq {}: {}", applied->channel, applied->seq, applied->running); // "active" or "candidate"
+}
+auto status = admin.release_status();                                // every channel: active, candidate, floor
+auto stopped = admin.release_deactivate("game.balance");             // fall back to the previous release
+```
+
 `rhp_release_signers.pub` has one key per line, the same shape as the script signers file plus optional channel patterns:
 
 ```text
@@ -118,7 +130,7 @@ rhp-cli rollout balance.rhprel -i admin.rhpid --host 10.0.0.5:7777 --host 10.0.0
 rhp-cli revoke build --release <id> -i ops.rhpid -o revocations.rhprev
 ```
 
-`release build` also takes `--seq` (default `auto`: the current Unix time), `--label`, `--app`, `--build`, `--platform`, `--not-before`, `--not-after`, `--role`, `--lib`, `--fail-event`, `--max-handler-failures`; several `-i` sign with several keys (`release sign` adds one later). `headless_server --releases DIR --release-signers FILE` serves releases and keeps them in `DIR`.
+`release confirm <channel>` and `release deactivate <channel> [--hold]` act on a running candidate or release; `revoke sign` adds a signature to a `.rhprev` and `revoke apply` sends it; `rollout` also takes `--max-failures` and `--keep-on-failure`, and discovers hosts when no `--host` is given. `release build` also takes `--seq` (default `auto`: the current Unix time), `--label`, `--app`, `--build`, `--platform`, `--not-before`, `--not-after`, `--role`, `--lib`, `--fail-event`, `--max-handler-failures`; several `-i` sign with several keys (`release sign` adds one later). `headless_server --releases DIR --release-signers FILE` serves releases and keeps them in `DIR`.
 
 ## Rollout
 

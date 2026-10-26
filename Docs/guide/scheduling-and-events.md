@@ -120,7 +120,16 @@ rhp.on("net.packet", parse, {on_error = "fault"}) -- the old behaviour: fault th
 rhp.on_error(function(f) print(f.module, f.kind, f.source, f.code, f.message) end)
 ```
 
-The host also logs it, sends `[handler failed] ...` to the identity's sessions and publishes `Rhp::event::handler_failed` (audit sinks write it). Set the default for every sandbox with `host_options::handler_errors`. A memory-limit stop always faults the module.
+The host also logs it, sends `[handler failed] ...` to the identity's sessions and publishes `Rhp::event::handler_failed` (audit sinks write it). Set the default for every sandbox with `host_options::handler_errors` (a standalone sandbox: `sandbox_options::handler_errors`). A memory-limit stop always faults the module.
+
+```cpp
+Rhp::host_options options;
+options.handler_errors = Rhp::script::handler_error_policy::kRemove; // kReport (default), kRemove, kFault
+Rhp::host<> host{Rhp::endpoint::listen("127.0.0.1", 7777), keys, signers, options};
+auto failures = host.on<Rhp::event::handler_failed>([](const Rhp::event::handler_failed& e) {
+    // pump thread: e.identity, e.module, e.kind, e.source, e.action, e.outcome
+});
+```
 
 ## Recipes
 

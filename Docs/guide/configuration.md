@@ -17,16 +17,42 @@ using my_cfg = Rhp::config<>::transport<Rhp::net::tcp> // Rhp::net::transport
     ::limits<Rhp::limits{.slice_us = 2'000}>           // value
     ::errors<Rhp::errors::expected>                    // Rhp::errors::mode
     ::clock<Rhp::exec::steady_clock>                   // Rhp::exec::clock_source
-    ::logger<Rhp::core::stderr_logger>;                // Rhp::core::logger
+    ::logger<Rhp::core::stderr_logger>                 // Rhp::core::logger
+    ::discovery<Rhp::net::mdns>;                       // Rhp::net::discovery
 
 // Use my_cfg as Rhp::host<my_cfg> / Rhp::client<my_cfg>'s template argument.
 ```
 
+That chain is exactly `Rhp::config<>`; write only the links you change:
+
+```cpp
+using lan_cfg  = Rhp::config<>::transport<Rhp::net::websocket>;                 // everything else default
+using test_cfg = Rhp::config<>::transport<Rhp::net::loopback>::io<Rhp::exec::zero_threads>;
+using throw_cfg = Rhp::config<>::errors<Rhp::errors::throwing>;
+```
+
 Inside your own templates (a dependent context) write `Cfg::template transport<X>`.
+
+A clock and a logger are default-constructible types the host creates itself; reach them with `host.clock()` and `host.logger()`:
+
+```cpp
+struct game_clock { // script time follows the game's clock (paused while the game is paused)
+    [[nodiscard]] std::chrono::steady_clock::time_point now() const { return game::time_now(); }
+};
+
+struct engine_log {
+    [[nodiscard]] bool enabled(Rhp::log_level level) const { return level >= Rhp::log_level::kInfo; }
+    void write(Rhp::log_level level, std::string_view message) { engine::log(static_cast<int>(level), message); }
+};
+
+using cfg = Rhp::config<>::clock<game_clock>::logger<engine_log>;
+```
+
+`game::time_now()` and `engine::log()` stand for your engine's own functions. `enabled` may be called from several threads at once; one host's `write` calls never overlap.
 
 | Slot | Default | Alternatives and what they do |
 |---|---|---|
-| `transport` | `net::tcp` | `net::loopback` (in-process, for tests and embedding), or your own ([guide](connecting.md#your-own-transport)) |
+| `transport` | `net::tcp` | `net::loopback` (in-process, for tests and embedding), `net::websocket`, `net::udp_reliable`, `net::local_ipc` ([networking](networking.md#transports)), or your own ([guide](connecting.md#your-own-transport)) |
 | `tls` | `tls::auto_backend` | `tls::openssl`, `tls::mbedtls`, or `tls::none` (no TLS; non-loopback endpoints then need `insecure_lan`) |
 | `codec` | `wire::msgpack` | any `wire::codec` (RHP's own MessagePack codec by default) |
 | `auth` | `security::psk_keyring` | any `security::authenticator` (mutual PSK challenge-response by default) |
@@ -80,7 +106,14 @@ using cfg = Rhp::config<>::limits<Rhp::limits{.instructions = 50'000'000, .memor
 | `event_queue` | 65536 | events queued per sandbox for its next pump (C++ fires from other threads, `rhp.publish`); more are dropped and counted; 0 = unlimited |
 | `async_ms` | 0 | script time an asynchronous binding (`Rhp::async<T>`) may take before the waiting script gets `kTimeout`; a result that arrives later is taken back through the binding's `undo<G>`; 0 = no limit |
 
-Instruction, memory and execution-time limits default to unlimited; slicing defaults to off. Set budgets on the **host** that executes code. Instruction/time checks run at hook boundaries and cannot preempt C++ bindings. The hook traps every Lua instruction while it is armed (a tight loop runs about half as fast under it), which is why `cancel_checks` confines it to requests by default: a host only ever cancels requests, and a handler that may loop forever needs a limit anyway. Trusted scripts that never need a remote cancel run at raw-Lua speed with `kNone` ([benchmarks](../benchmarks.md#where-the-remaining-cost-is)). A host pump can dispatch several operations and pump several identity sandboxes, so `slice_us` is not a hard bound on the whole application frame.
+Instruction, memory and execution-time limits default to unlimited; slicing defaults to off. Set budgets on the **host** that executes code. Instruction/time checks run at hook boundaries and cannot preempt C++ bindings. The hook traps every Lua instruction while it is armed; a count that isn't due is counted down inline, so loop-heavy code runs at about 1.2x raw Lua under it. `cancel_checks` confines it to requests by default: a host only ever cancels requests, and a handler that may loop forever needs a limit anyway. `kNone` buys only the last few percent ([performance](performance.md#the-cancel-hook-limitscancel_checks)). A host pump can dispatch several operations and pump several identity sandboxes, so `slice_us` is not a hard bound on the whole application frame.
+
+```cpp
+// A game host: budgets for every identity, 2 ms slices, handlers stoppable from a watchdog too.
+using game_cfg = Rhp::config<>::limits<Rhp::limits{
+    .instructions = 50'000'000, .memory = 64u << 20, .wall_ms = 250, .slice_us = 2'000,
+    .cancel_checks = Rhp::cancel_scope::kEverything, .async_ms = 5'000}>;
+```
 
 `executor<pumped>` is the only implemented script execution model; accepting a custom marker does not install a scheduler. `clock` affects script sleep/timer time on a host or local sandbox, and the HTTP listener's idle expiry (`pump()` samples the clock's offset from `steady_clock` for the network thread, so the clock is only ever called on the pump thread); not protocol deadlines, heartbeats or HTTP proof freshness. The client logger/clock slots do not currently supply engine callbacks. `engine<>` is not a slot (Lua 5.5 is the only engine).
 
@@ -117,11 +150,11 @@ The supplied memory resource must outlive the sandbox. It covers Lua allocations
 | `RHP_BUILD_TOOLS` | top-level only | build `Tools/` (`rhp-cli`; needs `RHP_ENABLE=ON`) |
 | `RHP_WARNINGS_AS_ERRORS` | top-level only | warnings are errors in RHP's own targets (off when RHP is a subproject, so a newer compiler's new warning doesn't break the parent's build) |
 | `RHP_INSTALL` | top-level only | install rules and the `rhp` CMake package (`find_package(rhp)`); see [getting started](getting-started.md#installed-package) |
-| `RHP_BUILD_BENCH` | OFF | build `Tests/bench` (`rhp_bench`); see [benchmarks](../benchmarks.md) |
-| `RHP_LUA_JUMP_YIELDS` | ON | coroutine yields jump (`_longjmp`) instead of throwing; errors still throw. With the MSVC ABI only on x64 (and a process with a CET shadow stack throws anyway); ignored under ThreadSanitizer |
-| `RHP_PCH` | top-level, not cross-compiling, not clang-cl | one shared precompiled header of standard headers for RHP's libraries and one for its tests (`cmake/RhpPch.cmake`) |
-| `RHP_LTO` | OFF | link-time optimization of RHP's targets in optimized configurations (measured 10-35% on binding calls, variable and property reads, handle methods); LTO objects only link with the same compiler version |
-| `RHP_UNITY_BUILD` | OFF | compile RHP's libraries, tests and tools as unity files: faster clean builds (CI), slower edits |
+| `RHP_BUILD_BENCH` | OFF | build `Tests/bench` (`rhp_bench`; needs `RHP_BUILD_TESTS`); see [performance](performance.md#measuring-your-own-case) and [benchmarks](../benchmarks.md) |
+| `RHP_LUA_JUMP_YIELDS` | ON | coroutine yields jump (`_longjmp`) instead of throwing; errors still throw. With the MSVC ABI only on x64, and a Windows process running with a CET shadow stack still throws (checked once per process); ignored under ThreadSanitizer. See [performance](performance.md#coroutine-yields-rhp_lua_jump_yields) |
+| `RHP_PCH` | ON for a top-level build, not cross-compiling, not clang-cl | one shared precompiled header of standard headers for RHP's libraries above `core` and one for its test suites (`cmake/RhpPch.cmake`) |
+| `RHP_LTO` | OFF | link-time optimization of RHP's targets in `Release`, `RelWithDebInfo` and `MinSizeRel` (measured 10-35% on binding calls, variable and property reads, handle methods; under 5% on pure script work). LTO objects only link with the same compiler version, so an installed LTO package ties its consumers to that toolchain |
+| `RHP_UNITY_BUILD` | OFF | compile RHP's libraries, tests and tools as unity files (16 sources each): about a third less wall time on clean builds (CI), slower edits |
 | `RHP_WITH_TLS` | ON | TLS 1.3 for network endpoints |
 | `RHP_TLS_OPENSSL` | AUTO | `AUTO` (use system OpenSSL ≥ 3.0 if found, desktop only), `ON` (required), `OFF` |
 | `RHP_TLS_MBEDTLS` | ON | build the Mbed TLS backend (mobile, and the fallback) |

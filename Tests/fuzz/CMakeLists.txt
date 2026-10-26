@@ -1,4 +1,4 @@
-# Fuzz targets (frame · envelope · msgpack · sandbox_escape · network). Each builds as a replay driver that
+# Fuzz targets (frame · envelope · msgpack · sandbox_escape · network · release). Each builds as a replay driver that
 # ctest runs (seeds + deterministic mutations) and, with RHP_FUZZ=ON (Clang), also as a libFuzzer
 # executable `rhp_fuzz_<name>` for long runs: see README.md.
 function(rhp_add_fuzz name)

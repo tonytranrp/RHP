@@ -1,20 +1,26 @@
 # net — layer 3
 
-Transports: ordered, reliable byte streams between a host and a client. Namespace `Rhp::net` (`Rhp::endpoint` is an alias of `Rhp::net::endpoint`).
+Transports (ordered, reliable byte streams between a host and a client) and discovery. Namespace `Rhp::net` (`Rhp::endpoint` is an alias of `Rhp::net::endpoint`). Target `Rhp::net`; depends on `core` and `platform`, privately on Asio (build tree only) and the OS's DNS-SD / socket libraries. Usage: [networking guide](../../../Docs/guide/networking.md).
 
 | Header | What |
 |---|---|
-| `endpoint.hpp` | `endpoint::listen` / `endpoint::dial` (host, port, `insecure_lan`, `require_tls`), `tls_mode`, `is_loopback_host`; the `transport` concept (`network` marks transports the TLS address rules apply to); `transport_ops` |
-| `io_context.hpp` | the reactor (Asio behind a wall): `post`, `poll`, `run_one_for`, `run(stop_token)`, one-shot `timer` |
-| `link.hpp` | `link` (a connected stream: `start`, `send`, `close`, `peer`, and `loopback`, `encrypted`, `channel_binding` with defaults), `link_handler` (`on_bytes`, `on_closed`), `listener` (`port`) |
-| `loopback/loopback.hpp` | in-process transport: named channels, no sockets, ends may live on different threads |
-| `tcp/tcp.hpp` | TCP on Asio (`network = true`); a non-loopback address only with `insecure_lan` or when TLS is layered on top (hosts and clients do that) |
-| `websocket/websocket.hpp` | RFC 6455 binary tunnel over TCP (`websocket/README.md`); codec in `websocket/detail/protocol.hpp` |
-| `udp_reliable/udp_reliable.hpp` | ordered stream over UDP (`udp_reliable/README.md`); packet format in `udp_reliable/detail/packet.hpp` |
-| `local/local.hpp` | local IPC: named pipes, AF_UNIX (`local/README.md`) |
-| `discovery.hpp` | the `discovery` concept, `service_record`, `advertise_options`, `browse_options`, `no_discovery` |
-| `mdns/mdns.hpp` | `mdns` (platform DNS-SD) and `mdns_wire` (own multicast responder): `mdns/README.md` |
+| `endpoint.hpp` | `endpoint::listen` / `endpoint::dial` (host, port, and the tags `insecure_lan` / `require_tls`), `reversed()`, `with_port()`, `tls_mode`, `is_loopback_host`; the `transport` concept (a transport must declare `network`), `transport_ops` / `transport_ops_for<T>`, `accept_fn` / `connect_fn` |
+| `io_context.hpp` | the reactor (Asio behind a wall): `post`, `shared_poster()` (posts from threads that may outlive it), `poll`, `run_one_for`, `run(stop_token)`, `running_in_this_thread`, `native_handle`, one-shot `timer` |
+| `link.hpp` | `link` (a connected stream: `start`, `send`, `close`, `peer`; `loopback`, `encrypted`, `channel_binding` with defaults), `link_decorator` (forwards all of them), `link_handler` (`on_bytes`, `on_closed`), `listener` (`port`) |
+| `loopback/loopback.hpp` | `loopback`: in-process transport, named channels (host + port name the channel), no sockets; ends may live on different threads (`network = false`) |
+| `tcp/tcp.hpp` | `tcp` on Asio (`network = true`); a non-loopback address only with `insecure_lan` or when TLS is layered on top (hosts and clients do that) |
+| `websocket/websocket.hpp` | `websocket`: RFC 6455 binary tunnel over TCP ([websocket/README.md](websocket/README.md)) |
+| `udp_reliable/udp_reliable.hpp` | `udp_reliable`: an ordered stream over UDP ([udp_reliable/README.md](udp_reliable/README.md)) |
+| `local/local.hpp` | `local_ipc`: named pipes, AF_UNIX sockets ([local/README.md](local/README.md)) |
+| `discovery.hpp` | the `discovery` concept, `service_record`, `advertise_options`, `browse_options`, `advertisement`, `discovery_browser`, `discovery_ops`, `no_discovery`, `dns_sd_service` |
+| `mdns/mdns.hpp` | `mdns` (platform DNS-SD) and `mdns_wire` (own multicast responder and querier): [mdns/README.md](mdns/README.md) |
 | `detail/http.hpp`, `detail/http_connection.hpp` | HTTP/1.1 heads and one-request connections for the host's HTTP listener and the WebSocket upgrade |
+
+```cpp
+using cfg = Rhp::config<>::transport<Rhp::net::udp_reliable>;          // or tcp (default), websocket, local_ipc, loopback
+Rhp::host<cfg> host{Rhp::endpoint::listen("0.0.0.0", 7777), keys, signers};   // non-loopback: TLS
+Rhp::client<cfg> lan{Rhp::endpoint::dial("192.168.1.20", 7777, Rhp::net::insecure_lan), id, key}; // plaintext, trusted LAN only
+```
 
 ## Writing a transport
 
@@ -28,13 +34,15 @@ struct my_transport {
 using cfg = Rhp::config<>::transport<my_transport>;   // checked by Rhp::net::transport here
 ```
 
-`network` is required: a transport without it doesn't compile, so none is silently treated as local. Links you hand out implement `Rhp::net::link`; a link that wraps another derives from `Rhp::net::link_decorator`, which forwards `loopback()`, `encrypted()` and `channel_binding()` (the session's security depends on them). Use `io_context::post` to get back onto the context's thread.
+`network` is required and must be a constant: a transport without it doesn't compile, so none is silently treated as local. Links you hand out implement `Rhp::net::link`; a link that wraps another derives from `link_decorator`, which forwards `loopback()`, `encrypted()` and `channel_binding()` (the session's security depends on them). Use `io_context::post` to get back onto the context's thread. A complete one: [Examples/custom_transport](../../../Examples/custom_transport).
 
 ## Rules
 
-- Asio stays in backend `.cpp` files and native test backends; `io_context::native_handle()` reaches the reactor. Public headers contain no Asio types.
-- Everything about a link, listener or timer happens on its io_context's thread; other threads only `post`.
+- Asio stays in backend `.cpp` files and native test backends; `io_context::native_handle()` reaches the reactor. Public headers contain no Asio types. With `RHP_ENABLE=OFF` the headers stay (configs still name transports) but nothing is compiled and Asio is not fetched.
+- Everything about a link, listener or timer happens on its io_context's thread; other threads only `post`. Code that may outlive the context (native callbacks, cross-thread transports) posts through `shared_poster()`, which refuses once the context shuts down.
 - `on_closed` is reported from a posted handler, never re-entrantly from `close()`, and never after the link is destroyed.
-- No default port: every endpoint names one (0 = any free port for TCP listeners).
+- No default port: every endpoint names one (0 = any free port for TCP and UDP listeners; `local_ipc` requires 0).
+- TCP and IPC links send the frames queued behind a write in flight in one gathered write (up to 16 buffers). Keep `send()` cheap: it only queues.
 - A protocol's byte format lives in a sans-IO `detail/` codec (no sockets, no Asio) so it is unit-tested and fuzzed (`Tests/fuzz/network_fuzz.cpp`) on its own.
-- OS-specific APIs/macros stay in backend `.cpp` files (IPC and DNS-SD); general behavior uses `Rhp::platform` traits.
+- OS-specific APIs and macros stay in backend `.cpp` files (IPC and DNS-SD); general behavior uses `Rhp::platform`.
+- Discovery records are untrusted hints: they never carry keys, grant nothing and never enable plaintext.

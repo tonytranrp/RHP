@@ -16,6 +16,7 @@ How to use RHP, what it supports, and how to configure and connect it. For *why*
 | [Testing scripts](testing-scripts.md) | test the Lua written against your API offline: busted / Jest style, spies and fakes, a fake clock, exact costs, coverage, snapshots, property tests, fuzzing, CI reports, VS Code |
 | [Tools](tools.md) | tunables, the sampling profiler and the debugger (rhp-cli, DAP for editors, C++) |
 | [Configuration](configuration.md) | `Rhp::config<>` slots, `Rhp::limits`, options, CMake switches |
+| [Performance](performance.md) | what RHP costs, `cancel_checks`, Release and `RHP_LTO`, yields, signing cache, network batching, build speed |
 | [Security](security.md) | keys, roles, signing, setting up a host safely |
 | [Reference](reference.md) | error codes, host events, operations, wire protocol, Lua sandbox contents, threads |
 | [Limitations](limitations.md) | what RHP doesn't do, or does only partly |
@@ -55,7 +56,7 @@ A running C++ program (the **host**) accepts Lua scripts from a **client** (your
 | Operations | audit events and JSON-lines log (`handler_failed` included), `host.on_script_event`, runtime kill switch (`set_enabled`), compile-time kill switch (`RHP_ENABLE=OFF`) |
 | Tooling | the pure-Python client `rhp_client` (`clients/python`); `rhp-cli` (REPL, `run`, `exec`, `stubs`, `blob`, `watch`, `events`, `keygen`, `pubkey`, `sign`, `discover`, `fleet`, `release`, `revoke`, `rollout`, `tune`, `profile`, `dap`, `test`), `headless_server`, six examples; the VS Code extension for Lua tests (`clients/vscode`) |
 | Packaging | `find_package(rhp)` from an installed prefix (Debug and Release side by side), `add_subdirectory` or CPM; a generated `<rhp/build_config.hpp>`; dependency pins checked by commit and hash; third-party licenses installed |
-| Performance | `rhp_bench` benchmarks every hot path against raw Lua ([benchmarks](../benchmarks.md)); the cancel hook only where a cancel can come from (`limits.cancel_checks`) |
+| Performance | `rhp_bench` benchmarks every hot path against raw Lua ([benchmarks](../benchmarks.md)); the cancel hook counted down inline and armed only where a cancel can come from (`limits.cancel_checks`); coroutine yields as jumps; cached script signatures; gathered TCP / IPC writes and delayed acks; opt-in `RHP_LTO`; shared precompiled headers and unity builds ([performance](performance.md)) |
 | Platforms | target presets for Windows, Linux, macOS, iOS and Android; verified builds and remaining platform checks are recorded in [platform decisions](../decisions/platforms-and-toolchains.md) |
 
 Start with the [runnable CLI walkthrough](getting-started.md#first-run-host-plus-rhp-cli), then the [complete local sandbox example](getting-started.md#without-any-network). The guide describes the current Stage 12 API; historical architecture decisions retain their stage context. Open items and platform checks are in [Status and TODO](../TODO.md).

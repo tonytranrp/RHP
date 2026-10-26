@@ -31,10 +31,10 @@ The executable is `build/Debug/rhp_demo.exe`. Run it from the directory holding 
 For a project that already uses CPM, replace `add_subdirectory` with a pinned package declaration:
 
 ```cmake
-CPMAddPackage(NAME rhp GITHUB_REPOSITORY tonytranrp/RHP GIT_TAG stage-7)
+CPMAddPackage(NAME rhp GITHUB_REPOSITORY tonytranrp/RHP GIT_TAG stage-11)   # or a commit sha
 ```
 
-`stage-7` is the latest release tag (releases are tagged by stage; this guide already describes Stage 8, tagged `stage-8` when it is released). Pin a commit sha instead if you need a fixed build between releases; a host and its clients must use the same protocol revision. RHP's tests, tools, examples and install rules default to OFF when consumed as a subproject, and its warnings aren't errors there; build the CLI from RHP's own checkout as described next.
+Releases are tagged by stage (`stage-0` ... `stage-11`); there are no version numbers. This guide describes Stage 12, which has no tag yet: pin a commit sha to use it. A host and its clients must use the same protocol revision (Stages 11 and 12 both speak revision 6). RHP's tests, tools, examples and install rules default to OFF when consumed as a subproject, and its warnings aren't errors there; build the CLI from RHP's own checkout as described next.
 
 ### Installed package
 
@@ -93,7 +93,7 @@ $rhpServer = (Resolve-Path build/windows-msvc/Examples/headless_server/Debug/hea
 
 Use `& $rhpCli` and `& $rhpServer` in place of the bare executable names below. On Linux, the paths end in `Tools/rhp-cli/Debug/rhp-cli` and `Examples/headless_server/Debug/headless_server` under `build/linux-clang`, without `.exe`.
 
-Other presets and configuration switches are in [configuration](configuration.md#cmake-options). A defined preset is not evidence that its platform has been verified; see [platform decisions](../decisions/platforms-and-toolchains.md).
+Ship and measure Release builds; [performance](performance.md) covers `RHP_LTO` and the settings that change what scripts cost. Other presets and configuration switches are in [configuration](configuration.md#cmake-options). A defined preset is not evidence that its platform has been verified; see [platform decisions](../decisions/platforms-and-toolchains.md).
 
 ## First run: host plus `rhp-cli`
 
@@ -262,7 +262,7 @@ Destroying a client closes its session gracefully. If it was the identity's last
 
 ## Learn from the examples
 
-Build with `RHP_BUILD_EXAMPLES=ON` (default when RHP is the top-level project). The four finite examples are registered as ctest `example.<name>` when tests are built too (the default top-level build); `headless_server` is a long-running host exercised by the CLI process tests.
+Build with `RHP_BUILD_EXAMPLES=ON` (default when RHP is the top-level project). When tests are built too (the default top-level build), the four finite programs are ctest tests `example.<name>`, and the `lua_tests` spec files are `example.lua_tests.<file>`; run them all with `ctest --preset windows-msvc -R example`. `headless_server` is a long-running host exercised by the CLI process tests.
 
 | Example | Shows |
 |---|---|
@@ -270,7 +270,8 @@ Build with `RHP_BUILD_EXAMPLES=ON` (default when RHP is the top-level project). 
 | [`frame_loop`](../../Examples/frame_loop) | per-frame `pump()`, time slicing, `rhp.wait`, reload keeping state, events, stubs |
 | [`remote_exec`](../../Examples/remote_exec) | host and clients over loopback and TCP: three roles, streamed output, cancel, disconnect = revert |
 | [`custom_transport`](../../Examples/custom_transport) | writing your own transport |
-| [`headless_server`](../../Examples/headless_server) | a standalone host driven by `rhp-cli`: key files, audit log, blob folder, reverse mode, TLS |
+| [`headless_server`](../../Examples/headless_server) | a standalone host driven by `rhp-cli`: key files, audit log, blob folder, reverse mode, TLS, DNS-SD, HTTP gateway, releases |
+| [`lua_tests`](../../Examples/lua_tests) | testing a game's Lua scripts offline with `Rhp::test` and `rhp_add_lua_tests` |
 
 ## Without any network
 
