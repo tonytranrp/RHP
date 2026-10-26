@@ -224,6 +224,7 @@ set(rhp_test_fixture_files
     "${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures/specs/spy_spec.lua"
     "${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures/specs/syntax_error_spec.lua"
     "${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures/specs/timeout_spec.lua"
+    "${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures/specs/views_fakes_spec.lua"
     "${CMAKE_CURRENT_SOURCE_DIR}/test/golden/basics.github"
     "${CMAKE_CURRENT_SOURCE_DIR}/test/golden/basics.jsonl"
     "${CMAKE_CURRENT_SOURCE_DIR}/test/golden/basics.junit.xml"

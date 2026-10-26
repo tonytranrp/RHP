@@ -884,8 +884,12 @@ inline fake_point& fake_main() {
     return g_fake_point;
 }
 
+inline float fake_total(std::span<const float> v) {
+    return v.empty() ? 0.0f : v[0];
+}
+
 using view_lib = Rhp::lib<"fviews">::view<"point", fake_point>::field<"x", &fake_point::x>::field<"y", &fake_point::y> //
-    ::fn<"samples", &fake_samples>::fn<"find", &fake_find>::fn<"main", &fake_main>;
+    ::fn<"samples", &fake_samples>::fn<"find", &fake_find>::fn<"main", &fake_main>::fn<"total", &fake_total>;
 
 } // namespace runner_tests_fixture
 
@@ -900,6 +904,18 @@ TEST_CASE("fake of a lib with views returns empty spans nil and default objects"
     // A view calls its binding again on every access: two calls and three field accesses.
     CHECK(Rhp::test::fake_registry::instance().calls("fviews.main").size() == 5);
     CHECK(box.revert_all().clean());
+}
+
+TEST_CASE("libs with views faked from a description stand in for the program", "[test][fake][views]") {
+    auto api = Rhp::test::describe_api([](Rhp::script::sandbox& box) { return box.install<view_lib>(); });
+    REQUIRE(api);
+    Rhp::test::run_options o = options_for({"views_fakes_spec.lua"});
+    o.api = *api;
+    run x = run_specs(o, {}); // no real libs at all
+    INFO(x.text);
+    check_conventions(x);
+    REQUIRE(find(x.result, "described views fake view bindings return empty spans nil and default objects (ok)") != nullptr);
+    CHECK(g_fake_point.x == 1.0f);
 }
 
 namespace runner_tests_fixture {
