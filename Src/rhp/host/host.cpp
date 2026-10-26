@@ -1952,7 +1952,7 @@ private:
                 if (!r) {
                     return std::unexpected{std::move(r).error()};
                 }
-                return value{value::array(r->begin(), r->end())};
+                return value{value::array(std::make_move_iterator(r->begin()), std::make_move_iterator(r->end()))};
             });
             return;
         }

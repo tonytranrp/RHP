@@ -163,6 +163,7 @@ void sandbox_impl::release_interest(const std::string& event) noexcept {
     }
     if (subs != subscriptions_.end()) {
         subscriptions_.erase(subs);
+        ++subscriptions_version_;
     }
     if (waits != waiters_.end()) {
         waiters_.erase(waits);
@@ -192,6 +193,7 @@ std::uint64_t sandbox_impl::subscribe(lua_State* L, std::string_view event, int 
     sub.once = once;
     sub.policy = opts.on_error.value_or(options_.handler_errors);
     subs.insert(at, std::move(sub));
+    ++subscriptions_version_;
     acquire_interest(event, state);
     std::string label = std::format("{} {}", once ? "rhp.once" : "rhp.on", event);
     const std::uint64_t seq = record_effect(std::move(label), std::make_unique<subscription_effect>(*this, std::string{event}, key));
@@ -217,6 +219,7 @@ void sandbox_impl::unsubscribe(const std::string& event, std::uint64_t key) noex
     }
     luaL_unref(state_, LUA_REGISTRYINDEX, sub->fn_ref);
     subs.erase(sub);
+    ++subscriptions_version_;
     release_interest(event);
 }
 
@@ -249,9 +252,10 @@ void sandbox_impl::enqueue(std::string_view event, const event_args& args) noexc
 
 void sandbox_impl::deliver_now(std::string_view event, event_pusher args, module_id publisher, const value_list* values) {
     // 1. Handlers, each as its own request. A snapshot of their keys: handlers may (un)subscribe, so
-    // each is looked up again before its call (where it was, unless the list changed).
+    // each is looked up again before its call (where it was, unless the list changed), and the list
+    // itself again once a subscription was added or removed.
     if (const auto it = subscriptions_.find(event); it != subscriptions_.end()) {
-        std::array<std::uint64_t, 8> few{}; // the usual handful without an allocation per delivery
+        std::array<std::uint64_t, 16> few{}; // the usual handful without an allocation per delivery
         std::vector<std::uint64_t> many;
         std::span<std::uint64_t> keys{few.data(), it->second.size()};
         if (it->second.size() > few.size()) {
@@ -261,12 +265,17 @@ void sandbox_impl::deliver_now(std::string_view event, event_pusher args, module
         for (std::size_t i = 0; i < keys.size(); ++i) {
             keys[i] = it->second[i].key;
         }
+        auto list = it;
+        std::uint64_t version = subscriptions_version_;
         for (std::size_t i = 0; i < keys.size(); ++i) {
-            const auto now = subscriptions_.find(event);
-            if (now == subscriptions_.end()) {
-                break;
+            if (version != subscriptions_version_) {
+                list = subscriptions_.find(event);
+                version = subscriptions_version_;
+                if (list == subscriptions_.end()) {
+                    break;
+                }
             }
-            std::vector<subscription>& subs = now->second;
+            std::vector<subscription>& subs = list->second;
             const auto live = i < subs.size() && subs[i].key == keys[i] ? subs.begin() + static_cast<std::ptrdiff_t>(i) : std::ranges::find(subs, keys[i], &subscription::key);
             if (live == subs.end() || live->paused) {
                 continue;

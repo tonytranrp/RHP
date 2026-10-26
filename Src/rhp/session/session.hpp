@@ -201,6 +201,7 @@ private:
     [[nodiscard]] error peer_error(utils::bytes_view payload, error fallback) const;
     // Encodes one frame and writes it (when there is a link). Sequenced ones are kept until acked.
     result<void> write(wire::op code, std::uint64_t seq, utils::bytes_view payload, bool sealed);
+    result<void> write(wire::op code, std::uint64_t seq, utils::byte_buffer&& payload, bool sealed); // keeps it for resends
     result<void> write_frame(wire::op code, std::uint64_t seq, utils::bytes_view payload, bool sealed);
     result<void> write_value(wire::op code, const value& body, bool sealed);
     void write_control(wire::op code);

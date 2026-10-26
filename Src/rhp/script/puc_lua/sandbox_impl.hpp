@@ -128,12 +128,11 @@ enum class wait_kind : std::uint8_t {
     kDebug  // paused by the debugger: resumed by debug_resume (woken) or debug_reset
 };
 
-// One script request: a coroutine the scheduler runs, suspends and resumes.
-struct request_record {
+// Everything a request record holds but its pooled strings: request_record::reset assigns it whole.
+struct request_state {
     request_id id;
     request_kind kind = request_kind::kExec;
     effect_owner owner; // owner.request == id
-    std::string label;  // error location when the script gives none ("combat.boost", "timer")
     lua_State* thread = nullptr;
     int thread_ref = kNoRef;
     run_budget budget;
@@ -146,7 +145,6 @@ struct request_record {
     int start_args = -1;                         // >= 0: not started yet; the first resume passes this many arguments (tasks)
     bool woken = false;                          // a delivery or a joined task's end: resume at the next resume pass
     wait_kind waiting = wait_kind::kNone;
-    std::string wait_event{};    // kEvent: the event waited for
     std::uint64_t wait_task = 0; // kTask: the task joined
     int resume_ref = kNoRef;     // kEvent: the delivered arguments, packed {n = count, ...}
     std::shared_ptr<async_wait> async{}; // kAsync: the call it waits for
@@ -154,25 +152,27 @@ struct request_record {
     std::uint64_t schedule_key = 0;
     std::uint64_t task_key = 0;
     std::uint64_t handler_seq = 0;
-    std::string source{}; // the event name, or "timer" / "frame" / "task"
     handler_error_policy policy = handler_error_policy::kReport;
     std::optional<error> start_error{}; // set up but can't start (its arguments didn't fit): fails at its first step
+};
+
+// One script request: a coroutine the scheduler runs, suspends and resumes.
+struct request_record : request_state {
+    std::string label;        // error location when the script gives none ("combat.boost", "timer")
+    std::string wait_event{}; // kEvent: the event waited for
+    std::string source{};     // the event name, or "timer" / "frame" / "task"
 
     // Back to a new record for the next request (records are pooled): every field to its default,
     // the strings keeping their buffers.
     void reset() noexcept {
-        std::string l = std::move(label);
-        std::string s = std::move(source);
-        std::string w = std::move(wait_event);
-        *this = request_record{};
-        l.clear();
-        s.clear();
-        w.clear();
-        label = std::move(l);
-        source = std::move(s);
-        wait_event = std::move(w);
+        static_cast<request_state&>(*this) = request_state{};
+        label.clear();
+        wait_event.clear();
+        source.clear();
     }
 };
+// A field added to request_record instead of request_state would survive reset().
+static_assert(sizeof(request_record) == sizeof(request_state) + 3 * sizeof(std::string), "request_record's fields belong in request_state");
 
 enum class schedule_kind : std::uint8_t {
     kTimer, // script clock
@@ -696,6 +696,7 @@ private:
     std::uint64_t schedule_next_frame_ = 0;
     steady::time_point schedule_next_due_{};
     std::map<std::string, std::vector<subscription>, std::less<>> subscriptions_;
+    std::uint64_t subscriptions_version_ = 0; // bumped when a list is added, removed or changes length
     std::map<std::string, std::vector<request_id>, std::less<>> waiters_; // rhp.wait_event
     std::map<std::string, event_state*, std::less<>> attached_;
     std::uint64_t subscription_keys_ = 0;
