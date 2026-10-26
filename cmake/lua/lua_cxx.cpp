@@ -128,26 +128,85 @@ bool rhp_lua_plain_jumps() noexcept {
 // clang-format on
 
 #if LUA_VERSION_RELEASE_NUM != 50501
-#error "Lua was updated: check onelua.c's include list and luaG_traceexec against rhp_lua_traceexec"
+#error "Lua was updated: check onelua.c's include list, luaG_traceexec against rhp_lua_traceexec and the lvm.c patch in cmake/RhpLua.cmake"
 #endif
 
-// While any hook is set (RHP's cancel / limit / slice hook counts instructions), the VM calls
-// luaG_traceexec before every instruction; for a count hook that isn't due it only counts down (and
-// stores the pc, which nothing reads until a hook runs or an instruction that may raise saves it
+// While any hook mask is set (the exact count hook of the meter and the profiler, line events), the VM
+// calls luaG_traceexec before every instruction; for a count hook that isn't due it only counts down
+// (and stores the pc, which nothing reads until a hook runs or an instruction that may raise saves it
 // itself, as it does without hooks). Counting down inline here makes the not-due case a decrement
-// instead of a call: loops with RHP's default cancel checks run at about 1.25x raw Lua instead of 2x.
-// Everything else (a due count, line events, a hook that yielded) goes through upstream's function.
+// instead of a call. Everything else (a due count, line events, a hook that yielded) goes through
+// upstream's function. RHP's cancel / limit / slice hook sets no mask: it counts at safe points (below).
 #if defined(_MSC_VER) && !defined(__clang__)
 #define RHP_LUA_FORCE_INLINE __forceinline
 #else
 #define RHP_LUA_FORCE_INLINE inline __attribute__((always_inline))
 #endif
+// Safe points. A count hook that only checks for cancels and limits doesn't need to run after an
+// exact number of instructions, only before a script can run long: straight-line code is bounded by
+// its function's size, so only loops and calls can. rhp_lua_sethook_safepoints installs such a hook
+// with no mask at all (the VM then runs as fast as without a hook) and the patched lvm.c
+// (cmake/RhpLua.cmake) charges L->hookcount at the safe points: a backward jump charges its distance
+// (the loop body's length, so a limit still counts a loop's instructions), entering a Lua function
+// charges 1. When the countdown runs out the count hook is armed for one instruction: it fires
+// through luaG_traceexec like any count event (errors, yields and CIST_HOOKYIELD work unchanged),
+// and rhp_lua_traceexec puts the safe-point mode back afterwards. With no hook the countdown only
+// restarts from far away, so an unchecked run pays one subtraction per loop iteration.
+// RHP_LUA_MASKSAFEPOINT marks the armed instruction (above the byte lua_sethook keeps, so only these
+// functions set it; luaG_traceexec casts the mask to a byte and doesn't see it).
+#define RHP_LUA_MASKSAFEPOINT 0x100
+
+static int rhp_lua_safepoint_due(lua_State* L, CallInfo* ci) {
+    if (L->hookmask == 0 && L->hook != NULL) { // counting at safe points: fire before the next instruction
+        L->hookmask = LUA_MASKCOUNT | RHP_LUA_MASKSAFEPOINT;
+        L->hookcount = 1;
+        ci->u.l.trap = 1;
+        return 1;
+    }
+    if (L->hookmask == 0) {
+        L->hookcount = INT_MAX / 2; // no hook: nothing to count
+        return 0;
+    }
+    return 1; // a hook set since this frame last looked (another mask): let luaG_traceexec see it
+}
+
+// lvm.c's charge at a safe point: `trap` is set while any other hook (or the armed count) needs
+// luaG_traceexec, which then does the counting.
+#define rhp_lua_charge(n)                                              \
+    {                                                                  \
+        if (l_unlikely(!trap && (L->hookcount -= cast_int(n)) <= 0)) { \
+            trap = rhp_lua_safepoint_due(L, ci);                       \
+        }                                                              \
+    }
+
 static RHP_LUA_FORCE_INLINE int rhp_lua_traceexec(lua_State* L, const Instruction* pc) {
     if ((L->hookmask & (LUA_MASKLINE | LUA_MASKCOUNT)) == LUA_MASKCOUNT && L->hookcount > 1) {
         --L->hookcount;
         return 1;
     }
-    return luaG_traceexec(L, pc);
+    const int trap = luaG_traceexec(L, pc);
+    if (l_unlikely(L->hookmask & RHP_LUA_MASKSAFEPOINT)) { // the armed count fired: back to safe points
+        L->hookmask = 0;
+        L->hookcount = L->basehookcount;
+        L->ci->u.l.trap = 0;
+        return 0;
+    }
+    return trap;
+}
+
+void rhp_lua_sethook_safepoints(lua_State* L, lua_Hook hook, int count) {
+    if (hook == NULL || count <= 0) {
+        lua_sethook(L, NULL, 0, 0);
+        return;
+    }
+    L->hook = hook;
+    L->basehookcount = count;
+    L->hookcount = count;
+    L->hookmask = 0; // frames still trapping for an earlier mask stop at their next instruction
+}
+
+int rhp_lua_hook_at_safepoints(lua_State* L) {
+    return (L->hookmask == 0 && L->hook != NULL) || (L->hookmask & RHP_LUA_MASKSAFEPOINT) != 0;
 }
 
 // clang-format off
@@ -158,7 +217,7 @@ static RHP_LUA_FORCE_INLINE int rhp_lua_traceexec(lua_State* L, const Instructio
 #include "ltable.c"
 #include "ldo.c"
 #define luaG_traceexec rhp_lua_traceexec // lvm.c's vmfetch calls it
-#include "lvm.c"
+#include "rhp_lvm.c" // lvm.c with the safe-point charges (cmake/RhpLua.cmake)
 #undef luaG_traceexec
 #include "lapi.c"
 

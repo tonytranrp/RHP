@@ -493,6 +493,9 @@ private:
     void coverage_compiled(lua_State* L, std::string_view chunk) noexcept;
     // The hook counts instructions on every run (the profiler or the meter is on).
     [[nodiscard]] bool counts_everywhere() const noexcept { return profiler_ != nullptr || metering_; }
+    // Whether a hook with `mask` counts at safe points (see install_hook).
+    [[nodiscard]] bool counts_at_safepoints(int mask) const noexcept;
+    void install_hook(lua_State* L, int mask, int count) noexcept;
     // What line events the hook needs: none; on every line (coverage, the debugger's step or pause);
     // or by function (breakpoints only: call and return events turn them on in functions that have
     // one, scope_lines).

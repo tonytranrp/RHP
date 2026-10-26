@@ -74,8 +74,16 @@ void collect(const Proto* p, std::vector<std::uint32_t>& lines, std::vector<cons
 
 } // namespace
 
+void set_safepoint_hook(lua_State* L, void (*hook)(lua_State*, lua_Debug*), int count) noexcept {
+    rhp_lua_sethook_safepoints(L, hook, count);
+}
+
+bool hook_at_safepoints(lua_State* L) noexcept {
+    return rhp_lua_hook_at_safepoints(L) != 0;
+}
+
 std::uint32_t take_hook_progress(lua_State* L) noexcept {
-    if ((L->hookmask & LUA_MASKCOUNT) == 0 || L->basehookcount <= 0) {
+    if (((L->hookmask & LUA_MASKCOUNT) == 0 && !hook_at_safepoints(L)) || L->basehookcount <= 0) {
         return 0;
     }
     const int done = L->basehookcount - L->hookcount;
@@ -121,7 +129,8 @@ const void* proto_at(lua_State* L, int level) noexcept {
 }
 
 void set_line_events(lua_State* L, bool on) noexcept {
-    const int mask = L->hookmask;
+    // A hook counting at safe points has no mask: line events make it an exact count hook.
+    const int mask = hook_at_safepoints(L) ? LUA_MASKCOUNT : (L->hookmask & (LUA_MASKCALL | LUA_MASKRET | LUA_MASKLINE | LUA_MASKCOUNT));
     const int wanted = on ? (mask | LUA_MASKLINE) : (mask & ~LUA_MASKLINE);
     if (wanted == mask || L->hook == nullptr) {
         return;

@@ -31,6 +31,7 @@
 #include <rhp/script/detail/patch_layers.hpp>
 #include <rhp/script/detail/patch_registry.hpp>
 #include <rhp/script/puc_lua/builtins.hpp>
+#include <rhp/script/puc_lua/lua_internals.hpp>
 #include <rhp/script/puc_lua/sandbox_impl.hpp>
 #include <rhp/script/puc_lua/tools.hpp>
 #include <rhp/script/sandbox.hpp>
@@ -676,10 +677,23 @@ void sandbox_impl::arm_hook(lua_State* L, bool armed) noexcept {
     // Line events: every line, or by function (internals::set_line_events switches them without
     // restarting the instruction countdown, so limits and cancels keep working in loops of calls).
     const int mask = (armed || counts_everywhere() ? LUA_MASKCOUNT : 0) | line_mask();
+    install_hook(L, mask, static_cast<int>(hook_count()));
+}
+
+// Cancels and limits only need a bound, so a hook that does nothing else counts at safe points (loop
+// back-edges and calls: internals::set_safepoint_hook) and costs nothing in straight-line code. The
+// meter, the profiler and line events need every instruction: lua_sethook.
+bool sandbox_impl::counts_at_safepoints(int mask) const noexcept {
+    return mask == LUA_MASKCOUNT && !counts_everywhere();
+}
+
+void sandbox_impl::install_hook(lua_State* L, int mask, int count) noexcept {
     if (mask == 0) {
         lua_sethook(L, nullptr, 0, 0);
+    } else if (counts_at_safepoints(mask)) {
+        internals::set_safepoint_hook(L, &sandbox_impl::count_hook, count);
     } else {
-        lua_sethook(L, &sandbox_impl::count_hook, mask, static_cast<int>(hook_count()));
+        lua_sethook(L, &sandbox_impl::count_hook, mask, count);
     }
 }
 
@@ -714,15 +728,13 @@ void sandbox_impl::sync_hook(lua_State* L, bool checked) noexcept {
     const int count = static_cast<int>(hook_count());
     // By function, a thread's line events come and go with its calls: either is in step.
     const int ignored = lines_wanted() == line_mode::kByFunction ? LUA_MASKLINE : 0;
-    if ((lua_gethookmask(L) | ignored) == mask && ((mask & LUA_MASKCOUNT) == 0 || lua_gethookcount(L) == count)) {
+    const bool at_safepoints = internals::hook_at_safepoints(L);
+    const int current = at_safepoints ? LUA_MASKCOUNT : lua_gethookmask(L);
+    if ((current | ignored) == mask && at_safepoints == counts_at_safepoints(mask) && ((mask & LUA_MASKCOUNT) == 0 || lua_gethookcount(L) == count)) {
         return;
     }
     credit_hook_progress(L);
-    if (mask == 0) {
-        lua_sethook(L, nullptr, 0, 0);
-    } else {
-        lua_sethook(L, &sandbox_impl::count_hook, mask, count);
-    }
+    install_hook(L, mask, count);
 }
 
 bool sandbox_impl::checks_requests() const noexcept {
