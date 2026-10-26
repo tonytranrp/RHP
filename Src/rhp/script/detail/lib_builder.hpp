@@ -368,8 +368,8 @@ int invoke_fn(stack& s, binding_label label, std::index_sequence<Is...>) {
             }
         } else if constexpr (Entry::feed == undo_feed::kArgs) {
             s.context().record_effect(std::string{std::string_view{label}},
-                              std::make_unique<undo_call_effect<Entry::undo_tag::function, capture_t<utils::at_t<args, Is>>...>>(
-                                  *std::get<Is>(pulled)...));
+                                      std::make_unique<undo_call_effect<Entry::undo_tag::function, capture_t<utils::at_t<args, Is>>...>>(
+                                          *std::get<Is>(pulled)...));
         } else if constexpr (Entry::is_irreversible) {
             s.context().record_effect(std::string{std::string_view{label}}, std::make_unique<irreversible_effect>());
         }
@@ -379,6 +379,169 @@ int invoke_fn(stack& s, binding_label label, std::index_sequence<Is...>) {
         return 0;
     } else {
         return push_return<Handles>(s, label, *out);
+    }
+}
+
+// ---- plain bindings -------------------------------------------------------------------------------
+
+// A parameter type the plain trampoline reads straight off the stack: `kind` tells
+// stack::read_args how to read it, take() converts the slot (false when the value doesn't fit the
+// type: the general path then says why). Every other type keeps the general path (invoke_fn). A new
+// kind of argument is a specialization here and a case in stack::read_args.
+template <class T>
+struct plain_arg {};
+
+template <>
+struct plain_arg<bool> {
+    static constexpr arg_kind kind = arg_kind::kBool;
+    static bool take(const arg_slot& slot, bool& out) noexcept {
+        out = slot.boolean;
+        return true;
+    }
+};
+
+template <lua_integer T>
+struct plain_arg<T> {
+    static constexpr arg_kind kind = arg_kind::kInteger;
+    static bool take(const arg_slot& slot, T& out) noexcept {
+        if (!std::in_range<T>(slot.integer)) {
+            return false;
+        }
+        out = static_cast<T>(slot.integer);
+        return true;
+    }
+};
+
+template <std::floating_point T>
+struct plain_arg<T> {
+    static constexpr arg_kind kind = arg_kind::kNumber;
+    static bool take(const arg_slot& slot, T& out) noexcept {
+        out = static_cast<T>(slot.number);
+        return true;
+    }
+};
+
+template <>
+struct plain_arg<std::string_view> {
+    static constexpr arg_kind kind = arg_kind::kString;
+    static bool take(const arg_slot& slot, std::string_view& out) noexcept {
+        out = std::string_view{slot.string.data, slot.string.size};
+        return true;
+    }
+};
+
+template <>
+struct plain_arg<std::string> {
+    static constexpr arg_kind kind = arg_kind::kString;
+    static bool take(const arg_slot& slot, std::string& out) {
+        out.assign(slot.string.data, slot.string.size);
+        return true;
+    }
+};
+
+// Taken by value or const reference.
+template <class T>
+inline constexpr bool by_value_or_const_ref_v = !std::is_reference_v<T> || std::is_const_v<std::remove_reference_t<T>>;
+
+// A parameter the plain trampoline takes: a type with a plain_arg reader, or a handle (checked with
+// pull_handle, as on the general path).
+template <class Handles, class T>
+concept plain_param = by_value_or_const_ref_v<T> && (requires { plain_arg<std::remove_cvref_t<T>>::kind; } || is_handle_v<Handles, T>);
+
+template <class Handles, class List>
+inline constexpr bool plain_params_v = false;
+
+template <class Handles, class... Args>
+inline constexpr bool plain_params_v<Handles, utils::type_list<Args...>> = (plain_param<Handles, Args> && ...);
+
+// A binding (function, method or property) the plain trampoline calls: synchronous, nothing
+// journaled (no undo<G>, not irreversible), every parameter plain. Its result is anything
+// push_return takes; a role it needs is still checked (call_fn).
+template <class Handles, class Entry>
+inline constexpr bool plain_binding_v = !Entry::is_async && Entry::feed == undo_feed::kNone && !Entry::is_irreversible &&
+                                        plain_params_v<Handles, typename Entry::traits::args>;
+
+// How the plain trampoline holds one argument: as itself, or a handle (which needn't be default
+// constructible) in an optional.
+template <class Handles, class T>
+using plain_storage_t = std::conditional_t<is_handle_v<Handles, T>, std::optional<storage_t<T>>, storage_t<T>>;
+
+template <class Handles, class T>
+consteval arg_kind plain_kind() {
+    if constexpr (is_handle_v<Handles, T>) {
+        return arg_kind::kOther;
+    } else {
+        return plain_arg<storage_t<T>>::kind;
+    }
+}
+
+// Converts read slot `slot` (a plain argument) or pulls the handle at `index` into `out`.
+template <class Handles, class T>
+bool take_plain(stack& s, int index, const arg_slot& slot, plain_storage_t<Handles, T>& out) {
+    if constexpr (is_handle_v<Handles, T>) {
+        auto h = pull_handle<find_handle_t<Handles, T>>(s, index);
+        if (!h) {
+            return false;
+        }
+        out.emplace(*h);
+        return true;
+    } else {
+        return plain_arg<storage_t<T>>::take(slot, out);
+    }
+}
+
+template <class Handles, class T>
+decltype(auto) plain_value(plain_storage_t<Handles, T>& held) {
+    if constexpr (is_handle_v<Handles, T>) {
+        return static_cast<storage_t<T>&&>(*held);
+    } else {
+        return static_cast<storage_t<T>&&>(held);
+    }
+}
+
+// The plain trampoline: one stack::read_args for every plain argument (handles are pulled as on the
+// general path), no result<> per argument, then the call and push_return as on the general path. An
+// argument that doesn't fit sends the call down the general path, which raises the error it always has.
+template <class Handles, class Entry, std::size_t... Is>
+int call_plain(stack& s, [[maybe_unused]] std::index_sequence<Is...> seq) {
+    using args = typename Entry::traits::args;
+    using R = typename Entry::traits::return_type;
+
+    [[maybe_unused]] std::tuple<plain_storage_t<Handles, utils::at_t<args, Is>>...> values;
+    if constexpr (sizeof...(Is) > 0) {
+        static constexpr arg_kind kinds[] = {plain_kind<Handles, utils::at_t<args, Is>>()...};
+        constexpr bool any_read = ((kinds[Is] != arg_kind::kOther) || ...);
+        arg_slot slots[sizeof...(Is)];
+        if ((any_read && !s.read_args(kinds, slots, static_cast<int>(sizeof...(Is)))) ||
+            !(take_plain<Handles, utils::at_t<args, Is>>(s, static_cast<int>(Is) + 1, slots[Is], std::get<Is>(values)) && ...)) [[unlikely]] {
+            return invoke_fn<Handles, Entry>(s, binding_label{s}, seq);
+        }
+    }
+
+    // As in invoke_fn: exceptions become Lua errors, raised after the try block.
+    std::optional<error> thrown;
+    std::conditional_t<std::is_void_v<R>, char, std::optional<R>> out{};
+    try {
+        if constexpr (std::is_void_v<R>) {
+            std::invoke(Entry::function, plain_value<Handles, utils::at_t<args, Is>>(std::get<Is>(values))...);
+        } else {
+            out.emplace(std::invoke(Entry::function, plain_value<Handles, utils::at_t<args, Is>>(std::get<Is>(values))...));
+        }
+    } catch (const Rhp::exception& e) {
+        thrown = e.err();
+    } catch (const std::exception& e) {
+        thrown = make_error(errc::kRuntime, e.what(), std::string{std::string_view{binding_label{s}}});
+    }
+    if (thrown) {
+        if (thrown->where.empty()) {
+            thrown->where = std::string{std::string_view{binding_label{s}}};
+        }
+        s.raise(*thrown);
+    }
+    if constexpr (std::is_void_v<R>) {
+        return 0;
+    } else {
+        return push_return<Handles>(s, binding_label{s}, *out);
     }
 }
 
@@ -562,6 +725,8 @@ int call_fn(lua_State* L) {
             return results;
         }
         yield_async(L); // nothing here has a destructor: the yield may jump
+    } else if constexpr (plain_binding_v<Handles, Entry>) {
+        return call_plain<Handles, Entry>(s, std::make_index_sequence<Entry::traits::arity>{});
     } else {
         return invoke_fn<Handles, Entry>(s, binding_label{s}, std::make_index_sequence<Entry::traits::arity>{});
     }

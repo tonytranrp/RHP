@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstddef>
+#include <cstdint>
 #include <format>
 #include <optional>
 #include <stdexcept>
@@ -17,6 +18,7 @@
 #include <rhp/core/result.hpp>
 #include <rhp/core/role.hpp>
 #include <rhp/core/value.hpp>
+#include <rhp/script/detail/lib_builder.hpp>
 #include <rhp/script/lib.hpp>
 #include <rhp/script/patch_point.hpp>
 #include <rhp/script/sandbox.hpp>
@@ -532,4 +534,149 @@ TEST_CASE("undo fed with arguments copies string_view arguments", "[script][bind
     REQUIRE(named_undo_fixtures::g_named.size() == 1);
     REQUIRE(box.revert(*mod));
     CHECK(named_undo_fixtures::g_named.empty());
+}
+
+namespace plain_path_fixtures {
+
+struct token {
+    int v = 0;
+    bool operator==(const token&) const = default;
+};
+
+inline bool token_alive(const token& t) {
+    return t.v > 0;
+}
+
+inline token make_token(int v) {
+    return token{v};
+}
+
+inline int g_irreversible_calls = 0;
+
+// Every plain parameter kind in one signature.
+inline std::string mix(bool b, std::int8_t i, float f, std::string_view s, const std::string& t, std::uint64_t u) {
+    return std::format("{} {} {} {} {} {}", b, i, f, s, t, u);
+}
+
+inline std::string mix_irreversible(bool b, std::int8_t i, float f, std::string_view s, const std::string& t, std::uint64_t u) {
+    ++g_irreversible_calls;
+    return mix(b, i, f, s, t, u);
+}
+
+inline int token_value(token t, int add) {
+    return t.v + add;
+}
+
+inline int token_value_irreversible(token t, int add) {
+    ++g_irreversible_calls;
+    return t.v + add;
+}
+
+inline Rhp::result<double> halve(double x) {
+    if (x < 0) {
+        return Rhp::fail(errc::kOutOfRange, "negative");
+    }
+    return x / 2;
+}
+
+inline int throws(int) {
+    throw std::runtime_error("plain kaboom");
+}
+
+inline int nothing_thrown(int x) noexcept {
+    return x + 1;
+}
+
+// mix / value take the plain trampoline; their irreversible twins (_g) take the general path.
+using plain_lib = Rhp::lib<"plain">                               //
+    ::handle<"token", token, &token_alive>                        //
+    ::fn<"make", &make_token>                                     //
+    ::fn<"mix", &mix>                                             //
+    ::fn<"mix_g", &mix_irreversible, Rhp::irreversible>           //
+    ::fn<"value", &token_value>                                   //
+    ::fn<"value_g", &token_value_irreversible, Rhp::irreversible> //
+    ::method<"plus", &token_value>                                //
+    ::fn<"halve", &halve>                                         //
+    ::fn<"throws", &throws>                                       //
+    ::fn<"noexcept", &nothing_thrown>                             //
+    ::fn<"admin_mix", &mix, Rhp::requires_role<Rhp::role::kAdmin>>;
+
+using plain_handles = Rhp::script::detail::handles_of_t<plain_lib>;
+static_assert(Rhp::script::detail::plain_binding_v<plain_handles, Rhp::script::detail::fn_entry<"mix", &mix>>);
+static_assert(Rhp::script::detail::plain_binding_v<plain_handles, Rhp::script::detail::method_entry<"plus", &token_value>>);
+static_assert(!Rhp::script::detail::plain_binding_v<plain_handles, Rhp::script::detail::fn_entry<"mix_g", &mix_irreversible, Rhp::irreversible>>);
+
+} // namespace plain_path_fixtures
+
+TEST_CASE("plain bindings read and refuse arguments as the general path does", "[script][binding][plain]") {
+    namespace pf = plain_path_fixtures;
+    sandbox_options options;
+    options.caller_role = role::kPatch;
+    options.output = [](std::string_view) {};
+    sandbox box{std::move(options)};
+    REQUIRE(box.install<pf::plain_lib>());
+
+    CHECK(box.exec<std::string>("return plain.mix(true, -3, 1.5, 'view', 'copy', 7)") == "true -3 1.5 view copy 7");
+    CHECK(box.exec<std::string>("return plain.mix(false, 2.0, 2, '', '', 0)") == "false 2 2   0");
+    CHECK(box.exec<int>("return plain.value(plain.make(4), 3)") == 7);
+    CHECK(box.exec<int>("return plain.make(5):plus(1)") == 6);
+    CHECK(box.exec<double>("return plain.halve(3)") == 1.5);
+    CHECK(box.exec<int>("return plain.noexcept(1)") == 2);
+
+    // Each bad call, made through the plain binding and through its general twin: same code, same
+    // message, same argument named.
+    const std::pair<std::string_view, std::string_view> calls[] = {
+        {"plain.mix", "(1, 1, 1, 's', 's', 1)"},      // a number for a boolean
+        {"plain.mix", "(true, 1.5, 1, 's', 's', 1)"}, // not an integer
+        {"plain.mix", "(true, 300, 1, 's', 's', 1)"}, // out of int8's range
+        {"plain.mix", "(true, '1', 1, 's', 's', 1)"}, // a string for an integer
+        {"plain.mix", "(true, 1, '1', 's', 's', 1)"}, // a string for a number
+        {"plain.mix", "(true, 1, 1, 2, 's', 1)"},     // a number for a string_view
+        {"plain.mix", "(true, 1, 1, 's', {}, 1)"},    // a table for a std::string
+        {"plain.mix", "(true, 1, 1, 's', 's', -1)"},  // negative for an unsigned
+        {"plain.mix", "(true, 1, 1, 's')"},           // missing arguments
+        {"plain.mix", "()"},                          // none at all
+        {"plain.value", "(1, 1)"},                    // not a handle
+        {"plain.value", "(plain.make(0), 1)"},       // a stale handle
+        {"plain.value", "(plain.make(1), 'x')"},     // a bad argument after a handle
+    };
+    for (const auto& [fn, args] : calls) {
+        const std::string plain_call = std::format("{}{}", fn, args);
+        const std::string general_call = std::format("{}_g{}", fn, args);
+        CAPTURE(plain_call);
+        const auto plain = box.exec(plain_call);
+        const auto general = box.exec(general_call);
+        REQUIRE_FALSE(plain.has_value());
+        REQUIRE_FALSE(general.has_value());
+        CHECK(plain.error().code == general.error().code);
+        CHECK(plain.error().message == general.error().message);
+        std::string where = general.error().where;
+        where.replace(where.find("_g"), 2, "");
+        CHECK(plain.error().where == where);
+    }
+    CHECK(pf::g_irreversible_calls == 0);
+
+    const auto stale_self = box.exec("plain.make(0):plus(1)");
+    REQUIRE_FALSE(stale_self.has_value());
+    CHECK(stale_self.error().code == errc::kStaleHandle);
+    CHECK(contains(stale_self.error().where, "token:plus (self)"));
+    const auto bad_after_self = box.exec("plain.make(2):plus('x')");
+    REQUIRE_FALSE(bad_after_self.has_value());
+    CHECK(contains(bad_after_self.error().where, "token:plus (argument 1)"));
+
+    const auto failed = box.exec("plain.halve(-1)");
+    REQUIRE_FALSE(failed.has_value());
+    CHECK(failed.error().code == errc::kOutOfRange);
+    CHECK(contains(failed.error().where, "plain.halve"));
+
+    const auto thrown = box.exec("plain.throws(1)");
+    REQUIRE_FALSE(thrown.has_value());
+    CHECK(thrown.error().code == errc::kRuntime);
+    CHECK(contains(describe(thrown.error()), "plain kaboom"));
+    CHECK(contains(thrown.error().where, "plain.throws"));
+
+    // A plain binding keeps its role check.
+    CHECK(exec_error(box, "plain.admin_mix(true, 1, 1, 's', 's', 1)") == errc::kForbidden);
+    // And the sandbox is fine after all of it.
+    CHECK(box.exec<int>("return plain.value(plain.make(1), 1)") == 2);
 }

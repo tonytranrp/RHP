@@ -16,21 +16,21 @@ namespace {
 
 // __index of the members table, for keys it doesn't hold: variables. Upvalue: 1 getters. Args: members, key.
 int lib_var_index(lua_State* L) {
-    lua_pushvalue(L, 2);
-    if (lua_rawget(L, lua_upvalueindex(1)) == LUA_TFUNCTION) {
+    // The VM calls a metamethod with exactly (members, key): the key on top is rawget's key, replaced
+    // by the getter (nil, the result, for a key that is no member).
+    const int type = lua_rawget(L, lua_upvalueindex(1));
+    if (type == LUA_TFUNCTION) {
         // RHP's getters are C functions without upvalues (get_var): one runs in this frame, which is
-        // cheaper than a nested lua_call. Anything else (a test's swapped getter) is called.
-        if (const lua_CFunction get = lua_tocfunction(L, -1); get != nullptr) {
-            if (lua_getupvalue(L, -1, 1) == nullptr) {
-                lua_pop(L, 1);
-                return get(L);
-            }
-            lua_pop(L, 1);
+        // cheaper than a nested lua_call (it ignores what is on the stack and pushes the value).
+        // Anything else (a test's swapped getter) is called.
+        if (const lua_CFunction get = lua_tocfunction(L, -1); get != nullptr && lua_getupvalue(L, -1, 1) == nullptr) {
+            return get(L);
         }
+        lua_settop(L, 2); // drops the upvalue a C closure pushed above
         lua_call(L, 0, 1);
-        return 1;
+    } else if (type != LUA_TNIL) {
+        lua_pushnil(L); // a getter swapped for something that isn't a function reads as nil
     }
-    lua_pushnil(L);
     return 1;
 }
 

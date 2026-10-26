@@ -22,8 +22,8 @@ namespace {
 constexpr int kMaxValueDepth = 64;
 constexpr const char* kTypeTagField = "__rhp_type";
 constexpr const char* kHandleTagsKey = "rhp.handle_tags"; // registry: type tag → metatable key
-constexpr const char* kMethodsField = "__rhp_methods";     // a handle metatable's methods (name -> function)
-constexpr const char* kGettersField = "__rhp_getters";     // and its properties (name -> getter(self))
+constexpr const char* kMethodsField = "__rhp_methods";    // a handle metatable's methods (name -> function)
+constexpr const char* kGettersField = "__rhp_getters";    // and its properties (name -> getter(self))
 
 int handle_newindex(lua_State* L); // __newindex of every handle: members are read-only
 
@@ -296,6 +296,45 @@ std::optional<std::string_view> stack::to_string(int index) const noexcept {
     return std::string_view{s, len};
 }
 
+bool stack::read_args(const arg_kind* kinds, arg_slot* out, int count) const noexcept {
+    for (int i = 0; i < count; ++i) {
+        const int index = i + 1;
+        switch (kinds[i]) {
+        case arg_kind::kBool:
+            if (lua_type(state_, index) != LUA_TBOOLEAN) {
+                return false;
+            }
+            out[i].boolean = lua_toboolean(state_, index) != 0;
+            break;
+        case arg_kind::kInteger: {
+            if (lua_type(state_, index) != LUA_TNUMBER) {
+                return false;
+            }
+            int ok = 0;
+            out[i].integer = static_cast<std::int64_t>(lua_tointegerx(state_, index, &ok)); // 1.5 doesn't convert
+            if (ok == 0) {
+                return false;
+            }
+            break;
+        }
+        case arg_kind::kNumber:
+            if (lua_type(state_, index) != LUA_TNUMBER) {
+                return false;
+            }
+            out[i].number = static_cast<double>(lua_tonumberx(state_, index, nullptr));
+            break;
+        case arg_kind::kString:
+            if (lua_type(state_, index) != LUA_TSTRING) {
+                return false;
+            }
+            out[i].string.data = lua_tolstring(state_, index, &out[i].string.size);
+            break;
+        case arg_kind::kOther: break;
+        }
+    }
+    return true;
+}
+
 result<value> stack::to_value(int index) const {
     luaL_checkstack(state_, 4, "rhp: value too deep");
     return read_value(state_, index, 0);
@@ -321,10 +360,12 @@ result<void> stack::define_userdata_type(std::string_view key, std::string_view 
     if (luaL_getmetatable(state_, k.c_str()) != LUA_TNIL) {
         lua_getfield(state_, -1, kTypeTagField);
         const bool same = lua_touserdata(state_, -1) == type_tag;
-        lua_pop(state_, 2);
+        lua_pop(state_, 1);
         if (!same) {
+            lua_pop(state_, 1);
             return fail(errc::kAlreadyLoaded, std::format("handle type '{}' is already defined for a different C++ type", display_name));
         }
+        lua_rawsetp(state_, LUA_REGISTRYINDEX, key.data()); // this spelling of the key finds it by address too
         return {};
     }
     lua_pop(state_, 1);
@@ -346,7 +387,9 @@ result<void> stack::define_userdata_type(std::string_view key, std::string_view 
     lua_setfield(state_, -2, "__index");
     lua_pushcfunction(state_, &handle_newindex);
     lua_setfield(state_, -2, "__newindex");
-    lua_pop(state_, 1);
+    // Also registered under the key's address: push_userdata and to_userdata find it without
+    // hashing the name (bindings pass the same static key every call).
+    lua_rawsetp(state_, LUA_REGISTRYINDEX, key.data());
 
     if (lua_getfield(state_, LUA_REGISTRYINDEX, kHandleTagsKey) != LUA_TTABLE) {
         lua_pop(state_, 1);
@@ -485,6 +528,11 @@ bool stack::push_handle(const void* type_tag, const void* data, std::size_t size
 
 void* stack::push_userdata(std::size_t size, std::string_view key) const {
     void* memory = lua_newuserdatauv(state_, size, 0);
+    if (lua_rawgetp(state_, LUA_REGISTRYINDEX, key.data()) == LUA_TTABLE) { // defined with this very key
+        lua_setmetatable(state_, -2);
+        return memory;
+    }
+    lua_pop(state_, 1);
     // luaL_setmetatable needs a C string; keys are short literals, so a small buffer avoids allocation.
     char buffer[96];
     if (key.size() < sizeof(buffer)) {
@@ -499,6 +547,18 @@ void* stack::push_userdata(std::size_t size, std::string_view key) const {
 }
 
 void* stack::to_userdata(int index, std::string_view key) const noexcept {
+    // luaL_testudata against the metatable registered under the key's address (define_userdata_type):
+    // no name to hash.
+    void* memory = lua_touserdata(state_, index);
+    if (memory == nullptr || lua_getmetatable(state_, index) == 0) {
+        return nullptr;
+    }
+    if (lua_rawgetp(state_, LUA_REGISTRYINDEX, key.data()) == LUA_TTABLE) {
+        const bool same = lua_rawequal(state_, -1, -2) != 0;
+        lua_pop(state_, 2);
+        return same ? memory : nullptr;
+    }
+    lua_pop(state_, 2);
     // luaL_testudata needs a C string; keys are short literals, so a small buffer avoids allocation.
     char buffer[96];
     if (key.size() >= sizeof(buffer)) {
