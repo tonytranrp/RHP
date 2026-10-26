@@ -21,6 +21,9 @@
 - `Rhp::undo<G>` is fed the binding's result (with `Rhp::result<>` peeled off) or, failing that, its arguments (string views copied).
 - Errors raised inside Lua are strings `[code] where: message`; C++ gets the original `Rhp::error` back.
 
+**Views (as built)**
+- Arrays and objects a script works on in place cross as views, not copies: `std::span<T>` results are typed views, pointers / references to `::view` types are struct views with `::field<>`s, writes journaled per target; see [views-and-buffers](views-and-buffers.md). Class binding (methods on struct views, inheritance) stays out.
+
 **Stage 2 (as built)**
 - `Rhp::lua_event<"name", Args...>`: arguments are `Rhp::convertible` or opaque handle types; a handle argument arrives as the handle userdata of whichever installed lib declares that C++ type (looked up by type tag), else through `Rhp::convert`, else `nil`.
 - `Rhp::script::stubs::generate<L>(role)` emits LuaLS annotations at compile time, filtered by role; `sandbox::stubs()` joins the `rhp` API with every installed lib.

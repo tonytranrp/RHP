@@ -17,6 +17,7 @@ Lua 5.5, text only (no binary chunks). Each identity (key) has its own Lua state
 | `rhp.pause(id)` / `rhp.resume(id)` / `rhp.reschedule(id, interval)` / `rhp.timers()` | any | control and list this module's timers and frame callbacks (`pause` / `resume` work on subscriptions too) |
 | `rhp.spawn(fn, ...)` / `rhp.tasks()` | any | start a background task (handle: `status()`, `cancel()`, `join()`, `id`) / this module's unfinished tasks |
 | `rhp.tunables([prefix])` | any | the variables the host's libs expose, with value and tags ([tools](tools.md)) |
+| `rhp.buffer.new(size [, fill])` / `rhp.buffer.from(bytes)` | any | a byte buffer this script owns: `b:read_u32(pos [, "be"])` / `write_*`, `pack` / `unpack`, `slice`, typed views `b:view("f32")`; never journaled ([buffers](views-and-buffers.md#buffers-rhpbuffer)) |
 | `rhp.on_error(fn [, opts])` / `rhp.stats()` | any | hear about failed handlers (`opts.priority`, `opts.on_error`) / `{dropped_events, queued_events, timers, subscriptions, tasks, waiting, async_waiting, async_compensated, async_dropped, handler_failures, memory}` |
 | `rhp.wait([frames])` / `rhp.next_frame()` | any | suspend for `frames` `pump()` calls (default 1) |
 | `rhp.sleep(ms)` | any | suspend for at least `ms` ms (clock is injectable) |
@@ -26,7 +27,7 @@ Lua 5.5, text only (no binary chunks). Each identity (key) has its own Lua state
 | `require(name)` | any | a loaded module of the same identity (read-only live proxy; cycles fail) |
 | `print(...)` | any | streams back to the client as an output line |
 
-Plus whatever libs the host installed (`game.spawn(...)`).
+Plus whatever libs the host installed (`game.spawn(...)`), and the views their bindings return: typed views of C++ arrays (`v[i]`, `#v`, `pairs(v)`) and struct views (`t.x = 1`), written in place and undone with the module ([views](views-and-buffers.md)).
 
 ## Roles decide what a script can do
 
