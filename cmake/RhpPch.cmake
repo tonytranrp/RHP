@@ -1,6 +1,6 @@
 include_guard(GLOBAL)
 
-# rhp_use_shared_pch(<target> <lib|tests|apps>)
+# rhp_use_shared_pch(<target> <lib|tests|apps|asio>)
 #
 # RHP_PCH: the standard headers nearly every RHP translation unit includes (plus Catch2's macros for
 # the tests) compiled once per group and reused by every target in it (REUSE_FROM), instead of
@@ -23,6 +23,12 @@ set(RHP_PCH_RHP_HEADERS
     <rhp/core/convert.hpp> <rhp/core/async.hpp> <rhp/core/limits.hpp> <rhp/core/subscription.hpp>
     <rhp/core/listener_table.hpp> <rhp/utils/type_list.hpp> <rhp/utils/fixed_string.hpp>
     <rhp/utils/function_traits.hpp> <rhp/utils/byte_buffer.hpp> <rhp/utils/scope_guard.hpp>)
+
+# Asio's headers most of rhp_net's Asio translation units include (rhp_net_asio): parsing them and
+# instantiating their executor machinery was 1.6-2.6 s per file.
+set(RHP_PCH_ASIO_HEADERS
+    <asio/io_context.hpp> <asio/ip/address.hpp> <asio/steady_timer.hpp> <asio/post.hpp> <asio/write.hpp>
+    <asio/ip/udp.hpp> <asio/ip/tcp.hpp> <asio/connect.hpp>)
 
 function(rhp_use_shared_pch target group)
     if(NOT RHP_PCH)
@@ -49,6 +55,11 @@ function(rhp_use_shared_pch target group)
                 set_target_properties(${pch} PROPERTIES POSITION_INDEPENDENT_CODE OFF)
                 target_compile_options(${pch} PRIVATE ${CMAKE_CXX_COMPILE_OPTIONS_PIE})
             endif()
+        elseif(group STREQUAL "asio")
+            # Asio's own macros come with the target, so they match the sources using it.
+            target_link_libraries(${pch} PRIVATE Rhp::core "$<BUILD_INTERFACE:Rhp::asio>")
+            list(APPEND headers ${RHP_PCH_ASIO_HEADERS})
+            rhp_apply_platform(${pch})
         else()
             target_link_libraries(${pch} PRIVATE Rhp::core)
             rhp_apply_platform(${pch})

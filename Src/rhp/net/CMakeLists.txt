@@ -2,27 +2,30 @@
 # RHP_ENABLE=OFF there is no network code: the headers stay (configs still name the transports),
 # nothing is compiled and Asio is not fetched.
 set(rhp_net_sources "")
+set(rhp_net_asio_sources "")
 set(rhp_net_private_deps "")
 if(RHP_ENABLE)
     set(rhp_net_sources
-        io_context.cpp
         loopback/loopback.cpp
-        tcp/tcp.cpp
         detail/http.cpp
         detail/http_connection.cpp
         mdns/metadata.cpp
+        websocket/detail/protocol.cpp
+        websocket/websocket.cpp
+        udp_reliable/detail/packet.cpp
+    )
+    # The translation units that include Asio (see rhp_net_asio below).
+    set(rhp_net_asio_sources
+        io_context.cpp
+        tcp/tcp.cpp
         mdns/dns.cpp
         mdns/wire.cpp
         mdns/native.cpp
-        websocket/detail/protocol.cpp
-        websocket/websocket.cpp
         local/local.cpp
-        udp_reliable/detail/packet.cpp
         udp_reliable/udp_reliable.cpp
     )
-    # Asio is header-only and stays in the build tree: an installed RHP links no Asio target. What
-    # Asio itself needs at link time is listed here instead.
-    set(rhp_net_private_deps "$<BUILD_INTERFACE:Rhp::asio>" Threads::Threads)
+    # What Asio itself needs at link time (an installed RHP links no Asio target).
+    set(rhp_net_private_deps Threads::Threads)
     if(RHP_PLATFORM STREQUAL "WINDOWS")
         list(APPEND rhp_net_private_deps ws2_32 mswsock)
     endif()
@@ -54,6 +57,28 @@ rhp_add_module(net
     PRIVATE_DEPS
         ${rhp_net_private_deps}
 )
+
+# Asio is header-only, PRIVATE to the backend translation units and stays in the build tree. They
+# compile apart (an OBJECT library folded into rhp_net): Asio's macros (and _WIN32_WINNT) change what
+# the standard headers mean, so they can't share the precompiled header the rest of rhp_net uses.
+if(RHP_ENABLE)
+    add_library(rhp_net_asio OBJECT ${rhp_net_asio_sources})
+    target_link_libraries(rhp_net_asio PRIVATE Rhp::core Rhp::platform "$<BUILD_INTERFACE:Rhp::asio>")
+    target_compile_features(rhp_net_asio PRIVATE cxx_std_23)
+    rhp_apply_platform(rhp_net_asio)
+    rhp_set_warnings(rhp_net_asio)
+    set_target_properties(rhp_net_asio PROPERTIES FOLDER "rhp")
+    rhp_use_shared_pch(rhp_net_asio asio) # a precompiled header of its own, with Asio's macros
+    # It defines UNICODE before <windows.h> (Asio includes it): a header included ahead of it would
+    # change which Win32 API it gets.
+    set_source_files_properties(mdns/native.cpp PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
+    # MSVC: the header's object defines what the precompiled header instantiated (Asio's service
+    # ids); objects folded in by TARGET_OBJECTS don't bring it, so rhp_net takes it too.
+    if(TARGET rhp_pch_asio)
+        target_sources(rhp_net PRIVATE $<TARGET_OBJECTS:rhp_pch_asio>)
+    endif()
+    target_sources(rhp_net PRIVATE $<TARGET_OBJECTS:rhp_net_asio>)
+endif()
 
 # Apple's DNS-SD API (dns_sd.h) is part of libSystem: there is no separate library to link.
 if(RHP_ENABLE AND RHP_PLATFORM STREQUAL "WINDOWS")

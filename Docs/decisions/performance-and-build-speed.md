@@ -105,9 +105,12 @@ memory when every test executable linked at once.
   with the standard headers and RHP's core and utils headers (those alone: -27% over 24 sources). A
   PCH per target cost more than it saved (31 PCH compiles, about 190 MB each); `<rhp/rhp.hpp>` stays
   out (it slowed every PCH). Headers come in
-  force-included, so CI's `linux-clang-asan` job builds without it. `rhp_net` and the test suites
-  that link Asio compile without it (Asio's macros and `_WIN32_WINNT` can change what the standard
-  headers mean), and it is off for clang-cl (it refuses a PCH built with other `/D` macros) and for
+  force-included, so CI's `linux-clang-asan` job builds without it. The translation units that include
+  Asio compile apart from it (Asio's macros and `_WIN32_WINNT` can change what the standard headers
+  mean): `rhp_net_asio`, an OBJECT library folded into `rhp_net`, with an Asio precompiled header of
+  its own (not `mdns/native.cpp`, which defines `UNICODE` before `<windows.h>`), and the net tests'
+  relay; the rest of `rhp_net` and `rhp_net_tests` share the library and test headers (a clean MSVC
+  Debug build: 72.5-74.6 s -> 69.7-69.8 s), and it is off for clang-cl (it refuses a PCH built with other `/D` macros) and for
   cross builds (not measured there).
 - **Catch2 as unity files** (always: it is built once per tree).
 - **The compile-fail fixtures build in their tests**: one test (`compile_fail.fixtures_compile`)
@@ -123,7 +126,10 @@ memory when every test executable linked at once.
   own file; Catch2 with `CATCH_CONFIG_FAST_COMPILE`; MSVC `/Zc:inline /Gw`, Clang
   `-ffunction-sections -fdata-sections`; clang-cl gets the interpreter's computed-goto dispatch.
 
-*Not done:* LTO by default (measured under 5% on script work, 10-35% on binding calls, variable and property reads
+*Not done:* `lld-link` (about 40% faster links, but not part of a default Visual Studio install:
+`-DCMAKE_LINKER_TYPE=LLD` with CMake 3.29+ where it is); making rhp-cli's `extern template` of its
+shell effective (every member is defined in the class, so the explicit instantiation saves nothing;
+moving about 900 lines out of the class would save about 1 s of the critical path); LTO by default (measured under 5% on script work, 10-35% on binding calls, variable and property reads
 and handle methods, and it ties a static library's objects to one toolchain version: `RHP_LTO` turns it
 on); Asio separate compilation (the eight Asio files save about 2 s together, and
 an extra file compiles Asio's implementation); `/DEBUG:FASTLINK` (slower here); removing
