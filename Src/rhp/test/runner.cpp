@@ -318,6 +318,7 @@ struct runner::impl {
         std::string module;
         fs::path path;
         std::string source;
+        mutable std::string bytecode; // compiled by the first sandbox that loads it (load_script)
     };
     std::vector<script_file> scripts;
     std::vector<std::string> lua_fake_returns;      // fake<L> results set from Lua in this test
@@ -485,6 +486,18 @@ struct runner::impl {
         return box;
     }
 
+    // Loads a module of the scripts folder. Its bytecode is compiled once, in the first sandbox, and
+    // every later sandbox (one per file, or per test with --isolation test) loads that instead of
+    // parsing the source again: in-process and made here, so it is trusted as is.
+    static auto load_script(sandbox& box, const script_file& s) {
+        if (s.bytecode.empty()) {
+            if (auto code = box.compile_module(s.module, s.source)) {
+                s.bytecode = std::move(*code);
+            }
+        }
+        return s.bytecode.empty() ? box.load(s.module, s.source) : box.load(s.module, s.source, script::trusted_bytecode{s.bytecode});
+    }
+
     void load_modules(sandbox& box, std::vector<file_error>& errors) {
         for (const std::string& e : script_errors) {
             errors.push_back(file_error{e, current_file, 0, {}});
@@ -498,7 +511,7 @@ struct runner::impl {
             std::vector<const script_file*> later;
             std::vector<std::pair<const script_file*, error>> failed;
             for (const script_file* s : left) {
-                auto loaded = box.load(s->module, s->source);
+                auto loaded = load_script(box, *s);
                 if (loaded) {
                     continue;
                 }
@@ -517,7 +530,7 @@ struct runner::impl {
             }
             if (later.size() == left.size()) {
                 for (const script_file* s : later) {
-                    if (auto again = box.load(s->module, s->source); !again) {
+                    if (auto again = load_script(box, *s); !again) {
                         const bool waiting = again.error().message.find("is not loaded") != std::string::npos || again.error().message.find("is still loading") != std::string::npos;
                         errors.push_back(file_error{std::format("module {} didn't load: {}", s->module, waiting ? std::string{"a require() cycle, or a module that doesn't exist"} : std::format("{}", again.error())), relative(s->path), 0, {}});
                     }

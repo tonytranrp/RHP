@@ -1233,7 +1233,7 @@ private:
     std::size_t bytes_ = 0;
 };
 
-bytecode_cache& trusted_bytecode() {
+bytecode_cache& exec_bytecode() {
     static bytecode_cache cache;
     return cache;
 }
@@ -1245,25 +1245,95 @@ int dump_writer(lua_State*, const void* p, size_t size, void* out) {
     return 0;
 }
 
+// Pushes the function of trusted bytecode compiled as `chunk_name`; false (nothing pushed) when Lua
+// refuses it (another Lua build, truncated, text) or it isn't a main chunk compiled under that name
+// (one upvalue, _ENV; vararg; no parameters).
+bool load_bytecode(lua_State* L, std::string_view bytecode, const std::string& chunk_name) {
+    if (luaL_loadbufferx(L, bytecode.data(), bytecode.size(), chunk_name.c_str(), "b") != LUA_OK) {
+        lua_pop(L, 1); // the error
+        return false;
+    }
+    lua_Debug ar{};
+    lua_pushvalue(L, -1);
+    lua_getinfo(L, ">Su", &ar);
+    if (ar.source == nullptr || std::string_view{ar.source, ar.srclen} != chunk_name || ar.nups != 1 || ar.nparams != 0 || ar.isvararg == 0) {
+        lua_pop(L, 1);
+        return false;
+    }
+    return true;
+}
+
+// A chunk exercising what bytecode encodes (integers, floats, strings, nested functions, upvalues,
+// varargs, gotos, line info): its dump changes when the compiler or the dump format does.
+constexpr std::string_view kProbeChunk = R"lua(local a, b, c = 1, 2.5, "probe"
+local t = {a, b, c, x = -0.0, [3] = 0x7fffffffffffffff, 1e308, [[long
+string]]}
+local function f(n, ...)
+    local s = 0
+    for i = 1, n do
+        s = s + i // 2 % 3
+    end
+    goto done
+    ::done::
+    return function(...) return s, t, select("#", ...), ... end
+end
+return f(10, a, b, c)
+)lua";
+
+// lua_pcall'd: compiles the probe chunk and dumps it into the std::string argument 1 points to.
+int dump_probe(lua_State* L) {
+    auto* out = static_cast<std::string*>(lua_touserdata(L, 1));
+    if (luaL_loadbufferx(L, kProbeChunk.data(), kProbeChunk.size(), "=rhp.bytecode_build", "t") != LUA_OK) {
+        return lua_error(L);
+    }
+    lua_dump(L, &dump_writer, out, 0);
+    return 0;
+}
+
+std::string make_bytecode_build() {
+    lua_State* L = luaL_newstate();
+    if (L == nullptr) {
+        return {};
+    }
+    std::string dumped;
+    bool made = false;
+    try {
+        lua_pushcfunction(L, &dump_probe);
+        lua_pushlightuserdata(L, &dumped);
+        made = lua_pcall(L, 1, 0, 0) == LUA_OK && !dumped.empty();
+    } catch (const std::exception&) { // out of memory while dumping
+        made = false;
+    }
+    lua_close(L);
+    return made ? std::format("rhp bytecode build: lua {}\n", LUA_VERSION_RELEASE_NUM) + dumped : std::string{};
+}
+
 } // namespace
 
-result<void> sandbox_impl::compile(std::string_view source, const std::string& chunk_name, int env_ref, bool cached) {
+result<void> sandbox_impl::compile(std::string_view source, const std::string& chunk_name, int env_ref, bool cached, std::string_view trusted) {
     lua_State* L = state_;
-    std::string bytecode = cached ? trusted_bytecode().find(chunk_name, source) : std::string{};
-    const int status = bytecode.empty() ? luaL_loadbufferx(L, source.data(), source.size(), chunk_name.c_str(), "t")
-                                        : luaL_loadbufferx(L, bytecode.data(), bytecode.size(), chunk_name.c_str(), "b");
-    if (status == LUA_OK && cached && bytecode.empty()) {
-        std::string dumped;
-        if (lua_dump(L, &dump_writer, &dumped, 0) == 0 && !dumped.empty()) {
-            trusted_bytecode().store(chunk_name, source, std::move(dumped));
-        }
+    bool from_trusted = false;
+    if (!trusted.empty()) {
+        from_trusted = load_bytecode(L, trusted, chunk_name);
+        ++(from_trusted ? bytecode_loaded_ : bytecode_rejected_);
     }
-    if (status != LUA_OK) {
-        error err = take_lua_error(L, status);
-        if (err.code == errc::kRuntime) {
-            err.code = errc::kCompile;
+    if (!from_trusted) {
+        std::string bytecode = cached ? exec_bytecode().find(chunk_name, source) : std::string{};
+        const int status = bytecode.empty() ? luaL_loadbufferx(L, source.data(), source.size(), chunk_name.c_str(), "t")
+                                            : luaL_loadbufferx(L, bytecode.data(), bytecode.size(), chunk_name.c_str(), "b");
+        if (status == LUA_OK && cached && bytecode.empty()) {
+            std::string dumped;
+            if (lua_dump(L, &dump_writer, &dumped, 0) == 0 && !dumped.empty()) {
+                exec_bytecode().store(chunk_name, source, std::move(dumped));
+            }
         }
-        return std::unexpected{std::move(err)};
+        if (status != LUA_OK) {
+            error err = take_lua_error(L, status);
+            if (err.code == errc::kRuntime) {
+                err.code = errc::kCompile;
+            }
+            return std::unexpected{std::move(err)};
+        }
     }
     lua_rawgeti(L, LUA_REGISTRYINDEX, env_ref);
     lua_setupvalue(L, -2, 1); // a main chunk's first upvalue is _ENV
@@ -2040,14 +2110,48 @@ result<value_list> sandbox_impl::exec(std::string_view source, std::string_view 
     return out;
 }
 
-result<module_id> sandbox_impl::load(std::string_view name, std::string_view source) {
+result<std::string> sandbox_impl::compile_module(std::string_view name, std::string_view source) {
+    if (!utils::is_dotted_name(name)) {
+        return fail(errc::kInvalidArgument, std::format("'{}' is not a module name (dotted lowercase, e.g. combat.low_grav)", name));
+    }
+    const std::string chunk = std::format("@{}", name);
+    result<std::string> out = std::string{};
+    auto glue = protect(state_, [&] {
+        lua_State* L = state_;
+        const int status = luaL_loadbufferx(L, source.data(), source.size(), chunk.c_str(), "t");
+        if (status != LUA_OK) {
+            error err = take_lua_error(L, status);
+            if (err.code == errc::kRuntime) {
+                err.code = errc::kCompile;
+            }
+            out = std::unexpected{std::move(err)};
+            return;
+        }
+        std::string dumped;
+        if (lua_dump(L, &dump_writer, &dumped, 0) != 0 || dumped.empty()) {
+            out = fail(errc::kRuntime, "the compiled chunk couldn't be dumped");
+        } else {
+            out = std::move(dumped);
+        }
+        lua_pop(L, 1);
+    });
+    if (!glue) {
+        out = std::unexpected{std::move(glue).error()};
+    }
+    if (!out && out.error().where.empty()) {
+        out.error().where = std::string{name};
+    }
+    return out;
+}
+
+result<module_id> sandbox_impl::load(std::string_view name, std::string_view source, std::string_view bytecode) {
     const operation_scope operation{*this};
     drain();
     if (!utils::is_dotted_name(name)) {
         return fail(errc::kInvalidArgument, std::format("'{}' is not a module name (dotted lowercase, e.g. combat.low_grav)", name));
     }
     if (const auto existing = find(name)) {
-        auto reloaded = reload(*existing, source);
+        auto reloaded = reload(*existing, source, bytecode);
         if (!reloaded) {
             return std::unexpected{std::move(reloaded).error()};
         }
@@ -2073,7 +2177,7 @@ result<module_id> sandbox_impl::load(std::string_view name, std::string_view sou
         const slice_scope slice{*this};
         module_record& mod = *record(id);
         mod.live.env_ref = new_environment();
-        if (auto compiled = compile(source, chunk, mod.live.env_ref); !compiled) {
+        if (auto compiled = compile(source, chunk, mod.live.env_ref, false, bytecode); !compiled) {
             failure = std::move(compiled).error();
             return;
         }
@@ -2108,13 +2212,13 @@ result<module_id> sandbox_impl::load(std::string_view name, std::string_view sou
     return id;
 }
 
-result<revision_id> sandbox_impl::reload(module_id id, std::string_view source) {
+result<revision_id> sandbox_impl::reload(module_id id, std::string_view source, std::string_view bytecode) {
     const operation_scope operation{*this};
     const module_record* found = record(id);
     if (found == nullptr || found->scratch) {
         return fail(errc::kNotFound, std::format("no module with id {}", id));
     }
-    if (defer_if_running([this, id, src = std::string{source}] { (void)reload(id, src); })) {
+    if (defer_if_running([this, id, src = std::string{source}] { (void)reload(id, src); })) { // parses: the bytecode's view won't live that long
         return revision_id{};
     }
     drain();
@@ -2137,7 +2241,7 @@ result<revision_id> sandbox_impl::reload(module_id id, std::string_view source) 
         mod->pending = module_instance{revision};
         mod->pending_source = revision_source{revision, std::string{source}, source_hash(source)};
         mod->pending->env_ref = new_environment();
-        if (auto compiled = compile(source, chunk, mod->pending->env_ref); !compiled) {
+        if (auto compiled = compile(source, chunk, mod->pending->env_ref, false, bytecode); !compiled) {
             out = std::unexpected{std::move(compiled).error()};
             return;
         }
@@ -2607,6 +2711,18 @@ result<revision_id> sandbox::reload(module_id mod, std::string_view source) {
     return impl_->reload(mod, source);
 }
 
+result<std::string> sandbox::compile_module(std::string_view name, std::string_view source) {
+    return impl_->compile_module(name, source);
+}
+
+result<module_id> sandbox::load(std::string_view name, std::string_view source, trusted_bytecode code) {
+    return impl_->load(name, source, code.bytes());
+}
+
+result<revision_id> sandbox::reload(module_id mod, std::string_view source, trusted_bytecode code) {
+    return impl_->reload(mod, source, code.bytes());
+}
+
 result<revision_id> sandbox::rollback(module_id mod, std::size_t steps) {
     return impl_->rollback(mod, steps);
 }
@@ -2708,7 +2824,15 @@ Rhp::subscription sandbox::on_script_event(std::string_view name, script_event_f
 }
 
 sandbox_stats sandbox::stats() const {
-    return impl_->stats();
+    sandbox_stats s = impl_->stats();
+    s.bytecode_loaded = impl_->bytecode_loaded();
+    s.bytecode_rejected = impl_->bytecode_rejected();
+    return s;
+}
+
+std::string_view bytecode_build() {
+    static const std::string build = detail::make_bytecode_build();
+    return build;
 }
 
 async_leftovers sandbox::release_async() {

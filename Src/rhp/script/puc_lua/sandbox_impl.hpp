@@ -382,8 +382,12 @@ public:
     void swap_variable(lua_State* L, int target, int key, int getter, int setter);
     // The module behind a require() proxy at `index` (nullptr if it isn't one, or the module is gone).
     [[nodiscard]] const module_record* module_of_proxy(lua_State* L, int index) const noexcept;
-    result<module_id> load(std::string_view name, std::string_view source);
-    result<revision_id> reload(module_id mod, std::string_view source);
+    // `bytecode`: trusted bytecode of the source (sandbox::load with a trusted_bytecode), or empty.
+    result<module_id> load(std::string_view name, std::string_view source, std::string_view bytecode = {});
+    result<revision_id> reload(module_id mod, std::string_view source, std::string_view bytecode = {});
+    result<std::string> compile_module(std::string_view name, std::string_view source);
+    [[nodiscard]] std::uint64_t bytecode_loaded() const noexcept { return bytecode_loaded_; }
+    [[nodiscard]] std::uint64_t bytecode_rejected() const noexcept { return bytecode_rejected_; }
     result<revision_id> rollback(module_id mod, std::size_t steps);
     result<value_list> call(module_id mod, std::string_view function, std::span<const value> args);
     result<revert_report> revert(module_id mod);
@@ -552,7 +556,10 @@ private:
     [[nodiscard]] int new_environment();
     // Pushes the compiled chunk with its _ENV set; fails with kCompile.
     // `cached`: a trusted source compiled once per process; later compiles load its bytecode.
-    [[nodiscard]] result<void> compile(std::string_view source, const std::string& chunk_name, int env_ref, bool cached = false);
+    // `bytecode`: trusted bytecode of `source` to load instead of parsing it (when Lua refuses it,
+    // the source is parsed: bytecode_rejected_).
+    [[nodiscard]] result<void> compile(std::string_view source, const std::string& chunk_name, int env_ref, bool cached = false,
+                                       std::string_view bytecode = {});
 
     // Requests. start_request moves the function and `nargs` arguments on top of the main stack
     // into a new coroutine; step runs it until it finishes (the result), fails, or suspends (nullopt).
@@ -714,6 +721,8 @@ private:
     std::vector<std::shared_ptr<async_wait>> detached_async_; // calls whose request is gone, until their result arrives
     std::uint64_t async_compensated_ = 0;
     std::uint64_t async_dropped_ = 0;
+    std::uint64_t bytecode_loaded_ = 0;   // compile(): trusted bytecode loaded
+    std::uint64_t bytecode_rejected_ = 0; // compile(): trusted bytecode Lua refused (the source was parsed)
     std::shared_ptr<script_listener_table> listeners_ = std::make_shared<script_listener_table>();
 
     // Work applied when no run is active.

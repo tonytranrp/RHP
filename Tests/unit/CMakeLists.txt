@@ -113,6 +113,7 @@ if(RHP_ENABLE)
 
     rhp_add_test_suite(rhp_release_tests
         SOURCES
+            release/bytecode_tests.cpp
             release/codec_tests.cpp
             release/manager_tests.cpp
         LINKS
@@ -143,6 +144,7 @@ if(RHP_ENABLE)
         SOURCES
             script/async_tests.cpp
             script/binding_tests.cpp
+            script/bytecode_tests.cpp
             script/event_tests.cpp
             script/handler_error_tests.cpp
             script/ledger_tests.cpp

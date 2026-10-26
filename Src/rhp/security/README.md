@@ -11,7 +11,7 @@ Who may connect, what each frame proves, and who signed a script. Namespace `Rhp
 | `signer.hpp` | the `signer` concept (`config<>::signer<S>`: `S::key` signs, `S::trust` verifies), `kScriptSignatureDomain`, `unsigned_scripts` (the typed opt-out) |
 | `ed25519.hpp` | `ed25519` (the default signer): `ed25519_secret_key` / `ed25519_public_key`, `signing_key` (client: name + secret, `sign(source)`), `trusted_signers` (host: `parse` / `from_file` of `name base64-public-key` lines, `verify(source, signature)` → signer name) |
 | `identity_file.hpp` | a developer's `.rhpid` file (`load`, `parse`, `generate`, `to_text`, `save`): name, PSK, signing key; `credential()`, `signer_key()`, and the host's `keyring_line(role)` / `signers_line()` |
-| `hash.hpp` | `blake2b_256`, `digest256`, `to_hex` (audit hashes, release ids) |
+| `hash.hpp` | `blake2b_256`, `digest256`, `to_hex` (audit hashes, release ids); `keyed_blake2b_256` (a MAC of domain || data: the release bytecode cache), `digests_equal` (constant time) |
 | `http_auth.hpp` | per-request HTTP proofs (`http_proof`, `http_authorization`, `verify_http_authorization`) with optional TLS channel binding, answer proofs (`http_answer_proof`, `verify_http_answer`), the `http_authenticator` concept, `http_replay_guard`, the `X-RHP-Signature` encoding: see the [networking guide](../../../Docs/guide/networking.md) |
 | `tls/` | `Rhp::security::tls` (target `Rhp::tls`): TLS 1.3 engines behind the `tls::backend` concept: [tls/README.md](tls/README.md) |
 

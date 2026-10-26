@@ -11,7 +11,7 @@ Done when: *the Lua a user writes against their API can be tested offline like a
 - [x] Reports: text, TAP 14, JUnit, JSON events, GitHub annotations; LCOV, Cobertura; folded profiles
 - [x] Entry points: `Rhp::test::main`, `rhp-cli test` (`--api`, `--api-from`, `--exe`), `rhp_add_lua_tests` (installed), `Examples/lua_tests`, the VS Code extension (`clients/vscode`)
 - [x] Tests: fixture specs with known outcomes for every feature, golden reports, CLI and process tests, the package consumer, compile-fail cases for `fake<L>`, the `RHP_ENABLE=OFF` build, the extension with `node --test`; benchmarks (`[testing]`) and the optimizations they led to
-- Stage 12 follow-ups: running test files in parallel; a watch mode in the runner; mutation testing; publishing the VS Code extension; module bytecode caching for `--isolation test`.
+- Stage 12 follow-ups: running test files in parallel; a watch mode in the runner; mutation testing; publishing the VS Code extension. (Module bytecode caching for `--isolation test`: done, each scripts-folder module is compiled once per run.)
 
 ## Stage 11 — debugger, profiler and tunables
 
