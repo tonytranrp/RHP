@@ -3,6 +3,7 @@
 #include <concepts>
 #include <cstddef>
 #include <format>
+#include <initializer_list>
 #include <ostream>
 #include <string>
 #include <string_view>
