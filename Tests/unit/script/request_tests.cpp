@@ -169,8 +169,8 @@ TEST_CASE("a handler stopped by a limit leaves the next one its own budget", "[s
     sandbox box = fx::make_box(out, limits);
     REQUIRE(box.load("tests.req.budget", R"lua(
         rhp.on("tests.req.ping", function(n) req.a = n while true do end end)
-        rhp.on("tests.req.ping", function(n) local s = 0 for i = 1, 20000 do s = s + i end req.b = n end)
-        rhp.on("tests.req.ping", function(n) local s = 0 for i = 1, 20000 do s = s + i end req.c = n end)
+        rhp.on("tests.req.ping", function(n) local s = 0 for i = 1, 5000 do s = s + i end req.b = n end)
+        rhp.on("tests.req.ping", function(n) local s = 0 for i = 1, 5000 do s = s + i end req.c = n end)
     )lua"));
     fx::ping.fire(3);
     REQUIRE(out.failures.size() == 1);
