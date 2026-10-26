@@ -55,8 +55,10 @@ envelopes move their body in and out (`wire::envelope_value`, `wire::take_envelo
 acks wait `session::options::ack_delay_ms` (5 ms) for an outgoing frame to carry them, so a call
 and its reply are two frames instead of four (still at once for every 8th frame, a requested ack and
 a duplicate; the protocol is unchanged); the host's cancel-enforcement timer runs only while a cancel
-is recorded. *Not done:* a local post queue in `io_context` (a threading review for a few
-microseconds on zero-thread hosts), TCP gathered writes, reliable-UDP ack coalescing.
+is recorded. The TCP and IPC links send the frames queued behind a write in flight in one gathered
+write (up to 16; WebSocket already joins them into one message): 32 pipelined calls over TCP on
+127.0.0.1 take 374-401 us instead of 632-635 us. *Not done:* a local post queue in `io_context` (a
+threading review for a few microseconds on zero-thread hosts), reliable-UDP ack coalescing.
 
 **Signatures.** Ed25519 is deterministic: a process-wide cache of recent script signatures, and of
 signatures found valid, keyed by the public key, the signature and the source's BLAKE2b-256, makes a

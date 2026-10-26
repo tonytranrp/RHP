@@ -62,6 +62,9 @@ struct link_state : std::enable_shared_from_this<link_state> {
     link_handler* handler = nullptr;
     std::array<std::byte, 64 * 1024> buffer{};
     std::deque<utils::byte_buffer> writes;
+    // The front buffers one gathered write sends: frames queued behind a write in flight go out
+    // together in the next one (one system call instead of one each).
+    std::vector<asio::const_buffer> gather;
     bool writing = false;
     bool closing = false; // close() asked: finish once the queue is written
     bool closed = false;
@@ -86,9 +89,16 @@ struct link_state : std::enable_shared_from_this<link_state> {
     }
 
     void write_next() {
+        constexpr std::size_t kMaxGather = 16;
         writing = true;
-        const utils::bytes_view front = writes.front().view();
-        asio::async_write(socket, asio::buffer(front.data(), front.size()), [self = shared_from_this()](const std::error_code& ec, std::size_t) {
+        gather.clear();
+        for (const auto& b : writes) {
+            gather.emplace_back(b.view().data(), b.size());
+            if (gather.size() == kMaxGather) {
+                break;
+            }
+        }
+        asio::async_write(socket, gather, [self = shared_from_this()](const std::error_code& ec, std::size_t) {
             self->writing = false;
             if (self->closed) {
                 return;
@@ -97,7 +107,7 @@ struct link_state : std::enable_shared_from_this<link_state> {
                 self->finish(transport_error(ec, self->peer));
                 return;
             }
-            self->writes.pop_front();
+            self->writes.erase(self->writes.begin(), self->writes.begin() + static_cast<std::ptrdiff_t>(self->gather.size()));
             if (!self->writes.empty()) {
                 self->write_next();
             } else if (self->closing) {
