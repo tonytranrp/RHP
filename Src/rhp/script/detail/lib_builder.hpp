@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cstddef>
+#include <cstdint>
 #include <exception>
 #include <expected>
 #include <format>
@@ -555,8 +556,8 @@ struct plain_arg<std::span<const E>> {
     static bool take(const arg_slot& slot, std::span<const E>& out) noexcept {
         const auto k = static_cast<elem_kind>(slot.view.elem);
         const bool fits = slot.view.string ? byte_element<E> : (k == elem_kind_of<E>() || (byte_element<E> && is_byte_kind(k)));
-        if (!fits) {
-            return false;
+        if (!fits || reinterpret_cast<std::uintptr_t>(slot.view.data) % alignof(E) != 0) {
+            return false; // the general path raises the error (a misaligned buffer view)
         }
         out = std::span<const E>{static_cast<const E*>(slot.view.data), slot.view.size / sizeof(E)};
         return true;
