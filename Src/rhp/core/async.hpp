@@ -93,18 +93,25 @@ public:
     using value_type = T;
 
     // An operation that is already over (a cache hit, an argument error): the script doesn't suspend.
+    // No producer ever sees it, so the outcome is kept here, without a shared state.
     [[nodiscard]] static async completed(result<T> r) {
-        async a{std::make_shared<async_detail::state<T>>()};
-        a.s_->done = true;
-        a.s_->outcome.emplace(std::move(r));
+        async a{nullptr};
+        a.outcome_.emplace(std::move(r));
+        a.completed_ = true;
         return a;
     }
 
-    async(async&& other) noexcept = default;
+    async(async&& other) noexcept
+        : s_(std::move(other.s_)), outcome_(std::move(other.outcome_)), completed_(std::exchange(other.completed_, false)) {
+        other.outcome_.reset();
+    }
     async& operator=(async&& other) noexcept {
         if (this != &other) {
             release();
             s_ = std::move(other.s_);
+            outcome_ = std::move(other.outcome_);
+            other.outcome_.reset();
+            completed_ = std::exchange(other.completed_, false);
         }
         return *this;
     }
@@ -114,7 +121,7 @@ public:
 
     // The outcome is there (or this async was moved from / abandoned).
     [[nodiscard]] bool ready() const {
-        if (!s_) {
+        if (completed_ || !s_) {
             return true;
         }
         const std::scoped_lock lock{s_->mutex};
@@ -123,6 +130,14 @@ public:
 
     // The outcome, once ready(): kInvalidArgument before, and after it was taken or abandoned.
     [[nodiscard]] result<T> take() {
+        if (completed_) {
+            if (!outcome_) {
+                return fail(errc::kInvalidArgument, "the async result was already taken", "async");
+            }
+            result<T> out = std::move(*outcome_);
+            outcome_.reset();
+            return out;
+        }
         if (!s_) {
             return fail(errc::kInvalidArgument, "this async was moved from or abandoned", "async");
         }
@@ -149,6 +164,10 @@ public:
     // Stops reading, atomically: afterwards complete() returns false, and the outcome that already
     // arrived (if any, untaken) is handed back so whoever abandons it can undo it. Requests a stop.
     [[nodiscard]] std::optional<result<T>> abandon() {
+        if (completed_) {
+            completed_ = false; // from now on: abandoned
+            return std::exchange(outcome_, std::nullopt);
+        }
         if (!s_) {
             return std::nullopt;
         }
@@ -171,7 +190,7 @@ public:
     // For the script engine: calls `wake` once, on the completing thread, when the outcome arrives.
     // Returns false and arms nothing when it is already there.
     [[nodiscard]] bool arm(std::function<void()> wake) {
-        if (!s_) {
+        if (completed_ || !s_) {
             return false;
         }
         const std::scoped_lock lock{s_->mutex};
@@ -189,6 +208,8 @@ private:
     explicit async(std::shared_ptr<async_detail::state<T>> s) noexcept : s_(std::move(s)) {}
 
     void release() noexcept {
+        completed_ = false;
+        outcome_.reset();
         if (!s_) {
             return;
         }
@@ -202,6 +223,8 @@ private:
     }
 
     std::shared_ptr<async_detail::state<T>> s_;
+    std::optional<result<T>> outcome_; // completed(): the outcome, until taken or abandoned
+    bool completed_ = false;           // made by completed() (no state), not yet abandoned
 };
 
 template <class T>

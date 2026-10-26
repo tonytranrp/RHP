@@ -117,7 +117,7 @@ void session::start() {
         });
     }
     if (host_side_ && opts_.speaks_first) {
-        (void)write(wire::op::kPing, 0, {}, false);
+        (void)write(wire::op::kPing, 0, utils::bytes_view{}, false);
     }
     if (!host_side_) {
         auto& hs = std::get<std::unique_ptr<security::client_handshake>>(handshake_);
@@ -707,26 +707,44 @@ result<void> session::write_frame(wire::op code, std::uint64_t seq, utils::bytes
 }
 
 result<void> session::write(wire::op code, std::uint64_t seq, utils::bytes_view payload, bool sealed) {
+    if (seq != 0 && wire::is_sequenced(code)) {
+        utils::byte_buffer kept;
+        kept.append(payload);
+        return write(code, seq, std::move(kept), sealed);
+    }
     if (payload.size() > opts_.limits.max_frame) {
         return fail(errc::kLimitExceeded, std::format("{} payload of {} bytes exceeds the {}-byte frame limit", code, payload.size(), opts_.limits.max_frame),
                     "wire.frame");
     }
-    if (seq != 0 && wire::is_sequenced(code)) {
-        unacked_frame f;
-        f.seq = seq;
-        f.code = code;
-        f.payload.append(payload);
-        unacked_bytes_ += payload.size() + wire::kHeaderSize;
-        unacked_.push_back(std::move(f));
-        if (unacked_bytes_ > opts_.max_unacked_bytes) {
-            fail_with(make_error(errc::kLimitExceeded, std::format("the peer left {} bytes unacknowledged", unacked_bytes_), peer_));
-            return Rhp::fail(errc::kTransport, "session closed", peer_);
-        }
+    if (state_ == state::kDetached) {
+        return {};
+    }
+    return write_frame(code, seq, payload, sealed);
+}
+
+// A sequenced frame: its payload moves into the resend window and is sent from there.
+result<void> session::write(wire::op code, std::uint64_t seq, utils::byte_buffer&& payload, bool sealed) {
+    if (seq == 0 || !wire::is_sequenced(code)) {
+        return write(code, seq, payload.view(), sealed);
+    }
+    if (payload.size() > opts_.limits.max_frame) {
+        return fail(errc::kLimitExceeded, std::format("{} payload of {} bytes exceeds the {}-byte frame limit", code, payload.size(), opts_.limits.max_frame),
+                    "wire.frame");
+    }
+    unacked_frame f;
+    f.seq = seq;
+    f.code = code;
+    f.payload = std::move(payload);
+    unacked_bytes_ += f.payload.size() + wire::kHeaderSize;
+    unacked_.push_back(std::move(f));
+    if (unacked_bytes_ > opts_.max_unacked_bytes) {
+        fail_with(make_error(errc::kLimitExceeded, std::format("the peer left {} bytes unacknowledged", unacked_bytes_), peer_));
+        return Rhp::fail(errc::kTransport, "session closed", peer_);
     }
     if (state_ == state::kDetached) {
         return {}; // goes out (from the resend window) once the session resumes
     }
-    return write_frame(code, seq, payload, sealed);
+    return write_frame(code, seq, unacked_.back().payload.view(), sealed);
 }
 
 result<void> session::write_value(wire::op code, const value& body, bool sealed) {
@@ -748,7 +766,7 @@ result<void> session::send(wire::op code, const value& body) {
     if (auto encoded = opts_.codec.encode(body, payload); !encoded) {
         return encoded;
     }
-    if (auto ok = write(code, next_seq_, payload.view(), true); !ok) {
+    if (auto ok = write(code, next_seq_, std::move(payload), true); !ok) {
         return ok;
     }
     ++next_seq_;
@@ -758,7 +776,7 @@ result<void> session::send(wire::op code, const value& body) {
 
 void session::write_control(wire::op code) {
     const bool sealed = state_ == state::kReady;
-    (void)write(code, sealed ? ++control_out_ : 0, {}, sealed);
+    (void)write(code, sealed ? ++control_out_ : 0, utils::bytes_view{}, sealed);
 }
 
 void session::acknowledge(std::uint64_t ack) {
