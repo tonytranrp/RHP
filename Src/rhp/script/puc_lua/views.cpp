@@ -927,6 +927,12 @@ result<detail::span_arg> stack::to_span(int index, const detail::span_request& r
         if (!p) {
             return std::unexpected{std::move(p).error()};
         }
+        // A buffer viewed at any byte position may be misaligned: Lua reads it by copying, but a
+        // std::span<T> must point at aligned elements.
+        if (reinterpret_cast<std::uintptr_t>(p->data) % elem_size(request.elem) != 0) {
+            return fail(errc::kInvalidArgument, std::format("a span<{}> given to C++ must be aligned to {} bytes: view the buffer at a position {} bytes apart from its start", elem_name(request.elem),
+                                                            elem_size(request.elem), elem_size(request.elem)));
+        }
         if (request.writable) {
             if (!n->writable) {
                 return fail(errc::kInvalidArgument, std::format("the {} is read-only", n->shape == node_shape::kBytes ? "buffer" : "span"));

@@ -143,7 +143,7 @@ Writes to C++ memory are journaled per **view target** (one binding with one set
 | `b:read_<k>(pos [, order])`, `b:write_<k>(pos, x [, order])` | `k` is `i8 u8 i16 u16 i32 u32 i64 u64 f32 f64`; `pos` is a 1-based byte position; `order` `"le"` (default) or `"be"`; writes return the position after them |
 | `b:read_string(pos, len)`, `b:write_string(pos, s)`, `b:tostring([i [, j]])` | bytes as strings |
 | `b:pack(pos, fmt, ...)`, `b:unpack(pos, fmt)` | `string.pack` / `string.unpack` formats at a position (`unpack` returns the values, then the position after them) |
-| `b:slice(i [, j])`, `b:view(kind [, pos [, count]])` | a buffer or a typed view sharing the bytes (no alignment needed) |
+| `b:slice(i [, j])`, `b:view(kind [, pos [, count]])` | a buffer or a typed view sharing the bytes (no alignment needed in Lua; a typed view passed to a C++ `std::span` must start at a position aligned for its element, e.g. `pos` = 1, 5, 9 for `f32`, else `kInvalidArgument`) |
 
 A buffer is read and written through its methods (its `__index` is the methods table, so a method call is a table lookup, not a C call); `b[i] = v` raises, and `b:view("u8")` indexes the bytes. A buffer is script state like a table: its memory is a Lua allocation (counted in `limits.memory`), never journaled, and it lives as long as something refers to it.
 

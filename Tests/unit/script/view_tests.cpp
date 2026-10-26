@@ -610,8 +610,10 @@ TEST_CASE("typed views of a buffer share its bytes", "[script][views][buffer]") 
         local f = b:view("f32", 2)
         f[1] = 1.5
         f[2] = -2
-        return #f, f[1], b:read_f32(2), b:read_f32(6), f:kind(), vt.sum(f)
+        return #f, f[1], b:read_f32(2), b:read_f32(6), f:kind(), vt.sum(rhp.buffer.from(b:slice(2, 9)):view("f32"))
     )") == value_list{Rhp::value{2}, Rhp::value{1.5}, Rhp::value{1.5}, Rhp::value{-2.0}, Rhp::value{"f32"}, Rhp::value{-0.5}});
+    // Lua reads a view at any byte position; C++ only gets aligned spans.
+    CHECK(fails(box, "local b = rhp.buffer.new(9) return vt.sum(b:view('f32', 2))").code == errc::kInvalidArgument);
     CHECK(fails(box, "rhp.buffer.new(4):view('f64')[1] = 1").code == errc::kOutOfRange);
     CHECK(fails(box, "rhp.buffer.new(4):view('f16')").code == errc::kInvalidArgument);
     CHECK(fails(box, "rhp.buffer.new(4):view('u8', 2, 4)").code == errc::kOutOfRange);
