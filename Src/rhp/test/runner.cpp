@@ -393,7 +393,7 @@ struct runner::impl {
                     continue;
                 }
                 chunk_files[*name] = relative(p);
-                scripts.push_back(script_file{*name, p, std::move(source)});
+                scripts.push_back(script_file{*name, p, std::move(source), {}});
             }
         }
     }

@@ -119,6 +119,8 @@ if(RHP_ENABLE)
         LINKS
             Rhp::release
     )
+    # RHP_UNITY_BUILD: the bytecode cache tests reuse manager_tests.cpp's fixture names.
+    set_source_files_properties(release/bytecode_tests.cpp PROPERTIES SKIP_UNITY_BUILD_INCLUSION ON)
 else()
     # RHP_ENABLE=OFF: keys, the keyring and signer files still build (a disabled host takes them);
     # signing reports kDisabled; host and client are inert.

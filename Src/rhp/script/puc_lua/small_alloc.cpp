@@ -93,7 +93,7 @@ void* small_alloc::allocate_slow(std::uint8_t c) noexcept {
     std::byte* const start = reinterpret_cast<std::byte*>(s) + kSlabHeader;
     std::byte* const first = start == reinterpret_cast<std::byte*>(s->owner) ? start + kRegionHeader : start;
     const auto size = static_cast<std::uint32_t>(small_classes::kSizes[c]);
-    const std::size_t blocks = (reinterpret_cast<std::byte*>(s) + kSlabSize - first) / size;
+    const std::size_t blocks = static_cast<std::size_t>(reinterpret_cast<std::byte*>(s) + kSlabSize - first) / size;
     s->free = nullptr;
     s->bump = first + size; // the first block is the one returned
     s->end = first + blocks * size;
