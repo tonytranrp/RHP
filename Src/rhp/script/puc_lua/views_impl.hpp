@@ -81,12 +81,15 @@ struct place {
 [[nodiscard]] view_node* to_span_node(lua_State* L, int index) noexcept;
 // Where `node` is now, or why it isn't (the caller labels the error).
 [[nodiscard]] result<place> locate(const view_node& node);
+// The same on every access: false (no error made) when locate would fail.
+[[nodiscard]] bool find_place(const view_node& node, place& out) noexcept;
 // locate, raising its error (where = the node's label).
 place locate_or_raise(lua_State* L, const view_node& node);
 // Before bytes [offset, offset + len) of `p` (relative to p.data) change: checks the caller may
 // write host memory (kPatch) and journals them. False when nothing may be written (the sandbox is
-// closing). Script-owned memory (p.root == nullptr) needs nothing. `what` labels errors.
-bool before_write(lua_State* L, view_node& writer, const place& p, std::size_t offset, std::size_t len, std::string_view what);
+// closing). Script-owned memory (p.root == nullptr) needs nothing. Errors are labelled with the
+// field ("transform.x") or the node's label.
+bool before_write(lua_State* L, view_node& writer, const place& p, std::size_t offset, std::size_t len, const field_desc* field = nullptr);
 // Pushes the element of kind `k` at `p`.
 void push_elem(lua_State* L, elem_kind k, const std::byte* p);
 
@@ -112,10 +115,11 @@ view_node* new_node(lua_State* L, std::size_t payload, const char* key);
 void push_part(lua_State* L, int index, std::size_t offset, std::size_t count, node_shape shape, elem_kind elem);
 // Reads a span argument for stack::read_args (no error): false when it isn't one.
 [[nodiscard]] bool read_span_arg(lua_State* L, int index, arg_slot& out) noexcept;
-// Sets __index, __newindex, __len, __pairs, __eq and __gc of the span or buffer metatable at `mt`
-// (`methods` becomes __index's table for names) and adds the methods spans and buffers share
-// (get, set, slice, fill, copy, totable, kind, writable) to `methods`.
-void set_sequence_metamethods(lua_State* L, int mt, int methods, bool gc);
+// Sets the metamethods of the span or buffer metatable at `mt` and adds the shared methods (slice,
+// fill, copy) to `methods`. A span's __index is a C function (integers are elements, names are
+// methods: get, set, totable, kind, writable too), with __newindex, __pairs and __gc; a buffer's
+// __index is `methods` itself and b[i] = v raises. Both get __len, __eq and a locked metatable.
+void set_sequence_metamethods(lua_State* L, int mt, int methods, bool buffer);
 // Creates the span metatable.
 void define_span_type(lua_State* L);
 // Parses optional element range arguments i, j (1-based, inclusive, as string.sub without negative

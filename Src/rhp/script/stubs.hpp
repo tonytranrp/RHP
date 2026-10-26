@@ -504,8 +504,9 @@ function span:kind() end
 ---@return boolean
 function span:writable() end
 
----Bytes a script owns: b[i] is a byte (1-based); numbers of every width at a byte position, little ("le", default) or big ("be") endian.
----@class rhp.buffer: rhp.span<integer>
+---Bytes a script owns, read and written through methods at 1-based byte positions: numbers of every width, little ("le", default) or big ("be") endian; b:view("u8")[i] indexes bytes.
+---@class rhp.buffer
+---@operator len: integer
 local buffer = {}
 
 ---Bytes i..j (default: to the end) sharing the memory.
@@ -513,6 +514,17 @@ local buffer = {}
 ---@param j? integer
 ---@return rhp.buffer
 function buffer:slice(i, j) end
+
+---Sets bytes i..j (default: all) to `byte`.
+---@param byte integer
+---@param i? integer
+---@param j? integer
+function buffer:fill(byte, i, j) end
+
+---Copies a string's, a buffer's, a byte span's or a table's bytes here, from byte `pos` (default 1).
+---@param source string|rhp.buffer|rhp.span<integer>|integer[]
+---@param pos? integer
+function buffer:copy(source, pos) end
 
 ---A typed view of the bytes from `pos` (default 1): `count` elements (default: as many as fit) of "i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64", "f32", "f64" or "byte".
 ---@param kind string

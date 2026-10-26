@@ -735,6 +735,38 @@ result<region> view_region(R&& r) {
     }
 }
 
+// view_region without the error: false when there is no memory.
+template <class R>
+bool view_find(R&& r, region& out) noexcept {
+    using U = std::remove_cvref_t<R>;
+    if constexpr (is_result_v<U>) {
+        return r.has_value() && view_find(*r, out);
+    } else if constexpr (is_span_v<U>) {
+        using E = std::remove_const_t<typename U::element_type>;
+        out = region{reinterpret_cast<std::byte*>(const_cast<E*>(r.data())), r.size_bytes()};
+        return true;
+    } else if constexpr (std::is_pointer_v<U>) {
+        using T = std::remove_cv_t<std::remove_pointer_t<U>>;
+        out = region{reinterpret_cast<std::byte*>(const_cast<T*>(r)), sizeof(T)};
+        return r != nullptr;
+    } else {
+        out = region{reinterpret_cast<std::byte*>(const_cast<std::remove_cv_t<U>*>(std::addressof(r))), sizeof(U)};
+        return true;
+    }
+}
+
+// Whether a handle argument of a view binding is still alive (true for every other argument).
+template <class Handles, class T>
+bool arg_alive(const T& v) {
+    if constexpr (is_handle_v<Handles, T>) {
+        return std::invoke(find_handle_t<Handles, T>::is_alive, v);
+    } else if constexpr (arg_traits<Handles, T>::optional_handle) {
+        return !v || std::invoke(find_handle_t<Handles, typename T::value_type>::is_alive, *v);
+    } else {
+        return true;
+    }
+}
+
 // Sets `out` when a handle argument of a view binding died since the view was made.
 template <class Handles, class T>
 void check_alive(const T& v, std::optional<error>& out) {
@@ -790,6 +822,22 @@ public:
         }
     }
 
+    [[nodiscard]] bool find(region& out) const noexcept override {
+        try {
+            return std::apply(
+                [&](const Captured&... a) {
+                    if (!(arg_alive<Handles>(a) && ...)) {
+                        return false;
+                    }
+                    decltype(auto) r = std::invoke(Entry::function, a...);
+                    return view_find<decltype(r)>(static_cast<decltype(r)&&>(r), out);
+                },
+                args_);
+        } catch (...) { // C++ only in here; resolve() says what went wrong
+            return false;
+        }
+    }
+
     [[nodiscard]] std::unique_ptr<view_source> clone() const override { return std::unique_ptr<view_source>{new binding_source(*this)}; }
 
     [[nodiscard]] bool same(const view_source& other) const noexcept override {
@@ -839,7 +887,8 @@ template <class Handles, class Entry, class Label, std::size_t... Is>
 int call_view(stack& s, Label label, std::index_sequence<Is...>) {
     using args = typename Entry::traits::args;
     using source = binding_source<Handles, Entry, capture_t<utils::at_t<args, Is>>...>;
-    static_assert(alignof(source) <= alignof(std::max_align_t));
+    // Lua aligns a userdata's memory for its own types (8 bytes), not for over-aligned arguments.
+    static_assert(alignof(source) <= 8, "a view binding's arguments are copied into the view: none may need more than 8-byte alignment");
 
     std::tuple<result<pulled_t<Handles, utils::at_t<args, Is>>>...> pulled{
         pull_arg<Handles, utils::at_t<args, Is>>(s, static_cast<int>(Is) + 1)...};

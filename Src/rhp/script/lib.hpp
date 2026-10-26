@@ -714,6 +714,11 @@ consteval bool field_free(std::string_view name) {
 //       ::handle<"entity", game::entity_id, &game::is_alive>           // opaque userdata + validity check
 //       ::method<"move", &game::move>                                  // e:move(dx, dy): first parameter is the entity
 //       ::property<"hp", &game::health_of>                             // e.hp (read-only)
+//       ::fn <"heights", &game::height_map>                            // returns std::span<float>: a typed view
+//       ::view<"transform", game::transform>                           // a struct scripts read and write in place
+//       ::field<"layer", &game::transform::layer, Rhp::range<0, 31>>   // t.layer = 3 (kPatch, journaled)
+//       ::ro_field<"id", &game::transform::id>                         // t.id (read-only)
+//       ::property<"transform", &game::transform_of>                   // returns transform*: a struct view (nil for nullptr)
 //       ::sub<Rhp::lib<"debug">::fn<"dump", &game::dump_state>>;
 //
 // Names are Lua identifiers and unique within a lib - both checked where you write them. A method

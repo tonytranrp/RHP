@@ -317,6 +317,33 @@ TEST_CASE("journaled writes across pages of a large span hand originals on", "[s
     CHECK(fx::g_samples == original);
 }
 
+TEST_CASE("writes of two sandboxes to the same memory stack and revert in any order", "[script][views]") {
+    sandbox first = make_box();
+    sandbox_options options;
+    options.output = [](std::string_view) {};
+    sandbox second{std::move(options)};
+    REQUIRE(second.install<fx::view_lib>());
+    run(first, "vt.ints()[1] = 5");
+    run(second, "vt.ints()[1] = 7 vt.ints()[2] = 8");
+    CHECK(fx::g_ints == std::array<std::int32_t, 4>{7, 8, 30, 40});
+    CHECK(first.revert_all().undone == 1); // the second sandbox's write stays
+    CHECK(fx::g_ints == std::array<std::int32_t, 4>{7, 8, 30, 40});
+    CHECK(second.revert_all().undone == 1);
+    CHECK(fx::g_ints == std::array<std::int32_t, 4>{10, 20, 30, 40});
+}
+
+TEST_CASE("a journaled write is undone after its view was collected", "[script][views]") {
+    sandbox box = make_box();
+    const auto mod = box.load("tests.views.collected", "do local v = vt.samples() v[3] = 33 end do local t = vt.main() t.layer = 9 end");
+    REQUIRE(mod.has_value());
+    REQUIRE(box.collect_garbage());
+    CHECK(fx::g_samples[2] == 33.0f);
+    CHECK(fx::g_main.layer == 9);
+    REQUIRE(box.revert(*mod));
+    CHECK(fx::g_samples[2] == 3.0f);
+    CHECK(fx::g_main.layer == 0);
+}
+
 TEST_CASE("a span write in a failed exec is undone with it", "[script][views]") {
     sandbox box = make_box();
     CHECK(fails(box, "vt.samples()[2] = 99 error('boom')").message.find("boom") != std::string::npos);
@@ -532,14 +559,17 @@ TEST_CASE("pairs walks a struct view's fields and views compare by object", "[sc
 
 TEST_CASE("buffers hold bytes a script owns", "[script][views][buffer]") {
     sandbox box = make_box();
-    CHECK(run(box, "local b = rhp.buffer.new(4, 7) b[2] = 255 return #b, b[1], b[2], b:tostring(1, 2)") ==
+    CHECK(run(box, "local b = rhp.buffer.new(4, 7) b:write_u8(2, 255) return #b, b:read_u8(1), b:read_u8(2), b:tostring(1, 2)") ==
           value_list{Rhp::value{4}, Rhp::value{7}, Rhp::value{255}, Rhp::value{std::string{"\x07\xff"}}});
+    CHECK(run(box, "local b = rhp.buffer.new(3) local u = b:view('u8') u[3] = 9 return b:read_u8(3), #u, b.nothing == nil") ==
+          value_list{Rhp::value{9}, Rhp::value{3}, Rhp::value{true}});
+    CHECK(fails(box, "rhp.buffer.new(2)[1] = 1").code == errc::kInvalidArgument);
     CHECK(run(box, "local b = rhp.buffer.from('abc') return b:tostring(), b:slice(2):tostring(), tostring(b)") ==
           value_list{Rhp::value{"abc"}, Rhp::value{"bc"}, Rhp::value{"buffer: 3 bytes"}});
-    CHECK(fails(box, "rhp.buffer.new(2)[3] = 1").code == errc::kOutOfRange);
+    CHECK(fails(box, "rhp.buffer.new(2):write_u8(3, 1)").code == errc::kOutOfRange);
     CHECK(fails(box, "rhp.buffer.new(-1)").code == errc::kOutOfRange);
     const std::size_t effects = box.effects().size();
-    run(box, "local b = rhp.buffer.new(16) b:write_u32(1, 5) b[16] = 1");
+    run(box, "local b = rhp.buffer.new(16) b:write_u32(1, 5) b:fill(1, 16)");
     CHECK(box.effects().size() == effects); // never journaled
 }
 
@@ -550,7 +580,7 @@ TEST_CASE("buffers read and write numbers at byte positions in either byte order
         local p = b:write_u16(1, 0x0102, "be")
         p = b:write_i32(p, -2)
         p = b:write_f64(p, 1.25)
-        return p, b[1], b[2], b:read_u16(1), b:read_u16(1, "be"), b:read_i32(3), b:read_f64(7), b:read_u8(3)
+        return p, b:read_u8(1), b:read_u8(2), b:read_u16(1), b:read_u16(1, "be"), b:read_i32(3), b:read_f64(7), b:read_u8(3)
     )") == value_list{Rhp::value{15}, Rhp::value{1}, Rhp::value{2}, Rhp::value{0x0201}, Rhp::value{0x0102}, Rhp::value{-2}, Rhp::value{1.25},
                       Rhp::value{0xfe}});
     CHECK(fails(box, "rhp.buffer.new(3):read_u32(1)").code == errc::kOutOfRange);

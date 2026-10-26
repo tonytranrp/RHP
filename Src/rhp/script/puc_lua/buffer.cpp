@@ -1,7 +1,8 @@
 // rhp.buffer: byte buffers a script owns. Created with rhp.buffer.new(size) / rhp.buffer.from(bytes);
-// read and written as bytes (b[i]), as numbers of every width at a byte position (b:read_u32(pos,
-// "be")), with string.pack formats (b:pack / b:unpack), sliced (b:slice) and viewed as typed spans
-// (b:view("f32")) without copying. Positions are 1-based, like string.byte and string.unpack.
+// read and written through methods: numbers of every width at a byte position (b:read_u32(pos,
+// "be")), strings, string.pack formats (b:pack / b:unpack); sliced (b:slice) and viewed as typed
+// spans (b:view("u8")[i]) without copying. Positions are 1-based, like string.byte and string.unpack.
+// A buffer's __index is its methods table, so a method call costs a table lookup, not a C call.
 //
 // A buffer is script state like a table: its memory is a Lua userdata (counted in limits.memory),
 // writes to it are never journaled, and it goes when nothing refers to it (slices and views keep it).
@@ -35,8 +36,8 @@ constexpr std::string_view kBufferLabel = "rhp.buffer";
 }
 
 view_node& self_buffer(lua_State* L, std::string_view method) {
-    view_node* n = to_span_node(L, 1);
-    if (n == nullptr || n->shape != node_shape::kBytes) {
+    auto* n = static_cast<view_node*>(luaL_testudata(L, 1, kBufferKey));
+    if (n == nullptr) {
         raise_buffer(L, errc::kTypeMismatch, std::format("expected a buffer, got {}", stack{L}.type_name(1)), std::format("buffer:{}", method));
     }
     return *n;
@@ -92,10 +93,12 @@ int buffer_from(lua_State* L) {
     raise_buffer(L, errc::kTypeMismatch, std::format("expected a string, a buffer or a span, got {}", stack{L}.type_name(1)), "rhp.buffer.from");
 }
 
-// The byte range [pos, pos + len) as an offset, raising when it isn't inside `size` bytes.
-std::size_t position(lua_State* L, lua_Integer pos, std::size_t len, std::size_t size, std::string_view where) {
+// The byte range [pos, pos + len) as an offset, raising when it isn't inside `size` bytes (labelled
+// "buffer:<method>").
+std::size_t position(lua_State* L, lua_Integer pos, std::size_t len, std::size_t size, std::string_view method) {
     if (pos < 1 || static_cast<lua_Unsigned>(pos) - 1 > size || len > size - (static_cast<std::size_t>(pos) - 1)) {
-        raise_buffer(L, errc::kOutOfRange, std::format("bytes [{}, {}] out of range [1, {}]", pos, pos + static_cast<lua_Integer>(len) - 1, size), where);
+        raise_buffer(L, errc::kOutOfRange, std::format("bytes [{}, {}] out of range [1, {}]", pos, pos + static_cast<lua_Integer>(len) - 1, size),
+                     std::format("buffer:{}", method));
     }
     return static_cast<std::size_t>(pos) - 1;
 }
@@ -123,10 +126,15 @@ void order_bytes(std::byte* p, std::size_t n, bool big) noexcept {
     }
 }
 
-std::string method_label(lua_State* L) {
+// A read_* / write_* method's name (upvalue 2: a Lua string, no copy).
+std::string_view method_name(lua_State* L) {
     std::size_t len = 0;
     const char* name = lua_tolstring(L, lua_upvalueindex(2), &len);
-    return std::format("buffer:{}", std::string_view{name, len});
+    return {name, len};
+}
+
+std::string method_label(lua_State* L) {
+    return std::format("buffer:{}", method_name(L));
 }
 
 // b:read_<kind>(pos [, order]). Upvalues: 1 the elem_kind, 2 the method's name.
@@ -137,7 +145,7 @@ int buffer_read(lua_State* L) {
     const std::size_t es = elem_size(k);
     const bool big = big_endian(L, 3, kBufferLabel);
     const place p = locate_or_raise(L, n);
-    const std::size_t at = position(L, pos, es, p.size, method_label(L));
+    const std::size_t at = position(L, pos, es, p.size, method_name(L));
     std::byte bytes[8];
     std::memcpy(bytes, p.data + at, es);
     order_bytes(bytes, es, big);
@@ -161,8 +169,8 @@ int buffer_write(lua_State* L) {
         raise_buffer(L, errc::kInvalidArgument, "the buffer is read-only", method_label(L));
     }
     const place p = locate_or_raise(L, n);
-    const std::size_t at = position(L, pos, es, p.size, method_label(L));
-    if (before_write(L, n, p, at, es, kBufferLabel)) {
+    const std::size_t at = position(L, pos, es, p.size, method_name(L));
+    if (before_write(L, n, p, at, es)) {
         std::memcpy(p.data + at, bytes, es);
     }
     lua_pushinteger(L, pos + static_cast<lua_Integer>(es));
@@ -178,7 +186,7 @@ int buffer_read_string(lua_State* L) {
         raise_buffer(L, errc::kOutOfRange, std::format("a length can't be negative ({})", len), "buffer:read_string");
     }
     const place p = locate_or_raise(L, n);
-    const std::size_t at = position(L, pos, static_cast<std::size_t>(len), p.size, "buffer:read_string");
+    const std::size_t at = position(L, pos, static_cast<std::size_t>(len), p.size, "read_string");
     lua_pushlstring(L, reinterpret_cast<const char*>(p.data + at), static_cast<std::size_t>(len));
     return 1;
 }
@@ -193,8 +201,8 @@ int buffer_write_string(lua_State* L) {
         raise_buffer(L, errc::kInvalidArgument, "the buffer is read-only", "buffer:write_string");
     }
     const place p = locate_or_raise(L, n);
-    const std::size_t at = position(L, pos, len, p.size, "buffer:write_string");
-    if (len > 0 && before_write(L, n, p, at, len, kBufferLabel)) {
+    const std::size_t at = position(L, pos, len, p.size, "write_string");
+    if (len > 0 && before_write(L, n, p, at, len)) {
         std::memcpy(p.data + at, s, len);
     }
     lua_pushinteger(L, pos + static_cast<lua_Integer>(len));
@@ -235,7 +243,7 @@ int buffer_view(lua_State* L) {
     const lua_Integer pos = luaL_optinteger(L, 3, 1);
     const place p = locate_or_raise(L, n);
     const std::size_t es = elem_size(k);
-    const std::size_t from = position(L, pos, 0, p.size, "buffer:view");
+    const std::size_t from = position(L, pos, 0, p.size, "view");
     const std::size_t fit = (p.size - from) / es;
     const lua_Integer count = luaL_optinteger(L, 4, static_cast<lua_Integer>(fit));
     if (count < 0 || static_cast<lua_Unsigned>(count) > fit) {
@@ -263,8 +271,8 @@ int buffer_pack(lua_State* L) {
     std::size_t len = 0;
     const char* packed = lua_tolstring(L, -1, &len);
     const place p = locate_or_raise(L, n);
-    const std::size_t at = position(L, pos, len, p.size, "buffer:pack");
-    if (len > 0 && before_write(L, n, p, at, len, kBufferLabel)) {
+    const std::size_t at = position(L, pos, len, p.size, "pack");
+    if (len > 0 && before_write(L, n, p, at, len)) {
         std::memcpy(p.data + at, packed, len);
     }
     lua_pushinteger(L, pos + static_cast<lua_Integer>(len));
@@ -278,7 +286,7 @@ int buffer_unpack(lua_State* L) {
     const lua_Integer pos = luaL_checkinteger(L, 2);
     luaL_checkstring(L, 3);
     const place p = locate_or_raise(L, n);
-    const std::size_t at = position(L, pos, 0, p.size, "buffer:unpack");
+    const std::size_t at = position(L, pos, 0, p.size, "unpack");
     std::size_t take = p.size - at;
     // A format of fixed size copies only what it reads (string.packsize refuses variable sizes).
     lua_pushvalue(L, lua_upvalueindex(2));
@@ -323,7 +331,7 @@ void define_buffer_type(lua_State* L) {
     lua_setfield(L, mt, "__tostring");
     lua_createtable(L, 0, 32);
     const int methods = lua_gettop(L);
-    set_sequence_metamethods(L, mt, methods, false);
+    set_sequence_metamethods(L, mt, methods, true);
     const luaL_Reg plain[] = {
         {"read_string", &buffer_read_string},
         {"write_string", &buffer_write_string},
