@@ -360,12 +360,10 @@ result<void> stack::define_userdata_type(std::string_view key, std::string_view 
     if (luaL_getmetatable(state_, k.c_str()) != LUA_TNIL) {
         lua_getfield(state_, -1, kTypeTagField);
         const bool same = lua_touserdata(state_, -1) == type_tag;
-        lua_pop(state_, 1);
+        lua_pop(state_, 2);
         if (!same) {
-            lua_pop(state_, 1);
             return fail(errc::kAlreadyLoaded, std::format("handle type '{}' is already defined for a different C++ type", display_name));
         }
-        lua_rawsetp(state_, LUA_REGISTRYINDEX, key.data()); // this spelling of the key finds it by address too
         return {};
     }
     lua_pop(state_, 1);
@@ -387,9 +385,7 @@ result<void> stack::define_userdata_type(std::string_view key, std::string_view 
     lua_setfield(state_, -2, "__index");
     lua_pushcfunction(state_, &handle_newindex);
     lua_setfield(state_, -2, "__newindex");
-    // Also registered under the key's address: push_userdata and to_userdata find it without
-    // hashing the name (bindings pass the same static key every call).
-    lua_rawsetp(state_, LUA_REGISTRYINDEX, key.data());
+    lua_pop(state_, 1);
 
     if (lua_getfield(state_, LUA_REGISTRYINDEX, kHandleTagsKey) != LUA_TTABLE) {
         lua_pop(state_, 1);
@@ -426,6 +422,12 @@ int handle_index(lua_State* L) {
     lua_pop(L, 1);
     lua_pushvalue(L, 2);
     if (lua_rawget(L, lua_upvalueindex(2)) != LUA_TNIL) {
+        // RHP's property getters are C functions without upvalues (get_property): one runs in this
+        // frame, reading the handle at index 1. Anything else (a test's swap) is called with the handle.
+        if (const lua_CFunction get = lua_tocfunction(L, -1); get != nullptr && lua_getupvalue(L, -1, 1) == nullptr) {
+            return get(L);
+        }
+        lua_settop(L, 3); // drops the upvalue a C closure pushed above
         lua_pushvalue(L, 1);
         lua_call(L, 1, 1);
         return 1;
@@ -528,11 +530,6 @@ bool stack::push_handle(const void* type_tag, const void* data, std::size_t size
 
 void* stack::push_userdata(std::size_t size, std::string_view key) const {
     void* memory = lua_newuserdatauv(state_, size, 0);
-    if (lua_rawgetp(state_, LUA_REGISTRYINDEX, key.data()) == LUA_TTABLE) { // defined with this very key
-        lua_setmetatable(state_, -2);
-        return memory;
-    }
-    lua_pop(state_, 1);
     // luaL_setmetatable needs a C string; keys are short literals, so a small buffer avoids allocation.
     char buffer[96];
     if (key.size() < sizeof(buffer)) {
@@ -547,18 +544,8 @@ void* stack::push_userdata(std::size_t size, std::string_view key) const {
 }
 
 void* stack::to_userdata(int index, std::string_view key) const noexcept {
-    // luaL_testudata against the metatable registered under the key's address (define_userdata_type):
-    // no name to hash.
-    void* memory = lua_touserdata(state_, index);
-    if (memory == nullptr || lua_getmetatable(state_, index) == 0) {
-        return nullptr;
-    }
-    if (lua_rawgetp(state_, LUA_REGISTRYINDEX, key.data()) == LUA_TTABLE) {
-        const bool same = lua_rawequal(state_, -1, -2) != 0;
-        lua_pop(state_, 2);
-        return same ? memory : nullptr;
-    }
-    lua_pop(state_, 2);
+    // By name, not by a light-userdata key: the registry hashes a pointer with a modulo by its size,
+    // which measured slower than Lua's string cache and a short-string lookup.
     // luaL_testudata needs a C string; keys are short literals, so a small buffer avoids allocation.
     char buffer[96];
     if (key.size() >= sizeof(buffer)) {

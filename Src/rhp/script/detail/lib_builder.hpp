@@ -309,8 +309,16 @@ struct binding_label {
     operator std::string_view() const noexcept { return s.upvalue_string(1); } // NOLINT(google-explicit-constructor)
 };
 
-template <class Handles, class Entry, std::size_t... Is>
-int invoke_fn(stack& s, binding_label label, std::index_sequence<Is...>) {
+// A label known at compile time: a property's, whose getter runs in its handle's __index frame
+// (no upvalues of its own).
+template <utils::fixed_string Text>
+struct static_label {
+    operator std::string_view() const noexcept { return Text.view(); } // NOLINT(google-explicit-constructor)
+};
+
+// `label` converts to std::string_view (binding_label, static_label).
+template <class Handles, class Entry, class Label, std::size_t... Is>
+int invoke_fn(stack& s, Label label, std::index_sequence<Is...>) {
     using args = typename Entry::traits::args;
     using R = typename Entry::traits::return_type;
     constexpr bool keep_args = Entry::feed == undo_feed::kArgs;
@@ -502,8 +510,8 @@ decltype(auto) plain_value(plain_storage_t<Handles, T>& held) {
 // The plain trampoline: one stack::read_args for every plain argument (handles are pulled as on the
 // general path), no result<> per argument, then the call and push_return as on the general path. An
 // argument that doesn't fit sends the call down the general path, which raises the error it always has.
-template <class Handles, class Entry, std::size_t... Is>
-int call_plain(stack& s, [[maybe_unused]] std::index_sequence<Is...> seq) {
+template <class Handles, class Entry, class Label, std::size_t... Is>
+int call_plain(stack& s, Label label, [[maybe_unused]] std::index_sequence<Is...> seq) {
     using args = typename Entry::traits::args;
     using R = typename Entry::traits::return_type;
 
@@ -514,7 +522,7 @@ int call_plain(stack& s, [[maybe_unused]] std::index_sequence<Is...> seq) {
         arg_slot slots[sizeof...(Is)];
         if ((any_read && !s.read_args(kinds, slots, static_cast<int>(sizeof...(Is)))) ||
             !(take_plain<Handles, utils::at_t<args, Is>>(s, static_cast<int>(Is) + 1, slots[Is], std::get<Is>(values)) && ...)) [[unlikely]] {
-            return invoke_fn<Handles, Entry>(s, binding_label{s}, seq);
+            return invoke_fn<Handles, Entry>(s, label, seq);
         }
     }
 
@@ -530,18 +538,18 @@ int call_plain(stack& s, [[maybe_unused]] std::index_sequence<Is...> seq) {
     } catch (const Rhp::exception& e) {
         thrown = e.err();
     } catch (const std::exception& e) {
-        thrown = make_error(errc::kRuntime, e.what(), std::string{std::string_view{binding_label{s}}});
+        thrown = make_error(errc::kRuntime, e.what(), std::string{std::string_view{label}});
     }
     if (thrown) {
         if (thrown->where.empty()) {
-            thrown->where = std::string{std::string_view{binding_label{s}}};
+            thrown->where = std::string{std::string_view{label}};
         }
         s.raise(*thrown);
     }
     if constexpr (std::is_void_v<R>) {
         return 0;
     } else {
-        return push_return<Handles>(s, binding_label{s}, *out);
+        return push_return<Handles>(s, label, *out);
     }
 }
 
@@ -726,10 +734,27 @@ int call_fn(lua_State* L) {
         }
         yield_async(L); // nothing here has a destructor: the yield may jump
     } else if constexpr (plain_binding_v<Handles, Entry>) {
-        return call_plain<Handles, Entry>(s, std::make_index_sequence<Entry::traits::arity>{});
+        return call_plain<Handles, Entry>(s, binding_label{s}, std::make_index_sequence<Entry::traits::arity>{});
     } else {
         return invoke_fn<Handles, Entry>(s, binding_label{s}, std::make_index_sequence<Entry::traits::arity>{});
     }
+}
+
+// A property's getter: no upvalues, so its handle's __index (handle_index, stack.cpp) runs it in its
+// own frame, the handle at index 1. Called from Lua (a test's swapped-out original) it reads the
+// handle at index 1 too. Its label ("entity.hp") is known at compile time.
+template <class Handles, class M>
+int get_property(lua_State* L) {
+    static_assert(plain_binding_v<Handles, M>, "a property takes only its handle and never waits or journals");
+    using H = find_handle_t<Handles, typename M::self_type>;
+    using label = static_label<concat_fixed<concat_fixed<H::fixed_name, utils::fixed_string{"."}>(), M::fixed_name>()>;
+    stack s{L};
+    if constexpr (M::required != role::kObserve) {
+        if (!allows(s.context().caller_role(), M::required)) {
+            s.raise(forbidden(label{}, M::required));
+        }
+    }
+    return call_plain<Handles, M>(s, label{}, std::make_index_sequence<M::traits::arity>{});
 }
 
 // Reads no upvalues and raises nothing that needs a label: the lib proxy calls it in its own frame.
@@ -872,11 +897,11 @@ private:
         using H = find_handle_t<Handles, typename M::self_type>;
         constexpr bool property = M::kind == entry_kind::kProperty;
         if constexpr (property) {
-            s.push_string(std::format("{}.{}", H::name, M::name));
+            s.push_function(&get_property<Handles, M>, 0); // no upvalues: handle_index calls it in place
         } else {
             s.push_string(std::format("{}:{}", H::name, M::name));
+            s.push_function(&call_fn<Handles, M>, 1);
         }
-        s.push_function(&call_fn<Handles, M>, 1);
         s.add_handle_member(handle_key_v<H>.view(), M::name, property);
     }
 };

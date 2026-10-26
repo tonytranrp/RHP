@@ -119,9 +119,7 @@ public:
     // ---- typed userdata (opaque handles) -------------------------------------------------------
     // Creates (once per state) the metatable registered under `key` for one C++ handle type.
     // `type_tag` identifies the C++ type; reusing a key with a different tag fails with kAlreadyLoaded.
-    // eq / tostring become __eq / __tostring. __name is set to `display_name`. The metatable is also
-    // found by the address of `key`'s characters: push_userdata / to_userdata given that same key
-    // object (a static, as bindings pass) skip hashing the name.
+    // eq / tostring become __eq / __tostring. __name is set to `display_name`.
     [[nodiscard]] result<void> define_userdata_type(std::string_view key, std::string_view display_name, const void* type_tag,
                                                     c_function eq, c_function tostring) const;
     // Pushes a new userdata of `size` bytes with the metatable registered under `key`.
@@ -130,7 +128,8 @@ public:
     [[nodiscard]] void* to_userdata(int index, std::string_view key) const noexcept;
     // Methods and properties of the handle type registered under `key` (defined first). The
     // function on top (popped) becomes method `name` (h:name(...)) or property `name` (h.name,
-    // read-only: called with the handle). handle_member_free fails with kAlreadyLoaded when the
+    // read-only: called with the handle; a C function without upvalues runs in __index's own frame,
+    // the handle at index 1). handle_member_free fails with kAlreadyLoaded when the
     // handle already has a member of that name.
     [[nodiscard]] result<void> handle_member_free(std::string_view key, std::string_view name) const;
     void add_handle_member(std::string_view key, std::string_view name, bool property) const;
