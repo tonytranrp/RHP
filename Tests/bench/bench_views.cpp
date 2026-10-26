@@ -8,6 +8,7 @@
 #include <cstring>
 #include <numeric>
 #include <span>
+#include <string>
 #include <string_view>
 #include <utility>
 #include <vector>

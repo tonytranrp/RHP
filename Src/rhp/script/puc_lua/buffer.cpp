@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <cstring>
 #include <format>
+#include <initializer_list>
 #include <string>
 #include <string_view>
 
