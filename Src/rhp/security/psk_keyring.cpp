@@ -69,16 +69,33 @@ using digest = std::array<std::byte, kMacSize>;
 }
 
 // The per-direction frame MAC: keyed BLAKE2b-256 over header + payload.
+//
+// Keyed BLAKE2b hashes the key, padded to a block, as its first block, and Monocypher compresses that
+// block once the first message byte arrives. Every frame starts with the frame magic, so the sealer
+// keeps the state after the key and the magic and copies it per frame: the same MAC, one compression
+// fewer (a frame of a call is 2-3 blocks). Input that doesn't start with the magic is hashed in full.
 class blake2b_sealer final : public wire::frame_sealer {
 public:
-    explicit blake2b_sealer(const digest& k) noexcept : key_(k) {}
-    ~blake2b_sealer() override { crypto_wipe(key_.data(), key_.size()); }
+    explicit blake2b_sealer(const digest& k) noexcept : key_(k) {
+        crypto_blake2b_keyed_init(&primed_, wire::kMacSize, u8(key_.data()), key_.size());
+        crypto_blake2b_update(&primed_, u8(wire::kMagic.data()), wire::kMagic.size());
+    }
+    ~blake2b_sealer() override {
+        crypto_wipe(key_.data(), key_.size());
+        crypto_wipe(&primed_, sizeof primed_);
+    }
 
     blake2b_sealer(const blake2b_sealer&) = delete;
     blake2b_sealer& operator=(const blake2b_sealer&) = delete;
 
     [[nodiscard]] wire::mac_bytes seal(utils::bytes_view sealed) const noexcept override {
         wire::mac_bytes out{};
+        if (sealed.size() >= wire::kMagic.size() && std::ranges::equal(sealed.first(wire::kMagic.size()), wire::kMagic)) {
+            crypto_blake2b_ctx ctx = primed_;
+            crypto_blake2b_update(&ctx, u8(sealed.data() + wire::kMagic.size()), sealed.size() - wire::kMagic.size());
+            crypto_blake2b_final(&ctx, u8(out.data())); // also wipes ctx
+            return out;
+        }
         crypto_blake2b_keyed(u8(out.data()), out.size(), u8(key_.data()), key_.size(), u8(sealed.data()), sealed.size());
         return out;
     }
@@ -90,6 +107,7 @@ public:
 
 private:
     digest key_;
+    crypto_blake2b_ctx primed_{}; // keyed, the magic absorbed
 };
 
 [[nodiscard]] auth_grant make_grant(std::span<const std::byte> secret, const std::vector<std::byte>& t, bool host_side) {

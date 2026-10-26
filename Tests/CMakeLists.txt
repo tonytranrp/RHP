@@ -22,11 +22,12 @@ endfunction()
 
 # rhp_add_compile_fail(<name> SOURCE <file> LINKS <targets...>)
 # The source must compile as-is AND must fail to compile with RHP_COMPILE_FAIL defined, so the
-# test proves the guarded snippet is what breaks the build (not an unrelated error).
+# test proves the guarded snippet is what breaks the build (not an unrelated error). Both are built
+# by their tests, not by the default build (the 34 _ok objects were 13% of a clean build's work).
 function(rhp_add_compile_fail name)
     cmake_parse_arguments(PARSE_ARGV 1 arg "" "SOURCE" "LINKS")
 
-    add_library(${name}_ok OBJECT ${arg_SOURCE})
+    add_library(${name}_ok OBJECT EXCLUDE_FROM_ALL ${arg_SOURCE})
     target_link_libraries(${name}_ok PRIVATE ${arg_LINKS})
     rhp_set_warnings(${name}_ok)
 
@@ -35,13 +36,25 @@ function(rhp_add_compile_fail name)
     target_compile_definitions(${name}_fail PRIVATE RHP_COMPILE_FAIL=1)
     set_target_properties(${name}_ok ${name}_fail PROPERTIES FOLDER "tests/compile_fail")
 
+    set_property(GLOBAL APPEND PROPERTY RHP_COMPILE_FAIL_OK ${name}_ok)
     add_test(NAME compile_fail.${name}
         COMMAND ${CMAKE_COMMAND} --build "${CMAKE_BINARY_DIR}" --target ${name}_fail --config $<CONFIG>)
-    set_tests_properties(compile_fail.${name} PROPERTIES WILL_FAIL TRUE LABELS compile_fail)
+    set_tests_properties(compile_fail.${name} PROPERTIES WILL_FAIL TRUE LABELS compile_fail FIXTURES_REQUIRED rhp_compile_fail_ok)
 endfunction()
 
 add_subdirectory(unit)
 add_subdirectory(compile_fail)
+# Every fixture's as-is build, in one parallel build run that the failing builds wait for (34 build
+# processes at once in one build directory would race on its logs).
+get_property(rhp_compile_fail_ok GLOBAL PROPERTY RHP_COMPILE_FAIL_OK)
+if(rhp_compile_fail_ok)
+    add_custom_target(rhp_compile_fail_ok)
+    add_dependencies(rhp_compile_fail_ok ${rhp_compile_fail_ok})
+    set_target_properties(rhp_compile_fail_ok PROPERTIES FOLDER "tests/compile_fail")
+    add_test(NAME compile_fail.fixtures_compile
+        COMMAND ${CMAKE_COMMAND} --build "${CMAKE_BINARY_DIR}" --target rhp_compile_fail_ok --config $<CONFIG>)
+    set_tests_properties(compile_fail.fixtures_compile PROPERTIES LABELS compile_fail FIXTURES_SETUP rhp_compile_fail_ok)
+endif()
 if(RHP_ENABLE)
     add_subdirectory(integration)
     add_subdirectory(fuzz)

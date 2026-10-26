@@ -14,6 +14,7 @@ set_target_properties(rhp_cli_core PROPERTIES FOLDER "tools")
 add_executable(rhp-cli src/main.cpp)
 target_link_libraries(rhp-cli PRIVATE rhp_cli_core Rhp::cli11 Rhp::replxx)
 rhp_set_warnings(rhp-cli)
+rhp_use_shared_pch(rhp-cli apps)
 set_target_properties(rhp-cli PROPERTIES FOLDER "tools")
 
 if(RHP_INSTALL)
