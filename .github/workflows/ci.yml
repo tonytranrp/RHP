@@ -10,6 +10,10 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# The workflow only reads the repository (checkout, caches, artifacts).
+permissions:
+  contents: read
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -31,6 +35,7 @@ jobs:
         with:
           path: .cpm-cache
           key: cpm-${{ runner.os }}-${{ hashFiles('cmake/Dependencies.cmake') }}
+          restore-keys: cpm-${{ runner.os }}-
       - name: Toolchain (Clang 21, libstdc++ 14, OpenSSL)
         run: |
           sudo apt-get update
@@ -62,8 +67,9 @@ jobs:
         with:
           path: .cpm-cache
           key: cpm-${{ runner.os }}-${{ hashFiles('cmake/Dependencies.cmake') }}
+          restore-keys: cpm-${{ runner.os }}-
       - uses: ilammy/msvc-dev-cmd@v1
-      - uses: lukka/get-cmake@latest
+      - uses: lukka/get-cmake@v4.4.2
       # windows-msvc builds as unity files, clang-cl and ASan file by file.
       - name: Configure
         run: cmake --preset ${{ matrix.preset }} ${{ matrix.preset == 'windows-msvc' && '-DRHP_UNITY_BUILD=ON' || '' }}
@@ -90,10 +96,11 @@ jobs:
         with:
           path: .cpm-cache
           key: cpm-off-${{ runner.os }}-${{ hashFiles('cmake/Dependencies.cmake') }}
+          restore-keys: cpm-off-${{ runner.os }}-
       - if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
       - if: runner.os == 'Windows'
-        uses: lukka/get-cmake@latest
+        uses: lukka/get-cmake@v4.4.2
       - if: runner.os == 'Linux'
         name: Toolchain (Clang 21)
         run: |
@@ -118,7 +125,11 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: .cpm-cache
-          key: cpm-${{ runner.os }}-${{ hashFiles('cmake/Dependencies.cmake') }}
+          # Its own key: the linux jobs save cpm-Linux-* at the same time.
+          key: cpm-fuzz-${{ runner.os }}-${{ hashFiles('cmake/Dependencies.cmake') }}
+          restore-keys: |
+            cpm-fuzz-${{ runner.os }}-
+            cpm-${{ runner.os }}-
       - name: Toolchain (Clang 21)
         run: |
           sudo apt-get update
@@ -162,10 +173,11 @@ jobs:
         with:
           path: .cpm-cache
           key: cpm-package-${{ runner.os }}-${{ hashFiles('cmake/Dependencies.cmake') }}
+          restore-keys: cpm-package-${{ runner.os }}-
       - if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
       - if: runner.os == 'Windows'
-        uses: lukka/get-cmake@latest
+        uses: lukka/get-cmake@v4.4.2
       - if: runner.os == 'Linux'
         name: Toolchain (Clang 21)
         run: |
@@ -218,10 +230,11 @@ jobs:
         with:
           path: .cpm-cache
           key: cpm-${{ runner.os }}-${{ hashFiles('cmake/Dependencies.cmake') }}
+          restore-keys: cpm-${{ runner.os }}-
       - uses: maxim-lobanov/setup-xcode@v1
         with:
           xcode-version: latest-stable
-      - uses: lukka/get-cmake@latest
+      - uses: lukka/get-cmake@v4.4.2
       - name: "macOS (universal, so Mbed TLS: Homebrew's OpenSSL is arm64 only)"
         run: |
           cmake --preset macos -DRHP_TLS_OPENSSL=OFF
@@ -258,6 +271,7 @@ jobs:
         with:
           path: .cpm-cache
           key: cpm-android-${{ hashFiles('cmake/Dependencies.cmake') }}
+          restore-keys: cpm-android-
       - uses: nttld/setup-ndk@v1
         id: ndk
         with:
