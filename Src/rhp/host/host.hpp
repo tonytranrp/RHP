@@ -21,7 +21,6 @@
 #include <rhp/host/detail/engine.hpp>
 #include <rhp/host/detail/releases.hpp>
 #include <rhp/net/endpoint.hpp>
-#include <rhp/platform/os.hpp>
 #include <rhp/release/manager.hpp>
 #include <rhp/script/lib.hpp>
 #include <rhp/script/sandbox.hpp>
@@ -169,8 +168,7 @@ public:
     // any identity's sandbox, on the pump thread, until the returned subscription dies.
     template <std::invocable<const event::script_event&> F>
     [[nodiscard]] event::subscription on_script_event(std::string_view name, F fn) {
-        const std::uint64_t id = script_events_->add(std::string{name}, std::move(fn));
-        return event::subscription{std::weak_ptr<subscribable>{script_events_}, id};
+        return event::subscribe_script(script_events_, name, std::move(fn));
     }
 
     // One frame: runs requests that arrived, resumes suspended scripts, fires timers and queued

@@ -29,11 +29,11 @@ template <class T>
 class pending_state {
 public:
     // With io<zero_threads> nobody else runs the network: get() / wait_for() run it through this.
-    using pump_fn = std::function<void(std::chrono::milliseconds)>;
+    using network_pump = std::function<void(std::chrono::milliseconds)>;
 
     // `blocked` (when set) says the calling thread is the one that has to deliver the result: get()
     // there would wait for itself, so it reports an error instead.
-    pending_state(std::uint64_t request, pump_fn pump, std::function<bool()> blocked = {})
+    pending_state(std::uint64_t request, network_pump pump, std::function<bool()> blocked = {})
         : request_(request), pump_(std::move(pump)), blocked_(std::move(blocked)) {}
 
     void complete(result<T> r) {
@@ -168,7 +168,7 @@ private:
     std::function<void(result<T>)> then_;
     std::coroutine_handle<> waiter_;
     std::uint64_t request_ = 0;
-    pump_fn pump_;
+    network_pump pump_;
     std::function<bool()> blocked_;
 };
 

@@ -72,6 +72,13 @@ template <std::invocable<const any&> F>
     return subscription{h, id};
 }
 
+// The script events named `name` ("*": every name).
+template <std::invocable<const script_event&> F>
+[[nodiscard]] subscription subscribe_script(const std::shared_ptr<script_hub>& h, std::string_view name, F fn) {
+    const std::uint64_t id = h->add(std::string{name}, std::move(fn));
+    return subscription{h, id};
+}
+
 } // namespace Rhp::event
 
 // Both tables are compiled once, in hub.cpp (with the members above): a file including this header

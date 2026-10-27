@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <concepts>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -458,7 +459,7 @@ private:
     }
 
     // Waits on the condition; a zero_threads client runs the network meanwhile.
-    template <class Pred>
+    template <std::predicate Pred>
     bool wait(std::unique_lock<std::mutex>& lock, clock::time_point deadline, Pred done) {
         if (setup_.io_thread) {
             if (deadline == clock::time_point::max()) {
@@ -486,7 +487,7 @@ private:
 
     // Runs `fn` on the network thread, unless this engine is gone by then (a shared reactor
     // outlives the engines on it, so work queued for one can run after it was destroyed).
-    template <class F>
+    template <std::invocable F>
     void post(F fn) {
         io_.post([alive = std::weak_ptr<bool>{alive_}, fn = std::move(fn)]() mutable {
             if (const auto still = alive.lock(); still != nullptr && *still) {
@@ -860,7 +861,7 @@ private:
     // Runs an application callback on the network thread. One that throws is the application's
     // bug; the client has no logger to report it to, and letting it escape would end the session
     // (and fail every other call), so it is dropped.
-    template <class F>
+    template <std::invocable F>
     static void guarded(F&& fn) noexcept {
         try {
             std::forward<F>(fn)();
