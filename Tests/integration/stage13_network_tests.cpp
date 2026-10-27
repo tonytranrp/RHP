@@ -13,7 +13,9 @@
 #include <catch2/catch_test_macros.hpp>
 #include <rhp_test/eventually.hpp>
 #include <rhp_test/net_support.hpp>
+#include <rhp_test/tls_fixtures.hpp>
 
+#include <rhp/build_config.hpp>
 #include <rhp/client/client.hpp>
 #include <rhp/config/config.hpp>
 #include <rhp/core/error.hpp>
@@ -357,6 +359,59 @@ TEST_CASE("stage13: stalled connections don't keep a real host from a listening 
     REQUIRE(rhp_test::poll_until({&raw.io}, [&] { return raw.closed(silent) && raw.closed(stalled); }));
     CHECK(c.exec<int>("return 6") == 6);
 }
+
+// ---- TLS host names ------------------------------------------------------------------------------------
+
+#if RHP_TLS_HAS_OPENSSL || RHP_TLS_HAS_MBEDTLS
+
+namespace stage13_net_fixtures {
+
+// A network transport that reaches every name at 127.0.0.1, as a DNS entry would: the name dialed is
+// only what TLS checks.
+struct any_name_tcp {
+    static constexpr std::string_view name = "any_name_tcp";
+    static constexpr bool network = true;
+
+    static Rhp::result<std::unique_ptr<Rhp::net::listener>> listen(Rhp::net::io_context& io, const Rhp::endpoint& ep, Rhp::net::accept_fn on_accept) {
+        return Rhp::net::tcp::listen(io, ep, std::move(on_accept));
+    }
+
+    static void dial(Rhp::net::io_context& io, const Rhp::endpoint& ep, Rhp::net::connect_fn on_connect) {
+        Rhp::endpoint here = ep;
+        here.host = "127.0.0.1";
+        Rhp::net::tcp::dial(io, here, std::move(on_connect));
+    }
+};
+
+static_assert(Rhp::net::transport<any_name_tcp>);
+
+} // namespace stage13_net_fixtures
+
+TEST_CASE("stage13: a CA-checked dial checks the host name unless it is an IP address", "[stage13][tls]") {
+    using named_cfg = Rhp::config<>::transport<any_name_tcp>::logger<Rhp::core::null_logger>;
+    keys k;
+    Rhp::host_options with_cert;
+    with_cert.tls.cert_pem = std::string{rhp_test::tls::kHostCertPem}; // issued for "game.test"
+    with_cert.tls.key_pem = std::string{rhp_test::tls::kHostKeyPem};
+    pumped_host<tcp_cfg> host{Rhp::endpoint::listen("127.0.0.1", 0), k.ring(), k.trusted(), with_cert};
+    const auto port = *host->port();
+    Rhp::client_options checked;
+    checked.tls.ca_pem = std::string{rhp_test::tls::kCaPem};
+    checked.connect_timeout = 3s;
+    {
+        Rhp::client<named_cfg> right{Rhp::endpoint::dial("game.test", port), k.as("patch"), k.dev(), checked};
+        CHECK(right.exec<int>("return 3") == 3);
+        CHECK(right.info().tls);
+    }
+    // Hex-looking names are names: the certificate isn't theirs.
+    for (const std::string_view name : {"cafe1", "db1.de", "beef.test"}) {
+        INFO(name);
+        Rhp::client<named_cfg> wrong{Rhp::endpoint::dial(name, port), k.as("patch"), k.dev(), checked};
+        CHECK_FALSE(wrong.connect());
+    }
+}
+
+#endif
 
 TEST_CASE("stage13: a listening client drops a connection that sends nothing", "[stage13][reverse][admission]") {
     using quick_cfg = tcp_cfg::limits<Rhp::limits{.handshake_timeout_ms = 60'000, .first_byte_ms = 150}>;
