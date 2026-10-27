@@ -13,6 +13,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <rhp/core/error.hpp>
 #include <rhp/platform/files.hpp>
 #include <rhp/platform/os.hpp>
 #include <rhp/platform/random.hpp>
@@ -116,4 +117,15 @@ TEST_CASE("platform: private files replace what was there and stay owner-only", 
     }
     CHECK(files == 1);
     CHECK_FALSE(Rhp::platform::readable_by_others(dir / "missing.key"));
+}
+
+TEST_CASE("platform: the user configuration folder", "[platform][files]") {
+    const auto dir = Rhp::platform::user_config_dir();
+    if constexpr (Rhp::platform::kOs == Rhp::platform::os_kind::kIos || Rhp::platform::kOs == Rhp::platform::os_kind::kAndroid) {
+        REQUIRE_FALSE(dir);
+        CHECK(dir.error().code == Rhp::errc::kDisabled);
+    } else {
+        REQUIRE(dir);
+        CHECK(dir->is_absolute());
+    }
 }

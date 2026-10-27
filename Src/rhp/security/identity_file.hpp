@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -23,6 +24,10 @@ namespace Rhp::security {
 //
 // Treat the file like an SSH private key. Secrets are wiped when the object dies.
 struct identity_file {
+    // Reads a field the identity doesn't have, for formats built on this one (the dev session file):
+    // true when it took it, false for a field it doesn't know either, an error for a bad value.
+    using field_reader = std::function<result<bool>(std::string_view field, std::string_view value)>;
+
     std::string name;
     key psk;
     std::optional<ed25519_secret_key> signing;
@@ -31,7 +36,7 @@ struct identity_file {
     // prints "warning: ..."); to_text leaves them out.
     std::vector<std::string> warnings;
 
-    [[nodiscard]] static result<identity_file> parse(std::string_view text);
+    [[nodiscard]] static result<identity_file> parse(std::string_view text, const field_reader& extra = {});
     [[nodiscard]] static result<identity_file> load(const std::string& path);
     // A new identity with a fresh 32-byte PSK and a fresh signing key.
     [[nodiscard]] static result<identity_file> generate(std::string name);

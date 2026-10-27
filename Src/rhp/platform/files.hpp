@@ -34,6 +34,11 @@ namespace Rhp::platform {
 // Creates `path` (and its parents) if missing; on POSIX every directory it creates is its owner's only.
 [[nodiscard]] result<void> make_private_directory(const std::filesystem::path& path);
 
+// This user's folder for application settings: %APPDATA% (Windows), ~/Library/Application Support
+// (macOS), $XDG_CONFIG_HOME or else ~/.config (Linux). kNotFound when the variable it comes from isn't
+// set; kDisabled on iOS and Android, where apps have no user folder to share.
+[[nodiscard]] result<std::filesystem::path> user_config_dir();
+
 // Standard output is a terminal (not a file or a pipe).
 [[nodiscard]] bool stdout_is_terminal() noexcept;
 

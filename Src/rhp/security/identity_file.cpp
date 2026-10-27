@@ -27,7 +27,7 @@ namespace {
 
 } // namespace
 
-result<identity_file> identity_file::parse(std::string_view text) {
+result<identity_file> identity_file::parse(std::string_view text, const field_reader& extra) {
     identity_file out;
     for (const detail::text_line& line : detail::content_lines(text)) {
         const auto eq = line.text.find('=');
@@ -56,7 +56,9 @@ result<identity_file> identity_file::parse(std::string_view text) {
                 return std::unexpected{bad_line(line.number, k.error().message)};
             }
             out.signing = std::move(*k);
-        } else {
+        } else if (auto taken = extra ? extra(field, v) : result<bool>{false}; !taken) {
+            return std::unexpected{bad_line(line.number, taken.error().message)};
+        } else if (!*taken) {
             return std::unexpected{bad_line(line.number, std::format("unknown key '{}'", field))};
         }
     }
