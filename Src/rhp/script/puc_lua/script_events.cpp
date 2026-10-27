@@ -260,11 +260,11 @@ void sandbox_impl::deliver_now(std::string_view event, event_pusher args, module
     if (const auto it = subscriptions_.find(event); it != subscriptions_.end()) {
         std::array<std::uint64_t, 16> few{}; // the usual handful without an allocation per delivery
         std::vector<std::uint64_t> many;
-        std::span<std::uint64_t> keys{few.data(), it->second.size()};
-        if (it->second.size() > few.size()) {
-            many.resize(it->second.size());
-            keys = many;
+        const std::size_t count = it->second.size();
+        if (count > few.size()) {
+            many.resize(count);
         }
+        const std::span<std::uint64_t> keys = count > few.size() ? std::span<std::uint64_t>{many} : std::span<std::uint64_t>{few.data(), count};
         for (std::size_t i = 0; i < keys.size(); ++i) {
             keys[i] = it->second[i].key;
         }

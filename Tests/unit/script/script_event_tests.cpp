@@ -414,3 +414,11 @@ TEST_CASE("a script event's C++ listeners keep the publisher's name when one of 
     CHECK(seen == std::vector<std::string>{"tests.sevents.leaving", "tests.sevents.leaving"});
     CHECK_FALSE(box.find("tests.sevents.leaving").has_value());
 }
+
+TEST_CASE("a script event reaches more handlers than a delivery keeps inline", "[script][script_events]") {
+    capture out;
+    sandbox box = make_box(out);
+    REQUIRE(box.exec("count = 0 for i = 1, 40 do rhp.on('game.crowd', function() count = count + 1 end) end rhp.publish('game.crowd')"));
+    box.pump();
+    CHECK(box.exec<int>("return count") == 40);
+}
