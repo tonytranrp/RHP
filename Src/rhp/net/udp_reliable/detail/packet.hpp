@@ -10,17 +10,21 @@
 //
 //   offset  size  field
 //        0     4  magic "RUDP" (little-endian 0x50445552)
-//        4     1  packet revision (1)
+//        4     1  packet revision (2)
 //        5     1  kind
 //        6     2  payload length
 //        8     8  connection token (random, nonzero; chosen by the dialer)
-//       16     8  sequence number (0 for hello/welcome/ack)
-//       24     8  cumulative ACK: every sequence <= this one arrived
+//       16     8  sequence number (0 for hello/welcome/ack/cookie)
+//       24     8  cumulative ACK: every sequence <= this one arrived (hello and cookie: the cookie)
 //       32     8  selective ACK: bit i set = sequence ack + 1 + i arrived
 //       40     n  payload (data only, n <= kMaxPayload)
 //     40+n     4  CRC-32C of everything before it
 //
 // The CRC catches corruption only; authentication is the session's job (PSK MAC or TLS).
+//
+// Opening: the dialer sends Hello (cookie 0); the listener answers Cookie (detail/cookie.hpp) and
+// keeps nothing; the dialer sends Hello again with that cookie; only then does the listener make the
+// link and answer Welcome. Revision 1 had no cookie (Hello was answered with Welcome at once).
 namespace Rhp::net::detail::rudp {
 
 enum class packet_kind : std::uint8_t {
@@ -28,11 +32,12 @@ enum class packet_kind : std::uint8_t {
     kWelcome = 2,
     kData = 3,
     kAck = 4,
-    kFin = 5
+    kFin = 5,
+    kCookie = 6
 };
 
 inline constexpr std::uint32_t kMagic = 0x50445552;
-inline constexpr std::uint8_t kRevision = 1;
+inline constexpr std::uint8_t kRevision = 2;
 inline constexpr std::size_t kHeaderBytes = 40;
 inline constexpr std::size_t kTrailerBytes = 4;
 // Payload that keeps a packet under the 576-byte IPv4 minimum reassembly size.

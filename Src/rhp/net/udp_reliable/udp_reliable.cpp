@@ -16,6 +16,7 @@
 #include <asio/steady_timer.hpp>
 
 #include <rhp/net/detail/asio_support.hpp>
+#include <rhp/net/udp_reliable/detail/cookie.hpp>
 #include <rhp/net/udp_reliable/detail/packet.hpp>
 #include <rhp/net/udp_reliable/udp_reliable.hpp>
 #include <rhp/platform/random.hpp>
@@ -66,6 +67,7 @@ struct udp_service : std::enable_shared_from_this<udp_service> {
     udp::socket socket;
     asio::steady_timer linger;
     accept_fn accept;
+    std::optional<rudp::cookie_jar> cookies; // a listener's: a Hello makes a peer only with one of its cookies
     std::map<peer_key, std::weak_ptr<peer_state>> peers;
     std::map<peer_key, tombstone> closed_peers;
     std::array<std::byte, rudp::kMaxPacket + 1> buffer{}; // one receive is outstanding at a time
@@ -121,8 +123,9 @@ struct peer_state : std::enable_shared_from_this<peer_state> {
     std::shared_ptr<udp_service> service;
     udp::endpoint remote;
     std::uint64_t token;
-    bool ready;           // handshake finished (always true for accepted peers)
-    bool closing = false; // close() asked: FIN follows the queued bytes
+    std::uint64_t cookie = 0; // a dialer's: the listener's cookie, echoed in every Hello once known
+    bool ready;               // handshake finished (always true for accepted peers)
+    bool closing = false;     // close() asked: FIN follows the queued bytes
     bool closed = false;
     bool fin_sent = false;
     bool ack_owed = false; // packets received this drain that no sent packet has acknowledged yet
@@ -152,6 +155,9 @@ struct peer_state : std::enable_shared_from_this<peer_state> {
     clock::time_point hello_sent{};
 
     [[nodiscard]] rudp::packet_header header(rudp::packet_kind kind, std::uint64_t seq = 0) const {
+        if (kind == rudp::packet_kind::kHello) {
+            return {kind, token, 0, cookie, 0};
+        }
         std::uint64_t sack = 0;
         for (auto it = received.lower_bound(recv_seq); it != received.end() && it->first - recv_seq < rudp::kWindow; ++it) {
             sack |= std::uint64_t{1} << (it->first - recv_seq);
@@ -445,6 +451,14 @@ void peer_state::ingest(const rudp::packet& in) {
             send(rudp::packet_kind::kWelcome); // our welcome was lost
         }
         return;
+    case rudp::packet_kind::kCookie:
+        if (!ready && h.ack != 0) {
+            // The listener's answer to our Hello: the same Hello again, with the cookie it made.
+            cookie = h.ack;
+            hello_sent = clock::now();
+            send(rudp::packet_kind::kHello);
+        }
+        return;
     case rudp::packet_kind::kWelcome:
         if (!ready) {
             ready = true;
@@ -564,7 +578,15 @@ void udp_service::dispatch(const rudp::packet& in, const udp::endpoint& source) 
         }
         return;
     }
-    if (in.header.kind != rudp::packet_kind::kHello || in.header.seq != 0 || !accept) {
+    if (in.header.kind != rudp::packet_kind::kHello || in.header.seq != 0 || !accept || !cookies) {
+        return;
+    }
+    // Nothing is kept for a Hello until it echoes a cookie made for its source, so a spoofed source
+    // (which never sees the cookie) costs one reply the size of its Hello.
+    const rudp::hello_source sender{detail::to_ip_address(source.address()).bytes(), source.port(), in.header.token};
+    const auto now = clock::now();
+    if (!cookies->valid(now, sender, in.header.ack)) {
+        send(source, {rudp::packet_kind::kCookie, in.header.token, 0, cookies->issue(now, sender), 0});
         return;
     }
     std::erase_if(peers, [](const auto& item) { return item.second.expired(); });
@@ -631,9 +653,14 @@ result<std::unique_ptr<listener>> udp_reliable::listen(io_context& io, const end
     if (!address) {
         return std::unexpected{std::move(address).error()};
     }
+    auto cookies = rudp::cookie_jar::make(clock::now());
+    if (!cookies) {
+        return std::unexpected{std::move(cookies).error()};
+    }
     if (auto ok = open_socket(*service, *address); !ok) {
         return std::unexpected{std::move(ok).error()};
     }
+    service->cookies = std::move(*cookies);
     service->accept = std::move(on_accept);
     service->receive();
     return std::make_unique<udp_listener>(std::move(service));

@@ -41,7 +41,7 @@ std::optional<packet> decode_packet(utils::bytes_view datagram) noexcept {
     out.header.ack = load<std::uint64_t>(datagram, 24);
     out.header.sack = load<std::uint64_t>(datagram, 32);
     const bool valid = load<std::uint32_t>(datagram, 0) == kMagic && std::to_integer<std::uint8_t>(datagram[4]) == kRevision &&
-                       kind >= static_cast<std::uint8_t>(packet_kind::kHello) && kind <= static_cast<std::uint8_t>(packet_kind::kFin) &&
+                       kind >= static_cast<std::uint8_t>(packet_kind::kHello) && kind <= static_cast<std::uint8_t>(packet_kind::kCookie) &&
                        out.header.token != 0 && size == body.size() - kHeaderBytes && (out.header.kind == packet_kind::kData || size == 0) &&
                        load<std::uint32_t>(datagram, body.size()) == utils::crc32c(body);
     if (!valid) {
