@@ -564,12 +564,7 @@ int bridge_due(lua_State* L) {
 
 // coverage() -> distinct (chunk, line) pairs that ran so far (0 while coverage is off)
 int bridge_coverage(lua_State* L) {
-    const coverage_report r = impl_of(L).coverage();
-    std::uint64_t n = 0;
-    for (const coverage_chunk& c : r.chunks) {
-        n += static_cast<std::uint64_t>(std::ranges::count_if(c.hits, [](std::uint64_t h) { return h != 0; })) + c.extra.size();
-    }
-    lua_pushinteger(L, static_cast<lua_Integer>(n));
+    lua_pushinteger(L, static_cast<lua_Integer>(impl_of(L).coverage_lines()));
     return 1;
 }
 
@@ -792,6 +787,10 @@ coverage_report sandbox_impl::coverage() const {
     }
     std::ranges::sort(out.chunks, {}, &coverage_chunk::chunk);
     return out;
+}
+
+std::uint64_t sandbox_impl::coverage_lines() const noexcept {
+    return coverage_ ? coverage_->distinct : 0;
 }
 
 coverage_report sandbox_impl::stop_coverage() {

@@ -392,7 +392,7 @@ int sandbox_impl::wait_event(lua_State* L, std::string_view event, std::optional
     waiters_[std::string{event}].push_back(me.id);
     acquire_interest(event, state);
     me.waiting = wait_kind::kEvent;
-    me.wait_event = std::string{event};
+    me.wait_event.assign(event); // in the pooled record's buffer
     if (timeout_ms) {
         me.wake_time = script_now() + milliseconds(*timeout_ms);
     }
@@ -422,10 +422,9 @@ void sandbox_impl::stop_waiting(request_record& req) noexcept {
         if (const auto it = waiters_.find(req.wait_event); it != waiters_.end()) {
             std::erase(it->second, req.id);
         }
-        const std::string event = std::move(req.wait_event);
-        req.wait_event.clear();
         req.waiting = wait_kind::kNone;
-        release_interest(event);
+        release_interest(req.wait_event);
+        req.wait_event.clear(); // keeps its buffer: the record is pooled
     } else if (req.waiting == wait_kind::kTask) {
         if (task_record* t = task(req.wait_task)) {
             std::erase(t->joiners, req.id);

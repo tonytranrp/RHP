@@ -414,6 +414,8 @@ public:
     result<void> set_gc_mode(gc_mode mode);
     result<void> start_coverage();
     [[nodiscard]] coverage_report coverage() const;
+    // The distinct (chunk, line) pairs that ran so far (0 while coverage is off): what coverage() counts.
+    [[nodiscard]] std::uint64_t coverage_lines() const noexcept;
     coverage_report stop_coverage();
     result<void> enable_testing(testing_options options);
     [[nodiscard]] std::optional<steady::time_point> next_due() const;

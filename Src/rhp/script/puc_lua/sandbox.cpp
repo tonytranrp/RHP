@@ -339,6 +339,7 @@ sandbox_impl::sandbox_impl(sandbox_options options)
     spare_requests_.reserve(kSpareRequests);
     spare_threads_.reserve(kSpareRequests);
     unlisted_.reserve(kSpareRequests); // runs nested deeper than this grow it (start_request may allocate anyway)
+    running_.reserve(kSpareRequests);  // likewise; the first sandbox::call can take call_unprotected's path
     call_keys_.reserve(kCallKeys);
     state_ = lua_newstate(&sandbox_impl::allocate, this, luaL_makeseed(nullptr));
     if (state_ == nullptr) {
