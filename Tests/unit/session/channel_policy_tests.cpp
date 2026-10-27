@@ -26,9 +26,9 @@ using Rhp::session::channel_policy;
 namespace channel_policy_fixtures {
 
 // A link from a given address; the test makes it deliver bytes. on_closed is posted, as for real links.
-class fake_link final : public Rhp::net::link {
+class policy_link final : public Rhp::net::link {
 public:
-    fake_link(Rhp::net::io_context& io, std::optional<ip_address> from, bool on_this_machine = false) : io_(io), from_(from), loopback_(on_this_machine) {}
+    policy_link(Rhp::net::io_context& io, std::optional<ip_address> from, bool on_this_machine = false) : io_(io), from_(from), loopback_(on_this_machine) {}
 
     void start(Rhp::net::link_handler& handler) override { handler_ = &handler; }
     void send(Rhp::utils::byte_buffer) override {}
@@ -56,7 +56,7 @@ constexpr auto kNone = Rhp::security::tls::backend_ops_for<Rhp::security::tls::n
 
 [[nodiscard]] Rhp::result<std::unique_ptr<Rhp::net::link>> wrap(const channel_policy& policy, Rhp::net::io_context& io, std::optional<ip_address> from,
                                                                 bool on_this_machine = false) {
-    return policy.wrap(std::unique_ptr<Rhp::net::link>{std::make_unique<fake_link>(io, from, on_this_machine)});
+    return policy.wrap(std::unique_ptr<Rhp::net::link>{std::make_unique<policy_link>(io, from, on_this_machine)});
 }
 
 } // namespace channel_policy_fixtures
@@ -121,8 +121,8 @@ TEST_CASE("channel_policy: an insecure_lan listener takes plaintext only from lo
         const auto policy = channel_policy::make(endpoint::listen("0.0.0.0", 7777, Rhp::net::insecure_lan), true, tls, {});
         REQUIRE(policy);
         CHECK(policy->tls());
-        auto far = std::make_unique<fake_link>(io, ip_address::v4(8, 8, 4, 4));
-        fake_link* raw = far.get();
+        auto far = std::make_unique<policy_link>(io, ip_address::v4(8, 8, 4, 4));
+        policy_link* raw = far.get();
         auto wrapped = policy->wrap(std::unique_ptr<Rhp::net::link>{std::move(far)});
         REQUIRE(wrapped);
         rhp_test::recorder seen;
@@ -133,8 +133,8 @@ TEST_CASE("channel_policy: an insecure_lan listener takes plaintext only from lo
         CHECK(seen.reason.message.find("insecure_lan") != std::string::npos);
         CHECK(seen.received.empty());
 
-        auto near = std::make_unique<fake_link>(io, ip_address::v4(192, 168, 0, 7));
-        fake_link* near_raw = near.get();
+        auto near = std::make_unique<policy_link>(io, ip_address::v4(192, 168, 0, 7));
+        policy_link* near_raw = near.get();
         auto near_wrapped = policy->wrap(std::unique_ptr<Rhp::net::link>{std::move(near)});
         REQUIRE(near_wrapped);
         rhp_test::recorder near_seen;
