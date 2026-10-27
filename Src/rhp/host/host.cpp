@@ -41,11 +41,11 @@
 #include <rhp/platform/random.hpp>
 #include <rhp/script/detail/event_registry.hpp>
 #include <rhp/script/ledger.hpp>
-#include <rhp/utils/fixed_string.hpp>
 #include <rhp/script/sandbox.hpp>
 #include <rhp/security/hash.hpp>
 #include <rhp/session/secure_link.hpp>
 #include <rhp/session/session.hpp>
+#include <rhp/utils/fixed_string.hpp>
 #include <rhp/utils/scope_guard.hpp>
 #include <rhp/utils/spsc_ring.hpp>
 #include <rhp/wire/messages.hpp>
@@ -338,7 +338,6 @@ public:
         if (setup_.ep.direction == net::endpoint::mode::kDial) {
             // Reverse mode: the host dials a listening client, and keeps dialing.
             reverse_ = true;
-            enforce_cancels();
             log(log_level::kInfo, "host dialing {} over {} (reverse mode{})", setup_.ep, setup_.transport.name, tls_note);
             dial_out();
             return;
@@ -351,7 +350,6 @@ public:
         }
         listener_ = std::move(*listener);
         listen_port_ = static_cast<std::uint16_t>(listener_->port());
-        enforce_cancels();
         log(log_level::kInfo, "host listening on {} over {} (port {}{})", setup_.ep, setup_.transport.name, listener_->port(), tls_note);
     }
 
@@ -764,7 +762,6 @@ private:
 
     struct identity_runtime {
         std::string name;
-        role granted = role::kObserve;
         std::unique_ptr<script::sandbox> box;
         std::shared_ptr<cancel_relay> relay;
         std::set<session_id> sessions;
@@ -774,10 +771,10 @@ private:
         std::map<request_id, event::script_executed> audits;
         session_id current_session; // the network request inside a sandbox call
         std::uint64_t current_req = 0;
-        std::set<module_id> pinned; // kept when the last session ends
+        std::set<module_id> pinned;        // kept when the last session ends
         Rhp::subscription script_listener; // the sandbox's script events → host.on_script_event and clients
-        std::set<session_id> debuggers; // sessions that set breakpoints or paused: the last one's end resets the debugger
-        session_id profiler;            // started the profiler: its end stops it
+        std::set<session_id> debuggers;    // sessions that set breakpoints or paused: the last one's end resets the debugger
+        session_id profiler;               // started the profiler: its end stops it
     };
 
     // A blob arriving on one session (one at a time).
@@ -794,7 +791,7 @@ private:
         role granted = role::kObserve;
         std::string peer;
         std::optional<blob_transfer> blob;
-        std::uint64_t failed_transfer = 0; // later chunks of a refused blob are refused quietly
+        std::uint64_t failed_transfer = 0;               // later chunks of a refused blob are refused quietly
         std::set<std::string, std::less<>> script_subs;  // rhp.publish names of its identity ("*": all)
         std::set<std::string, std::less<>> program_subs; // C++ lua_event names
         std::size_t sent_this_pump = 0;
@@ -1307,7 +1304,6 @@ private:
         if (it == identities_.end()) {
             identity_runtime rt;
             rt.name = in.identity;
-            rt.granted = in.granted;
             rt.relay = in.relay;
             rt.box = std::make_unique<script::sandbox>(sandbox_options_for(in.identity, in.granted));
             for (const auto& [name, fn] : installers_) {
@@ -1404,7 +1400,7 @@ private:
             publish(std::move(record));
         }
         log(log_level::kInfo, "identity {} reverted: {} effects undone, {} irreversible, {} failures", rt.name, report.undone, report.irreversible,
-                                          report.failures.size());
+            report.failures.size());
         if (wants<event::identity_reverted>()) {
             publish(event::identity_reverted{now(), rt.name, report.undone, report.irreversible, report.failures.size(), 0});
         }
@@ -1725,7 +1721,8 @@ private:
             audit_->module = module;
             audit_->hash = security::to_hex(security::blake2b_256(source));
         }
-        auto who = in.signer ? *in.signer : setup_.verify ? setup_.verify(source, signature) : result<std::string>{std::string{}};
+        auto who = in.signer ? *in.signer : setup_.verify ? setup_.verify(source, signature)
+                                                          : result<std::string>{std::string{}};
         if (!who && signature.is_nil() && sess.granted == role::kObserve) {
             who = std::string{}; // observe can't mutate anything: unsigned code is allowed
         }
@@ -2394,7 +2391,7 @@ private:
     std::map<session_id, std::string> http_sessions_; // network thread
     std::unique_ptr<net::advertisement> advertisement_;
     std::optional<net::advertise_options> advertise_options_; // pump-thread metadata
-    std::uint16_t listen_port_ = 0; // fixed once the constructor returns (listener_ belongs to the network thread)
+    std::uint16_t listen_port_ = 0;                           // fixed once the constructor returns (listener_ belongs to the network thread)
     std::map<session_id, io_session> sessions_;
     std::atomic<std::size_t> open_sessions_{0};
     bool stopping_ = false; // goodbye(): no new connections or dials
@@ -2440,9 +2437,8 @@ private:
     std::map<std::string, std::set<session_id>, std::less<>> program_subs_;
     std::map<std::string, script::detail::event_state*, std::less<>> program_attached_;
     std::atomic<std::thread::id> pump_thread_{}; // unclaimed until the first pump()
-    std::mutex program_mutex_; // guards program_inbox_ (fires from other threads)
+    std::mutex program_mutex_;                   // guards program_inbox_ (fires from other threads)
     std::vector<std::pair<std::string, std::vector<value>>> program_inbox_;
-
 };
 
 // ---- the C++ wall --------------------------------------------------------------------------------------
