@@ -397,3 +397,20 @@ TEST_CASE("finalizers run by a closing sandbox schedule and subscribe nothing", 
     CHECK(fx::cpp_event.listeners() == 0);
     fx::cpp_event.fire(1); // nothing listens to a destroyed sandbox
 }
+
+TEST_CASE("a script event's C++ listeners keep the publisher's name when one of them unloads it", "[script][script_events]") {
+    capture out;
+    sandbox box = make_box(out);
+    const auto publisher = box.load("tests.sevents.leaving", "function go() rhp.publish('game.leaving', 1) end");
+    REQUIRE(publisher.has_value());
+    std::vector<std::string> seen;
+    const auto first = box.on_script_event("game.leaving", [&](const Rhp::script::script_event& e) {
+        seen.emplace_back(e.module_name);
+        (void)box.unload(*publisher); // its record and name go now
+    });
+    const auto second = box.on_script_event("game.leaving", [&](const Rhp::script::script_event& e) { seen.emplace_back(e.module_name); });
+    REQUIRE(box.call(*publisher, "go"));
+    box.pump();
+    CHECK(seen == std::vector<std::string>{"tests.sevents.leaving", "tests.sevents.leaving"});
+    CHECK_FALSE(box.find("tests.sevents.leaving").has_value());
+}

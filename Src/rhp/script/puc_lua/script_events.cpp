@@ -470,8 +470,10 @@ int sandbox_impl::unpack_ref(lua_State* L, int ref) {
 
 void sandbox_impl::call_listeners() {
     for (auto& e : std::exchange(listener_calls_, {})) {
+        // A copy of the name: a callback may unload the module (its record goes) before the next one runs.
         const module_record* mod = e.publisher ? record(e.publisher) : nullptr;
-        const script_event view{e.name, e.publisher, mod != nullptr ? std::string_view{mod->name} : std::string_view{}, e.args};
+        const std::string module_name = mod != nullptr ? mod->name : std::string{};
+        const script_event view{e.name, e.publisher, module_name, e.args};
         listeners_->dispatch(e.name, view);
     }
 }
