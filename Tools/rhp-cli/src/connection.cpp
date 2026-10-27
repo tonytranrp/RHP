@@ -64,7 +64,9 @@ void add_connection_options(CLI::App& cmd, connection_options& o, bool positiona
 }
 
 std::optional<connected> open_connection(const connection_options& o, replxx::Replxx* rx, bool to_stderr) {
-    auto out = std::make_unique<terminal>(rx, !to_stderr && Rhp::platform::stdout_is_terminal() && Rhp::platform::environment_variable("NO_COLOR").empty(), to_stderr);
+    // Colors only where the terminal shows them (a classic Windows console needs them turned on).
+    const bool color = !to_stderr && Rhp::platform::stdout_is_terminal() && Rhp::platform::environment_variable("NO_COLOR").empty() && Rhp::platform::enable_ansi_colors();
+    auto out = std::make_unique<terminal>(rx, color, to_stderr);
     auto id = Rhp::security::identity_file::load(o.identity);
     if (!id) {
         (*out)(style::kError, std::format("{}", id.error()));
