@@ -1181,6 +1181,10 @@ struct runner::impl {
             }
             rr.files.push_back(run_file(f, out, stop));
         }
+        // Results the last test set from Lua belong to it, like every other test's (begin_test).
+        for (const std::string& path : std::exchange(lua_fake_returns, {})) {
+            fake_registry::instance().reset(path);
+        }
         for (const file_result& fr : rr.files) {
             rr.totals.file_errors += fr.errors.size();
             for (const test_result& t : fr.tests) {

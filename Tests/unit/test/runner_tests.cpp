@@ -882,6 +882,17 @@ TEST_CASE("fake of a lib records calls instead of reaching the program", "[test]
     CHECK_FALSE(Rhp::test::fake_registry::instance().strict());
 }
 
+TEST_CASE("fake results the last test set from Lua end with the run", "[test][fake]") {
+    const Rhp::test::install_fn install = [](Rhp::script::sandbox& box) { return box.install<Rhp::test::fake<arena_lib>>(); };
+    const Rhp::utils::scope_guard forget{[]() noexcept { Rhp::test::fake_registry::instance().reset(); }};
+    Rhp::test::run_options o = options_for({"fake_cpp_spec.lua"});
+    o.filters.emplace_back("fake.returns sets results"); // the only test: nothing runs after it
+    const run x = run_specs(o, install);
+    INFO(x.text);
+    CHECK(x.result.totals.passed == 1);
+    CHECK_FALSE(Rhp::test::fake_registry::instance().returns("arena.spawn").has_value());
+}
+
 namespace runner_tests_fixture {
 
 struct fake_point {
