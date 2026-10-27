@@ -79,6 +79,18 @@ struct quiet_stderr_logger : Rhp::core::stderr_logger {
 };
 using logged_cfg = Rhp::config<>::transport<Rhp::net::loopback>::logger<quiet_stderr_logger>;
 
+// A logger whose write() throws while a test arms it.
+std::atomic<bool> g_logger_throws{false};
+struct throwing_logger {
+    [[nodiscard]] static bool enabled(Rhp::log_level) noexcept { return true; }
+    static void write(Rhp::log_level, std::string_view) {
+        if (g_logger_throws.load()) {
+            throw std::runtime_error{"the log is full"};
+        }
+    }
+};
+using throwing_log_cfg = Rhp::config<>::transport<Rhp::net::loopback>::logger<throwing_logger>;
+
 struct keys {
     Rhp::security::key admin = *Rhp::security::key::generate();
     Rhp::security::key patch = *Rhp::security::key::generate();
@@ -784,6 +796,19 @@ TEST_CASE("host: the logger level may change while the network thread logs", "[i
         REQUIRE(c.connect()); // the network thread logs "authenticated" (info), then "ended" when c closes
     }
     done = true;
+}
+
+TEST_CASE("host: set_enabled survives a logger that throws", "[integration][host][log]") {
+    using namespace host_client_fixtures;
+    keys k;
+    Rhp::host<throwing_log_cfg> host{Rhp::endpoint::listen("hc.throwing_log", 1), k.ring(), k.trusted()};
+    REQUIRE(host.port());
+    g_logger_throws = true;
+    host.set_enabled(false); // noexcept: the logger's exception must not escape (std::terminate)
+    g_logger_throws = false;
+    CHECK_FALSE(host.enabled());
+    host.set_enabled(true);
+    CHECK(host.enabled());
 }
 
 TEST_CASE("host+client: a blocking call from the client network thread fails instead of deadlocking", "[integration][client][threads]") {

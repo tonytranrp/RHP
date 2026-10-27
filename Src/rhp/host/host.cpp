@@ -398,7 +398,10 @@ public:
 
     void set_enabled(bool on) noexcept {
         enabled_.store(on, std::memory_order_release);
-        log_text(log_level::kWarn, on ? "host enabled" : "host disabled: new connections are closed, requests answered kDisabled");
+        try {
+            log_text(log_level::kWarn, on ? "host enabled" : "host disabled: new connections are closed, requests answered kDisabled");
+        } catch (...) { // the user's logger threw (or its lock failed): the switch flipped all the same
+        }
     }
 
     [[nodiscard]] bool is_enabled() const noexcept { return enabled_.load(std::memory_order_acquire); }
