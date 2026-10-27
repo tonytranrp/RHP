@@ -1,5 +1,7 @@
 #include <array>
 #include <optional>
+#include <system_error>
+#include <vector>
 
 #include <asio/ip/udp.hpp>
 #include <rhp_test/datagram_relay.hpp>
@@ -89,6 +91,43 @@ struct datagram_relay::impl : std::enable_shared_from_this<impl> {
         });
     }
 };
+
+struct datagram_probe::impl : std::enable_shared_from_this<impl> {
+    using udp = asio::ip::udp;
+    explicit impl(Rhp::net::io_context& io) : socket(*static_cast<asio::io_context*>(io.native_handle()), udp::endpoint{asio::ip::make_address("127.0.0.1"), 0}) {}
+    udp::socket socket;
+    std::array<std::byte, 65536> buffer{};
+    udp::endpoint from;
+    std::vector<Rhp::utils::byte_buffer> received;
+
+    void receive() {
+        socket.async_receive_from(asio::buffer(buffer), from, [weak = weak_from_this()](const std::error_code& ec, std::size_t n) {
+            auto self = weak.lock();
+            if (!self || ec) {
+                return;
+            }
+            Rhp::utils::byte_buffer datagram;
+            datagram.append({self->buffer.data(), n});
+            self->received.push_back(std::move(datagram));
+            self->receive();
+        });
+    }
+};
+
+datagram_probe::datagram_probe(Rhp::net::io_context& io) : impl_(std::make_shared<impl>(io)) {
+    impl_->receive();
+}
+datagram_probe::~datagram_probe() {
+    std::error_code ignored;
+    impl_->socket.close(ignored);
+}
+void datagram_probe::send(unsigned short port, Rhp::utils::bytes_view datagram) {
+    std::error_code ignored;
+    impl_->socket.send_to(asio::buffer(datagram.data(), datagram.size()), asio::ip::udp::endpoint{asio::ip::make_address("127.0.0.1"), port}, 0, ignored);
+}
+const std::vector<Rhp::utils::byte_buffer>& datagram_probe::received() const {
+    return impl_->received;
+}
 
 datagram_relay::datagram_relay(Rhp::net::io_context& io, unsigned short server_port, datagram_faults faults)
     : impl_(std::make_shared<impl>(io, server_port, faults)) {

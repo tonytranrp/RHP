@@ -13,6 +13,7 @@ if(RHP_ENABLE)
         websocket/detail/protocol.cpp
         websocket/websocket.cpp
         udp_reliable/detail/packet.cpp
+        udp_reliable/detail/cookie.cpp
     )
     # The translation units that include Asio (see rhp_net_asio below). The private header they share,
 # detail/asio_support.hpp, is deliberately not in HEADERS: it includes Asio and is not installed.
@@ -51,6 +52,7 @@ rhp_add_module(net
         local/local.hpp
         udp_reliable/udp_reliable.hpp
         udp_reliable/detail/packet.hpp
+        udp_reliable/detail/cookie.hpp
     SOURCES
         ${rhp_net_sources}
     DEPS

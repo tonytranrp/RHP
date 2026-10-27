@@ -1,10 +1,26 @@
 #pragma once
 
 #include <memory>
+#include <vector>
 
 #include <rhp/net/io_context.hpp>
+#include <rhp/utils/byte_buffer.hpp>
 
 namespace rhp_test {
+
+// A bare UDP socket on 127.0.0.1 (native test backend): sends datagrams to a port on 127.0.0.1 and
+// keeps every datagram that comes back.
+class datagram_probe {
+public:
+    explicit datagram_probe(Rhp::net::io_context& io);
+    ~datagram_probe();
+    void send(unsigned short port, Rhp::utils::bytes_view datagram);
+    [[nodiscard]] const std::vector<Rhp::utils::byte_buffer>& received() const;
+
+private:
+    struct impl;
+    std::shared_ptr<impl> impl_;
+};
 
 struct datagram_faults {
     bool drop_data = false;
