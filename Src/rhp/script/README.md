@@ -74,6 +74,12 @@ pump() ─▶ queued C++ events ─▶ queued script events ─▶ frame callbac
 - Lifecycle operations from inside a run are deferred to the end of the outermost operation.
 - `sandbox_options::on_output` (print with its request and module), `on_result` and `sandbox::pending(request)` exist for `Rhp::host`, which answers network requests that suspended once `on_result` reports them.
 
+## What untrusted code can't do (Stage 13, AL3)
+
+Measured holes, closed for every hardening level ([decisions](../../../Docs/decisions/stage13-security.md)).
+
+- **Finalizers.** Lua runs `__gc` with its hooks off (`lgc.c` `GCTM` clears `allowhook`), where no limit, cancel or deadline reaches, so a finalizer that loops would hang the pump. Observe and patch identities get a `setmetatable` that refuses a metatable with a `__gc` field (`lua_safe_setmetatable`, a raw lookup, any value); Lua marks an object for finalization only when it gets a metatable that has `__gc` at that moment (`luaC_checkfinalizer`), so a `__gc` added to the metatable afterwards never runs. Admin keeps the standard one (and `debug.setmetatable`). `<close>` variables run with hooks on: they work, and stay limited.
+
 ## Rules
 
 - `lua.h` / `lauxlib.h` / `lualib.h` only in `puc_lua/*.cpp` (and `Tests/bench` raw-Lua twins). Headers forward-declare `lua_State`.

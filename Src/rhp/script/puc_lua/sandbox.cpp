@@ -152,6 +152,26 @@ int lua_safe_load(lua_State* L) {
     return lua_gettop(L) - 4;
 }
 
+// setmetatable(t, mt) for observe and patch: refuses a metatable with a __gc field. Lua runs
+// finalizers with its hooks off, where no limit, cancel or deadline reaches, so one that loops would
+// hang the pump. Lua marks an object for finalization only when it gets a metatable that has __gc
+// then (lgc.c, luaC_checkfinalizer), so a __gc added to the metatable later never runs.
+// Upvalue 1: the standard setmetatable.
+int lua_safe_setmetatable(lua_State* L) {
+    if (lua_type(L, 2) == LUA_TTABLE) {
+        lua_pushliteral(L, "__gc");
+        const bool finalizer = lua_rawget(L, 2) != LUA_TNIL;
+        lua_pop(L, 1);
+        if (finalizer) {
+            stack{L}.raise(make_error(errc::kForbidden, std::format("a metatable with __gc needs role {}", role::kAdmin), "setmetatable"));
+        }
+    }
+    lua_pushvalue(L, lua_upvalueindex(1));
+    lua_insert(L, 1);
+    lua_call(L, lua_gettop(L) - 1, LUA_MULTRET);
+    return lua_gettop(L);
+}
+
 // coroutine.resume / coroutine.close, refusing request coroutines: only the scheduler resumes them.
 // Upvalue 1: the standard function.
 int lua_guarded_coroutine(lua_State* L) {
@@ -428,6 +448,10 @@ void sandbox_impl::open_libraries() {
         lua_setfield(L, -2, "clock");
         lua_setglobal(L, "os");
         lua_pop(L, 1);
+        // No finalizers (lua_safe_setmetatable).
+        lua_getglobal(L, "setmetatable");
+        lua_pushcclosure(L, &lua_safe_setmetatable, 1);
+        lua_setglobal(L, "setmetatable");
     }
 
     // Binary chunks are never loaded, whatever the role: they are unverified and can crash the VM.

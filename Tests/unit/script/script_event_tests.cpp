@@ -381,9 +381,8 @@ TEST_CASE("an event carries many values to handlers and waiters", "[script][scri
 }
 
 TEST_CASE("finalizers run by a closing sandbox schedule and subscribe nothing", "[script][script_events]") {
-    capture out;
     {
-        sandbox box = make_box(out);
+        sandbox box{sandbox_options{.caller_role = Rhp::role::kAdmin, .output = [](std::string_view) {}}}; // __gc needs admin
         REQUIRE(box.exec(R"lua(
             _G.keep = setmetatable({}, {__gc = function()
                 pcall(rhp.every, 1, print)
