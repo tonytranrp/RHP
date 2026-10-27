@@ -20,7 +20,7 @@ namespace wire = Rhp::wire;
 namespace {
 
 // Through the codec too, as the session sends it.
-template <class T>
+template <Rhp::wire_convertible T>
 T roundtrip(const T& m) {
     Rhp::utils::byte_buffer bytes;
     REQUIRE(wire::msgpack::encode(Rhp::to_value(m), bytes));

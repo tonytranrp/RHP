@@ -3,7 +3,6 @@
 // gives the same bytes (payload, header, CRC and flags). The MACs and the handshake derivations are
 // covered end to end by the Python client's live tests against headless_server.
 #include <algorithm>
-#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <span>

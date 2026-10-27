@@ -50,14 +50,8 @@ struct events final : Rhp::session::handler {
     bool closed = false;
     Rhp::error why;
     std::vector<std::pair<op, value>> messages;
-    std::function<void(session&)> on_ready_hook;
 
-    void on_ready(session& s) override {
-        ready = true;
-        if (on_ready_hook) {
-            on_ready_hook(s);
-        }
-    }
+    void on_ready(session&) override { ready = true; }
     void on_message(session&, op code, value body) override { messages.emplace_back(code, std::move(body)); }
     void on_closed(session&, const Rhp::error& e) override {
         closed = true;
@@ -66,25 +60,21 @@ struct events final : Rhp::session::handler {
 };
 
 // Wraps a link and lets a test damage what goes out.
-class tampering_link final : public net_link {
+class tampering_link final : public Rhp::net::link_decorator {
 public:
     // Called with every outgoing write (one whole frame per write from a session) and its index.
     using tamper_fn = std::function<void(Rhp::utils::byte_buffer&, int)>;
 
-    tampering_link(std::unique_ptr<net_link> inner, tamper_fn fn) : inner_(std::move(inner)), fn_(std::move(fn)) {}
+    tampering_link(std::unique_ptr<net_link> inner, tamper_fn fn) : link_decorator(std::move(inner)), fn_(std::move(fn)) {}
 
-    void start(Rhp::net::link_handler& h) override { inner_->start(h); }
     void send(Rhp::utils::byte_buffer bytes) override {
         if (fn_) {
             fn_(bytes, writes_++);
         }
-        inner_->send(std::move(bytes));
+        link_decorator::send(std::move(bytes));
     }
-    void close() noexcept override { inner_->close(); }
-    [[nodiscard]] std::string peer() const override { return inner_->peer(); }
 
 private:
-    std::unique_ptr<net_link> inner_;
     tamper_fn fn_;
     int writes_ = 0;
 };
