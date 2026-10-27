@@ -201,6 +201,14 @@ bool stdout_is_terminal() noexcept {
 #endif
 }
 
+bool stdin_is_terminal() noexcept {
+#if defined(RHP_PLATFORM_WINDOWS)
+    return _isatty(_fileno(stdin)) != 0;
+#else
+    return isatty(STDIN_FILENO) != 0;
+#endif
+}
+
 bool enable_ansi_colors() noexcept {
     if (!stdout_is_terminal()) {
         return false;

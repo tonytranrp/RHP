@@ -6,8 +6,8 @@ Operating-system facts and services behind portable C++ APIs. Namespace `Rhp::pl
 |---|---|
 | `os.hpp` | `os_kind`, `kOs` / `kOsName`: the target OS from `RHP_PLATFORM_*` (sent in the handshake and in discovery records) |
 | `random.hpp` | `random_bytes(span)` / `random_array<N>()`: OS cryptographic randomness (nonces, keys, idempotency keys) |
-| `files.hpp` | `read_file`; `replace_file` (atomic: write a temporary next to it, flush, rename); `make_private_directory` (owner-only on POSIX); `stdout_is_terminal`, `enable_ansi_colors`, `binary_stdio` |
-| `process.hpp` | `run_process(program, args)`: start a program that shares this process's standard streams and wait for its exit status (`rhp-cli test --exe`) |
+| `files.hpp` | `read_file`; `replace_file` (atomic: write a temporary next to it, flush, rename); `make_private_directory` (owner-only on POSIX); `stdout_is_terminal`, `stdin_is_terminal`, `enable_ansi_colors`, `binary_stdio` |
+| `process.hpp` | `run_process(program, args)`: start a program that shares this process's standard streams and wait for its exit status (`rhp-cli test --exe`); `environment_variable(name)` |
 
 ```cpp
 auto bytes = Rhp::platform::read_file("keys.txt");          // kNotFound / kRuntime on failure

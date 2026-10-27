@@ -13,4 +13,7 @@ namespace Rhp::platform {
 // a signal ended it). A program without a folder is looked up on PATH. kDisabled on iOS.
 [[nodiscard]] result<int> run_process(const std::filesystem::path& program, std::span<const std::string> args);
 
+// The value of this process's environment variable `name` ("" when it isn't set).
+[[nodiscard]] std::string environment_variable(const std::string& name);
+
 } // namespace Rhp::platform

@@ -25,6 +25,9 @@ namespace Rhp::platform {
 // Standard output is a terminal (not a file or a pipe).
 [[nodiscard]] bool stdout_is_terminal() noexcept;
 
+// Standard input is a terminal (not a file or a pipe).
+[[nodiscard]] bool stdin_is_terminal() noexcept;
+
 // Lets the terminal on standard output show ANSI colors (turns them on in a Windows console); false
 // when it can't.
 [[nodiscard]] bool enable_ansi_colors() noexcept;

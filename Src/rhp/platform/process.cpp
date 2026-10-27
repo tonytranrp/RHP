@@ -1,4 +1,6 @@
 #include <cerrno>
+#include <cstddef>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <format>
@@ -173,5 +175,21 @@ result<int> run_process(const std::filesystem::path& program, std::span<const st
 }
 
 #endif
+
+std::string environment_variable(const std::string& name) {
+#if defined(RHP_PLATFORM_WINDOWS)
+    char* value = nullptr;
+    std::size_t length = 0;
+    if (_dupenv_s(&value, &length, name.c_str()) != 0 || value == nullptr) {
+        return {};
+    }
+    std::string out{value};
+    std::free(value);
+    return out;
+#else
+    const char* value = std::getenv(name.c_str());
+    return value != nullptr ? std::string{value} : std::string{};
+#endif
+}
 
 } // namespace Rhp::platform
