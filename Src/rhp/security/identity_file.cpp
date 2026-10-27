@@ -1,3 +1,5 @@
+#include <array>
+#include <cstddef>
 #include <filesystem>
 #include <format>
 #include <fstream>
@@ -14,6 +16,7 @@
 #include <rhp/security/ed25519.hpp>
 #include <rhp/security/identity_file.hpp>
 #include <rhp/security/key.hpp>
+#include <rhp/utils/scope_guard.hpp>
 
 namespace Rhp::security {
 
@@ -97,12 +100,40 @@ result<identity_file> identity_file::generate(std::string name) {
 }
 
 std::string identity_file::to_text() const {
-    std::string text = std::format("# RHP identity: keep it private (like an SSH key)\nname        = \"{}\"\npsk         = \"{}\"\n", name, psk.to_base64());
-    if (signing) {
-        text += std::format("signing_key = \"{}\"\n", signing->to_base64());
+    // The secrets' base64 stays in these two (wiped on the way out), and the text is reserved whole
+    // up front, so no reallocation leaves a copy behind in freed memory.
+    std::string psk_text = psk.to_base64();
+    std::string signing_text = signing ? signing->to_base64() : std::string{};
+    const utils::scope_guard wipe{[&]() noexcept {
+        secure_wipe(psk_text.data(), psk_text.size());
+        secure_wipe(signing_text.data(), signing_text.size());
+    }};
+    struct line {
+        std::string_view field; // padded, up to the opening quote
+        std::string_view value;
+        bool present;
+    };
+    const std::array<line, 4> lines{{
+        {"name        = \"", name, true},
+        {"psk         = \"", psk_text, true},
+        {"signing_key = \"", signing_text, signing.has_value()},
+        {"signer      = \"", signer, !signer.empty() && signer != name},
+    }};
+    constexpr std::string_view kHeader = "# RHP identity: keep it private (like an SSH key)\n";
+    constexpr std::string_view kEnd = "\"\n";
+    std::size_t size = kHeader.size();
+    for (const line& l : lines) {
+        size += l.present ? l.field.size() + l.value.size() + kEnd.size() : 0;
     }
-    if (!signer.empty() && signer != name) {
-        text += std::format("signer      = \"{}\"\n", signer);
+    std::string text;
+    text.reserve(size);
+    text += kHeader;
+    for (const line& l : lines) {
+        if (l.present) {
+            text += l.field;
+            text += l.value;
+            text += kEnd;
+        }
     }
     return text;
 }

@@ -14,6 +14,7 @@
 
 #include <mbedtls/error.h>
 #include <mbedtls/pk.h>
+#include <mbedtls/platform_util.h>
 #include <mbedtls/ssl.h>
 #include <mbedtls/x509_crt.h>
 #include <psa/crypto.h>
@@ -98,6 +99,17 @@ struct shared_config {
     return out;
 }
 
+// pem_bytes of a private key, zeroed when it goes.
+struct wiped_pem {
+    std::vector<unsigned char> bytes;
+
+    explicit wiped_pem(std::string_view pem) : bytes(pem_bytes(pem)) {}
+    ~wiped_pem() { mbedtls_platform_zeroize(bytes.data(), bytes.size()); }
+
+    wiped_pem(const wiped_pem&) = delete;
+    wiped_pem& operator=(const wiped_pem&) = delete;
+};
+
 // A fresh P-256 key pair in c.own_key.
 [[nodiscard]] result<void> make_key(shared_config& c) {
     psa_key_attributes_t attributes = PSA_KEY_ATTRIBUTES_INIT;
@@ -170,8 +182,8 @@ struct shared_config {
     if (const int ret = mbedtls_x509_crt_parse(&c.own_cert, cert.data(), cert.size()); ret != 0) {
         return failure(errc::kInvalidArgument, "cert_pem holds no usable certificate", ret);
     }
-    const auto key = pem_bytes(s.key_pem);
-    if (const int ret = mbedtls_pk_parse_key(&c.own_key, key.data(), key.size(), nullptr, 0); ret != 0) {
+    const wiped_pem key{s.key_pem};
+    if (const int ret = mbedtls_pk_parse_key(&c.own_key, key.bytes.data(), key.bytes.size(), nullptr, 0); ret != 0) {
         return failure(errc::kInvalidArgument, "key_pem holds no usable private key", ret);
     }
     if (const int ret = mbedtls_pk_check_pair(&c.own_cert.pk, &c.own_key); ret != 0) {

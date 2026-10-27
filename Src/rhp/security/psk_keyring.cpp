@@ -22,6 +22,7 @@
 #include <rhp/security/key.hpp>
 #include <rhp/security/psk_keyring.hpp>
 #include <rhp/utils/byte_buffer.hpp>
+#include <rhp/utils/scope_guard.hpp>
 #include <rhp/wire/frame.hpp>
 
 namespace Rhp::security {
@@ -96,11 +97,13 @@ private:
 [[nodiscard]] auth_grant make_grant(std::span<const std::byte> secret, std::span<const std::byte> t, bool host_side) {
     digest256 c2h = keyed_blake2b_256(secret, "rhp/c2h", t);
     digest256 h2c = keyed_blake2b_256(secret, "rhp/h2c", t);
+    const utils::scope_guard wipe{[&]() noexcept {
+        crypto_wipe(c2h.data(), c2h.size());
+        crypto_wipe(h2c.data(), h2c.size());
+    }};
     auth_grant grant;
     grant.outgoing = std::make_unique<blake2b_sealer>(host_side ? h2c : c2h);
     grant.incoming = std::make_unique<blake2b_sealer>(host_side ? c2h : h2c);
-    crypto_wipe(c2h.data(), c2h.size());
-    crypto_wipe(h2c.data(), h2c.size());
     return grant;
 }
 
@@ -148,13 +151,15 @@ public:
         if (!host_nonce) {
             return std::unexpected{std::move(host_nonce).error()};
         }
+        // Drawn for every name, so a known one takes the same path as an unknown one, which is
+        // answered exactly like a known one, with a secret nobody has.
+        auto fake = platform::random_array<kMacSize>();
+        if (!fake) {
+            return std::unexpected{std::move(fake).error()};
+        }
+        const utils::scope_guard wipe_fake{[&fake]() noexcept { crypto_wipe(fake->data(), fake->size()); }};
         entry_ = keys_->find(name_);
         if (entry_ == nullptr) {
-            // Unknown key: answer exactly like a known one, with a secret nobody has.
-            auto fake = platform::random_array<kMacSize>();
-            if (!fake) {
-                return std::unexpected{std::move(fake).error()};
-            }
             fake_secret_.assign(fake->begin(), fake->end());
         }
         transcript_ = transcript(name_, *client_nonce, *host_nonce, binding_);

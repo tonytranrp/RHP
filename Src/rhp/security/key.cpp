@@ -15,6 +15,7 @@
 #include <rhp/security/hash.hpp>
 #include <rhp/security/key.hpp>
 #include <rhp/utils/base64.hpp>
+#include <rhp/utils/scope_guard.hpp>
 
 namespace Rhp::security {
 
@@ -103,9 +104,8 @@ result<key> key::from_base64(std::string_view text) {
     if (!bytes) {
         return std::unexpected{std::move(bytes).error()};
     }
-    auto k = from_bytes(*bytes);
-    secure_wipe(bytes->data(), bytes->size());
-    return k;
+    const utils::scope_guard wipe{[&bytes]() noexcept { secure_wipe(bytes->data(), bytes->size()); }};
+    return from_bytes(*bytes);
 }
 
 result<key> key::from_env(std::string_view variable) {
