@@ -694,23 +694,8 @@ private:
 
     [[nodiscard]] session_id open_http(const security::http_grant& grant, const http_peer& peer) override {
         const session_id id = session_ids_.next();
-        auto& identity = io_identities_[grant.identity];
-        if (!identity.relay) {
-            identity.relay = std::make_shared<cancel_relay>();
-        }
-        ++identity.sessions;
-        ready_sessions_.fetch_add(1, std::memory_order_acq_rel);
         http_sessions_[id] = grant.identity;
-        inbound in;
-        in.what = inbound::kind::kOpened;
-        in.session = id;
-        in.identity = grant.identity;
-        in.granted = grant.granted;
-        in.relay = identity.relay;
-        in.peer = peer.address;
-        in.platform = "http";
-        in.tls = peer.tls;
-        (void)to_pump(std::move(in));
+        register_session(id, grant.identity, grant.granted, peer.address, "http", peer.tls);
         return id;
     }
 
@@ -718,25 +703,7 @@ private:
         if (http_sessions_.erase(id) == 0) {
             return;
         }
-        ready_sessions_.fetch_sub(1, std::memory_order_acq_rel);
-        if (auto identity = io_identities_.find(name); identity != io_identities_.end()) {
-            {
-                const std::scoped_lock lock{identity->second.relay->mutex};
-                identity->second.relay->end(id);
-            }
-            if (--identity->second.sessions == 0) {
-                orphans_.push_back(identity->second.relay);
-                io_identities_.erase(identity);
-            }
-            arm_enforce();
-        }
-        inbound in;
-        in.what = inbound::kind::kClosed;
-        in.session = id;
-        in.identity = std::string{name};
-        in.peer = "http";
-        in.reason = why;
-        (void)to_pump(std::move(in));
+        unregister_session(id, name, "http", why);
     }
 
     [[nodiscard]] bool submit_http(session_id id, std::uint64_t req, wire::op code, value body, const http_peer& peer) override {
@@ -997,23 +964,8 @@ private:
         }
         it->second.ready = true;
         it->second.identity = s.identity();
-        io_identity& ident = io_identities_[s.identity()];
-        if (ident.relay == nullptr) {
-            ident.relay = std::make_shared<cancel_relay>();
-        }
-        ++ident.sessions;
-        ready_sessions_.fetch_add(1, std::memory_order_acq_rel);
         log(log_level::kInfo, "session {} from {} ({}) authenticated as {} ({})", s.id(), s.peer(), s.peer_platform(), s.identity(), s.granted());
-        inbound in;
-        in.what = inbound::kind::kOpened;
-        in.session = s.id();
-        in.identity = s.identity();
-        in.granted = s.granted();
-        in.relay = ident.relay;
-        in.peer = s.peer();
-        in.platform = s.peer_platform();
-        in.tls = s.encrypted();
-        to_pump(std::move(in));
+        register_session(s.id(), s.identity(), s.granted(), s.peer(), s.peer_platform(), s.encrypted());
     }
 
     void on_message(session::session& s, wire::op code, value body) override {
@@ -1091,28 +1043,7 @@ private:
         const std::string identity = it->second.identity;
         if (was_ready) {
             log(log_level::kInfo, "session {} ({}) ended: {}", id, identity, why);
-            ready_sessions_.fetch_sub(1, std::memory_order_acq_rel);
-            if (auto ident = io_identities_.find(identity); ident != io_identities_.end()) {
-                // Nobody is left to answer: stop what this session runs, has suspended or queued.
-                {
-                    const std::scoped_lock lock{ident->second.relay->mutex};
-                    ident->second.relay->end(id);
-                }
-                if (--ident->second.sessions == 0) {
-                    // The identity's last session; pump() reverts the rest. Its relay stays on the
-                    // enforce timer until pump() has let go of the sandbox.
-                    orphans_.push_back(ident->second.relay);
-                    io_identities_.erase(ident);
-                }
-                arm_enforce();
-            }
-            inbound in;
-            in.what = inbound::kind::kClosed;
-            in.session = id;
-            in.identity = identity;
-            in.peer = s.peer();
-            in.reason = why;
-            to_pump(std::move(in));
+            unregister_session(id, identity, s.peer(), why);
         } else if (s.handed_over()) {
             --pending_handshakes_; // it only carried a resume: its link went to that session
         } else {
@@ -1128,6 +1059,54 @@ private:
                 redial();
             }
         }
+    }
+
+    // A session authenticated (a native one, or an HTTP identity's logical one): counted in its
+    // identity (whose cancel relay it gets) and handed to pump(), which gives the identity a sandbox
+    // if it has none.
+    void register_session(session_id id, const std::string& identity, role granted, std::string peer, std::string platform, bool tls) {
+        io_identity& ident = io_identities_[identity];
+        if (ident.relay == nullptr) {
+            ident.relay = std::make_shared<cancel_relay>();
+        }
+        ++ident.sessions;
+        ready_sessions_.fetch_add(1, std::memory_order_acq_rel);
+        inbound in;
+        in.what = inbound::kind::kOpened;
+        in.session = id;
+        in.identity = identity;
+        in.granted = granted;
+        in.relay = ident.relay;
+        in.peer = std::move(peer);
+        in.platform = std::move(platform);
+        in.tls = tls;
+        (void)to_pump(std::move(in));
+    }
+
+    // An authenticated session ended: nobody is left to answer it, so what it runs, has suspended or
+    // queued is stopped, and pump() hears of it.
+    void unregister_session(session_id id, std::string_view identity, std::string peer, const error& why) {
+        ready_sessions_.fetch_sub(1, std::memory_order_acq_rel);
+        if (auto ident = io_identities_.find(identity); ident != io_identities_.end()) {
+            {
+                const std::scoped_lock lock{ident->second.relay->mutex};
+                ident->second.relay->end(id);
+            }
+            if (--ident->second.sessions == 0) {
+                // The identity's last session; pump() reverts the rest. Its relay stays on the
+                // enforce timer until pump() has let go of the sandbox.
+                orphans_.push_back(ident->second.relay);
+                io_identities_.erase(ident);
+            }
+            arm_enforce();
+        }
+        inbound in;
+        in.what = inbound::kind::kClosed;
+        in.session = id;
+        in.identity = std::string{identity};
+        in.peer = std::move(peer);
+        in.reason = why;
+        (void)to_pump(std::move(in));
     }
 
     void cancel_from_network(session::session& s, const value& body, std::uint64_t arrival) {
@@ -1388,14 +1367,18 @@ private:
         identity_count_.store(identities_.size(), std::memory_order_release);
     }
 
+    // No session of the identity is left to cancel anything: the network loses its way to the
+    // sandbox, and the cancels and suspended requests it recorded go.
+    static void detach_relay(identity_runtime& rt) {
+        const std::scoped_lock lock{rt.relay->mutex};
+        rt.relay->box = nullptr;
+        rt.relay->suspended.clear();
+        rt.relay->cancels.clear();
+    }
+
     // Disconnect = revert: the identity's last session is gone (or the host is).
     void teardown(identity_runtime& rt) {
-        {
-            const std::scoped_lock lock{rt.relay->mutex};
-            rt.relay->box = nullptr;
-            rt.relay->suspended.clear();
-            rt.relay->cancels.clear();
-        }
+        detach_relay(rt);
         const script::revert_report report = rt.box->revert_all();
         // Asynchronous calls still running for it: a success arriving later is still taken back.
         if (script::async_leftovers left = rt.box->release_async(); !left.empty()) {
@@ -1417,12 +1400,7 @@ private:
     // The identity's last session ended but an admin pinned some of its modules: keep those (and
     // every module they require), revert and unload the rest, keep the sandbox.
     void release(identity_runtime& rt) {
-        {
-            const std::scoped_lock lock{rt.relay->mutex};
-            rt.relay->box = nullptr; // no session is left to cancel anything
-            rt.relay->suspended.clear();
-            rt.relay->cancels.clear();
-        }
+        detach_relay(rt);
         const std::vector<script::module_info> modules = rt.box->list();
         std::set<module_id> keep = rt.pinned;
         for (bool grew = true; grew;) {
