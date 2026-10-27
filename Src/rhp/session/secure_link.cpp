@@ -262,10 +262,9 @@ result<channel_policy> channel_policy::make(const net::endpoint& ep, bool networ
             return p;
         }
         security::tls::settings client = settings;
-        // With a CA, check the name too: by default the one dialed (unless it is an IP address).
-        const bool ip = ep.host.find_first_not_of("0123456789.:[]abcdefABCDEF") == std::string::npos &&
-                        ep.host.find_first_of("0123456789") != std::string::npos;
-        if (!client.ca_pem.empty() && client.server_name.empty() && !ip) {
+        // With a CA, check the name too: by default the one dialed, unless it is an IP address (one
+        // that parses as IPv4 or IPv6: "cafe1" and "db1.de" are names, and get checked).
+        if (!client.ca_pem.empty() && client.server_name.empty() && !net::ip_address::parse(ep.host)) {
             client.server_name = ep.host;
         }
         auto ctx = backend.client(client);
