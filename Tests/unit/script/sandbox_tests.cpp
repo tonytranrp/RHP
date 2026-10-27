@@ -26,6 +26,7 @@
 #include <rhp/script/lib.hpp>
 #include <rhp/script/puc_lua/lua_internals.hpp>
 #include <rhp/script/sandbox.hpp>
+#include <rhp/script/testing.hpp>
 
 using Rhp::errc;
 using Rhp::role;
@@ -724,6 +725,65 @@ TEST_CASE("revert_all unloads every module and reverts scratch", "[script][sandb
     // Still usable.
     REQUIRE(box.exec("counter.value = 8"));
     CHECK(fx::g_counter == 8);
+}
+
+TEST_CASE("revert_all puts back the library tables scripts changed", "[script][sandbox][builtins]") {
+    output_capture out;
+    sandbox box = make_box(out);
+    // Nothing stands between a script and the library tables (no proxy: no cost on the hot path).
+    CHECK(box.exec<bool>("return getmetatable(string) == nil and rawget(string, 'upper') == string.upper and getmetatable('').__index == string") == true);
+    REQUIRE(box.load("tests.builtins", R"lua(
+        string.upper = function() return "hijacked" end
+        string.shout = string.upper
+        string.rep = nil
+        table.insert = nil
+        math.pi = 3
+        setmetatable(math, {__index = function() return 42 end})
+        getmetatable("").__add = function() return "added" end
+        getmetatable("").__index = {len = function() return -1 end}
+        os.time = function() return 0 end
+        rhp.after = nil
+        rhp.buffer.new = nil
+        coroutine.wrap = nil
+    )lua"));
+    REQUIRE(box.exec("utf8.char = print"));
+    // The tables are shared: every module of the identity sees the changes until it reverts.
+    CHECK(box.exec<std::string>("return string.upper('x')") == "hijacked");
+    CHECK(box.exec<int>("return ('abc'):len()") == -1);
+    CHECK(box.exec<int>("return math.nothing") == 42);
+
+    (void)box.revert_all();
+    CHECK(box.list().size() == 1); // scratch only
+    const auto problems = box.exec<std::string>(R"lua(
+        local problems = {}
+        local function check(ok, what) if not ok then problems[#problems + 1] = what end end
+        check(string.upper("x") == "X", "string.upper")
+        check(string.shout == nil, "string.shout")
+        check(string.rep("a", 2) == "aa", "string.rep")
+        check(type(table.insert) == "function", "table.insert")
+        check(math.pi > 3.14, "math.pi")
+        check(getmetatable(math) == nil and math.nothing == nil, "math's metatable")
+        check(("10" + 1) == 11, "string arithmetic")
+        check(getmetatable("").__index == string and ("abc"):len() == 3, "string methods")
+        check(os.time() > 0, "os.time")
+        check(type(rhp.after) == "function", "rhp.after")
+        check(type(rhp.buffer.new) == "function", "rhp.buffer.new")
+        check(type(coroutine.wrap) == "function", "coroutine.wrap")
+        check(utf8.char(65) == "A", "utf8.char")
+        return table.concat(problems, ", ")
+    )lua");
+    CHECK(problems == "");
+
+    // What RHP itself put in a library table after the sandbox was made stays: the test bridge's clock.
+    rhp_test::manual_clock clock;
+    sandbox_options options;
+    options.clock = clock.fn();
+    options.output = [](std::string_view) {};
+    sandbox tested{std::move(options)};
+    REQUIRE(tested.enable_testing(Rhp::script::testing_options{.fake_os_epoch = 1000}));
+    REQUIRE(tested.exec("os.time = nil os.clock = nil"));
+    (void)tested.revert_all();
+    CHECK(tested.exec<std::int64_t>("return os.time()") == 1000);
 }
 
 TEST_CASE("destroying a sandbox reverts everything", "[script][sandbox]") {

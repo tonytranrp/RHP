@@ -851,6 +851,7 @@ revert_report sandbox_impl::revert_all() {
             }
         }
         report += revert_module(*record(scratch_));
+        restore_builtins(); // the identity leaves no changed string, table, ... behind
         return report;
     };
     if (defer_if_running([apply] { (void)apply(); })) {
