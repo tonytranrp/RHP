@@ -302,7 +302,11 @@ public:
             c.watches.clear();
         } else {
             c.state.candidate = id;
-            start_watch(c);
+            if (mode == confirm_mode::kHealth) {
+                start_watch(c);
+            } else {
+                c.watches.clear(); // kManual: confirm() decides, nothing watches it
+            }
         }
         c.state.confirm = mode;
         if (auto saved = persist(); !saved) {

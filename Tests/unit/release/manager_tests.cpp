@@ -348,6 +348,30 @@ TEST_CASE("a candidate that publishes a fail event is rolled back", "[release][m
     CHECK(fx::g_speed == 2);
 }
 
+TEST_CASE("a manual candidate is not health watched", "[release][manager]") {
+    fixture f;
+    auto m = f.make();
+    REQUIRE(m.apply(f.speed_release(1, 2)));
+    const std::string source = "game.speed = 8 rhp.after(0, function() rhp.publish('game.desync') end) rhp.every_frame(function() error('bad frame') end)";
+    auto man = manifest_for("game.balance", 2, {{"tuning", source}});
+    man.health.fail_events = {"game.desync"};
+    const auto cand = m.apply(envelope(man, {{"tuning", source}}, {&f.dev}), confirm_mode::kManual);
+    REQUIRE(cand.has_value());
+    for (int i = 0; i < 4; ++i) {
+        m.pump();
+    }
+    f.clocks->steady += std::chrono::milliseconds{1500}; // past health_window
+    m.pump();
+    auto s = *status_of(m.status(), "game.balance");
+    CHECK(s.running == slot::kCandidate); // neither rolled back nor confirmed by the health watch
+    CHECK(s.handler_failures == 0);
+    CHECK(fx::g_speed == 8);
+    REQUIRE(m.confirm("game.balance", cand->id));
+    s = *status_of(m.status(), "game.balance");
+    CHECK(s.running == slot::kActive);
+    CHECK(s.active->seq == 2);
+}
+
 TEST_CASE("deactivate with hold leaves the channel empty", "[release][manager]") {
     fixture f;
     auto m = f.make();
