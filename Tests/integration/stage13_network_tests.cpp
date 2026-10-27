@@ -330,3 +330,44 @@ TEST_CASE("stage13: auth_failed names the key that was tried", "[stage13][admiss
     CHECK(seen[1].key == "patch");
     CHECK(seen[1].reason.code == errc::kAuth);
 }
+
+// ---- a listening client ---------------------------------------------------------------------------------
+
+TEST_CASE("stage13: stalled connections don't keep a real host from a listening client", "[stage13][reverse][admission]") {
+    // A handshake deadline long enough that a stalled connection holding the client would fail the test.
+    using slow_cfg = tcp_cfg::limits<Rhp::limits{.handshake_timeout_ms = 60'000}>;
+    keys k;
+    Rhp::client_options patient;
+    patient.connect_timeout = 10s;
+    Rhp::client<slow_cfg> c{Rhp::endpoint::listen("127.0.0.1", 0), k.as("patch"), k.dev(), patient};
+    const auto port = c.port();
+    REQUIRE(port);
+    const auto at = Rhp::endpoint::dial("127.0.0.1", *port);
+    raw_peers raw;
+    const auto silent = raw.open<Rhp::net::tcp>(at);
+    const auto stalled = raw.open<Rhp::net::tcp>(at);
+    raw.speak(stalled); // the start of a frame, and then nothing
+    raw.settle();
+    pumped_host<slow_cfg> host{at, k.ring(), k.trusted()}; // reverse mode: the host dials the client
+    const auto started = std::chrono::steady_clock::now();
+    CHECK(c.exec<int>("return 5") == 5);
+    CHECK(std::chrono::steady_clock::now() - started < 5s);
+    CHECK(c.info().identity == "patch");
+    // The host that authenticated first is served; the connections still handshaking are closed.
+    REQUIRE(rhp_test::poll_until({&raw.io}, [&] { return raw.closed(silent) && raw.closed(stalled); }));
+    CHECK(c.exec<int>("return 6") == 6);
+}
+
+TEST_CASE("stage13: a listening client drops a connection that sends nothing", "[stage13][reverse][admission]") {
+    using quick_cfg = tcp_cfg::limits<Rhp::limits{.handshake_timeout_ms = 60'000, .first_byte_ms = 150}>;
+    keys k;
+    Rhp::client<quick_cfg> c{Rhp::endpoint::listen("127.0.0.1", 0), k.as("patch"), k.dev()};
+    const auto port = c.port();
+    REQUIRE(port);
+    raw_peers raw;
+    const auto silent = raw.open<Rhp::net::tcp>(Rhp::endpoint::dial("127.0.0.1", *port));
+    REQUIRE(rhp_test::poll_until({&raw.io}, [&] { return raw.closed(silent); }, 5s));
+    // Neither the drop nor the wait failed anything: a host that comes now is served.
+    pumped_host<quick_cfg> host{Rhp::endpoint::dial("127.0.0.1", *port), k.ring(), k.trusted()};
+    CHECK(c.exec<int>("return 8") == 8);
+}
