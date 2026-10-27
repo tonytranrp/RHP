@@ -5,7 +5,6 @@
 #include <cstdint>
 #include <string>
 #include <string_view>
-#include <type_traits>
 #include <variant>
 #include <vector>
 
@@ -13,6 +12,7 @@
 #include <rhp/core/ids.hpp>
 #include <rhp/core/role.hpp>
 #include <rhp/core/value.hpp>
+#include <rhp/utils/type_list.hpp>
 
 namespace Rhp::event {
 
@@ -111,8 +111,8 @@ struct handler_failed {
     time_point time;
     std::string identity;
     std::string module;
-    std::string kind;   // "timer", "frame", "event" or "task"
-    std::string source; // the event name, or "timer" / "frame" / "task"
+    std::string kind;          // "timer", "frame", "event" or "task"
+    std::string source;        // the event name, or "timer" / "frame" / "task"
     std::uint64_t handler = 0; // the id the script holds (0: none)
     std::string action;
     error outcome;
@@ -128,8 +128,8 @@ struct release_changed {
     std::string release;  // what it is about (empty: none)
     std::string fallback; // rolled_back: what runs instead (empty: nothing)
     std::uint64_t seq = 0;
-    std::string reason;   // rolled_back: why ("unhealthy: ...", "deactivated", "revoked", "expired")
-    error outcome;        // refused: why
+    std::string reason; // rolled_back: why ("unhealthy: ...", "deactivated", "revoked", "expired")
+    error outcome;      // refused: why
 };
 
 // Every host event, for handlers that take them all (the audit sinks). New kinds go at the end.
@@ -149,27 +149,24 @@ struct script_event {
 
 namespace detail {
 
-template <class E, class V>
-struct index_of;
+template <class V>
+struct alternatives;
 
-template <class E, class... Ts>
-struct index_of<E, std::variant<Ts...>> {
-    static constexpr std::size_t find() {
-        std::size_t i = 0;
-        const bool found = ((std::is_same_v<E, Ts> ? true : (++i, false)) || ...);
-        return found ? i : sizeof...(Ts);
-    }
-    static constexpr std::size_t value = find();
+template <class... Ts>
+struct alternatives<std::variant<Ts...>> {
+    using type = utils::type_list<Ts...>;
 };
+
+using host_events = alternatives<any>::type;
 
 } // namespace detail
 
 // One of the event types above.
 template <class E>
-concept host_event = detail::index_of<E, any>::value < std::variant_size_v<any>;
+concept host_event = utils::contains_v<detail::host_events, E>;
 
 template <host_event E>
-inline constexpr std::size_t kind_of = detail::index_of<E, any>::value;
+inline constexpr std::size_t kind_of = utils::index_of_v<detail::host_events, E>;
 
 // One line of JSON (no trailing newline): {"event":"script_executed","time":"2026-10-08T22:13:00.123Z",...}.
 [[nodiscard]] std::string to_json(const any& e);

@@ -2,16 +2,13 @@
 
 #include <concepts>
 #include <cstddef>
-#include <algorithm>
 #include <cstdint>
 #include <functional>
 #include <memory>
-#include <mutex>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <variant>
-#include <vector>
 
 #include <rhp/core/listener_table.hpp>
 #include <rhp/core/subscription.hpp>
@@ -32,7 +29,6 @@ public:
     std::uint64_t add(std::size_t kind, handler fn);
 
     void unsubscribe(std::uint64_t id) noexcept override;
-    void remove(std::uint64_t id) noexcept { unsubscribe(id); }
 
     // True if anyone listens to `kind` (lets the host skip building events nobody wants).
     [[nodiscard]] bool wants(std::size_t kind) const;
@@ -84,4 +80,3 @@ namespace Rhp::core {
 extern template class listener_table<std::size_t, event::hub::handler>;
 extern template class listener_table<std::string, event::script_hub::handler>;
 } // namespace Rhp::core
-

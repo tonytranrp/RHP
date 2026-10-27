@@ -1,6 +1,8 @@
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <format>
+#include <iterator>
 #include <string>
 #include <string_view>
 #include <variant>
@@ -31,7 +33,7 @@ public:
 
     json_object& number(std::string_view key, std::uint64_t v) {
         name(key);
-        text_ += std::format("{}", v);
+        std::format_to(std::back_inserter(text_), "{}", v);
         return *this;
     }
 
@@ -98,7 +100,7 @@ private:
             case '\t': text_ += "\\t"; break;
             default:
                 if (static_cast<unsigned char>(c) < 0x20) {
-                    text_ += std::format("\\u{:04x}", static_cast<unsigned>(static_cast<unsigned char>(c)));
+                    std::format_to(std::back_inserter(text_), "\\u{:04x}", static_cast<unsigned>(static_cast<unsigned char>(c)));
                 } else {
                     text_ += c;
                 }
