@@ -60,6 +60,18 @@ std::vector<std::string> rhp_fuzz_seeds() {
         R"(rhp.every_frame(function() error('x') end))",
         R"(_G.k = setmetatable({}, {__gc = function() pcall(rhp.every, 1, print) pcall(rhp.spawn, print) end}))",
         R"(rhp.reschedule(rhp.every_frames(1, print), math.huge))",
+        // Stage 13 (AL3): finalizers run with hooks off, pattern matching runs in C, handlers outlive the request.
+        R"(setmetatable({}, {__gc = function() while true do end end}))",
+        R"(local mt = {} local t = setmetatable({}, mt) mt.__gc = function() while true do end end t = nil for i = 1, 1e5 do local x = {} end)",
+        R"lua(return string.find(("a"):rep(5000), ("a*"):rep(10) .. "b"))lua",
+        R"lua(for m in ("a"):rep(5000):gmatch(("a-"):rep(10) .. "b") do end)lua",
+        R"lua(return string.find(("("):rep(1 << 16), "%b()"))lua",
+        R"lua(return string.find(("a"):rep(1 << 20), ("a"):rep(1 << 16) .. "b", 1, true))lua",
+        R"(rhp.every_frame(function() while true do end end))",
+        R"(rhp.on('a.b', function() while true do end end) rhp.publish('a.b'))",
+        R"(rhp.spawn(function() while true do string.find(('a'):rep(5000), ('a*'):rep(10) .. 'b') end end))",
+        R"(return tostring(print), string.format('%p', {}), tostring(coroutine.running()))",
+        R"(string.rep = nil getmetatable('').__index = nil table.concat = error)",
     };
 }
 
