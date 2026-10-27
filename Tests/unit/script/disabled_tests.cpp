@@ -50,7 +50,7 @@ TEST_CASE("disabled sandbox reports kDisabled", "[script][disabled]") {
     REQUIRE(box.memory_used() == 0);
 }
 
-TEST_CASE("disabled reload, rollback and unload report kDisabled", "[script][disabled]") {
+TEST_CASE("disabled reload rollback and unload report kDisabled", "[script][disabled]") {
     Rhp::script::sandbox box;
     const Rhp::module_id mod{1};
     REQUIRE(box.reload(mod, "return {}").error().code == Rhp::errc::kDisabled);

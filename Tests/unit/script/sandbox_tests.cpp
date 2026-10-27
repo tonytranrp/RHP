@@ -144,7 +144,7 @@ TEST_CASE("admin gets the full standard library", "[script][sandbox]") {
     CHECK(*problems == "");
 }
 
-TEST_CASE("load accepts text only, for every role", "[script][sandbox]") {
+TEST_CASE("load accepts text only for every role", "[script][sandbox]") {
     SECTION("binary chunks are refused even for admin and mode b") {
         output_capture out;
         sandbox box = make_box(out, role::kAdmin);

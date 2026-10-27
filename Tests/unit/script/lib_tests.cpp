@@ -268,7 +268,7 @@ TEST_CASE("installable checks every type crossing the boundary", "[script][lib]"
                        Rhp::lib<"s">::handle<"other", fx::other_id, &fx::is_other_alive>>>);
 }
 
-TEST_CASE("convertible, pushable and pullable", "[script][lib]") {
+TEST_CASE("convertible pushable and pullable", "[script][lib]") {
     using Rhp::convertible;
     using Rhp::script::pullable;
     using Rhp::script::pushable;

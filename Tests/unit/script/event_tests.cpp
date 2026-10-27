@@ -220,7 +220,7 @@ TEST_CASE("rhp.off can't remove another module's subscription", "[script][events
     CHECK(out.lines == std::vector<std::string>{"kept"});
 }
 
-TEST_CASE("handlers run in subscription order, each as its own request", "[script][events]") {
+TEST_CASE("handlers run in subscription order each as its own request", "[script][events]") {
     capture out;
     sandbox box = make_box(out);
     const auto a = box.load("tests.events.order_a", R"lua(
@@ -236,7 +236,7 @@ TEST_CASE("handlers run in subscription order, each as its own request", "[scrip
     CHECK(out.lines == std::vector<std::string>{"a1", "b1", "a2"});
 }
 
-TEST_CASE("a failing handler faults only its own module, at once outside a run", "[script][events]") {
+TEST_CASE("a failing handler faults only its own module at once outside a run", "[script][events]") {
     fx::g_counter = 0;
     capture out;
     sandbox box = make_box(out, {}, Rhp::script::handler_error_policy::kFault);
@@ -359,7 +359,7 @@ TEST_CASE("rhp.on validates the event and the handler", "[script][events]") {
     STATIC_REQUIRE(decltype(fx::ping)::name == "tests.events.ping");
 }
 
-TEST_CASE("unsubscribing: rhp.off, revert, unload and destruction", "[script][events]") {
+TEST_CASE("unsubscribing: rhp.off revert unload and destruction", "[script][events]") {
     capture out;
     sandbox box = make_box(out);
     const auto mod = box.load("tests.events.off", R"lua(

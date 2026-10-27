@@ -121,7 +121,7 @@ TEST_CASE("reload runs the new revision in a fresh environment next to the old o
     CHECK(fx::g_counter == 0);
 }
 
-TEST_CASE("reload order: new top level and on_load, then old on_save, then new on_restore", "[script][reload]") {
+TEST_CASE("reload order: new top level and on_load then old on_save then new on_restore", "[script][reload]") {
     capture out;
     sandbox box = make_box(out);
     const auto mod = box.load("tests.reload.order", R"lua(
@@ -169,7 +169,7 @@ TEST_CASE("on_save runs only for an active old revision", "[script][reload]") {
     CHECK_FALSE(info->fault.has_value());
 }
 
-TEST_CASE("reload removes the old revision's timers, subscriptions and suspended requests", "[script][reload]") {
+TEST_CASE("reload removes the old revision's timers subscriptions and suspended requests", "[script][reload]") {
     manual_clock clock;
     capture out;
     sandbox box = make_box(out, {}, &clock);
@@ -576,7 +576,7 @@ TEST_CASE("reload swaps patch handlers; a failed reload keeps the old one", "[sc
     CHECK(fx::damage.depth() == 0);
 }
 
-TEST_CASE("effects made in on_save belong to the old revision, in on_restore to the new", "[script][reload]") {
+TEST_CASE("effects made in on_save belong to the old revision in on_restore to the new", "[script][reload]") {
     manual_clock clock;
     capture out;
     sandbox box = make_box(out, {}, &clock);
@@ -610,7 +610,7 @@ TEST_CASE("a module reverted while loading can be reloaded", "[script][reload]")
     CHECK(call_value(box, *mod, "which") == Rhp::value{"old"});
 }
 
-TEST_CASE("on_unload runs on unload, can't suspend, and its errors are ignored", "[script][reload]") {
+TEST_CASE("on_unload runs on unload can't suspend and its errors are ignored", "[script][reload]") {
     capture out;
     sandbox box = make_box(out);
     const auto quiet = box.load("tests.reload.unload_print", "counter.value = 1 function on_unload() print('bye') end");

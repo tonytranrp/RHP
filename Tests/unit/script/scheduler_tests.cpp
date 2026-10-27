@@ -285,7 +285,7 @@ TEST_CASE("smoke: reload keeps state through on_save / on_restore", "[script][sc
     CHECK(fx::g_counter == 20);
 }
 
-TEST_CASE("smoke: require, cycles and force unload", "[script][scheduler]") {
+TEST_CASE("smoke: require cycles and force unload", "[script][scheduler]") {
     capture out;
     sandbox box = make_box(out);
     const auto a = box.load("tests.sched.a", "return { value = function() return 1 end }");
@@ -307,7 +307,7 @@ TEST_CASE("smoke: require, cycles and force unload", "[script][scheduler]") {
     CHECK(dead.error().code == errc::kUnloaded);
 }
 
-TEST_CASE("smoke: events, timers, emit", "[script][scheduler]") {
+TEST_CASE("smoke: events timers emit", "[script][scheduler]") {
     capture out;
     sandbox box = make_box(out);
     const auto mod = box.load("tests.sched.events", R"lua(
@@ -685,7 +685,7 @@ TEST_CASE("a time slice yields a long request; it continues at the next pump", "
     CHECK(*n > 0);
 }
 
-TEST_CASE("loads, calls and game-code events each get a time slice", "[script][scheduler]") {
+TEST_CASE("loads calls and game-code events each get a time slice", "[script][scheduler]") {
     capture out;
     Rhp::limits limits;
     limits.slice_us = 2'000;
@@ -880,7 +880,7 @@ TEST_CASE("wall time is summed over a request's resumes; suspended time is free"
     CHECK(out.results[0].second->at(0) == Rhp::value{"idle"});
 }
 
-TEST_CASE("instruction budgets are per request, summed over resumes", "[script][scheduler]") {
+TEST_CASE("instruction budgets are per request summed over resumes", "[script][scheduler]") {
     capture out;
     Rhp::limits limits;
     limits.instructions = 60'000;
@@ -1144,7 +1144,7 @@ TEST_CASE("timers due in the same pump fire in due order", "[script][scheduler]"
     CHECK(out.lines == std::vector<std::string>{"a", "b", "c"});
 }
 
-TEST_CASE("revert, unload and a reload swap remove timers", "[script][scheduler]") {
+TEST_CASE("revert unload and a reload swap remove timers", "[script][scheduler]") {
     manual_clock clock;
     capture out;
     sandbox box = make_box(out, {}, clock.fn());
@@ -1419,7 +1419,7 @@ TEST_CASE("lifecycle operations outside a run are not deferred", "[script][sched
 
 // ---- stubs ---------------------------------------------------------------------------------------------------------------
 
-TEST_CASE("sandbox stubs: the rhp API, then every installed lib, for the caller's role", "[script][scheduler]") {
+TEST_CASE("sandbox stubs: the rhp API then every installed lib for the caller's role", "[script][scheduler]") {
     namespace stubs = Rhp::script::stubs;
     for (const Rhp::role caller : {Rhp::role::kObserve, Rhp::role::kPatch, Rhp::role::kAdmin}) {
         CAPTURE(caller);

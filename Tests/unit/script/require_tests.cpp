@@ -50,7 +50,7 @@ constexpr std::string_view kB = R"lua(
 
 } // namespace
 
-TEST_CASE("require returns a cached, read-only proxy of a loaded module", "[script][require]") {
+TEST_CASE("require returns a cached read-only proxy of a loaded module", "[script][require]") {
     sandbox box = make_box();
     const auto a = box.load("tests.req.a", kA);
     const auto b = box.load("tests.req.b", kB);

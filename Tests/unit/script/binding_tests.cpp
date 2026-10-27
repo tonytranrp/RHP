@@ -316,7 +316,7 @@ TEST_CASE("arguments are checked and labelled", "[script][binding]") {
     }
 }
 
-TEST_CASE("results: tuples, Rhp::result and exceptions", "[script][binding]") {
+TEST_CASE("results: tuples Rhp::result and exceptions", "[script][binding]") {
     sandbox box = make_game_box();
 
     const auto values = box.exec("return game.triple()");

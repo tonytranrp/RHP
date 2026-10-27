@@ -273,7 +273,7 @@ TEST_CASE("a script's span writes are undone with its module", "[script][views]"
     CHECK(fx::g_samples == std::vector<float>{1.0f, 2.0f, 3.0f, 4.0f});
 }
 
-TEST_CASE("one journal entry per span per request, not per element", "[script][views]") {
+TEST_CASE("one journal entry per span per request not per element", "[script][views]") {
     sandbox box = make_box();
     const std::size_t before = box.effects().size();
     run(box, "local v = vt.samples() for k = 1, 100 do for i = 1, #v do v[i] = k end end");
@@ -418,7 +418,7 @@ TEST_CASE("slices share memory and stay bounded", "[script][views]") {
     CHECK(fx::g_ints[1] == 20);
 }
 
-TEST_CASE("bulk helpers fill, copy and totable", "[script][views]") {
+TEST_CASE("bulk helpers fill copy and totable", "[script][views]") {
     sandbox box = make_box();
     run(box, "vt.ints():fill(5, 2, 3)");
     CHECK(fx::g_ints == std::array<std::int32_t, 4>{10, 5, 5, 40});
@@ -454,7 +454,7 @@ TEST_CASE("a read-only span parameter takes a table copied for the call", "[scri
     CHECK(has(err.message, "element 2"));
 }
 
-TEST_CASE("a byte span parameter takes strings, buffers and byte views", "[script][views]") {
+TEST_CASE("a byte span parameter takes strings buffers and byte views", "[script][views]") {
     sandbox box = make_box();
     CHECK(run(box, "return vt.byte_count('hello'), vt.byte_count(rhp.buffer.new(7)), vt.byte_count(vt.bytes()), vt.first_byte('A')") ==
           value_list{Rhp::value{5}, Rhp::value{7}, Rhp::value{8}, Rhp::value{65}});
@@ -512,7 +512,7 @@ TEST_CASE("a struct view reads and writes fields in place", "[script][views]") {
     CHECK(t.tags[2] == 9);
 }
 
-TEST_CASE("struct view fields check their tags, types and writability", "[script][views]") {
+TEST_CASE("struct view fields check their tags types and writability", "[script][views]") {
     sandbox box = make_box();
     run(box, "body = vt.make_body() t = body:transform()");
     auto err = fails(box, "t.layer = 32");
@@ -547,7 +547,7 @@ TEST_CASE("a struct view's writes are undone with its module", "[script][views]"
     CHECK(fx::g_main.pos.x == 9.0f);
 }
 
-TEST_CASE("a kept view raises once its object is gone, and a null pointer is nil", "[script][views]") {
+TEST_CASE("a kept view raises once its object is gone and a null pointer is nil", "[script][views]") {
     sandbox box = make_box();
     const auto mod = box.load("tests.views.keeper", "body = vt.make_body() tf = body:transform() tf.layer = 4 m = tf.m");
     REQUIRE(mod.has_value());
@@ -768,7 +768,7 @@ TEST_CASE("a test swaps a view binding like any lib function", "[script][views][
     CHECK(run(box, "return vt.samples():kind()") == value_list{Rhp::value{"f32"}});
 }
 
-TEST_CASE("stubs describe spans, view types and buffers", "[script][views][stubs]") {
+TEST_CASE("stubs describe spans view types and buffers", "[script][views][stubs]") {
     const std::string patch = Rhp::script::stubs::generate<fx::view_lib>(Rhp::role::kPatch);
     CHECK(has(patch, "---@return rhp.span<number>\nfunction vt.samples() end"));
     CHECK(has(patch, "---@param arg1 rhp.span<integer>\n---@return integer\nfunction vt.sum_ints(arg1) end"));
