@@ -1,4 +1,5 @@
-# Layer 3: the script engine. Lua is a PRIVATE dependency and only puc_lua/*.cpp include lua.h.
+# Layer 3: the script engine. Lua and platform (the OS random source) are PRIVATE dependencies, and
+# only puc_lua/*.cpp include lua.h.
 # With RHP_ENABLE=OFF the sandbox compiles to an inert stub and Lua is neither fetched nor linked;
 # the lib DSL, ledger and patch points (direct calls) still build.
 set(rhp_script_sources
@@ -32,7 +33,7 @@ if(RHP_ENABLE)
         puc_lua/view_journal.cpp
         puc_lua/views.cpp
     )
-    list(APPEND rhp_script_private_deps Rhp::lua)
+    list(APPEND rhp_script_private_deps Rhp::lua Rhp::platform)
 else()
     list(APPEND rhp_script_sources sandbox_disabled.cpp)
 endif()

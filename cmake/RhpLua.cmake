@@ -76,7 +76,14 @@ _rhp_lua_patch(lstrlib.c "      if (memcmp(init, s2+1, l2) == 0)\n"
                          "      rhp_lua_step(L, rhp_steps, 1 + l2 / RHP_LUA_BYTES_PER_STEP);\n      if (memcmp(init, s2+1, l2) == 0)\n")
 _rhp_lua_patch(lstrlib.c "lmemfind(s + init, ls - init, p, lp)"
                          "lmemfind(L, s + init, ls - init, p, lp)")
+# Addresses: string.format's %p and tostring show a keyed hash, not the address (rhp_lua_topointer).
+_rhp_lua_patch(lstrlib.c "          const void *p = lua_topointer(L, arg);\n"
+                         "          const void *p = rhp_lua_topointer(L, arg);\n")
 _rhp_lua_write(lstrlib.c)
+_rhp_lua_read(lauxlib.c)
+_rhp_lua_patch(lauxlib.c "lua_pushfstring(L, \"%s: %p\", kind, lua_topointer(L, idx));"
+                         "lua_pushfstring(L, \"%s: %p\", kind, rhp_lua_topointer(L, idx));")
+_rhp_lua_write(lauxlib.c)
 
 add_library(rhp_lua STATIC "${PROJECT_SOURCE_DIR}/cmake/lua/lua_cxx.cpp")
 target_include_directories(rhp_lua PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/rhp_lua")

@@ -4,7 +4,9 @@
 // collectvalidlines), which onelua.c compiles as static functions.
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
+#include <span>
 #include <string_view>
 #include <vector>
 
@@ -83,6 +85,14 @@ bool hook_at_safepoints(lua_State* L) noexcept {
 
 void set_step_function(lua_State* L, int (*f)(lua_State*)) {
     rhp_lua_set_step_function(L, f);
+}
+
+void set_address_key(lua_State* L, std::span<const std::byte, 16> key) {
+    rhp_lua_set_address_key(L, reinterpret_cast<const char*>(key.data()));
+}
+
+const void* shown_pointer(lua_State* L, int index) {
+    return rhp_lua_topointer(L, index);
 }
 
 std::uint32_t take_hook_progress(lua_State* L) noexcept {

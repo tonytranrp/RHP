@@ -1,4 +1,7 @@
+#include <array>
+#include <charconv>
 #include <cstddef>
+#include <cstdint>
 #include <memory_resource>
 #include <optional>
 #include <span>
@@ -9,6 +12,9 @@
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
+#include <lauxlib.h>
+#include <lua.h>
+#include <lualib.h>
 #include <rhp_test/script_support.hpp>
 
 #include <rhp/core/error.hpp>
@@ -18,6 +24,7 @@
 #include <rhp/core/role.hpp>
 #include <rhp/core/value.hpp>
 #include <rhp/script/lib.hpp>
+#include <rhp/script/puc_lua/lua_internals.hpp>
 #include <rhp/script/sandbox.hpp>
 
 using Rhp::errc;
@@ -65,6 +72,19 @@ bool contains(std::string_view haystack, std::string_view needle) {
 template <class T>
 bool is_nil_result(const Rhp::result<std::optional<T>>& r) {
     return r.has_value() && !r->has_value();
+}
+
+// The hex number at the end of what tostring, %p or a described result shows ("table: 0x1f2e",
+// "table: 00001F2E", "0x1f2e").
+std::uint64_t shown_number(std::string_view text) {
+    text = text.substr(text.rfind(' ') + 1);
+    if (text.starts_with("0x")) {
+        text.remove_prefix(2);
+    }
+    std::uint64_t n = 0;
+    const auto parsed = std::from_chars(text.data(), text.data() + text.size(), n, 16);
+    CHECK(parsed.ptr == text.data() + text.size());
+    return n;
 }
 
 std::string describe(const Rhp::error& err) {
@@ -236,6 +256,64 @@ TEST_CASE("only admin may give a table a finalizer", "[script][sandbox][gc]") {
         REQUIRE(box.collect_garbage());
         CHECK(out.lines == std::vector<std::string>{"finalized"});
     }
+}
+
+TEST_CASE("tostring and %p show a keyed hash instead of an address", "[script][sandbox][addresses]") {
+    output_capture out;
+    sandbox box = make_box(out, role::kObserve);
+    // One object always shows the same value, tostring and %p agree, and live objects never share one.
+    REQUIRE(box.exec(R"lua(
+        local t = {}
+        local text = tostring(t)
+        local live, seen = {}, {}
+        for i = 1, 2000 do
+            live[i] = {}
+            local s = tostring(live[i])
+            assert(not seen[s], "two live tables show the same value")
+            seen[s] = true
+        end
+        assert(tostring(t) == text, "a table's value changed")
+        print(text .. "\t" .. string.format("%p", t))
+    )lua"));
+    REQUIRE(out.lines.size() == 1);
+    const std::string_view line = out.lines[0];
+    CHECK(shown_number(line.substr(0, line.find('\t'))) == shown_number(line.substr(line.find('\t') + 1)));
+    CHECK(box.exec<std::string>("return string.format('%p', 1)") == "(null)"); // nothing to show, as before
+
+    // A C function's address is the program's: a plain Lua state shows it, each sandbox a hash of its own.
+    lua_State* raw = luaL_newstate();
+    luaL_openlibs(raw);
+    lua_getglobal(raw, "string");
+    lua_getfield(raw, -1, "len");
+    const auto address = reinterpret_cast<std::uintptr_t>(lua_topointer(raw, -1));
+    CHECK(shown_number(luaL_tolstring(raw, -1, nullptr)) == address);
+    lua_close(raw);
+    const auto shown = box.exec<std::string>("return tostring(string.len)");
+    REQUIRE(shown.has_value());
+    CHECK(shown_number(*shown) != address);
+    sandbox other = make_box(out);
+    CHECK(other.exec<std::string>("return tostring(string.len)") != shown);
+
+    // A result RHP can't convert is described with the value tostring shows.
+    const auto described = box.exec("return string.len");
+    REQUIRE(described.has_value());
+    REQUIRE(described->front().is_string());
+    CHECK(shown_number(*described->front().get_if<std::string>()) == shown_number(*shown));
+}
+
+TEST_CASE("the value shown for an address is SipHash-2-4 under the sandbox's key", "[script][sandbox][addresses]") {
+    // The reference vector: key 00..0f, message 00..07 (a light userdata of that value) -> 0x93f5f5799a932462.
+    namespace internals = Rhp::script::detail::internals;
+    std::array<std::byte, 16> key{};
+    for (std::size_t i = 0; i < key.size(); ++i) {
+        key[i] = static_cast<std::byte>(i);
+    }
+    lua_State* L = luaL_newstate();
+    internals::set_address_key(L, key);
+    lua_pushlightuserdata(L, reinterpret_cast<void*>(std::uintptr_t{0x0706050403020100}));
+    CHECK(reinterpret_cast<std::uintptr_t>(internals::shown_pointer(L, -1)) == 0x93f5f5799a932462);
+    CHECK(shown_number(luaL_tolstring(L, -1, nullptr)) == 0x93f5f5799a932462);
+    lua_close(L);
 }
 
 TEST_CASE("each module has its own environment", "[script][sandbox]") {
