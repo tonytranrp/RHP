@@ -36,6 +36,7 @@ Usage: [getting started](../guide/getting-started.md#installed-package), [config
 - **Why:** the check is a count hook, and while any hook is set Lua traps every instruction: a tight loop ran 1.8x and recursive code 2.4x slower than raw Lua. The host's cancel relay only ever targets requests (a client cancels what it sent), so handlers paid for checks nobody could trigger.
 - **Alternatives:** arming the hook from the cancelling thread (`lua_sethook` walks the call stack: unsafe from another thread); a larger check interval (the trap is per instruction regardless of the count).
 - **Consequences:** `sandbox::cancel()` from a watchdog thread no longer stops a handler stuck in a loop unless `kEverything` is set; limits still do. Tests cover both scopes.
+- **As built since the Lua speed pass:** the armed hook counts at safe points (loop back-edges and Lua calls, `internals::set_safepoint_hook`), so it no longer traps every instruction and armed code runs at about raw speed; the scopes still decide where it is armed ([performance and build speed](performance-and-build-speed.md)).
 
 ## Allocator
 

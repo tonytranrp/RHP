@@ -32,7 +32,7 @@ int lua_rhp_stats(lua_State* L);
 int lua_rhp_spawn(lua_State* L);
 int lua_rhp_tasks(lua_State* L);
 
-// tools.cpp: tunables (and the debugger and profiler).
+// tools.cpp: tunables.
 int lua_rhp_tunables(lua_State* L);
 // Pushes the value at a dotted lib path ("game.sub.speed") through the lib proxies' getters (nil
 // when a part is missing). May raise.

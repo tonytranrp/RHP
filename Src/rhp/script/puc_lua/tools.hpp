@@ -1,6 +1,7 @@
 #pragma once
 
-// Private to Src/rhp/script/puc_lua: the profiler's and the debugger's state (profile.cpp, debug.cpp).
+// Private to Src/rhp/script/puc_lua: the state of the profiler (profile.cpp), the debugger
+// (debug.cpp) and line coverage (testing.cpp).
 
 #include <algorithm>
 #include <chrono>

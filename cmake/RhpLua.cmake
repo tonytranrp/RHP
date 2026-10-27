@@ -1,8 +1,9 @@
 include_guard(GLOBAL)
 
-# rhp_lua: PUC Lua built as C++ (see cmake/lua/lua_cxx.cpp). Only Rhp::script links it, PRIVATE,
-# so lua.h never reaches a consumer. Upstream sources are not warning-clean under RHP's flags,
-# so this target keeps the compiler defaults and is marked SYSTEM for includers.
+# rhp_lua: PUC Lua built as C++ (see cmake/lua/lua_cxx.cpp). Rhp::script links it PRIVATE, so lua.h
+# never reaches a consumer; RHP's own script tests and benchmarks link it too (they compare with a
+# plain Lua state). Upstream sources are not warning-clean under RHP's flags, so this target keeps
+# the compiler defaults and is marked SYSTEM for includers.
 if(NOT DEFINED lua_SOURCE_DIR)
     message(FATAL_ERROR "RHP: include RhpLua after CPMAddPackage(NAME lua ...)")
 endif()

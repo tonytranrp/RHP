@@ -9,8 +9,9 @@
 // (lua_yield / lua_yieldk, itself or through a helper it calls) must hold no C++ object with a
 // destructor at that point. In RHP those are rhp.wait, rhp.next_frame, rhp.sleep, rhp.wait_event,
 // task:join (Src/rhp/script/puc_lua) and every asynchronous binding (detail::call_fn ->
-// detail::yield_async, Src/rhp/script/detail/lib_builder.hpp); the time-slice yield in the count hook
-// is safe either way (Lua jumps after the hook has returned).
+// detail::yield_async, Src/rhp/script/detail/lib_builder.hpp). Yields from the hook are safe either
+// way, the time-slice yield in the count hook and the debugger's pause in the line hook
+// (Src/rhp/script/puc_lua/debug.cpp): Lua jumps after the hook has returned.
 //
 // x64 Windows: the CRT's longjmp unwinds (runs the skipped frames' destructors, like an exception)
 // when the buffer names the frame setjmp ran in, and only restores the registers when that frame is

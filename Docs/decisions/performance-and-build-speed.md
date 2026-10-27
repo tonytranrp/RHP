@@ -178,7 +178,8 @@ request id: a deferred `report` would also undo what later handlers and nested d
 after the mark. Skipping `arm_hook` for a reused coroutine whose hook is already off: it restarts the
 countdown a budget is measured by, and the hook functions are being reworked separately. The
 remaining costs per call are the result vector's allocation (the API returns a `value_list`),
-`lua_resume`, the operation scope's two `lua_sethook` calls and the record's bookkeeping.
+`lua_resume`, the operation scope's two hook switches (`internals::set_safepoint_hook` when the
+hook only counts, `lua_sethook` otherwise) and the record's bookkeeping.
 
 **The debugger with breakpoints only** runs line events in the functions whose lines hold one
 (`scope_lines`, debug.cpp): call and return events switch them, keeping the instruction countdown

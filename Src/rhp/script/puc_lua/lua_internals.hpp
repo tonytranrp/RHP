@@ -1,8 +1,10 @@
 #pragma once
 
-// Private to Src/rhp/script/puc_lua: the few things the test tools read from inside PUC Lua's
-// structures (lua_internals.cpp is the only file that includes Lua's private headers). Lua is built
-// from a pinned source (cmake/Dependencies.cmake), so these layouts are the ones compiled in.
+// Private to Src/rhp/script/puc_lua: the few things RHP reads or sets inside PUC Lua's structures,
+// for the hook (counting at safe points, line events per function, the countdown in progress) and
+// the tools (the meter, coverage, the debugger's scopes); lua_internals.cpp is the only file that
+// includes Lua's private headers. Lua is built from a pinned source (cmake/Dependencies.cmake), so
+// these layouts are the ones compiled in.
 
 #include <cstdint>
 #include <string_view>
