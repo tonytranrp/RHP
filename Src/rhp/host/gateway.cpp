@@ -462,12 +462,15 @@ void http_gateway::reply(session_id session, wire::op code, std::uint64_t req, c
 }
 
 void http_gateway::stop() {
-    impl_->idle_timer.cancel();
     impl_->listener.reset();
+    close_all(make_error(errc::kTransport, "the host is shutting down", kWhere));
+}
+
+void http_gateway::close_all(const error& why) {
+    impl_->idle_timer.cancel();
     // Pending requests get an answer first; closing links still flush it after they are released.
-    const auto stopping = make_error(errc::kTransport, "the host is shutting down", kWhere);
     for (auto& [name, id] : impl_->identities) {
-        impl_->close_identity(name, id, stopping);
+        impl_->close_identity(name, id, why);
     }
     impl_->identities.clear();
     for (auto& [id, conn] : impl_->connections) {

@@ -179,8 +179,12 @@ public:
 #endif
     }
 
-    // Runtime kill switch (any thread). While off, new connections are closed and every request is
-    // answered kDisabled; what already ran stays (send revert_all first to undo it).
+    // Runtime kill switch (any thread). Off: every session closes (kDisabled; each identity reverts as
+    // on disconnect, except modules an admin pinned), new connections are refused, a reverse-mode
+    // host stops dialing, and pump() runs no scripts - no requests (answered kDisabled), handlers,
+    // tasks or release channels - until it is switched on again, which resumes all of it (dialing
+    // too). Pinned modules and release channels stay loaded: a patch they hold still runs when game
+    // code calls its point (revert_all and release_deactivate remove them first).
     void set_enabled(bool on) noexcept {
 #if RHP_ENABLE
         host_detail::set_enabled(*engine_, on);
