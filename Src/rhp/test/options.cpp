@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <charconv>
 #include <chrono>
+#include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -37,7 +38,7 @@ std::vector<std::string> split_list(std::string_view text) {
     return out;
 }
 
-template <class T>
+template <std::integral T>
 std::optional<T> number(std::string_view text) {
     T v{};
     const auto [end, ec] = std::from_chars(text.data(), text.data() + text.size(), v);

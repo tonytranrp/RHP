@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <format>
@@ -87,7 +88,7 @@ std::string_view compiled_cache::bytecode_for(script::sandbox& box, const releas
     return chunks.made[i];
 }
 
-template <class F>
+template <std::invocable F>
 auto compiled_cache::tracked(script::sandbox& box, std::size_t i, chunk_set& chunks, F&& load) {
     const bool from_store = !chunks.stored_code(i).empty();
     const std::uint64_t refused_before = box.stats().bytecode_rejected;

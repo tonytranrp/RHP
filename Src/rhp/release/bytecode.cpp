@@ -24,10 +24,6 @@ namespace {
 constexpr std::string_view kTag = "release-bytecode";
 constexpr std::size_t kMac = security::digest256{}.size();
 
-std::span<const std::byte> key_bytes(const security::key& key) {
-    return key.bytes();
-}
-
 } // namespace
 
 security::digest256 compiled_build() {
@@ -57,7 +53,7 @@ result<std::vector<std::byte>> seal_compiled(const compiled_release& r, const se
     if (!body) {
         return std::unexpected{std::move(body).error()};
     }
-    const security::digest256 mac = security::keyed_blake2b_256(key_bytes(key), kBytecodeMacDomain, *body);
+    const security::digest256 mac = security::keyed_blake2b_256(key.bytes(), kBytecodeMacDomain, *body);
     std::vector<std::byte> out;
     out.reserve(kMac + body->size());
     out.insert(out.end(), mac.begin(), mac.end());
@@ -76,7 +72,7 @@ result<compiled_release> open_compiled(std::span<const std::byte> entry, const s
     const auto body = entry.subspan(kMac);
     security::digest256 claimed{};
     std::copy_n(entry.begin(), kMac, claimed.begin());
-    if (!security::digests_equal(claimed, security::keyed_blake2b_256(key_bytes(key), kBytecodeMacDomain, body))) {
+    if (!security::digests_equal(claimed, security::keyed_blake2b_256(key.bytes(), kBytecodeMacDomain, body))) {
         return fail(errc::kIntegrity, "a bytecode cache entry doesn't match its MAC (another key, or it was changed)", "release.bytecode");
     }
     auto v = detail::decode(body);

@@ -4,6 +4,7 @@
 // bytecode.hpp). Bytecode is only ever read from the store, and only after its MAC checks out under the
 // host's key; envelopes from the wire are parsed (text).
 
+#include <concepts>
 #include <cstddef>
 #include <optional>
 #include <span>
@@ -65,7 +66,7 @@ private:
     // and kept in `chunks`; empty: parse the source.
     std::string_view bytecode_for(script::sandbox& box, const release& r, std::size_t i, chunk_set& chunks);
     // Runs a load given bytecode; notes whether Lua refused stored bytecode (the sandbox parsed the source).
-    template <class F>
+    template <std::invocable F>
     auto tracked(script::sandbox& box, std::size_t i, chunk_set& chunks, F&& load);
 
     const any_store& store_;

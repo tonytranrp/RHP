@@ -76,12 +76,12 @@ std::string indent(std::string_view text, std::string_view prefix) {
     return out;
 }
 
-const char* kReset = "\x1b[0m";
-const char* kGreen = "\x1b[32m";
-const char* kRed = "\x1b[31m";
-const char* kYellow = "\x1b[33m";
-const char* kDim = "\x1b[2m";
-const char* kBold = "\x1b[1m";
+constexpr const char* kReset = "\x1b[0m";
+constexpr const char* kGreen = "\x1b[32m";
+constexpr const char* kRed = "\x1b[31m";
+constexpr const char* kYellow = "\x1b[33m";
+constexpr const char* kDim = "\x1b[2m";
+constexpr const char* kBold = "\x1b[1m";
 
 // ---- text --------------------------------------------------------------------------------------------------
 

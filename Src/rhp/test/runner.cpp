@@ -666,7 +666,7 @@ struct runner::impl {
             fake_registry::instance().reset(arg_text(0));
             return value{};
         }
-        return fail(errc::kNotFound, std::format("the runner has no service '{}'", command));
+        return fail(errc::kNotFound, std::format("the runner has no service '{}'", command), "test");
     }
 
     // ---- one file ----
