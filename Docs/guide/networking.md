@@ -10,7 +10,7 @@ using udp_cfg = Rhp::config<>::transport<Rhp::net::udp_reliable>;
 using ipc_cfg = Rhp::config<>::transport<Rhp::net::local_ipc>;
 ```
 
-Both peers use the same transport. The session layer adds TLS on top of any of them under the [usual rules](connecting.md#tls). TCP and IPC send frames queued behind a write in flight in one gathered write, and WebSocket joins them into one message, so pipelined calls (`client.async()`) share writes; reliable UDP sends a datagram per fragment and is slower than TCP on a clean link ([performance](performance.md#network)).
+Both peers use the same transport. The session layer adds TLS on top of any of them under the [usual rules](connecting.md#tls). TCP and IPC send frames queued behind a write in flight in one gathered write, and WebSocket frames (one message per frame) ride the same gathered TCP writes, so pipelined calls (`client.async()`) share writes; reliable UDP sends a datagram per fragment and is slower than TCP on a clean link ([performance](performance.md#network)).
 
 | Transport | Endpoint | Notes |
 |---|---|---|

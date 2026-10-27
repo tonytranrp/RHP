@@ -196,7 +196,7 @@ acks wait `session::options::ack_delay_ms` (5 ms) for an outgoing frame to carry
 and its reply are two frames instead of four (still at once for every 8th frame, a requested ack and
 a duplicate; the protocol is unchanged); the host's cancel-enforcement timer runs only while a cancel
 is recorded. The TCP and IPC links send the frames queued behind a write in flight in one gathered
-write (up to 16; WebSocket already joins them into one message): 32 pipelined calls over TCP on
+write (up to 16; WebSocket messages, one per frame, share the TCP link's): 32 pipelined calls over TCP on
 127.0.0.1 take 374-401 us instead of 632-635 us. *Measured and left out:* a local queue for posts made on the
 running thread (one reactor post per batch instead of one each: module calls, signed execs and 32
 pipelined calls over TCP and UDP all stayed within run-to-run noise), and posting each reliable-UDP

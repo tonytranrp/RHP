@@ -43,6 +43,6 @@ using cfg = Rhp::config<>::transport<my_transport>;   // checked by Rhp::net::tr
 - `on_closed` is reported from a posted handler, never re-entrantly from `close()`, and never after the link is destroyed.
 - No default port: every endpoint names one (0 = any free port for TCP and UDP listeners; `local_ipc` requires 0).
 - TCP and IPC links send the frames queued behind a write in flight in one gathered write (up to 16 buffers). Keep `send()` cheap: it only queues.
-- A protocol's byte format lives in a sans-IO `detail/` codec (no sockets, no Asio) so it is unit-tested and fuzzed (`Tests/fuzz/network_fuzz.cpp`) on its own.
+- A protocol's byte format lives in a sans-IO `detail/` codec (no sockets, no I/O; the DNS codec's implementation uses Asio's IP address type to format and parse addresses) so it is unit-tested and fuzzed (`Tests/fuzz/network_fuzz.cpp`) on its own.
 - OS-specific APIs and macros stay in backend `.cpp` files (IPC and DNS-SD); general behavior uses `Rhp::platform`.
 - Discovery records are untrusted hints: they never carry keys, grant nothing and never enable plaintext.

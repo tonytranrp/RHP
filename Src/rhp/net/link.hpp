@@ -11,8 +11,8 @@
 
 namespace Rhp::net {
 
-// Receives what a link reads. Called on the link's io_context thread, never after the link was
-// closed or destroyed.
+// Receives what a link reads. Called on the link's io_context thread. After close(), on_bytes may
+// still arrive until on_closed; nothing arrives after the link is destroyed.
 class link_handler {
 public:
     // May be empty: the link became ready (a TLS link finished its handshake, channel_binding() is set).
