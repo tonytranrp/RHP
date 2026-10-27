@@ -179,6 +179,10 @@ using view_lib = Rhp::lib<"vt">                                                 
 
 static_assert(Rhp::script::installable<view_lib>);
 
+// The same ::fn entry type as view_lib's "ints" in a lib with no handles: the two libs' views come
+// from different binding_source classes with one binding.
+using twin_lib = Rhp::lib<"vt_twin">::fn<"ints", &ints>;
+
 } // namespace view_tests_fixtures
 
 namespace {
@@ -289,6 +293,21 @@ TEST_CASE("span writes of two modules reverted out of order leave the right valu
     REQUIRE(box.revert(*a)); // b's writes stay; a's own element goes back
     CHECK(fx::g_ints == std::array<std::int32_t, 4>{10, 222, 333, 40});
     REQUIRE(box.revert(*b)); // b's element 2 goes back to what was there before a
+    CHECK(fx::g_ints == std::array<std::int32_t, 4>{10, 20, 30, 40});
+}
+
+TEST_CASE("one binding in two libs with other handles journals as one target", "[script][views]") {
+    sandbox box = make_box();
+    REQUIRE(box.install<fx::twin_lib>());
+    // The journal compares the two libs' sources (same binding, same arguments): the same memory.
+    const auto a = box.load("tests.views.twin_a", "local v = vt.ints() v[1] = 100 v[2] = 200");
+    const auto b = box.load("tests.views.twin_b", "local v = vt_twin.ints() v[2] = 222 v[3] = 333");
+    REQUIRE(a.has_value());
+    REQUIRE(b.has_value());
+    CHECK(fx::g_ints == std::array<std::int32_t, 4>{100, 222, 333, 40});
+    REQUIRE(box.revert(*a));
+    CHECK(fx::g_ints == std::array<std::int32_t, 4>{10, 222, 333, 40});
+    REQUIRE(box.revert(*b));
     CHECK(fx::g_ints == std::array<std::int32_t, 4>{10, 20, 30, 40});
 }
 

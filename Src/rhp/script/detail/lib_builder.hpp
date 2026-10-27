@@ -519,20 +519,55 @@ void check_alive(const T& v, std::optional<error>& out) {
 template <class Entry>
 inline constexpr char binding_tag_v = 0;
 
+// What a view source is apart from its handle checks: the binding (Entry) and copies of the
+// arguments it was called with. same() compares two of these: one entry type in two lib trees with
+// other handle sets makes two binding_source classes with one binding(), so the cast must stop
+// here, below the Handles they differ in.
+template <class Entry, class... Captured>
+class binding_args : public view_source {
+public:
+    [[nodiscard]] bool same(const view_source& other) const noexcept final {
+        if (other.binding() != binding()) {
+            return false;
+        }
+        if constexpr ((std::equality_comparable<Captured> && ...)) {
+            try {
+                return static_cast<const binding_args&>(other).args_.values == args_.values;
+            } catch (...) { // a throwing operator==: not known to be the same memory
+                return false;
+            }
+        } else {
+            return &other == this;
+        }
+    }
+
+    [[nodiscard]] const void* binding() const noexcept final { return &binding_tag_v<Entry>; }
+
+protected:
+    template <class... A>
+        requires(sizeof...(A) == sizeof...(Captured))
+    explicit binding_args(A&&... captured) : args_(std::forward<A>(captured)...) {}
+    binding_args(const binding_args&) = default;
+
+    captured_args<Captured...> args_;
+};
+
 // A host view's source: the binding and copies of the arguments it was called with. Every access
 // calls the binding again (handle arguments checked first), so the view never holds a pointer that
 // could dangle.
 template <utils::type_list_like Handles, class Entry, class... Captured>
-class binding_source final : public view_source {
+class binding_source final : public binding_args<Entry, Captured...> {
+    using base = binding_args<Entry, Captured...>;
+
 public:
     template <class... A>
         requires(sizeof...(A) == sizeof...(Captured))
-    explicit binding_source(A&&... captured) : args_(std::forward<A>(captured)...) {}
+    explicit binding_source(A&&... captured) : base(std::forward<A>(captured)...) {}
 
     [[nodiscard]] result<region> resolve() const noexcept override {
         try {
             std::optional<error> stale;
-            std::apply([&](const Captured&... a) { (check_alive<Handles>(a, stale), ...); }, args_.values);
+            std::apply([&](const Captured&... a) { (check_alive<Handles>(a, stale), ...); }, this->args_.values);
             if (stale) {
                 return std::unexpected{std::move(*stale)};
             }
@@ -541,7 +576,7 @@ public:
                     decltype(auto) r = std::invoke(Entry::function, a...);
                     return view_region<decltype(r)>(static_cast<decltype(r)&&>(r));
                 },
-                args_.values);
+                this->args_.values);
         } catch (const std::exception& e) {
             return std::unexpected{binding_error(e, {})};
         } catch (...) { // C++ only in here (no Lua call): nothing else may escape a noexcept function
@@ -559,7 +594,7 @@ public:
                     decltype(auto) r = std::invoke(Entry::function, a...);
                     return view_find<decltype(r)>(static_cast<decltype(r)&&>(r), out);
                 },
-                args_.values);
+                this->args_.values);
         } catch (...) { // C++ only in here; resolve() says what went wrong
             return false;
         }
@@ -567,27 +602,8 @@ public:
 
     [[nodiscard]] std::unique_ptr<view_source> clone() const override { return std::unique_ptr<view_source>{new binding_source(*this)}; }
 
-    [[nodiscard]] bool same(const view_source& other) const noexcept override {
-        if (other.binding() != binding()) {
-            return false;
-        }
-        if constexpr ((std::equality_comparable<Captured> && ...)) {
-            try {
-                return static_cast<const binding_source&>(other).args_.values == args_.values;
-            } catch (...) { // a throwing operator==: not known to be the same memory
-                return false;
-            }
-        } else {
-            return &other == this;
-        }
-    }
-
-    [[nodiscard]] const void* binding() const noexcept override { return &binding_tag_v<Entry>; }
-
 private:
     binding_source(const binding_source&) = default;
-
-    captured_args<Captured...> args_;
 };
 
 template <utils::type_list_like Handles, class Entry>
