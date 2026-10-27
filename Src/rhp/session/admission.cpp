@@ -44,8 +44,7 @@ private:
 } // namespace
 
 admission::admission(net::io_context& io, const Rhp::limits& limits)
-    : io_(io),
-      total_cap_(limits.pending_handshakes),
+    : total_cap_(limits.pending_handshakes),
       source_cap_(limits.handshakes_per_source),
       first_byte_(limits.first_byte_ms),
       timer_(io) {}

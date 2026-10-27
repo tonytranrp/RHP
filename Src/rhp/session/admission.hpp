@@ -69,7 +69,6 @@ private:
     void arm_timer();
     void on_timer();
 
-    net::io_context& io_;
     std::uint32_t total_cap_ = 0;
     std::uint32_t source_cap_ = 0;
     std::chrono::milliseconds first_byte_{};

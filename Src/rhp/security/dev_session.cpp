@@ -22,14 +22,14 @@ namespace Rhp::security {
 
 namespace {
 
-constexpr std::string_view kWhere = "security.dev_session";
+constexpr std::string_view kSessionWhere = "security.dev_session";
 // Rhp::net::local_ipc::name (security sits beside net, not above it): its address is a name, not host:port.
 constexpr std::string_view kLocalIpc = "local_ipc";
 
 [[nodiscard]] result<void> check_app(std::string_view app) {
     constexpr std::string_view kAllowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-";
     if (app.empty() || app.size() > 64 || app.find_first_not_of(kAllowed) != std::string_view::npos || kAllowed.find(app.front()) >= 62) {
-        return fail(errc::kInvalidArgument, std::format("'{}' is not an app name (1..64 letters, digits, '.', '_' or '-', starting with a letter or digit)", app), std::string{kWhere});
+        return fail(errc::kInvalidArgument, std::format("'{}' is not an app name (1..64 letters, digits, '.', '_' or '-', starting with a letter or digit)", app), std::string{kSessionWhere});
     }
     return {};
 }
@@ -38,7 +38,7 @@ constexpr std::string_view kLocalIpc = "local_ipc";
 [[nodiscard]] result<void> read_endpoint(dev_session& s, std::string_view text) {
     const auto scheme = text.find("://");
     if (scheme == std::string_view::npos || scheme == 0 || scheme + 3 == text.size()) {
-        return fail(errc::kInvalidArgument, "the endpoint must be transport://address", std::string{kWhere});
+        return fail(errc::kInvalidArgument, "the endpoint must be transport://address", std::string{kSessionWhere});
     }
     s.transport = text.substr(0, scheme);
     std::string_view address = text.substr(scheme + 3);
@@ -53,11 +53,11 @@ constexpr std::string_view kLocalIpc = "local_ipc";
     if (host.size() >= 2 && host.front() == '[' && host.back() == ']') {
         host = host.substr(1, host.size() - 2);
     } else if (host.find(':') != std::string_view::npos) {
-        return fail(errc::kInvalidArgument, "write IPv6 addresses in brackets: tcp://[::1]:7777", std::string{kWhere});
+        return fail(errc::kInvalidArgument, "write IPv6 addresses in brackets: tcp://[::1]:7777", std::string{kSessionWhere});
     }
     const auto [end, ec] = std::from_chars(port.data(), port.data() + port.size(), s.port);
     if (host.empty() || ec != std::errc{} || end != port.data() + port.size() || s.port == 0) {
-        return fail(errc::kInvalidArgument, std::format("the endpoint '{}' needs host:port", address), std::string{kWhere});
+        return fail(errc::kInvalidArgument, std::format("the endpoint '{}' needs host:port", address), std::string{kSessionWhere});
     }
     s.host = host;
     return {};
@@ -86,7 +86,7 @@ result<dev_session> dev_session::parse(std::string_view text) {
         return std::unexpected{std::move(id).error()};
     }
     if (!has_endpoint) {
-        return fail(errc::kInvalidArgument, "a dev session file needs an endpoint", std::string{kWhere});
+        return fail(errc::kInvalidArgument, "a dev session file needs an endpoint", std::string{kSessionWhere});
     }
     if (auto app = check_app(out.app); !app) {
         return std::unexpected{std::move(app).error()};
@@ -125,7 +125,7 @@ result<void> write_dev_session(const std::filesystem::path& path, const dev_sess
         return app;
     }
     if (session.transport.empty() || session.host.empty() || session.identity.name.empty() || session.identity.psk.empty()) {
-        return fail(errc::kInvalidArgument, "a dev session needs an endpoint and an identity", std::string{kWhere});
+        return fail(errc::kInvalidArgument, "a dev session needs an endpoint and an identity", std::string{kSessionWhere});
     }
     if (path.has_parent_path()) {
         if (auto made = platform::make_private_directory(path.parent_path()); !made) {
@@ -142,7 +142,7 @@ result<dev_session> read_dev_session(const std::filesystem::path& path) {
     auto text = detail::read_file(path);
     if (!text) {
         const std::u8string name = path.u8string();
-        return fail(errc::kNotFound, std::format("can't read dev session file {}", std::string_view{reinterpret_cast<const char*>(name.data()), name.size()}), std::string{kWhere});
+        return fail(errc::kNotFound, std::format("can't read dev session file {}", std::string_view{reinterpret_cast<const char*>(name.data()), name.size()}), std::string{kSessionWhere});
     }
     auto session = dev_session::parse(*text);
     secure_wipe(text->data(), text->size());
