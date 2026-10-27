@@ -12,6 +12,7 @@
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
+#include <rhp_test/script_support.hpp>
 
 #include <rhp/core/error.hpp>
 #include <rhp/core/limits.hpp>
@@ -28,28 +29,7 @@ using Rhp::script::detail::small_alloc;
 
 namespace allocator_fixture {
 
-class counting_resource final : public std::pmr::memory_resource {
-public:
-    [[nodiscard]] std::size_t allocations() const noexcept { return allocations_; }
-    [[nodiscard]] std::size_t live_bytes() const noexcept { return live_bytes_; }
-
-private:
-    void* do_allocate(std::size_t bytes, std::size_t alignment) override {
-        ++allocations_;
-        live_bytes_ += bytes;
-        return std::pmr::new_delete_resource()->allocate(bytes, alignment);
-    }
-
-    void do_deallocate(void* p, std::size_t bytes, std::size_t alignment) override {
-        live_bytes_ -= bytes;
-        std::pmr::new_delete_resource()->deallocate(p, bytes, alignment);
-    }
-
-    [[nodiscard]] bool do_is_equal(const std::pmr::memory_resource& other) const noexcept override { return this == &other; }
-
-    std::size_t allocations_ = 0;
-    std::size_t live_bytes_ = 0;
-};
+using rhp_test::counting_resource;
 
 sandbox make_box(sandbox_options options = {}) {
     options.output = [](std::string_view) {};

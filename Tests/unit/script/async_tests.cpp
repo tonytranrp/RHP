@@ -1,7 +1,7 @@
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
-#include <algorithm>
 #include <map>
 #include <memory>
 #include <optional>
@@ -14,6 +14,7 @@
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
+#include <rhp_test/script_support.hpp>
 
 #include <rhp/core/async.hpp>
 #include <rhp/core/error.hpp>
@@ -124,9 +125,7 @@ namespace {
 
 namespace fx = async_tests_fixtures;
 
-struct manual_clock {
-    std::chrono::steady_clock::time_point now = std::chrono::steady_clock::time_point{} + std::chrono::hours{1};
-};
+using rhp_test::manual_clock;
 
 struct capture {
     std::vector<std::string> lines;

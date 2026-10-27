@@ -4,6 +4,7 @@
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
+#include <rhp_test/script_support.hpp>
 
 #include <rhp/core/error.hpp>
 #include <rhp/core/ids.hpp>
@@ -28,10 +29,7 @@ sandbox make_box(role caller = role::kPatch) {
     return sandbox{std::move(options)};
 }
 
-template <class T>
-errc code_of(const Rhp::result<T>& r) {
-    return r ? errc::kOk : r.error().code;
-}
+using rhp_test::code_of;
 
 // A call's values, or one string describing its error (readable in a failed CHECK).
 value_list values(const Rhp::result<value_list>& r) {

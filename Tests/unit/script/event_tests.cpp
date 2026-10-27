@@ -21,6 +21,7 @@
 #include <rhp/script/lib.hpp>
 #include <rhp/script/lua_event.hpp>
 #include <rhp/script/sandbox.hpp>
+#include <rhp_test/script_support.hpp>
 
 using Rhp::errc;
 using Rhp::script::module_state;
@@ -109,10 +110,7 @@ sandbox make_box(capture& out, Rhp::limits limits = {}, Rhp::script::handler_err
     return box;
 }
 
-template <class T>
-errc code_of(const Rhp::result<T>& r) {
-    return r ? errc::kOk : r.error().code;
-}
+using rhp_test::code_of;
 
 value_list values(const Rhp::result<value_list>& r) {
     return r ? *r : value_list{Rhp::value{"error: " + r.error().message}};

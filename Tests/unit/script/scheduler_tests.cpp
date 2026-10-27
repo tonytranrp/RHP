@@ -10,6 +10,7 @@
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
+#include <rhp_test/script_support.hpp>
 
 #include <rhp/core/error.hpp>
 #include <rhp/core/ids.hpp>
@@ -130,15 +131,7 @@ struct capture {
     std::vector<std::string> log; // print and emit, interleaved as they happened
 };
 
-// Script time the test moves by hand.
-struct manual_clock {
-    clock_type::time_point now = clock_type::time_point{} + std::chrono::hours{1};
-
-    void advance(milliseconds ms) { now += ms; }
-    [[nodiscard]] Rhp::script::clock_fn fn() {
-        return [this] { return now; };
-    }
-};
+using rhp_test::manual_clock; // script time the test moves by hand
 
 sandbox make_box(capture& out, Rhp::limits limits = {}, Rhp::script::clock_fn clock = {},
                  Rhp::script::handler_error_policy policy = Rhp::script::handler_error_policy::kReport) {

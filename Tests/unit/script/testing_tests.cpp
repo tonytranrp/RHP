@@ -11,6 +11,7 @@
 #include <lauxlib.h>
 #include <lua.h>
 #include <lualib.h>
+#include <rhp_test/script_support.hpp>
 
 #include <rhp/core/error.hpp>
 #include <rhp/core/limits.hpp>
@@ -66,13 +67,7 @@ inline int double_it(int v) {
 inline constexpr Rhp::patch_point<"ttest.double", &double_it> double_point{};
 inline constexpr Rhp::lua_event<"ttest.tick", int> tick_event{};
 
-// A manual script clock.
-struct manual_clock {
-    std::chrono::steady_clock::time_point now{};
-    Rhp::script::clock_fn fn() {
-        return [this] { return now; };
-    }
-};
+using rhp_test::manual_clock;
 
 // Instructions a plain Lua state runs for `source`, counted one by one by a count hook.
 std::uint64_t raw_instructions(std::string_view source) {

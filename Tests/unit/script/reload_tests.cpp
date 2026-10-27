@@ -7,6 +7,7 @@
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
+#include <rhp_test/script_support.hpp>
 
 #include <rhp/core/error.hpp>
 #include <rhp/core/ids.hpp>
@@ -46,16 +47,12 @@ namespace {
 
 namespace fx = reload_tests_fixtures;
 
-using clock_type = std::chrono::steady_clock;
-
 struct capture {
     std::vector<std::string> lines;
     std::vector<std::pair<Rhp::request_id, Rhp::result<Rhp::script::value_list>>> results;
 };
 
-struct manual_clock {
-    clock_type::time_point now = clock_type::time_point{} + std::chrono::hours{1};
-};
+using rhp_test::manual_clock;
 
 sandbox make_box(capture& out, Rhp::limits limits = {}, manual_clock* clock = nullptr) {
     fx::g_counter = 0;
@@ -71,10 +68,7 @@ sandbox make_box(capture& out, Rhp::limits limits = {}, manual_clock* clock = nu
     return box;
 }
 
-template <class T>
-errc code_of(const Rhp::result<T>& r) {
-    return r ? errc::kOk : r.error().code;
-}
+using rhp_test::code_of;
 
 std::uint32_t hash_of(std::string_view source) {
     return Rhp::utils::crc32c(Rhp::utils::as_bytes(source));

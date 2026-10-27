@@ -8,6 +8,7 @@
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
+#include <rhp_test/script_support.hpp>
 
 #include <rhp/core/error.hpp>
 #include <rhp/core/ids.hpp>
@@ -42,14 +43,7 @@ namespace {
 namespace fx = script_event_tests_fixtures;
 using std::chrono::milliseconds;
 
-struct manual_clock {
-    std::chrono::steady_clock::time_point now = std::chrono::steady_clock::time_point{} + std::chrono::hours{1};
-
-    void advance(milliseconds ms) { now += ms; }
-    [[nodiscard]] Rhp::script::clock_fn fn() {
-        return [this] { return now; };
-    }
-};
+using rhp_test::manual_clock;
 
 struct capture {
     std::vector<std::string> lines;
@@ -65,10 +59,7 @@ sandbox make_box(capture& out, Rhp::limits limits = {}, Rhp::script::clock_fn cl
     return sandbox{std::move(options)};
 }
 
-template <class T>
-errc code_of(const Rhp::result<T>& r) {
-    return r ? errc::kOk : r.error().code;
-}
+using rhp_test::code_of;
 
 std::vector<std::string> lines(std::initializer_list<const char*> items) {
     return {items.begin(), items.end()};

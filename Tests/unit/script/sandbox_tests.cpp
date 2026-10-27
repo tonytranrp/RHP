@@ -9,6 +9,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
+#include <rhp_test/script_support.hpp>
 
 #include <rhp/core/error.hpp>
 #include <rhp/core/ids.hpp>
@@ -69,28 +70,7 @@ std::string describe(const Rhp::error& err) {
     return err.message + " | " + err.where + " | " + err.traceback;
 }
 
-class counting_resource final : public std::pmr::memory_resource {
-public:
-    [[nodiscard]] std::size_t allocations() const noexcept { return allocations_; }
-    [[nodiscard]] std::size_t live_bytes() const noexcept { return live_bytes_; }
-
-private:
-    void* do_allocate(std::size_t bytes, std::size_t alignment) override {
-        ++allocations_;
-        live_bytes_ += bytes;
-        return std::pmr::new_delete_resource()->allocate(bytes, alignment);
-    }
-
-    void do_deallocate(void* p, std::size_t bytes, std::size_t alignment) override {
-        live_bytes_ -= bytes;
-        std::pmr::new_delete_resource()->deallocate(p, bytes, alignment);
-    }
-
-    [[nodiscard]] bool do_is_equal(const std::pmr::memory_resource& other) const noexcept override { return this == &other; }
-
-    std::size_t allocations_ = 0;
-    std::size_t live_bytes_ = 0;
-};
+using rhp_test::counting_resource;
 
 // Returns "" when the environment matches the restricted standard library, else what's wrong.
 constexpr std::string_view kRestrictedStdlibProbe = R"lua(
