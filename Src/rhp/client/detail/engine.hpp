@@ -10,6 +10,7 @@
 #include <string>
 #include <string_view>
 
+#include <rhp/client/detail/requests.hpp>
 #include <rhp/core/ids.hpp>
 #include <rhp/core/limits.hpp>
 #include <rhp/core/result.hpp>
@@ -52,9 +53,9 @@ struct client_options {
 // One delivery of a subscribed event (client.on). Views are valid during the callback only.
 struct remote_event {
     std::string_view name{};
-    module_id module{};            // the publishing module on the host (0: a C++ event or the sandbox itself)
+    module_id module{}; // the publishing module on the host (0: a C++ event or the sandbox itself)
     std::span<const value> args{};
-    std::uint64_t dropped = 0;     // deliveries to this session the host dropped since the previous one
+    std::uint64_t dropped = 0; // deliveries to this session the host dropped since the previous one
 };
 
 using remote_event_fn = std::function<void(const remote_event&)>;
@@ -76,6 +77,8 @@ struct setup {
     Rhp::limits limits{};
     bool io_thread = true; // false: the calling thread runs the network while it waits
     client_options options;
+    // Signs the scripts this client sends (the client's signing key); empty sends them unsigned.
+    sign_fn sign;
     // A reactor shared with other engines (a fleet's) instead of one of the engine's own. Its owner
     // runs it (one thread, or the waits when io_thread is false), outlives the engine, never calls
     // run_io for it, and destroys the engine on the thread running the reactor or once it stopped.
@@ -101,6 +104,8 @@ using completion = std::function<void(result<value>)>;
 [[nodiscard]] result<std::uint16_t> port(engine& e);
 // Sends one request and waits for its kResult body (or the kError it gets).
 [[nodiscard]] result<value> request(engine& e, wire::op code, value body);
+// The signature setup::sign gives a script's source (nil without a signer). Any thread.
+[[nodiscard]] result<value> sign(const engine& e, std::string_view source);
 // Sends one request without waiting; `done` runs once with the outcome, on the network thread
 // (or right away on this thread if the client is already closed). Connects first if needed.
 // Returns the request id (for cancel_request).

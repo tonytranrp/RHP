@@ -17,6 +17,7 @@
 #include <rhp/build_config.hpp>
 #include <rhp/client/detail/engine.hpp>
 #include <rhp/client/detail/replies.hpp>
+#include <rhp/client/detail/requests.hpp>
 #include <rhp/client/pending.hpp>
 #include <rhp/config/config.hpp>
 #include <rhp/core/convert.hpp>
@@ -115,18 +116,22 @@ public:
     // ---- scripts --------------------------------------------------------------------------------
 
     // Runs source in this identity's scratch module (effects kept until reverted or disconnect).
-    return_t<value_list> exec(std::string_view source, std::string_view chunk = "exec") { return finish(client_detail::values(code_request(wire::op::kExec, exec_body(source, chunk)))); }
+    return_t<value_list> exec(std::string_view source, std::string_view chunk = "exec") {
+        return finish(client_detail::values(raw(wire::op::kExec, client_detail::exec_body(sign(source), source, chunk))));
+    }
 
     // The first returned value, converted (nil if none).
     template <from_value_convertible T>
     return_t<T> exec(std::string_view source, std::string_view chunk = "exec") {
-        return finish(client_detail::first<T>(code_request(wire::op::kExec, exec_body(source, chunk))));
+        return finish(client_detail::first<T>(raw(wire::op::kExec, client_detail::exec_body(sign(source), source, chunk))));
     }
 
-    return_t<module_id> load(std::string_view name, std::string_view source) { return finish(client_detail::as<module_id>(code_request(wire::op::kLoad, load_body(name, source)))); }
+    return_t<module_id> load(std::string_view name, std::string_view source) {
+        return finish(client_detail::as<module_id>(raw(wire::op::kLoad, client_detail::load_body(sign(source), name, source))));
+    }
 
     return_t<value_list> call(module_ref mod, std::string_view function, std::span<const value> args = {}) {
-        return finish(client_detail::values(send(wire::op::kCall, wire::call_request{std::move(mod), std::string{function}, value::array(args.begin(), args.end())})));
+        return finish(client_detail::values(raw(wire::op::kCall, client_detail::call_body(std::move(mod), function, args))));
     }
 
     template <to_value_convertible A0, to_value_convertible... A>
@@ -139,18 +144,18 @@ public:
 
     // Transactional reload; the new revision (0 = deferred).
     return_t<revision_id> reload(module_ref mod, std::string_view source) {
-        return finish(client_detail::as<revision_id>(code_request(wire::op::kReload, reload_body(std::move(mod), source))));
+        return finish(client_detail::as<revision_id>(raw(wire::op::kReload, client_detail::reload_body(sign(source), std::move(mod), source))));
     }
 
     return_t<revision_id> rollback(module_ref mod, std::size_t steps = 1) {
-        return finish(client_detail::as<revision_id>(send(wire::op::kRollback, wire::rollback_request{std::move(mod), steps})));
+        return finish(client_detail::as<revision_id>(raw(wire::op::kRollback, client_detail::rollback_body(std::move(mod), steps))));
     }
 
-    return_t<revert_summary> revert(module_ref mod) { return finish(client_detail::as<revert_summary>(send(wire::op::kRevert, wire::module_request{std::move(mod)}))); }
+    return_t<revert_summary> revert(module_ref mod) { return finish(client_detail::as<revert_summary>(raw(wire::op::kRevert, client_detail::module_body(std::move(mod))))); }
 
     // `force` unloads even while other modules require this one (they then get kUnloaded).
     return_t<revert_summary> unload(module_ref mod, bool force = false) {
-        return finish(client_detail::as<revert_summary>(send(wire::op::kUnload, wire::unload_request{std::move(mod), force})));
+        return finish(client_detail::as<revert_summary>(raw(wire::op::kUnload, client_detail::unload_body(std::move(mod), force))));
     }
 
     return_t<void> checkpoint(std::string_view tag) { return finish(client_detail::nothing(send(wire::op::kCheckpoint, wire::tag_request{std::string{tag}}))); }
@@ -164,8 +169,8 @@ public:
 
     // Admin: the host keeps the module (and what it requires) when this identity's last session
     // ends; revert / unload refuse it (kForbidden) until unpin.
-    return_t<void> pin(module_ref mod) { return finish(client_detail::nothing(send(wire::op::kPin, wire::module_request{std::move(mod)}))); }
-    return_t<void> unpin(module_ref mod) { return finish(client_detail::nothing(send(wire::op::kUnpin, wire::module_request{std::move(mod)}))); }
+    return_t<void> pin(module_ref mod) { return finish(client_detail::nothing(raw(wire::op::kPin, client_detail::module_body(std::move(mod))))); }
+    return_t<void> unpin(module_ref mod) { return finish(client_detail::nothing(raw(wire::op::kUnpin, client_detail::module_body(std::move(mod))))); }
 
     // ---- releases (a host that serves a release manager: host.serve) --------------------------------
 
@@ -284,7 +289,7 @@ public:
 
     return_t<std::vector<module_status>> list() { return finish(client_detail::as<std::vector<module_status>>(raw(wire::op::kList, value{}))); }
 
-    return_t<module_status> status(module_ref mod) { return finish(client_detail::as<module_status>(send(wire::op::kStatus, wire::module_request{std::move(mod)}))); }
+    return_t<module_status> status(module_ref mod) { return finish(client_detail::as<module_status>(raw(wire::op::kStatus, client_detail::module_body(std::move(mod))))); }
 
     // LuaLS annotations for everything this identity can use on the host.
     return_t<std::string> describe() { return finish(client_detail::as<std::string>(raw(wire::op::kDescribe, value{}))); }
@@ -298,21 +303,20 @@ public:
         explicit async_calls(client& c) noexcept : c_(&c) {}
 
         pending_t<value_list> exec(std::string_view source, std::string_view chunk = "exec") {
-            return c_->template start<value_list>(wire::op::kExec, c_->exec_body(source, chunk), &client_detail::values);
+            return c_->template start<value_list>(wire::op::kExec, client_detail::exec_body(c_->sign(source), source, chunk), &client_detail::values);
         }
 
         template <from_value_convertible T>
         pending_t<T> exec(std::string_view source, std::string_view chunk = "exec") {
-            return c_->template start<T>(wire::op::kExec, c_->exec_body(source, chunk), &client_detail::first<T>);
+            return c_->template start<T>(wire::op::kExec, client_detail::exec_body(c_->sign(source), source, chunk), &client_detail::first<T>);
         }
 
         pending_t<module_id> load(std::string_view name, std::string_view source) {
-            return c_->template start<module_id>(wire::op::kLoad, c_->load_body(name, source), &client_detail::as<module_id>);
+            return c_->template start<module_id>(wire::op::kLoad, client_detail::load_body(c_->sign(source), name, source), &client_detail::as<module_id>);
         }
 
         pending_t<value_list> call(module_ref mod, std::string_view function, std::span<const value> args = {}) {
-            return c_->template start<value_list>(
-                wire::op::kCall, Rhp::to_value(wire::call_request{std::move(mod), std::string{function}, value::array(args.begin(), args.end())}), &client_detail::values);
+            return c_->template start<value_list>(wire::op::kCall, client_detail::call_body(std::move(mod), function, args), &client_detail::values);
         }
 
         template <to_value_convertible A0, to_value_convertible... A>
@@ -322,19 +326,19 @@ public:
         }
 
         pending_t<revision_id> reload(module_ref mod, std::string_view source) {
-            return c_->template start<revision_id>(wire::op::kReload, c_->reload_body(std::move(mod), source), &client_detail::as<revision_id>);
+            return c_->template start<revision_id>(wire::op::kReload, client_detail::reload_body(c_->sign(source), std::move(mod), source), &client_detail::as<revision_id>);
         }
 
         pending_t<revision_id> rollback(module_ref mod, std::size_t steps = 1) {
-            return c_->template start<revision_id>(wire::op::kRollback, Rhp::to_value(wire::rollback_request{std::move(mod), steps}), &client_detail::as<revision_id>);
+            return c_->template start<revision_id>(wire::op::kRollback, client_detail::rollback_body(std::move(mod), steps), &client_detail::as<revision_id>);
         }
 
         pending_t<revert_summary> revert(module_ref mod) {
-            return c_->template start<revert_summary>(wire::op::kRevert, Rhp::to_value(wire::module_request{std::move(mod)}), &client_detail::as<revert_summary>);
+            return c_->template start<revert_summary>(wire::op::kRevert, client_detail::module_body(std::move(mod)), &client_detail::as<revert_summary>);
         }
 
         pending_t<revert_summary> unload(module_ref mod, bool force = false) {
-            return c_->template start<revert_summary>(wire::op::kUnload, Rhp::to_value(wire::unload_request{std::move(mod), force}), &client_detail::as<revert_summary>);
+            return c_->template start<revert_summary>(wire::op::kUnload, client_detail::unload_body(std::move(mod), force), &client_detail::as<revert_summary>);
         }
 
         pending_t<std::vector<module_status>> list() {
@@ -342,7 +346,7 @@ public:
         }
 
         pending_t<module_status> status(module_ref mod) {
-            return c_->template start<module_status>(wire::op::kStatus, Rhp::to_value(wire::module_request{std::move(mod)}), &client_detail::as<module_status>);
+            return c_->template start<module_status>(wire::op::kStatus, client_detail::module_body(std::move(mod)), &client_detail::as<module_status>);
         }
 
         pending_t<std::string> describe() { return c_->template start<std::string>(wire::op::kDescribe, value{}, &client_detail::as<std::string>); }
@@ -395,7 +399,7 @@ public:
     }
 
 private:
-    client(net::endpoint ep, typename Cfg::credential_t identity, std::optional<signing_key_t> key, client_options options) : signer_(std::move(key)) {
+    client(net::endpoint ep, typename Cfg::credential_t identity, std::optional<signing_key_t> key, client_options options) {
 #if RHP_ENABLE
         client_detail::setup s;
         s.ep = std::move(ep);
@@ -406,6 +410,9 @@ private:
         s.limits = Cfg::limits_v;
         s.io_thread = Cfg::io_t::kOwnsThread;
         s.options = std::move(options);
+        if (key) {
+            s.sign = [signer = std::move(*key)](std::string_view source) -> result<value> { return signer.sign(source); };
+        }
         engine_ = client_detail::make_engine(std::move(s));
         if constexpr (Cfg::io_t::kOwnsThread) {
             // The I/O thread shares the engine: a client destroyed from one of its own callbacks
@@ -415,6 +422,7 @@ private:
 #else
         (void)ep;
         (void)identity;
+        (void)key;
         (void)options;
 #endif
     }
@@ -424,44 +432,14 @@ private:
         return Cfg::errors_t::finish(std::move(r));
     }
 
-    // The signature this client attaches to `source` (nil without a key).
+    // The signature this client attaches to a script's `source` (nil without a signing key).
     [[nodiscard]] result<value> sign(std::string_view source) const {
-        if (!signer_) {
-            return value{};
-        }
-        return signer_->sign(source);
-    }
-
-    // A code-carrying request body (exec / load / reload) with its signature, or why it couldn't be signed.
-    [[nodiscard]] result<value> exec_body(std::string_view source, std::string_view chunk) const {
-        auto signature = sign(source);
-        if (!signature) {
-            return std::unexpected{std::move(signature).error()};
-        }
-        return Rhp::to_value(wire::exec_request{std::string{source}, std::string{chunk}, std::move(*signature)});
-    }
-
-    [[nodiscard]] result<value> load_body(std::string_view name, std::string_view source) const {
-        auto signature = sign(source);
-        if (!signature) {
-            return std::unexpected{std::move(signature).error()};
-        }
-        return Rhp::to_value(wire::load_request{std::string{name}, std::string{source}, std::move(*signature)});
-    }
-
-    [[nodiscard]] result<value> reload_body(module_ref mod, std::string_view source) const {
-        auto signature = sign(source);
-        if (!signature) {
-            return std::unexpected{std::move(signature).error()};
-        }
-        return Rhp::to_value(wire::reload_request{std::move(mod), std::string{source}, std::move(*signature)});
-    }
-
-    result<value> code_request(wire::op code, result<value> body) {
-        if (!body) {
-            return std::unexpected{std::move(body).error()};
-        }
-        return raw(code, std::move(*body));
+#if RHP_ENABLE
+        return client_detail::sign(*engine_, source);
+#else
+        (void)source;
+        return value{};
+#endif
     }
 
     result<void> do_connect() {
@@ -472,9 +450,13 @@ private:
 #endif
     }
 
-    result<value> raw(wire::op code, value body) {
+    // Sends one request and waits for its reply; a body that couldn't be built (signed) is the answer.
+    result<value> raw(wire::op code, result<value> body) {
 #if RHP_ENABLE
-        return client_detail::request(*engine_, code, std::move(body));
+        if (!body) {
+            return std::unexpected{std::move(body).error()};
+        }
+        return client_detail::request(*engine_, code, std::move(*body));
 #else
         (void)code;
         (void)body;
@@ -482,7 +464,7 @@ private:
 #endif
     }
 
-    template <class Message>
+    template <to_value_convertible Message>
     result<value> send(wire::op code, const Message& m) {
         return raw(code, Rhp::to_value(m));
     }
@@ -509,7 +491,6 @@ private:
 #endif
     }
 
-    std::optional<signing_key_t> signer_;
 #if RHP_ENABLE
     typename Cfg::io_t runner_{};
     std::shared_ptr<client_detail::engine> engine_;

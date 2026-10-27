@@ -13,6 +13,7 @@ rhp_add_module(client
         detail/engine.hpp
         detail/fleet_engine.hpp
         detail/replies.hpp
+        detail/requests.hpp
         pending.hpp
         rollout.hpp
     SOURCES

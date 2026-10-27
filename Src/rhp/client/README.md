@@ -10,6 +10,7 @@
 | `rollout.hpp` | `rollout_plan` (canaries, cumulative `rollout_stage`s with an observe time, `max_failures`, `rollback_on_failure`, `on_progress`), `rollout_host`, `rollout_report` |
 | `detail/engine.hpp` | `client_options` (`connect_timeout`, `request_timeout`, `on_output`, `on_emit`, `blob_chunk`, `blob_window`, `ack_delay_ms`, `tls`), `session_info` (what `info()` returns), `remote_event` (one `on` delivery; views valid during the callback), the type-erased `setup`, the engine's free functions |
 | `detail/replies.hpp` | `values`, `as<T>`, `first<T>`, `nothing`: a reply body as the calls (blocking, async and fleet broadcasts) return it; header-only, used with `RHP_ENABLE=0` too |
+| `detail/requests.hpp` | `sign_fn` (the signing key, type-erased) and `signature`; the request bodies (`exec_body` / `load_body` / `reload_body` with the source's signature, `call_body`, `rollback_body`, `unload_body`, `module_body`) the calls and the fleet's broadcasts send; header-only |
 | `detail/fleet_engine.hpp` | `fleet_options` (`client`, `timeout`, `tls`, `insecure_lan`), the fleet engine's `setup` and free functions |
 
 ```cpp

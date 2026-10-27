@@ -16,6 +16,7 @@
 #include <rhp/core/value.hpp>
 #include <rhp/net/discovery.hpp>
 #include <rhp/net/endpoint.hpp>
+#include <rhp/wire/messages.hpp>
 #include <rhp/wire/ops.hpp>
 
 namespace Rhp {
@@ -36,7 +37,7 @@ namespace Rhp::fleet_detail {
 struct setup {
     client_detail::setup member; // `ep` and `shared_io` are filled in per member
     // Signs a script's source (the client's signer); empty sends scripts unsigned.
-    std::function<result<value>(std::string_view)> sign;
+    client_detail::sign_fn sign;
     std::string transport; // the transport's name, which records must carry
     std::chrono::milliseconds timeout{10000};
     net::tls_mode tls = net::tls_mode::kAuto;
@@ -82,11 +83,15 @@ void run_io(engine& e, std::stop_token stop);
 [[nodiscard]] std::vector<outcome> exec(engine& e, std::string_view source);
 [[nodiscard]] std::vector<outcome> load(engine& e, std::string_view name, std::string_view source);
 [[nodiscard]] std::vector<outcome> call(engine& e, std::string_view module, std::string_view function, std::span<const value> args);
+// release_status of every member.
+[[nodiscard]] std::vector<outcome> release_status(engine& e);
 
 // The members, in member order.
 [[nodiscard]] std::vector<net::service_record> records(const engine& e);
 // Sends one request to the members at `which` (indices into records()) within the deadline.
 [[nodiscard]] std::vector<outcome> send(engine& e, wire::op code, const value& body, std::span<const std::size_t> which);
+// A release_status answer, decoded (or the error it was).
+[[nodiscard]] result<wire::release_status_reply> status_of(const outcome& o);
 
 // fleet::rollout (rollout.cpp).
 [[nodiscard]] rollout_report rollout(engine& e, std::span<const std::byte> envelope, const rollout_plan& plan);

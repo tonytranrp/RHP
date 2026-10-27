@@ -233,8 +233,7 @@ private:
         const auto newer = send(e_, wire::op::kReleaseStatus, value{}, superseded);
         for (std::size_t k = 0; k < superseded.size(); ++k) {
             rollout_host& h = report_.hosts[superseded[k]];
-            auto status = newer[k].body ? Rhp::from_value<wire::release_status_reply>(*newer[k].body)
-                                        : result<wire::release_status_reply>{std::unexpected{newer[k].body.error()}};
+            const auto status = status_of(newer[k]);
             if (status && running_seq(*status, peek_.channel) > peek_.seq) {
                 h.status = host_state::kSkipped;
             } else {
@@ -288,7 +287,7 @@ private:
                 fail_host(h, statuses[k].body.error());
                 continue;
             }
-            auto status = Rhp::from_value<wire::release_status_reply>(*statuses[k].body);
+            const auto status = status_of(statuses[k]);
             if (!status || !runs(*status, peek_.channel, peek_.id)) {
                 fail_host(h, make_error(errc::kRuntime, "the host no longer runs the release (rolled back)", "fleet.rollout"));
             }
@@ -313,7 +312,7 @@ private:
         const auto statuses = send(e_, wire::op::kReleaseStatus, value{}, touched);
         std::vector<std::size_t> running;
         for (std::size_t k = 0; k < touched.size(); ++k) {
-            auto status = statuses[k].body ? Rhp::from_value<wire::release_status_reply>(*statuses[k].body) : result<wire::release_status_reply>{std::unexpected{statuses[k].body.error()}};
+            const auto status = status_of(statuses[k]);
             if (status && runs(*status, peek_.channel, peek_.id)) {
                 running.push_back(touched[k]);
             }

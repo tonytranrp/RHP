@@ -115,42 +115,27 @@ public:
 
     void run_io(std::stop_token stop) { io_.run(std::move(stop)); }
 
+    // Signed once, the same body for every member.
     std::vector<outcome> exec(std::string_view source) {
-        return broadcast(wire::op::kExec, code_body(source, [&](value signature) { return Rhp::to_value(wire::exec_request{std::string{source}, "exec", std::move(signature)}); }),
-                         "fleet.exec");
+        return broadcast(wire::op::kExec, client_detail::exec_body(client_detail::signature(setup_.sign, source), source, "exec"), "fleet.exec");
     }
 
     std::vector<outcome> load(std::string_view name, std::string_view source) {
-        return broadcast(wire::op::kLoad,
-                         code_body(source, [&](value signature) { return Rhp::to_value(wire::load_request{std::string{name}, std::string{source}, std::move(signature)}); }),
-                         "fleet.load");
+        return broadcast(wire::op::kLoad, client_detail::load_body(client_detail::signature(setup_.sign, source), name, source), "fleet.load");
     }
 
     std::vector<outcome> call(std::string_view module, std::string_view function, std::span<const value> args) {
         // By name: a module's id differs from host to host.
-        const wire::module_ref target{std::string{module}};
-        return broadcast(wire::op::kCall, Rhp::to_value(wire::call_request{target, std::string{function}, value::array(args.begin(), args.end())}), "fleet.call");
+        return broadcast(wire::op::kCall, client_detail::call_body(wire::module_ref{std::string{module}}, function, args), "fleet.call");
     }
+
+    std::vector<outcome> release_status() { return broadcast(wire::op::kReleaseStatus, value{}, wire::to_string(wire::op::kReleaseStatus)); }
 
 private:
     struct member {
         net::service_record record;
         client_detail::engine_ptr connection;
     };
-
-    // A code-carrying body (exec / load) with the source's signature, or why it couldn't be signed.
-    template <class Make>
-    result<value> code_body(std::string_view source, Make make) const {
-        value signature;
-        if (setup_.sign) {
-            auto signed_by = setup_.sign(source);
-            if (!signed_by) {
-                return std::unexpected{std::move(signed_by).error()};
-            }
-            signature = std::move(*signed_by);
-        }
-        return make(std::move(signature));
-    }
 
     [[nodiscard]] client_detail::engine_ptr make_member(const net::service_record& record) {
         client_detail::setup s = setup_.member;
@@ -341,8 +326,19 @@ std::vector<net::service_record> records(const engine& e) {
     return e.records();
 }
 
+std::vector<outcome> release_status(engine& e) {
+    return e.release_status();
+}
+
 std::vector<outcome> send(engine& e, wire::op code, const value& body, std::span<const std::size_t> which) {
     return e.send_to(code, body, which, wire::to_string(code));
+}
+
+result<wire::release_status_reply> status_of(const outcome& o) {
+    if (!o.body) {
+        return std::unexpected{o.body.error()};
+    }
+    return Rhp::from_value<wire::release_status_reply>(*o.body);
 }
 
 } // namespace Rhp::fleet_detail

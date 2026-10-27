@@ -178,7 +178,7 @@ public:
         std::vector<host_result<module_id>> out;
         out.reserve(raw.size());
         for (auto& o : raw) {
-            out.push_back({std::move(o.host), o.body ? Rhp::from_value<module_id>(*o.body) : result<module_id>{std::unexpected{std::move(o.body).error()}}});
+            out.push_back({std::move(o.host), client_detail::as<module_id>(std::move(o.body))});
         }
         return out;
 #else
@@ -229,15 +229,10 @@ public:
     // What every member's channels run (one outcome per member).
     [[nodiscard]] std::vector<host_result<wire::release_status_reply>> release_status() {
 #if RHP_ENABLE
-        const auto all = fleet_detail::records(*engine_);
-        std::vector<std::size_t> which(all.size());
-        for (std::size_t i = 0; i < which.size(); ++i) {
-            which[i] = i;
-        }
         std::vector<host_result<wire::release_status_reply>> out;
-        for (auto& o : fleet_detail::send(*engine_, wire::op::kReleaseStatus, value{}, which)) {
-            out.push_back({std::move(o.host), o.body ? Rhp::from_value<wire::release_status_reply>(*o.body)
-                                                     : result<wire::release_status_reply>{std::unexpected{std::move(o.body).error()}}});
+        for (auto& o : fleet_detail::release_status(*engine_)) {
+            auto status = fleet_detail::status_of(o);
+            out.push_back({std::move(o.host), std::move(status)});
         }
         return out;
 #else

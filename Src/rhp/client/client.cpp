@@ -190,6 +190,9 @@ public:
         return std::move(*node.mapped().done);
     }
 
+    // setup_ is fixed once the engine exists: any thread.
+    [[nodiscard]] result<value> sign(std::string_view source) const { return signature(setup_.sign, source); }
+
     result<std::uint64_t> subscribe(std::string_view name, remote_event_fn fn) {
         if (!fn) {
             return fail(errc::kInvalidArgument, "client.on needs a callback", "client.on");
@@ -986,6 +989,10 @@ result<std::uint16_t> port(engine& e) {
 
 result<value> request(engine& e, wire::op code, value body) {
     return e.request(code, std::move(body));
+}
+
+result<value> sign(const engine& e, std::string_view source) {
+    return e.sign(source);
 }
 
 std::uint64_t submit(engine& e, wire::op code, value body, completion done) {
