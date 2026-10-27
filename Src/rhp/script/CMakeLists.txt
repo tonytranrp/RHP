@@ -5,6 +5,7 @@ set(rhp_script_sources
     event_registry.cpp
     ledger.cpp
     patch_registry.cpp
+    stubs.cpp
 )
 set(rhp_script_private_deps "")
 if(RHP_ENABLE)
