@@ -12,7 +12,7 @@ TEST_CASE("strong ids are distinct types", "[core][ids]") {
     STATIC_REQUIRE(sizeof(Rhp::revision_id) == sizeof(std::uint32_t));
 }
 
-TEST_CASE("strong ids compare, hash and format", "[core][ids]") {
+TEST_CASE("strong ids compare hash and format", "[core][ids]") {
     constexpr Rhp::module_id none{};
     STATIC_REQUIRE(!none.valid());
     STATIC_REQUIRE(Rhp::module_id{1} < Rhp::module_id{2});

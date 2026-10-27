@@ -1,4 +1,5 @@
 #include <string_view>
+#include <type_traits>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -22,7 +23,7 @@ TEST_CASE("fixed_string works as a template argument", "[utils][fixed_string]") 
     STATIC_REQUIRE(std::is_same_v<named<"a">, named<"a">>);
 }
 
-TEST_CASE("fixed_string size, view and comparison", "[utils][fixed_string]") {
+TEST_CASE("fixed_string size view and comparison", "[utils][fixed_string]") {
     constexpr fixed_string s{"combat.damage"};
     STATIC_REQUIRE(s.size() == 13);
     STATIC_REQUIRE(s.view() == "combat.damage");

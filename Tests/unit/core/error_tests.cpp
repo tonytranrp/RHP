@@ -28,7 +28,7 @@ TEST_CASE("parse_errc reads what to_string writes", "[core][error]") {
     CHECK_FALSE(Rhp::parse_errc("Forbidden"));
 }
 
-TEST_CASE("error formats code, where and message", "[core][error]") {
+TEST_CASE("error formats code where and message", "[core][error]") {
     REQUIRE(std::format("{}", Rhp::make_error(errc::kForbidden, "needs role patch", "game.spawn")) ==
             "[forbidden] game.spawn: needs role patch");
     REQUIRE(std::format("{}", Rhp::make_error(errc::kTimeout, "no pong")) == "[timeout] no pong");

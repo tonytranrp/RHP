@@ -46,7 +46,7 @@ TEST_CASE("type_list uniqueness", "[utils][type_list]") {
     STATIC_REQUIRE(!is_unique_v<type_list<int, double, int>>);
 }
 
-TEST_CASE("type_list push, concat, transform, filter", "[utils][type_list]") {
+TEST_CASE("type_list push concat transform and filter", "[utils][type_list]") {
     STATIC_REQUIRE(std::is_same_v<push_back_t<empty, int>, type_list<int>>);
     STATIC_REQUIRE(std::is_same_v<push_front_t<three, char>, type_list<char, int, double, std::string>>);
     STATIC_REQUIRE(std::is_same_v<concat_t<>, empty>);
