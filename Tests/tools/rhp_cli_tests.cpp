@@ -44,6 +44,7 @@
 #include <rhp/security/keyring.hpp>
 #include <rhp/security/psk_keyring.hpp>
 #include <rhp/utils/scope_guard.hpp>
+#include <rhp_test/eventually.hpp>
 
 using namespace std::chrono_literals;
 namespace fs = std::filesystem;
@@ -55,15 +56,9 @@ int g_level = 0;
 using cli_lib = Rhp::lib<"s4cli">::var<"level", &g_level>;
 using cfg = Rhp::config<>::transport<Rhp::net::loopback>::logger<Rhp::core::null_logger>;
 
+// Separate processes start slowly: a longer default wait, polled less often.
 bool eventually(const std::function<bool()>& done, std::chrono::milliseconds timeout = 20s) {
-    const auto deadline = std::chrono::steady_clock::now() + timeout;
-    while (!done()) {
-        if (std::chrono::steady_clock::now() > deadline) {
-            return false;
-        }
-        std::this_thread::sleep_for(5ms);
-    }
-    return true;
+    return rhp_test::eventually(done, timeout, 5ms);
 }
 
 // What the shell printed.

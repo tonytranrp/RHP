@@ -33,6 +33,7 @@
 #include <rhp/security/key.hpp>
 #include <rhp/security/keyring.hpp>
 #include <rhp/security/psk_keyring.hpp>
+#include <rhp_test/eventually.hpp>
 
 using namespace std::chrono_literals;
 using Rhp::errc;
@@ -104,16 +105,7 @@ private:
     std::jthread pump_;
 };
 
-bool eventually(const std::function<bool()>& done, std::chrono::milliseconds timeout = 10s) {
-    const auto deadline = std::chrono::steady_clock::now() + timeout;
-    while (!done()) {
-        if (std::chrono::steady_clock::now() > deadline) {
-            return false;
-        }
-        std::this_thread::sleep_for(2ms);
-    }
-    return true;
-}
+using rhp_test::eventually;
 
 Rhp::release::manager make_manager(const signer& dev, Rhp::release::memory_store store) {
     Rhp::release::manager_options o;

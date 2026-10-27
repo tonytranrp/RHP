@@ -15,6 +15,7 @@
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
+#include <rhp_test/eventually.hpp>
 #include <rhp_test/net_support.hpp>
 #include <rhp_test/tls_fixtures.hpp>
 
@@ -244,16 +245,7 @@ private:
     std::jthread pump_;
 };
 
-bool eventually(const std::function<bool()>& done, std::chrono::milliseconds timeout = 10s) {
-    const auto deadline = std::chrono::steady_clock::now() + timeout;
-    while (!done()) {
-        if (std::chrono::steady_clock::now() > deadline) {
-            return false;
-        }
-        std::this_thread::sleep_for(2ms);
-    }
-    return true;
-}
+using rhp_test::eventually;
 
 // Events of one kind, kept for the test thread.
 template <class E>
