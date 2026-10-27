@@ -1,6 +1,5 @@
 // Rhp::async<Rhp::result<T>> must not compile: the async already carries an error.
 #include <string>
-#include <string_view>
 #include <utility>
 
 #include <rhp/core/async.hpp>

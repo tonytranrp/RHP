@@ -1,7 +1,4 @@
 // A property has nothing to undo: undo<> on it must not compile.
-#include <tuple>
-
-#include <rhp/core/async.hpp>
 #include <rhp/script/lib.hpp>
 
 namespace property_undo_fixture {

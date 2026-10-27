@@ -5,7 +5,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <expected>
-#include <functional>
 #include <limits>
 #include <optional>
 #include <span>

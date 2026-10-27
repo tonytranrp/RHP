@@ -1,6 +1,4 @@
 // A property must not wait: it can't return Rhp::async<T>.
-#include <tuple>
-
 #include <rhp/core/async.hpp>
 #include <rhp/script/lib.hpp>
 

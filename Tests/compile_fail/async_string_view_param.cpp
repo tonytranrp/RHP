@@ -5,7 +5,6 @@
 #include <utility>
 
 #include <rhp/core/async.hpp>
-#include <rhp/core/result.hpp>
 #include <rhp/script/lib.hpp>
 
 namespace async_string_view_param_fixture {

@@ -7,7 +7,6 @@
 #include <type_traits>
 #include <utility>
 
-#include <rhp/core/convert.hpp>
 #include <rhp/core/role.hpp>
 #include <rhp/core/value.hpp>
 #include <rhp/script/detail/lib_traits.hpp>

@@ -1,7 +1,6 @@
 // A property returning several values must not compile: h.name is one value.
 #include <tuple>
 
-#include <rhp/core/async.hpp>
 #include <rhp/script/lib.hpp>
 
 namespace property_tuple_fixture {

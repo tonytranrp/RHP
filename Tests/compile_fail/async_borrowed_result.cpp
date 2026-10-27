@@ -4,7 +4,6 @@
 #include <utility>
 
 #include <rhp/core/async.hpp>
-#include <rhp/core/result.hpp>
 #include <rhp/script/lib.hpp>
 
 namespace async_borrowed_result_fixture {

@@ -1,6 +1,5 @@
 // Rhp::result<Rhp::async<T>> must not compile: an async that fails at once is async<T>::completed(error).
 #include <string>
-#include <string_view>
 #include <utility>
 
 #include <rhp/core/async.hpp>

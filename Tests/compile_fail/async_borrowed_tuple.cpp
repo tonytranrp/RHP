@@ -2,7 +2,6 @@
 #include <string>
 #include <string_view>
 #include <tuple>
-#include <utility>
 
 #include <rhp/core/async.hpp>
 #include <rhp/script/lib.hpp>

@@ -1,10 +1,8 @@
 // An asynchronous binding returning Rhp::async<Rhp::async<T>> must not compile.
 #include <string>
-#include <string_view>
 #include <utility>
 
 #include <rhp/core/async.hpp>
-#include <rhp/core/result.hpp>
 #include <rhp/script/lib.hpp>
 
 namespace async_nested_fixture {
