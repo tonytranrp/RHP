@@ -1,5 +1,9 @@
+#include <algorithm>
 #include <array>
+#include <cstddef>
 #include <initializer_list>
+#include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -63,15 +67,71 @@ TEST_CASE("websocket: frames round trip through the codec", "[net][websocket]") 
     }
 }
 
+TEST_CASE("websocket: a header and its payload in separate buffers are the encoded frame", "[net][websocket]") {
+    const ws::masking_key key{std::byte{0x37}, std::byte{0xfa}, std::byte{0x21}, std::byte{0x3d}};
+    for (const std::size_t size : {std::size_t{0}, std::size_t{1}, std::size_t{125}, std::size_t{126}, std::size_t{65535}, std::size_t{65536}, std::size_t{200000}}) {
+        for (const auto& mask : {std::optional<ws::masking_key>{}, std::optional<ws::masking_key>{key}}) {
+            std::string payload(size, '\0');
+            for (std::size_t i = 0; i < size; ++i) {
+                payload[i] = static_cast<char>(i * 7);
+            }
+            Rhp::utils::byte_buffer frame;
+            ws::encode_frame(frame, ws::opcode::kBinary, bytes_of(payload), mask);
+
+            Rhp::utils::byte_buffer split;
+            ws::encode_header(split, ws::opcode::kBinary, size, mask);
+            Rhp::utils::byte_buffer body;
+            body.append(payload);
+            if (mask) {
+                ws::apply_mask(body.mutable_view(), *mask);
+            }
+            split.append(body.view());
+            CHECK(std::ranges::equal(split.view(), frame.view()));
+        }
+    }
+}
+
+TEST_CASE("websocket: large messages cross both ways", "[net][websocket]") {
+    Rhp::net::io_context io;
+    std::unique_ptr<Rhp::net::link> accepted;
+    auto listener = Rhp::net::websocket::listen(io, Rhp::endpoint::listen("127.0.0.1", 0), [&](auto link) { accepted = std::move(link); });
+    REQUIRE(listener);
+    std::unique_ptr<Rhp::net::link> dialed;
+    Rhp::net::websocket::dial(io, Rhp::endpoint::dial("127.0.0.1", (*listener)->port()), [&](auto result) {
+        REQUIRE(result);
+        dialed = std::move(*result);
+    });
+    REQUIRE(rhp_test::poll_until({&io}, [&] { return dialed && accepted; }));
+    rhp_test::recorder at_host;
+    rhp_test::recorder at_client;
+    accepted->start(at_host);
+    dialed->start(at_client);
+    std::string up(100000, '\0');
+    std::string down(300000, '\0');
+    for (std::size_t i = 0; i < down.size(); ++i) {
+        down[i] = static_cast<char>(i % 251);
+        if (i < up.size()) {
+            up[i] = static_cast<char>(i % 241);
+        }
+    }
+    dialed->send(rhp_test::buffer_of(up)); // masked by the client
+    dialed->send(rhp_test::buffer_of("small"));
+    accepted->send(rhp_test::buffer_of(down));
+    accepted->send(rhp_test::buffer_of("tail"));
+    REQUIRE(rhp_test::poll_until({&io}, [&] { return at_host.received.size() == up.size() + 5 && at_client.received.size() == down.size() + 4; }));
+    CHECK(at_host.text() == up + "small");
+    CHECK(at_client.text() == down + "tail");
+}
+
 TEST_CASE("websocket: the codec refuses protocol violations", "[net][websocket]") {
-    CHECK(refused({0x82, 0x01}, ws::role::kClient));                                // a client frame without a mask
-    CHECK(refused({0x82, 0x81}, ws::role::kServer));                                // a masked server frame
-    CHECK(refused({0xc2, 0x81}, ws::role::kClient));                                // reserved bit
-    CHECK(refused({0x81, 0x81}, ws::role::kClient));                                // text
-    CHECK(refused({0x83, 0x81}, ws::role::kClient));                                // unknown opcode
-    CHECK(refused({0x09, 0x80}, ws::role::kClient));                                // fragmented ping
-    CHECK(refused({0x89, 0xfe, 0x00, 0x7e}, ws::role::kClient));                    // ping longer than 125
-    CHECK(refused({0x82, 0xfe, 0x00, 0x10}, ws::role::kClient));                    // 16 in the 2-byte form
+    CHECK(refused({0x82, 0x01}, ws::role::kClient));                               // a client frame without a mask
+    CHECK(refused({0x82, 0x81}, ws::role::kServer));                               // a masked server frame
+    CHECK(refused({0xc2, 0x81}, ws::role::kClient));                               // reserved bit
+    CHECK(refused({0x81, 0x81}, ws::role::kClient));                               // text
+    CHECK(refused({0x83, 0x81}, ws::role::kClient));                               // unknown opcode
+    CHECK(refused({0x09, 0x80}, ws::role::kClient));                               // fragmented ping
+    CHECK(refused({0x89, 0xfe, 0x00, 0x7e}, ws::role::kClient));                   // ping longer than 125
+    CHECK(refused({0x82, 0xfe, 0x00, 0x10}, ws::role::kClient));                   // 16 in the 2-byte form
     CHECK(refused({0x82, 0xff, 0, 0, 0, 0, 0, 0, 0xff, 0xff}, ws::role::kClient)); // 65535 in the 8-byte form
     CHECK(refused({0x82, 0xff, 0, 0, 0, 0, 0x02, 0, 0, 0}, ws::role::kClient));    // over 16 MiB
 }
@@ -79,11 +139,13 @@ TEST_CASE("websocket: the codec refuses protocol violations", "[net][websocket]"
 TEST_CASE("websocket: close payloads carry a sendable status and UTF-8", "[net][websocket]") {
     CHECK(ws::valid_close_payload({}));
     CHECK(ws::valid_close_payload(ws::close_payload(ws::close_code::kNormal)));
-    CHECK(ws::valid_close_payload(bytes_of(std::string_view{"\x0b\xb8" "caf\xc3\xa9", 7})));      // 3000 and UTF-8 text
-    CHECK_FALSE(ws::valid_close_payload(bytes_of(std::string_view{"\x03", 1})));                // half a status
-    CHECK_FALSE(ws::valid_close_payload(bytes_of(std::string_view{"\x03\xed", 2})));            // 1005 is local-only
-    CHECK_FALSE(ws::valid_close_payload(bytes_of(std::string_view{"\x07\xd0", 2})));            // 2000 is unassigned
-    CHECK_FALSE(ws::valid_close_payload(bytes_of(std::string_view{"\x03\xe8\xc3", 3})));        // truncated UTF-8
+    CHECK(ws::valid_close_payload(bytes_of(std::string_view{"\x0b\xb8"
+                                                            "caf\xc3\xa9",
+                                                            7})));                               // 3000 and UTF-8 text
+    CHECK_FALSE(ws::valid_close_payload(bytes_of(std::string_view{"\x03", 1})));                 // half a status
+    CHECK_FALSE(ws::valid_close_payload(bytes_of(std::string_view{"\x03\xed", 2})));             // 1005 is local-only
+    CHECK_FALSE(ws::valid_close_payload(bytes_of(std::string_view{"\x07\xd0", 2})));             // 2000 is unassigned
+    CHECK_FALSE(ws::valid_close_payload(bytes_of(std::string_view{"\x03\xe8\xc3", 3})));         // truncated UTF-8
     CHECK_FALSE(ws::valid_close_payload(bytes_of(std::string_view{"\x03\xe8\xed\xa0\x80", 5}))); // a surrogate
 }
 

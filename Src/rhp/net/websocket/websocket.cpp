@@ -21,6 +21,9 @@ namespace ws = detail::ws;
 
 constexpr const char* kWhere = "net.websocket";
 constexpr std::chrono::seconds kCloseGrace{5};
+// A send up to this size is copied behind its frame header (one buffer: an idle TCP link writes it
+// in one go); a larger one keeps its own buffer and follows the header without a copy.
+constexpr std::size_t kCopyLimit = 16 * 1024;
 
 // One WebSocket connection over an owned TCP link. `Self` fixes which side we are at compile time:
 // the client masks what it sends and opens with the upgrade request; the server answers it.
@@ -61,7 +64,7 @@ public:
             return;
         }
         if (phase_ == phase::kOpen) {
-            send_data(bytes.view());
+            send_message(std::move(bytes));
             return;
         }
         if (bytes.size() > ws::kMaxMessage - queued_bytes_) {
@@ -149,8 +152,8 @@ private:
         }
         read_ += (*head)->bytes;
         phase_ = phase::kOpen;
-        for (const auto& bytes : queued_) {
-            send_data(bytes.view());
+        for (auto& bytes : queued_) {
+            send_message(std::move(bytes));
         }
         queued_.clear();
         queued_bytes_ = 0;
@@ -289,6 +292,31 @@ private:
         finish();
     }
 
+    // One binary message per send. A large one goes as its header and then its own buffer (masked in
+    // place by a client): the same bytes on the wire as encode_frame, without copying the payload.
+    void send_message(utils::byte_buffer bytes) {
+        if (bytes.size() <= kCopyLimit || bytes.size() > ws::kMaxMessage) {
+            send_data(bytes.view());
+            return;
+        }
+        if (phase_ != phase::kOpen) {
+            return;
+        }
+        auto mask = frame_mask();
+        if (!mask) {
+            failure_ = std::move(mask).error();
+            finish();
+            return;
+        }
+        utils::byte_buffer header;
+        ws::encode_header(header, ws::opcode::kBinary, bytes.size(), *mask);
+        if (*mask) {
+            ws::apply_mask(bytes.mutable_view(), **mask);
+        }
+        stream_->send(std::move(header));
+        stream_->send(std::move(bytes));
+    }
+
     // The stream has no message boundaries, so a send larger than the peer's limit becomes several messages.
     void send_data(utils::bytes_view bytes) {
         while (!bytes.empty() && phase_ == phase::kOpen) {
@@ -299,19 +327,28 @@ private:
     }
 
     void send_frame(ws::opcode op, utils::bytes_view payload) {
-        std::optional<ws::masking_key> mask;
+        auto mask = frame_mask();
+        if (!mask) {
+            failure_ = std::move(mask).error();
+            finish();
+            return;
+        }
+        utils::byte_buffer frame;
+        ws::encode_frame(frame, op, payload, *mask);
+        stream_->send(std::move(frame));
+    }
+
+    // A fresh masking key for each frame a client sends; none for the server.
+    [[nodiscard]] static result<std::optional<ws::masking_key>> frame_mask() {
         if constexpr (Self == ws::role::kClient) {
             auto random = platform::random_array<4>();
             if (!random) {
-                failure_ = std::move(random).error();
-                finish();
-                return;
+                return std::unexpected{std::move(random).error()};
             }
-            mask = *random;
+            return std::optional<ws::masking_key>{*random};
+        } else {
+            return std::optional<ws::masking_key>{};
         }
-        utils::byte_buffer frame;
-        ws::encode_frame(frame, op, payload, mask);
-        stream_->send(std::move(frame));
     }
 
     void send_raw(std::string_view text) {

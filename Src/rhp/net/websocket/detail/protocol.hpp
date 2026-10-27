@@ -68,6 +68,9 @@ struct frame_header {
 
 // Appends one complete frame; `mask` is set exactly when the sender is a client.
 void encode_frame(utils::byte_buffer& out, opcode op, utils::bytes_view payload, std::optional<masking_key> mask);
+// Appends only the header of that frame for a payload of `size` bytes: the payload, masked with
+// apply_mask when `mask` is set, follows it on the wire (it can travel in a buffer of its own).
+void encode_header(utils::byte_buffer& out, opcode op, std::uint64_t size, std::optional<masking_key> mask);
 
 // XORs `payload` with the key, `offset` bytes into the frame's payload.
 constexpr void apply_mask(std::span<std::byte> payload, const masking_key& mask, std::uint64_t offset = 0) noexcept {

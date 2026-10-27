@@ -180,8 +180,7 @@ result<std::optional<frame_header>> decode_header(utils::bytes_view input, role 
     return std::optional<frame_header>{out};
 }
 
-void encode_frame(utils::byte_buffer& out, opcode op, utils::bytes_view payload, std::optional<masking_key> mask) {
-    const auto n = static_cast<std::uint64_t>(payload.size());
+void encode_header(utils::byte_buffer& out, opcode op, std::uint64_t n, std::optional<masking_key> mask) {
     std::array<std::byte, kMaxHeaderBytes> header{};
     std::size_t at = 0;
     header[at++] = static_cast<std::byte>(0x80 | static_cast<unsigned>(op));
@@ -199,8 +198,12 @@ void encode_frame(utils::byte_buffer& out, opcode op, utils::bytes_view payload,
         std::ranges::copy(*mask, header.begin() + static_cast<std::ptrdiff_t>(at));
         at += mask->size();
     }
-    out.reserve(out.size() + at + payload.size());
     out.append(utils::bytes_view{header.data(), at});
+}
+
+void encode_frame(utils::byte_buffer& out, opcode op, utils::bytes_view payload, std::optional<masking_key> mask) {
+    out.reserve(out.size() + kMaxHeaderBytes + payload.size());
+    encode_header(out, op, payload.size(), mask);
     const auto offset = out.size();
     out.append(payload);
     if (mask) {
