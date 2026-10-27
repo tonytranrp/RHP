@@ -33,7 +33,7 @@ def main():
         overlap = low <= b_high and b_low <= high
         verdict = "~" if overlap or abs(change) < args.threshold else f"{change:+.1f}%"
         print(f"| {name} | {human(b_mean)} | {human(mean)} | {verdict} |")
-    for name in before.keys() - {row[0] for row in after}:
+    for name in sorted(before.keys() - {row[0] for row in after}):  # a set: sorted, so the report is stable
         print(f"| {name} | {human(before[name][0])} | - | gone |")
     return 0
 
