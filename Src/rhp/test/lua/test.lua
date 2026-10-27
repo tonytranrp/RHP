@@ -11,11 +11,11 @@
 
 local T = __rhp_t
 local bridge = T.bridge
-local type, select, pairs, ipairs, error, tostring, tonumber, setmetatable, pcall =
-    type, select, pairs, ipairs, error, tostring, tonumber, setmetatable, pcall
+local type, select, pairs, ipairs, error, tostring, setmetatable, pcall =
+    type, select, pairs, ipairs, error, tostring, setmetatable, pcall
 local concat, sort, unpack = table.concat, table.sort, table.unpack
 local format = string.format
-local floor, sqrt, huge = math.floor, math.sqrt, math.huge
+local sqrt = math.sqrt
 local pack = T.pack
 
 local function running(what)

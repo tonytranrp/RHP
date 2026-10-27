@@ -5,10 +5,10 @@
 -- flip the assertion. A failure raises a table error the runner reports with the test file's line.
 
 local T = __rhp_t
-local type, select, pairs, ipairs, next, error, pcall, tostring, tonumber, setmetatable, getmetatable, rawget, rawset, rawequal =
-    type, select, pairs, ipairs, next, error, pcall, tostring, tonumber, setmetatable, getmetatable, rawget, rawset, rawequal
-local concat, insert, unpack = table.concat, table.insert, table.unpack
-local format, find, gsub, gmatch, lower, sub = string.format, string.find, string.gsub, string.gmatch, string.lower, string.sub
+local type, select, pairs, ipairs, error, pcall, tostring, tonumber, setmetatable, getmetatable, rawget, rawset, rawequal =
+    type, select, pairs, ipairs, error, pcall, tostring, tonumber, setmetatable, getmetatable, rawget, rawset, rawequal
+local concat, unpack = table.concat, table.unpack
+local format, find, gsub, gmatch, lower = string.format, string.find, string.gsub, string.gmatch, string.lower
 local lua_assert = assert
 
 -- ---- failures -----------------------------------------------------------------------------------------
@@ -250,16 +250,6 @@ T.matchers = matchers
 local assertions = {}
 T.assertions = assertions
 
-local function shown(args)
-    return function(...)
-        local out = {}
-        for i = 1, select("#", ...) do
-            out[i] = T.show(args[select(i, ...)])
-        end
-        return unpack(out, 1, select("#", ...))
-    end
-end
-
 -- `arity`: how many arguments the assertion takes; the first string after them is the message
 -- (assert.equals(1, x, "why")), as in luassert.
 local function register(name, check, positive, negative, show, arity)
@@ -450,7 +440,6 @@ local function check(words, target, message, ...)
     end
     T.fail(text, extra)
 end
-T.check = check
 
 -- Chains without a spy or a message are the same for everyone: made once ("is_not.equal" -> chain).
 local chain_cache = {}

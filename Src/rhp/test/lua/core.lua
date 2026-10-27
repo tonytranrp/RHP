@@ -6,10 +6,10 @@ local bridge = __rhp_test
 local T = {}
 __rhp_t = T
 
-local type, select, pairs, ipairs, next, error, pcall, xpcall, tostring, tonumber, setmetatable, getmetatable, rawget, rawset, rawequal =
-    type, select, pairs, ipairs, next, error, pcall, xpcall, tostring, tonumber, setmetatable, getmetatable, rawget, rawset, rawequal
+local type, pairs, ipairs, next, error, xpcall, tostring, tonumber, setmetatable, getmetatable, rawget, rawset =
+    type, pairs, ipairs, next, error, xpcall, tostring, tonumber, setmetatable, getmetatable, rawget, rawset
 local concat, insert, sort, unpack = table.concat, table.insert, table.sort, table.unpack
-local format, find, sub, gsub, gmatch, match, lower = string.format, string.find, string.sub, string.gsub, string.gmatch, string.match, string.lower
+local format, sub, gsub, gmatch = string.format, string.sub, string.gsub, string.gmatch
 
 T.bridge = bridge
 T.env = _ENV -- the scratch environment: test files' globals
@@ -40,7 +40,7 @@ T.order = {}  -- ids in definition order
 T.errors = {} -- errors outside tests: a failing describe body, setup or teardown
 T.running = nil
 T.next_id = 0
-T.config = {} -- what the runner says (host "config"): seed, ci, ...
+T.config = {} -- what the runner says (host "config"): seed, property_runs, fuzz_ms
 
 -- ---- locations --------------------------------------------------------------------------------------
 
@@ -255,7 +255,6 @@ spec = it
 
 -- pending("name"[, fn]) declares a pending test; pending("why") inside a running test stops it as pending.
 local pending_mt = { __tostring = function(p) return "pending: " .. tostring(p.message) end }
-T.pending_mt = pending_mt
 
 function pending(name, fn)
     if T.running then
@@ -326,7 +325,6 @@ T.catch = catch
 local function call(fn, ...)
     return xpcall(fn, catch, ...)
 end
-T.call = call
 
 local function chain_of(block)
     local chain = {}
@@ -355,7 +353,6 @@ local function describe_error(err, test)
     out.diff = err.diff
     return out
 end
-T.describe_error = describe_error
 
 function T.list()
     local tests = {}
@@ -491,7 +488,6 @@ function T.run(id)
         budget = nil, -- a copy of the test's: test.budget adds to it
         snapshot_count = 0,
         strict_undo = test.opts.undone or false,
-        fakes = {},
         chain = chain_of(test.block),
         reached = 0, -- blocks whose before_each ran (their after_each runs)
         globals_before = {},
@@ -603,7 +599,7 @@ function T.finish()
     return { errors = errors }
 end
 
--- The runner's settings for this file (seed, ci, update_snapshots, fuzz budget, ...).
+-- The runner's settings for this file (seed, property_runs, fuzz_ms).
 function T.configure(config)
     T.config = config or {}
 end

@@ -7,10 +7,10 @@
 
 local T = __rhp_t
 local bridge = T.bridge
-local type, select, pairs, ipairs, error, tostring, setmetatable, rawget, rawset, tonumber =
-    type, select, pairs, ipairs, error, tostring, setmetatable, rawget, rawset, tonumber
+local type, pairs, ipairs, error, tostring, setmetatable, rawget =
+    type, pairs, ipairs, error, tostring, setmetatable, rawget
 local concat, unpack = table.concat, table.unpack
-local format, find, sub = string.format, string.find, string.sub
+local format, sub = string.format, string.sub
 local mtype = math.type
 local pack = T.pack
 

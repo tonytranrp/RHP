@@ -2,8 +2,8 @@
 -- the first difference, and the stable serializer snapshots use.
 
 local T = __rhp_t
-local type, pairs, ipairs, next, tostring, getmetatable, setmetatable, rawget, rawequal, select =
-    type, pairs, ipairs, next, tostring, getmetatable, setmetatable, rawget, rawequal, select
+local type, ipairs, next, tostring, getmetatable, rawget, rawequal =
+    type, ipairs, next, tostring, getmetatable, rawget, rawequal
 local concat, sort, insert = table.concat, table.sort, table.insert
 local format, rep, gsub, find, sub = string.format, string.rep, string.gsub, string.find, string.sub
 local mtype = math.type
@@ -36,7 +36,6 @@ local function sorted_keys(t)
     sort(keys, key_less)
     return keys
 end
-T.sorted_keys = sorted_keys
 
 local function quote(s)
     return "'" .. gsub(s, "[%c\\']", function(c)
@@ -54,7 +53,6 @@ local function quote(s)
         return format("\\%03d", c:byte())
     end) .. "'"
 end
-T.quote = quote
 
 local function number_text(n)
     if mtype(n) == "integer" then

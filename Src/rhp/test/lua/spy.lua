@@ -10,8 +10,8 @@
 
 local T = __rhp_t
 local bridge = T.bridge
-local type, select, pairs, ipairs, next, error, tostring, setmetatable, getmetatable, rawget, rawset, rawequal =
-    type, select, pairs, ipairs, next, error, tostring, setmetatable, getmetatable, rawget, rawset, rawequal
+local type, pairs, ipairs, next, error, tostring, setmetatable, getmetatable, rawget, rawequal =
+    type, pairs, ipairs, next, error, tostring, setmetatable, getmetatable, rawget, rawequal
 local concat, unpack = table.concat, table.unpack
 local format = string.format
 local pack = T.pack

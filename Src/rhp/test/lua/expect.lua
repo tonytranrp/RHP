@@ -7,9 +7,9 @@
 -- Filler words: to, be, been, have, has, a, an, is, that, and. Negation: to_not, not_to, never.
 
 local T = __rhp_t
-local type, select, pairs, ipairs, error, tostring, setmetatable, rawget, rawequal, getmetatable, pcall =
-    type, select, pairs, ipairs, error, tostring, setmetatable, rawget, rawequal, getmetatable, pcall
-local concat, unpack = table.concat, table.unpack
+local type, error, tostring, setmetatable, rawget, getmetatable, pcall =
+    type, error, tostring, setmetatable, rawget, getmetatable, pcall
+local concat = table.concat
 local format, find = string.format, string.find
 local pack = T.pack
 
@@ -17,7 +17,6 @@ local fillers = { to = true, be = true, been = true, have = true, has = true, a 
 local negators = { to_not = true, not_to = true, never = true, ["not"] = true }
 
 local matchers = {}
-T.expect_matchers = matchers
 
 -- Each matcher: function(actual, ...) -> ok, describe; describe() -> positive message, negative
 -- message, extra. Messages are built for a failure only: a passing expect formats nothing.

@@ -8,11 +8,11 @@
 
 local T = __rhp_t
 local bridge = T.bridge
-local type, select, pairs, ipairs, next, error, pcall, xpcall, tostring, setmetatable, load =
-    type, select, pairs, ipairs, next, error, pcall, xpcall, tostring, setmetatable, load
-local concat, insert, remove, unpack, sort = table.concat, table.insert, table.remove, table.unpack, table.sort
-local format, byte, char, sub = string.format, string.byte, string.char, string.sub
-local floor, huge, mtype = math.floor, math.huge, math.type
+local type, pairs, ipairs, error, pcall, xpcall, tostring, setmetatable, load =
+    type, pairs, ipairs, error, pcall, xpcall, tostring, setmetatable, load
+local concat, unpack, sort = table.concat, table.unpack, table.sort
+local format, byte, sub = string.format, string.byte, string.sub
+local floor, huge = math.floor, math.huge
 local pack = T.pack
 
 -- ---- snapshots ------------------------------------------------------------------------------------------
@@ -62,7 +62,6 @@ rng_mt.__index = rng_mt
 local function new_rng(seed)
     return setmetatable({ state = seed // 1 }, rng_mt)
 end
-T.new_rng = new_rng
 
 function rng_mt:next()
     self.state = self.state + 0x9E3779B97F4A7C15
@@ -104,7 +103,6 @@ local function seed_of(text, base)
     end
     return h
 end
-T.seed_of = seed_of
 
 -- ---- generators ------------------------------------------------------------------------------------------
 
@@ -695,7 +693,7 @@ function test.fuzz(fn, opts)
     local seed = run_seed(opts, label)
     local rng = new_rng(seed)
     local budget_ms = opts.time_ms or T.config.fuzz_ms
-    local runs = opts.runs or (budget_ms and 1e15 or (T.config.fuzz_runs or 500))
+    local runs = opts.runs or (budget_ms and 1e15 or 500)
     local started = bridge.meter().active_ms
     local corpus = {}
     local stored = bridge.host("corpus_load", label)

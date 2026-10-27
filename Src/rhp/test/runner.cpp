@@ -695,10 +695,7 @@ struct runner::impl {
         }
         if (command == "config") {
             object o;
-            o.set("seed", value{static_cast<std::int64_t>(seed)})
-                .set("ci", value{options.ci})
-                .set("update_snapshots", value{options.update_snapshots})
-                .set("property_runs", value{static_cast<std::int64_t>(options.property_runs)});
+            o.set("seed", value{static_cast<std::int64_t>(seed)}).set("property_runs", value{static_cast<std::int64_t>(options.property_runs)});
             if (options.fuzz_ms) {
                 o.set("fuzz_ms", value{static_cast<std::int64_t>(*options.fuzz_ms)});
             }
