@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <format>
 #include <optional>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -637,8 +638,8 @@ TEST_CASE("plain bindings read and refuse arguments as the general path does", "
         {"plain.mix", "(true, 1, 1, 's')"},           // missing arguments
         {"plain.mix", "()"},                          // none at all
         {"plain.value", "(1, 1)"},                    // not a handle
-        {"plain.value", "(plain.make(0), 1)"},       // a stale handle
-        {"plain.value", "(plain.make(1), 'x')"},     // a bad argument after a handle
+        {"plain.value", "(plain.make(0), 1)"},        // a stale handle
+        {"plain.value", "(plain.make(1), 'x')"},      // a bad argument after a handle
     };
     for (const auto& [fn, args] : calls) {
         const std::string plain_call = std::format("{}{}", fn, args);
@@ -679,4 +680,120 @@ TEST_CASE("plain bindings read and refuse arguments as the general path does", "
     CHECK(exec_error(box, "plain.admin_mix(true, 1, 1, 's', 's', 1)") == errc::kForbidden);
     // And the sandbox is fine after all of it.
     CHECK(box.exec<int>("return plain.value(plain.make(1), 1)") == 2);
+}
+
+namespace guard_fixtures {
+
+// A handle whose is_alive throws for 13, and a type whose Rhp::convert throws while pulling.
+struct fragile {
+    int v = 0;
+    bool operator==(const fragile&) const = default;
+};
+
+inline bool fragile_alive(const fragile& f) {
+    if (f.v == 13) {
+        throw std::runtime_error("alive kaboom");
+    }
+    return f.v > 0;
+}
+
+inline fragile make_fragile(int v) {
+    return fragile{v};
+}
+
+inline int fragile_value(fragile f) {
+    return f.v;
+}
+
+inline int fragile_value_irreversible(fragile f) {
+    return f.v;
+}
+
+inline int g_cells[2] = {};
+
+inline std::span<int> fragile_cells(fragile) {
+    return g_cells;
+}
+
+struct picky {
+    int v = 0;
+};
+
+inline picky g_picky{};
+
+inline int picky_value(picky p) {
+    return p.v;
+}
+
+} // namespace guard_fixtures
+
+template <>
+struct Rhp::convert<guard_fixtures::picky> {
+    static Rhp::value to_value(const guard_fixtures::picky& p) { return Rhp::value{static_cast<std::int64_t>(p.v)}; }
+    static Rhp::result<guard_fixtures::picky> from_value(const Rhp::value& v) {
+        const auto* n = v.get_if<std::int64_t>();
+        if (n == nullptr) {
+            return Rhp::fail(errc::kTypeMismatch, "expected an integer");
+        }
+        if (*n == 13) {
+            throw Rhp::exception{Rhp::make_error(errc::kOutOfRange, "convert kaboom")};
+        }
+        return guard_fixtures::picky{static_cast<int>(*n)};
+    }
+};
+
+namespace guard_fixtures {
+
+// value takes the plain trampoline, value_g the general one, cells the view one.
+using guard_lib = Rhp::lib<"guard">                                 //
+    ::handle<"fragile", fragile, &fragile_alive>                    //
+    ::fn<"make", &make_fragile>                                     //
+    ::fn<"value", &fragile_value>                                   //
+    ::fn<"value_g", &fragile_value_irreversible, Rhp::irreversible> //
+    ::method<"get", &fragile_value>                                 //
+    ::fn<"cells", &fragile_cells>                                   //
+    ::fn<"picky", &picky_value>                                     //
+    ::var<"p", &g_picky>;
+
+} // namespace guard_fixtures
+
+TEST_CASE("exceptions while pulling arguments are labelled like the binding's own", "[script][binding]") {
+    sandbox_options options;
+    options.caller_role = role::kPatch;
+    options.output = [](std::string_view) {};
+    sandbox box{std::move(options)};
+    REQUIRE(box.install<guard_fixtures::guard_lib>());
+    REQUIRE(box.exec<int>("return guard.value(guard.make(2))") == 2);
+
+    // A handle's is_alive throws: on the plain, general, method and view paths alike.
+    const std::pair<std::string_view, std::string_view> alive_calls[] = {
+        {"guard.value(guard.make(13))", "guard.value"},
+        {"guard.value_g(guard.make(13))", "guard.value_g"},
+        {"guard.make(13):get()", "fragile:get"},
+        {"guard.cells(guard.make(13))", "guard.cells"},
+    };
+    for (const auto& [call, where] : alive_calls) {
+        CAPTURE(call);
+        const auto r = box.exec(call);
+        REQUIRE_FALSE(r.has_value());
+        CHECK(r.error().code == errc::kRuntime);
+        CHECK(r.error().message == "alive kaboom");
+        CHECK(r.error().where == where);
+    }
+
+    // A Rhp::convert<T> throws an Rhp::exception: its own error, labelled.
+    const std::pair<std::string_view, std::string_view> convert_calls[] = {
+        {"guard.picky(13)", "guard.picky"},
+        {"guard.p = 13", "guard.p"},
+    };
+    for (const auto& [call, where] : convert_calls) {
+        CAPTURE(call);
+        const auto r = box.exec(call);
+        REQUIRE_FALSE(r.has_value());
+        CHECK(r.error().code == errc::kOutOfRange);
+        CHECK(r.error().message == "convert kaboom");
+        CHECK(r.error().where == where);
+    }
+    CHECK(guard_fixtures::g_picky.v == 0);
+    CHECK(box.exec<int>("guard.p = 4 return guard.picky(guard.p)") == 4);
 }

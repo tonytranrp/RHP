@@ -311,7 +311,10 @@ private:
 
     template <std::size_t... Is>
     static int call_original(stack& s, lua_patch_layer& self, std::index_sequence<Is...>) {
-        std::tuple<result<std::remove_cvref_t<Args>>...> pulled{pull<std::remove_cvref_t<Args>>(s, static_cast<int>(Is) + 1)...};
+        // A Rhp::convert<T>::pull may throw: as the call below does, it raises without a label.
+        auto pulled = call_guarded(s, std::string_view{}, [&] {
+            return std::tuple<result<std::remove_cvref_t<Args>>...>{pull<std::remove_cvref_t<Args>>(s, static_cast<int>(Is) + 1)...};
+        });
         std::optional<error> bad;
         ((bad || std::get<Is>(pulled) ? void() : void(bad = std::get<Is>(pulled).error())), ...);
         if (bad) {

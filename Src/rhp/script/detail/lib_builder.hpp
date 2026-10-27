@@ -312,11 +312,12 @@ void raise_bad_arg(stack& s, const Label& label, const Pulled& pulled, std::inde
 }
 
 // Pulls Entry's arguments as Pulled (a tuple of one result per argument) and raises the first that
-// doesn't fit.
+// doesn't fit. Pulling runs user code (a handle's is_alive, a Rhp::convert<T>::pull): what it
+// throws raises as the binding's own exceptions do.
 template <utils::type_list_like Handles, class Entry, class Pulled, class Label, std::size_t... Is>
 Pulled pull_args(stack& s, const Label& label, std::index_sequence<Is...> seq) {
     using args = typename Entry::traits::args;
-    Pulled pulled{pull_arg<Handles, utils::at_t<args, Is>>(s, static_cast<int>(Is) + 1)...};
+    Pulled pulled = call_guarded(s, label, [&] { return Pulled{pull_arg<Handles, utils::at_t<args, Is>>(s, static_cast<int>(Is) + 1)...}; });
     raise_bad_arg<Entry>(s, label, pulled, seq);
     return pulled;
 }
@@ -405,6 +406,11 @@ bool take_plain(stack& s, int index, const arg_slot& slot, plain_storage_t<Handl
     }
 }
 
+// A plain parameter whose take may throw: a handle (its is_alive is user code) or a std::string
+// (it allocates). The others take without a guard.
+template <utils::type_list_like Handles, class T>
+inline constexpr bool plain_take_throws_v = is_handle_v<Handles, T> || std::same_as<storage_t<T>, std::string>;
+
 template <utils::type_list_like Handles, class T>
 decltype(auto) plain_value(plain_storage_t<Handles, T>& held) {
     if constexpr (is_handle_v<Handles, T>) {
@@ -427,8 +433,14 @@ int call_plain(stack& s, Label label, [[maybe_unused]] std::index_sequence<Is...
         static constexpr arg_kind kinds[] = {plain_kind<Handles, utils::at_t<args, Is>>()...};
         constexpr bool any_read = ((kinds[Is] != arg_kind::kOther) || ...);
         arg_slot slots[sizeof...(Is)];
-        if ((any_read && !s.read_args(kinds, slots, static_cast<int>(sizeof...(Is)))) ||
-            !(take_plain<Handles, utils::at_t<args, Is>>(s, static_cast<int>(Is) + 1, slots[Is], std::get<Is>(values)) && ...)) [[unlikely]] {
+        const auto take_all = [&] { return (take_plain<Handles, utils::at_t<args, Is>>(s, static_cast<int>(Is) + 1, slots[Is], std::get<Is>(values)) && ...); };
+        bool taken = !any_read || s.read_args(kinds, slots, static_cast<int>(sizeof...(Is)));
+        if constexpr ((plain_take_throws_v<Handles, utils::at_t<args, Is>> || ...)) {
+            taken = taken && call_guarded(s, label, take_all); // an is_alive is user code; a std::string allocates
+        } else {
+            taken = taken && take_all();
+        }
+        if (!taken) [[unlikely]] {
             return invoke_fn<Handles, Entry>(s, label, seq);
         }
     }
@@ -845,7 +857,7 @@ int set_var(lua_State* L) {
     const std::string_view label = s.upvalue_string(1);
     check_role<role::kPatch>(s, label);
     using T = typename Entry::value_type;
-    auto incoming = pull_arg<Handles, T>(s, 1);
+    auto incoming = call_guarded(s, label, [&] { return pull_arg<Handles, T>(s, 1); }); // a Rhp::convert may throw
     if (!incoming) {
         s.raise(arg_error(std::move(incoming).error(), label, 1));
     }
