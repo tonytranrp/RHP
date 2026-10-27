@@ -30,6 +30,7 @@
 #include <atomic>
 #include <charconv>
 #include <chrono>
+#include <concepts>
 #include <csignal>
 #include <cstdint>
 #include <filesystem>
@@ -116,6 +117,13 @@ struct options {
     std::string release_signers;
 };
 
+// The whole of `text` as a number (no sign, spaces or trailing characters).
+template <std::integral T>
+[[nodiscard]] bool parse_number(std::string_view text, T& out) {
+    const auto [end, ec] = std::from_chars(text.data(), text.data() + text.size(), out);
+    return ec == std::errc{} && end == text.data() + text.size();
+}
+
 [[nodiscard]] std::optional<options> parse(int argc, char** argv) {
     options o;
     for (int i = 1; i < argc; ++i) {
@@ -151,7 +159,7 @@ struct options {
             o.host = *v;
         } else if (arg == "--port") {
             std::uint16_t p = 0;
-            if (std::from_chars(v->data(), v->data() + v->size(), p).ec != std::errc{}) {
+            if (!parse_number(*v, p)) {
                 std::println(stderr, "bad port {}", *v);
                 return std::nullopt;
             }
@@ -188,14 +196,13 @@ struct options {
             o.release_signers = *v;
         } else if (arg == "--http-port") {
             std::uint16_t port = 0;
-            const auto [end, ec] = std::from_chars(v->data(), v->data() + v->size(), port);
-            if (ec != std::errc{} || end != v->data() + v->size()) {
+            if (!parse_number(*v, port)) {
                 std::println(stderr, "invalid HTTP port");
                 return std::nullopt;
             }
             o.http_port = port;
         } else if (arg == "--seconds") {
-            if (std::from_chars(v->data(), v->data() + v->size(), o.seconds).ec != std::errc{} || o.seconds < 0) {
+            if (!parse_number(*v, o.seconds) || o.seconds < 0) {
                 std::println(stderr, "bad --seconds {}", *v);
                 return std::nullopt;
             }
@@ -246,7 +253,7 @@ struct options {
     } else {
         const auto colon = o.reverse.rfind(':');
         std::uint16_t p = 0;
-        if (colon == std::string::npos || std::from_chars(o.reverse.data() + colon + 1, o.reverse.data() + o.reverse.size(), p).ec != std::errc{}) {
+        if (colon == std::string::npos || !parse_number(std::string_view{o.reverse}.substr(colon + 1), p)) {
             std::println(stderr, "--reverse wants host:port");
             return std::nullopt;
         }
