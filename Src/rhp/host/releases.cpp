@@ -46,6 +46,31 @@ std::string_view kind_name(release::release_event::kind k) noexcept {
     return "unknown";
 }
 
+// The wire form of a manager's status.
+wire::release_status_reply to_message(const release::manager& m) {
+    wire::release_status_reply out;
+    out.app = m.options().app;
+    out.build = m.options().build;
+    out.platform = m.options().platform;
+    out.revocation_seq = m.revocation_seq();
+    for (const release::channel_status& s : m.status()) {
+        wire::channel_status_message c;
+        c.channel = s.channel;
+        c.running = std::string{release::to_string(s.running)};
+        c.active = info_message(s.active);
+        c.candidate = info_message(s.candidate);
+        c.previous = s.previous ? id_bytes(*s.previous) : value::bytes{};
+        c.floor = s.floor;
+        c.held = s.held;
+        c.attempts = s.attempts;
+        c.confirm = std::string{release::to_string(s.confirm)};
+        c.handler_failures = s.handler_failures;
+        c.modules = s.modules;
+        out.channels.push_back(std::move(c));
+    }
+    return out;
+}
+
 result<value> handle(release::manager& m, wire::op code, const value& body) {
     switch (code) {
     case wire::op::kReleaseApply: {
@@ -102,30 +127,6 @@ result<value> handle(release::manager& m, wire::op code, const value& body) {
 }
 
 } // namespace
-
-wire::release_status_reply to_message(const release::manager& m) {
-    wire::release_status_reply out;
-    out.app = m.options().app;
-    out.build = m.options().build;
-    out.platform = m.options().platform;
-    out.revocation_seq = m.revocation_seq();
-    for (const release::channel_status& s : m.status()) {
-        wire::channel_status_message c;
-        c.channel = s.channel;
-        c.running = std::string{release::to_string(s.running)};
-        c.active = info_message(s.active);
-        c.candidate = info_message(s.candidate);
-        c.previous = s.previous ? id_bytes(*s.previous) : value::bytes{};
-        c.floor = s.floor;
-        c.held = s.held;
-        c.attempts = s.attempts;
-        c.confirm = std::string{release::to_string(s.confirm)};
-        c.handler_failures = s.handler_failures;
-        c.modules = s.modules;
-        out.channels.push_back(std::move(c));
-    }
-    return out;
-}
 
 release_bridge bridge(release::manager& m) {
     release_bridge b;
