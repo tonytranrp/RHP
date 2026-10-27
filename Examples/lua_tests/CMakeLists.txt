@@ -2,7 +2,6 @@
 # each spec file (rhp_add_lua_tests, cmake/RhpLuaTests.cmake).
 add_executable(lua_tests_example lua_tests_main.cpp)
 target_link_libraries(lua_tests_example PRIVATE Rhp::rhp)
-rhp_set_warnings(lua_tests_example)
 set_target_properties(lua_tests_example PROPERTIES FOLDER "examples")
 
 if(RHP_BUILD_TESTS AND RHP_ENABLE)

@@ -1,6 +1,5 @@
 add_executable(remote_exec main.cpp)
 target_link_libraries(remote_exec PRIVATE Rhp::rhp)
-rhp_set_warnings(remote_exec)
 target_compile_definitions(remote_exec PRIVATE RHP_REMOTE_SCRIPTS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/scripts")
 set_target_properties(remote_exec PROPERTIES FOLDER "examples")
 

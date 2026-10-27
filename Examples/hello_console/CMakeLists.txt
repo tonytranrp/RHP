@@ -1,6 +1,5 @@
 add_executable(hello_console main.cpp)
 target_link_libraries(hello_console PRIVATE Rhp::rhp)
-rhp_set_warnings(hello_console)
 target_compile_definitions(hello_console PRIVATE RHP_HELLO_SCRIPTS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/scripts")
 set_target_properties(hello_console PROPERTIES FOLDER "examples")
 
