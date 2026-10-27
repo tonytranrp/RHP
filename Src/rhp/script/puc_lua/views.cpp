@@ -1044,8 +1044,6 @@ result<void> stack::define_view_type(const detail::view_type_info& type, const d
     lua_setfield(L, mt, "__name");
     lua_pushlightuserdata(L, const_cast<void*>(type.type_tag));
     lua_setfield(L, mt, detail::kTypeTagField);
-    lua_pushboolean(L, 1);
-    lua_setfield(L, mt, detail::kViewMarker);
     lua_createtable(L, 0, static_cast<int>(count));
     const int table = lua_gettop(L);
     lua_createtable(L, static_cast<int>(count), 0);

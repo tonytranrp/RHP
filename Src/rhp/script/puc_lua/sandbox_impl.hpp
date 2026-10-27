@@ -11,7 +11,6 @@
 #include <deque>
 #include <functional>
 #include <map>
-#include <unordered_map>
 #include <memory>
 #include <memory_resource>
 #include <mutex>
@@ -21,6 +20,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -141,14 +141,13 @@ struct request_state {
     bool listed = false;         // in requests_ (it suspended, or it's a task); while it runs, in unlisted_
     bool checked = false;        // armed for cancels and limits when it started (start_request; rearm_all keeps it)
     bool suspended_once = false; // its result goes to on_result
-    bool sliced = false;         // the hook yielded it at the end of a time slice
     std::uint64_t wake_frame = 0;
     std::optional<steady::time_point> wake_time; // script clock
     int start_args = -1;                         // >= 0: not started yet; the first resume passes this many arguments (tasks)
     bool woken = false;                          // a delivery or a joined task's end: resume at the next resume pass
     wait_kind waiting = wait_kind::kNone;
-    std::uint64_t wait_task = 0; // kTask: the task joined
-    int resume_ref = kNoRef;     // kEvent: the delivered arguments, packed {n = count, ...}
+    std::uint64_t wait_task = 0;         // kTask: the task joined
+    int resume_ref = kNoRef;             // kEvent: the delivered arguments, packed {n = count, ...}
     std::shared_ptr<async_wait> async{}; // kAsync: the call it waits for
     // Handlers: what started it, for the overlap guard, rhp.off and failure reports.
     std::uint64_t schedule_key = 0;
@@ -409,8 +408,7 @@ public:
     void note_gc_mode(gc_mode mode) noexcept { gc_mode_ = mode; }
     [[nodiscard]] request_id last_request() const noexcept { return last_request_; }
     [[nodiscard]] std::size_t suspended() const noexcept;
-    [[nodiscard]] bool pending(request_id request) const noexcept { return live(request); }
-    // A request that is suspended or running (one that never suspended isn't in requests_).
+    // A request that is suspended or running (one that never suspended isn't in requests_): sandbox::pending.
     [[nodiscard]] bool live(request_id request) const noexcept;
     [[nodiscard]] std::uint64_t frame() const noexcept { return frame_; }
     [[nodiscard]] std::size_t memory_used() const noexcept { return memory_used_; }
@@ -471,7 +469,6 @@ public:
     int finish_join(lua_State* L, std::uint64_t key); // the continuation of a join
     void push_task_handle(lua_State* L, task_record& t);
     void handle_released(std::uint64_t key) noexcept; // a task handle was collected
-    [[nodiscard]] bool closing() const noexcept { return closing_; }
     // Raises (naming `where`) while lua_close runs finalizers: nothing may be scheduled, subscribed or spawned.
     void refuse_while_closing(lua_State* L, std::string_view where) const;
 
@@ -514,7 +511,11 @@ private:
     // What line events the hook needs: none; on every line (coverage, the debugger's step or pause);
     // or by function (breakpoints only: call and return events turn them on in functions that have
     // one, scope_lines).
-    enum class line_mode : std::uint8_t { kNone, kEverywhere, kByFunction };
+    enum class line_mode : std::uint8_t {
+        kNone,
+        kEverywhere,
+        kByFunction
+    };
     [[nodiscard]] line_mode lines_wanted() const noexcept;
     [[nodiscard]] int line_mask() const noexcept;
     // A call or return event in kByFunction: line events on in the function now running (debug.cpp).
@@ -595,7 +596,6 @@ private:
     // step's two halves after its checks: one lua_resume (returns its status), and what follows it.
     int resume_request(request_record& req, int nargs, int& nresults);
     std::optional<result<value_list>> finish_step(request_record& req, int status, int nresults, bool* kept);
-    result<value_list> complete(request_id id, result<int> outcome);
     // `results`: an exec's or a call's results already converted (call_unprotected).
     result<value_list> complete(request_record& req, result<int> outcome, bool* kept = nullptr, value_list* results = nullptr);
     // sandbox::call without the protected run around its setup, when nothing before or after its
@@ -763,7 +763,7 @@ private:
     std::uint64_t schedule_next_frame_ = 0;
     steady::time_point schedule_next_due_{};
     std::map<std::string, std::vector<subscription>, std::less<>> subscriptions_;
-    std::uint64_t subscriptions_version_ = 0; // bumped when a list is added, removed or changes length
+    std::uint64_t subscriptions_version_ = 0;                             // bumped when a list is added, removed or changes length
     std::map<std::string, std::vector<request_id>, std::less<>> waiters_; // rhp.wait_event
     std::map<std::string, event_state*, std::less<>> attached_;
     std::uint64_t subscription_keys_ = 0;
@@ -794,9 +794,9 @@ private:
     std::vector<active_run> running_;
     std::optional<steady::time_point> slice_deadline_;
     bool hook_dirty_ = false;
-    std::unique_ptr<profiler_state> profiler_;  // while profiling
-    std::unique_ptr<coverage_state> coverage_;  // while recording coverage
-    std::unique_ptr<debugger_state> debugger_;  // breakpoints, steps, paused requests (created on first use)
+    std::unique_ptr<profiler_state> profiler_; // while profiling
+    std::unique_ptr<coverage_state> coverage_; // while recording coverage
+    std::unique_ptr<debugger_state> debugger_; // breakpoints, steps, paused requests (created on first use)
 
     // Shared with other threads.
     std::atomic<std::thread::id> thread_;

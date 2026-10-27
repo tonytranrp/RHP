@@ -18,6 +18,7 @@
 #include <rhp/core/role.hpp>
 #include <rhp/core/value.hpp>
 #include <rhp/script/lib.hpp>
+#include <rhp/script/puc_lua/views_impl.hpp> // journal_layers
 #include <rhp/script/sandbox.hpp>
 #include <rhp/script/stubs.hpp>
 
@@ -285,15 +286,18 @@ TEST_CASE("one journal entry per span per request, not per element", "[script][v
 
 TEST_CASE("span writes of two modules reverted out of order leave the right values", "[script][views]") {
     sandbox box = make_box();
+    const std::size_t layers = Rhp::script::detail::journal_layers(); // process-wide
     const auto a = box.load("tests.views.a", "local v = vt.ints() v[1] = 100 v[2] = 200");
     const auto b = box.load("tests.views.b", "local v = vt.ints() v[2] = 222 v[3] = 333");
     REQUIRE(a.has_value());
     REQUIRE(b.has_value());
+    CHECK(Rhp::script::detail::journal_layers() == layers + 2); // one per module writing the span
     CHECK(fx::g_ints == std::array<std::int32_t, 4>{100, 222, 333, 40});
     REQUIRE(box.revert(*a)); // b's writes stay; a's own element goes back
     CHECK(fx::g_ints == std::array<std::int32_t, 4>{10, 222, 333, 40});
     REQUIRE(box.revert(*b)); // b's element 2 goes back to what was there before a
     CHECK(fx::g_ints == std::array<std::int32_t, 4>{10, 20, 30, 40});
+    CHECK(Rhp::script::detail::journal_layers() == layers); // the undone layers are gone
 }
 
 TEST_CASE("one binding in two libs with other handles journals as one target", "[script][views]") {

@@ -25,9 +25,8 @@ namespace Rhp::script::detail {
 
 class context;
 
-inline constexpr const char* kSpanKey = "rhp.span";      // typed views (host spans, slices, buffer views)
-inline constexpr const char* kBufferKey = "rhp.buffer";  // byte buffers and their slices
-inline constexpr const char* kViewMarker = "__rhp_view"; // set in every struct view type's metatable
+inline constexpr const char* kSpanKey = "rhp.span";     // typed views (host spans, slices, buffer views)
+inline constexpr const char* kBufferKey = "rhp.buffer"; // byte buffers and their slices
 
 enum class node_shape : std::uint8_t {
     kBytes, // a byte buffer (elem kU8)
@@ -132,7 +131,7 @@ std::pair<std::size_t, std::size_t> range_args(lua_State* L, int i_index, std::s
 // of the root region (offset counted from p.root_data), copying the ones it doesn't have yet. False:
 // nothing may be written (the sandbox is closing). Throws std::bad_alloc.
 bool journal_touch(context& ctx, journal_cache& cache, const place& p, std::size_t offset, std::size_t len);
-// Journal layers alive in this process (all sandboxes): tests.
+// Journal layers alive in this process (all sandboxes): tests check undone layers go away.
 [[nodiscard]] std::size_t journal_layers() noexcept;
 
 } // namespace Rhp::script::detail

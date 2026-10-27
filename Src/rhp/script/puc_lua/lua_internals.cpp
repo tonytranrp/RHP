@@ -9,7 +9,6 @@
 #include <vector>
 
 #include "ldebug.h"
-#include "lfunc.h"
 #include "lobject.h"
 #include "lstate.h"
 #include <lua.h>

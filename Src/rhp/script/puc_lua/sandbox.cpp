@@ -1027,7 +1027,6 @@ void sandbox_impl::count_hook(lua_State* L, lua_Debug* ar) {
     if (self.slice_deadline_ && now >= *self.slice_deadline_) {
         const active_run& top = self.running_.back();
         if (top.thread == L && top.request != nullptr && lua_isyieldable(L) != 0) {
-            top.request->sliced = true;
             (void)lua_yield(L, 0);
         }
     }
@@ -1649,7 +1648,6 @@ std::optional<result<value_list>> sandbox_impl::step(request_record& req, int na
 }
 
 int sandbox_impl::resume_request(request_record& req, int nargs, int& nresults) {
-    req.sliced = false;
     req.wake_frame = 0;
     req.wake_time.reset();
     req.woken = false;
@@ -1706,14 +1704,6 @@ std::optional<result<value_list>> sandbox_impl::finish_step(request_record& req,
         err.code = sticky_error(stop).code;
     }
     return complete(req, std::unexpected{std::move(err)}, kept);
-}
-
-result<value_list> sandbox_impl::complete(request_id id, result<int> outcome) {
-    const auto it = requests_.find(id);
-    if (it == requests_.end()) {
-        return fail(errc::kNotFound, std::format("no request {}", id));
-    }
-    return complete(*it->second, std::move(outcome));
 }
 
 result<value_list> sandbox_impl::complete(request_record& req, result<int> outcome, bool* kept, value_list* results) {
@@ -2127,7 +2117,7 @@ void sandbox_impl::drain() {
     }
     for (const request_id id : cancels) {
         if (const auto it = requests_.find(id); it != requests_.end() && !it->second->running) {
-            (void)complete(id, std::unexpected{make_error(errc::kCancelled, "script cancelled")});
+            (void)complete(*it->second, std::unexpected{make_error(errc::kCancelled, "script cancelled")});
         }
     }
     for (auto& [owner, err] : std::exchange(pending_faults_, {})) {
@@ -3157,7 +3147,7 @@ std::size_t sandbox::suspended() const noexcept {
 }
 
 bool sandbox::pending(request_id request) const noexcept {
-    return impl_->pending(request);
+    return impl_->live(request);
 }
 
 std::uint64_t sandbox::frame() const noexcept {
