@@ -13,6 +13,7 @@
 
 #include <rhp/core/error.hpp>
 #include <rhp/core/ids.hpp>
+#include <rhp/core/limits.hpp>
 #include <rhp/core/result.hpp>
 #include <rhp/core/role.hpp>
 #include <rhp/core/value.hpp>
@@ -185,6 +186,55 @@ TEST_CASE("load accepts text only for every role", "[script][sandbox]") {
         CHECK((*values)[0] == Rhp::value{4});
         // The scratch module never saw the module's globals.
         CHECK(is_nil_result(box.exec<std::optional<int>>("return w")));
+    }
+}
+
+TEST_CASE("only admin may give a table a finalizer", "[script][sandbox][gc]") {
+    // Lua runs __gc with its hooks off: no limit, cancel or deadline would stop one that loops.
+    SECTION("observe and patch: a metatable with __gc is refused") {
+        const role caller = GENERATE(role::kObserve, role::kPatch);
+        CAPTURE(caller);
+        output_capture out;
+        sandbox box = make_box(out, caller);
+        const auto refused = box.exec("setmetatable({}, {__gc = function() while true do end end})");
+        REQUIRE_FALSE(refused.has_value());
+        CHECK(refused.error().code == errc::kForbidden);
+        CHECK(contains(refused.error().message, "needs role admin"));
+        CHECK(refused.error().where == "setmetatable");
+        // Any value counts (Lua marks the object for finalization when __gc isn't nil).
+        CHECK(box.exec("setmetatable({}, {__gc = false})").error().code == errc::kForbidden);
+
+        // A __gc added after setmetatable never runs: Lua checks for one only when the metatable is set.
+        REQUIRE(box.exec("local mt = {} keep = setmetatable({}, mt) mt.__gc = function() print('finalized') end keep = nil"));
+        REQUIRE(box.collect_garbage());
+        CHECK(out.lines.empty());
+
+        // Everything else setmetatable does still works, <close> included.
+        CHECK(box.exec<int>("return setmetatable({}, {__index = function() return 5 end}).x") == 5);
+        CHECK(box.exec("setmetatable({}, setmetatable({}, {__index = {__gc = print}}))")); // only the metatable's own field counts
+        CHECK(box.exec("local t = setmetatable({}, {__metatable = 'locked'}) setmetatable(t, {})").error().code == errc::kRuntime);
+        REQUIRE(box.exec("do local x <close> = setmetatable({}, {__close = function() print('closed') end}) end"));
+        CHECK(out.lines == std::vector<std::string>{"closed"});
+    }
+
+    SECTION("a __close that loops is still stopped") {
+        Rhp::limits limits;
+        limits.instructions = 100'000;
+        sandbox_options options;
+        options.limits = limits;
+        options.output = [](std::string_view) {};
+        sandbox box{std::move(options)};
+        const auto stopped = box.exec("do local x <close> = setmetatable({}, {__close = function() while true do end end}) end");
+        REQUIRE_FALSE(stopped.has_value());
+        CHECK(stopped.error().code == errc::kBudgetExceeded);
+    }
+
+    SECTION("admin keeps the standard setmetatable") {
+        output_capture out;
+        sandbox box = make_box(out, role::kAdmin);
+        REQUIRE(box.exec("setmetatable({}, {__gc = function() print('finalized') end})"));
+        REQUIRE(box.collect_garbage());
+        CHECK(out.lines == std::vector<std::string>{"finalized"});
     }
 }
 
