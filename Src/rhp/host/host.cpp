@@ -534,8 +534,9 @@ public:
     }
 
     // Before the network stops: every session is closed with a reason ("the host is shutting
-    // down"), so its client fails its calls now instead of waiting to resume; waits briefly for
-    // those frames to go out. No new connections or dials after this.
+    // down"), so its client fails its calls now instead of waiting to resume, and the gateway
+    // answers its requests in flight; waits briefly for that to be done and for the sessions'
+    // frames to go out. No new connections or dials after this.
     void goodbye() {
         io_.post([this] {
             stopping_ = true;
@@ -548,9 +549,13 @@ public:
             for (auto& [id, rec] : sessions_) {
                 rec.s->close(make_error(errc::kTransport, "the host is shutting down", "host"));
             }
+            said_goodbye_.store(true, std::memory_order_release);
         });
         const auto deadline = std::chrono::steady_clock::now() + kGoodbyeWait;
-        while (open_sessions_.load(std::memory_order_acquire) != 0 && std::chrono::steady_clock::now() < deadline) {
+        // An HTTP-only host has no native session to wait for, but its gateway's answers are only
+        // sent once the posted goodbye ran.
+        while ((!said_goodbye_.load(std::memory_order_acquire) || open_sessions_.load(std::memory_order_acquire) != 0) &&
+               std::chrono::steady_clock::now() < deadline) {
             if (setup_.io_thread) {
                 std::this_thread::sleep_for(std::chrono::milliseconds{2});
             } else {
@@ -2394,7 +2399,8 @@ private:
     std::uint16_t listen_port_ = 0;                           // fixed once the constructor returns (listener_ belongs to the network thread)
     std::map<session_id, io_session> sessions_;
     std::atomic<std::size_t> open_sessions_{0};
-    bool stopping_ = false; // goodbye(): no new connections or dials
+    bool stopping_ = false;                 // goodbye(): no new connections or dials
+    std::atomic<bool> said_goodbye_{false}; // goodbye()'s posted work ran (sessions closed, gateway stopped)
     std::map<std::string, io_identity, std::less<>> io_identities_;
     id_generator<session_id> session_ids_;
     std::size_t pending_handshakes_ = 0;

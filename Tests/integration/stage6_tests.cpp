@@ -694,6 +694,38 @@ TEST_CASE("stage6: HTTP cancels an abandoned request and expires the idle identi
     REQUIRE(rhp_test::poll_until({}, [&] { return http_closed.load() == 2 && counter.load() == 0; }, std::chrono::seconds{3}));
 }
 
+// A host with HTTP requests in flight and no native session goes away: they are answered.
+template <Rhp::configuration Cfg>
+void shutdown_answers_http() {
+    using namespace stage6_fixtures;
+    keys key;
+    Rhp::host_options options;
+    options.gateway = Rhp::endpoint::listen("127.0.0.1", 0);
+    auto server = std::make_unique<running_host<Cfg>>(key, Rhp::endpoint::listen("127.0.0.1", 0), options);
+    const auto port = server->host.gateway_port();
+    REQUIRE(port);
+    http_client waiting{*port, key, {.body = "stage6.bump(5); rhp.sleep(60000); return 1"}};
+    REQUIRE(rhp_test::poll_until({}, [&] { return counter.load() == 5; }, std::chrono::seconds{3}));
+    server.reset(); // no native session is open: the goodbye still waits for the gateway's answers
+    const auto answer = waiting.finish();
+    CHECK(answer.status == 500);
+    CHECK(answer.verified);
+    const auto err = Rhp::from_value<Rhp::error>(answer.body);
+    REQUIRE(err);
+    CHECK(err->code == Rhp::errc::kTransport);
+    CHECK(err->message == "the host is shutting down");
+    CHECK(counter.load() == 0);
+}
+
+TEST_CASE("stage6: a host shutting down answers the HTTP requests in flight", "[integration][stage6][http]") {
+    SECTION("with its own I/O thread") {
+        shutdown_answers_http<stage6_fixtures::cfg>();
+    }
+    SECTION("with zero threads") {
+        shutdown_answers_http<stage6_fixtures::cfg::io<Rhp::exec::zero_threads>>();
+    }
+}
+
 TEST_CASE("stage6: authenticated HTTP requests release the handshake budget", "[integration][stage6][http]") {
     using namespace stage6_fixtures;
     using small_cfg = cfg::limits<Rhp::limits{.pending_handshakes = 1}>;
