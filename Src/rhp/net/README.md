@@ -4,8 +4,8 @@ Transports (ordered, reliable byte streams between a host and a client) and disc
 
 | Header | What |
 |---|---|
-| `address.hpp` | `ip_address`: an IPv4 or IPv6 address (IPv4 kept IPv4-mapped), `parse` (strict: host names such as `cafe1` are not addresses), `is_v4`, `source` (an IPv4 address or IPv6 /64, for per-source limits); constexpr, no I/O |
-| `endpoint.hpp` | `endpoint::listen` / `endpoint::dial` (host, port, and the tags `insecure_lan` / `require_tls`), `reversed()`, `with_port()`, `tls_mode`, `is_loopback_host`; the `transport` concept (a transport must declare `network`), `transport_ops` / `transport_ops_for<T>`, `accept_fn` / `connect_fn` |
+| `address.hpp` | `ip_address`: an IPv4 or IPv6 address (IPv4 kept IPv4-mapped), `parse` (strict: host names such as `cafe1` are not addresses), `is_v4`, `is_loopback` / `is_private` / `is_link_local` / `is_local` (what `insecure_lan` may talk plaintext to; CGNAT is not local), `source` (an IPv4 address or IPv6 /64, for per-source limits); constexpr, no I/O |
+| `endpoint.hpp` | `endpoint::listen` / `endpoint::dial` (host, port, and the tags `insecure_lan` (plaintext over a network transport, with local peers only: see the session module's TLS policy) / `require_tls`), `reversed()`, `with_port()`, `tls_mode`, `is_loopback_host`; the `transport` concept (a transport must declare `network`), `transport_ops` / `transport_ops_for<T>`, `accept_fn` / `connect_fn` |
 | `io_context.hpp` | the reactor (Asio behind a wall): `post`, `shared_poster()` (posts from threads that may outlive it), `poll`, `run_one_for`, `run(stop_token)`, `running_in_this_thread`, `native_handle`, one-shot `timer` |
 | `link.hpp` | `link` (a connected stream: `start`, `send`, `close`, `peer`; `loopback`, `encrypted`, `channel_binding`, `address` with defaults), `link_decorator` (forwards all of them), `link_handler` (`on_bytes`, `on_closed`), `listener` (`port`) |
 | `loopback/loopback.hpp` | `loopback`: in-process transport, named channels (host + port name the channel), no sockets; ends may live on different threads (`network = false`) |

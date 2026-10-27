@@ -25,16 +25,24 @@ namespace Rhp::session {
 // address isn't loopback and the endpoint doesn't say insecure_lan. Listening: TLS is accepted from
 // anyone who starts it (when a backend exists); plaintext only from loopback peers, over local
 // transports, or with insecure_lan - never with require_tls.
+//
+// insecure_lan over a network transport speaks plaintext only with local peers: loopback, private
+// (RFC 1918, RFC 4193) and link-local addresses (net::ip_address::is_local; CGNAT's 100.64/10 and
+// a link without an address are not local). A listener refuses plaintext from anyone else, and a dial
+// to anyone else is refused (kForbidden): TLS is the only way past that.
 class channel_policy {
 public:
-    // kForbidden when the endpoint needs TLS and the backend can't provide it.
+    // kForbidden when the endpoint needs TLS and the backend can't provide it, or dials a literal
+    // address that isn't local with insecure_lan.
     [[nodiscard]] static result<channel_policy> make(const net::endpoint& ep, bool network_transport, const security::tls::backend_ops& backend,
                                                      const security::tls::settings& settings);
 
     // The endpoint to give the transport (TCP binds or dials non-loopback addresses only when told
     // TLS will be layered on top).
     [[nodiscard]] const net::endpoint& transport_endpoint() const noexcept { return transport_ep_; }
-    // A dialed or accepted link, wrapped as the endpoint wants (or as it is).
+    // A dialed or accepted link, wrapped as the endpoint wants (or as it is). kForbidden for a
+    // plaintext link insecure_lan may not use (a dialed peer that isn't local; an accepted one when
+    // there is no TLS to offer it instead).
     [[nodiscard]] result<std::unique_ptr<net::link>> wrap(std::unique_ptr<net::link> link) const;
     // A dial's outcome: its link wrapped, or the dial's error as it is.
     [[nodiscard]] result<std::unique_ptr<net::link>> wrap(result<std::unique_ptr<net::link>> dialed) const;
@@ -46,9 +54,12 @@ private:
     net::endpoint transport_ep_;
     bool dialing_ = true; // as net::endpoint's default direction: a default policy wraps nothing
     bool dial_tls_ = false;
-    // Listening: plaintext is accepted from any peer / from a peer whose link is loopback.
+    bool lan_dial_ = false; // plaintext under insecure_lan: only to a local peer
+    // Listening: plaintext is accepted from any peer / from a peer whose link is loopback / from a
+    // local peer (insecure_lan).
     bool plaintext_from_anyone_ = false;
     bool plaintext_from_loopback_ = false;
+    bool plaintext_from_local_ = false;
     std::shared_ptr<security::tls::context> context_;
     std::string_view backend_;
 };

@@ -59,6 +59,31 @@ TEST_CASE("ip_address: host names are not addresses", "[net][address]") {
     }
 }
 
+TEST_CASE("ip_address: loopback private and link-local addresses are local", "[net][address]") {
+    const auto local = [](std::string_view text) {
+        const auto ip = ip_address::parse(text);
+        REQUIRE(ip);
+        return ip->is_local();
+    };
+    for (const std::string_view yes : {"127.0.0.1", "127.255.0.9", "::1", "::ffff:127.0.0.1", "10.0.0.5", "10.255.255.255", "172.16.0.1", "172.31.255.254",
+                                       "192.168.1.20", "169.254.10.1", "fc00::1", "fd12:3456:789a::1", "fe80::1", "febf::1", "::ffff:192.168.0.1"}) {
+        INFO(yes);
+        CHECK(local(yes));
+    }
+    // Public, CGNAT shared space (100.64/10), the unspecified address and multicast are not.
+    for (const std::string_view no : {"8.8.8.8", "203.0.113.9", "100.64.0.1", "100.127.255.254", "172.15.255.255", "172.32.0.1", "192.167.1.1", "169.253.1.1",
+                                      "0.0.0.0", "224.0.0.251", "::", "2001:db8::1", "fec0::1", "fe00::1", "ff02::fb", "::ffff:8.8.8.8", "::127.0.0.1"}) {
+        INFO(no);
+        CHECK_FALSE(local(no));
+    }
+    CHECK(ip_address::parse("127.0.0.2")->is_loopback());
+    CHECK_FALSE(ip_address::parse("::2")->is_loopback());
+    CHECK(ip_address::parse("172.20.1.1")->is_private());
+    CHECK_FALSE(ip_address::parse("172.20.1.1")->is_link_local());
+    CHECK(ip_address::parse("fe80::abcd")->is_link_local());
+    CHECK_FALSE(ip_address::parse("fe80::abcd")->is_private());
+}
+
 TEST_CASE("ip_address: a source is an IPv4 address or an IPv6 /64", "[net][address]") {
     CHECK(ip_address::v4(192, 0, 2, 7).source() == ip_address::v4(192, 0, 2, 7));
     CHECK(ip_address::v4(192, 0, 2, 7).source() != ip_address::v4(192, 0, 2, 8).source());
