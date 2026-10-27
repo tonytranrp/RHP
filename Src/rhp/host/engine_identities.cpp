@@ -23,7 +23,7 @@ void engine::process(std::vector<inbound>& batch) {
         switch (in.what) {
         case inbound::kind::kOpened: opened(in); break;
         case inbound::kind::kClosed: closed(in); break;
-        case inbound::kind::kRequest: request(in); break;
+        case inbound::kind::kRequest: admit(in); break;
         case inbound::kind::kAuthFailed:
             if (wants<event::auth_failed>()) {
                 publish(event::auth_failed{now(), std::move(in.peer), std::move(in.reason), std::move(in.identity)});
@@ -83,6 +83,9 @@ void engine::opened(inbound& in) {
 }
 
 void engine::closed(inbound& in) {
+    if (const auto it = identities_.find(in.identity); it != identities_.end()) {
+        drop_queued(it->second, in.session);
+    }
     if (const auto ps = pump_sessions_.find(in.session); ps != pump_sessions_.end()) {
         for (const std::string& name : ps->second.program_subs) {
             drop_program_sub(name, in.session);

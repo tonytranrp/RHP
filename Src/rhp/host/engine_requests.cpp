@@ -106,6 +106,34 @@ namespace {
     return ref.name.empty() ? std::format("#{}", ref.id) : ref.name;
 }
 
+// limits.request_rate: a bucket of `rate` tokens refilled at `rate` a second, kept as the time it is
+// full again. A request moves that time on by 1/rate; one that would move it more than a second past
+// now finds the bucket empty, and takes nothing.
+[[nodiscard]] bool take_token(std::chrono::steady_clock::time_point& full, std::chrono::steady_clock::time_point now, std::uint32_t rate) noexcept {
+    const auto next = std::max(full, now) + std::chrono::nanoseconds{std::chrono::seconds{1}} / rate;
+    if (next - now > std::chrono::seconds{1}) {
+        return false;
+    }
+    full = next;
+    return true;
+}
+
+// The transfer a blob chunk belongs to (0 for any other request) and whether it is its first chunk.
+struct chunk_info {
+    std::uint64_t transfer = 0;
+    bool first = true;
+};
+
+[[nodiscard]] chunk_info chunk_of(const inbound& in) {
+    if (in.code != wire::op::kBlob) {
+        return {};
+    }
+    const value* transfer = in.body.find("transfer");
+    const value* offset = in.body.find("offset");
+    return {transfer != nullptr ? Rhp::from_value<std::uint64_t>(*transfer).value_or(0) : 0,
+            offset == nullptr || Rhp::from_value<std::uint64_t>(*offset).value_or(0) == 0};
+}
+
 } // namespace
 
 void engine::reply_error(session_id s, std::uint64_t req, const error& err) {
@@ -164,7 +192,7 @@ void engine::answer(request_ctx& c, result<value> r) {
     reply(c.in.session, c.in.req, std::move(*r));
 }
 
-void engine::request(const inbound& in) {
+void engine::request(const inbound& in, const error* refused) {
     const auto ps = pump_sessions_.find(in.session);
     if (ps == pump_sessions_.end()) {
         return; // the session ended before its request ran
@@ -197,6 +225,11 @@ void engine::request(const inbound& in) {
     if (!is_enabled()) {
         abandon_blob(sess, in);
         reply_error(in.session, in.req, make_error(errc::kDisabled, "the host is disabled", std::string{wire::to_string(in.code)}));
+        return;
+    }
+    if (refused != nullptr) {
+        abandon_blob(sess, in);
+        reply_error(in.session, in.req, *refused);
         return;
     }
     const auto need = wire::required_role(in.code);
@@ -262,6 +295,83 @@ void engine::request(const inbound& in) {
     case wire::op::kDebug: return op_debug(c);
     default:
         return reject(c, make_error(errc::kInvalidArgument, std::format("{} is not supported by this host", in.code), std::string{wire::to_string(in.code)}));
+    }
+}
+
+void engine::admit(inbound& in) {
+    const Rhp::limits& l = setup_.limits;
+    const auto ps = pump_sessions_.find(in.session);
+    const auto it = ps != pump_sessions_.end() ? identities_.find(ps->second.identity) : identities_.end();
+    if ((l.request_rate == 0 && l.pump_requests == 0) || it == identities_.end() || !is_enabled()) {
+        return request(in); // which drops a request nobody is left to answer, and refuses while disabled
+    }
+    pump_session& sess = ps->second;
+    identity_runtime& rt = it->second;
+    if (l.request_rate != 0) {
+        // A blob counts once: the chunks after the first of an admitted transfer take no token.
+        const chunk_info chunk = chunk_of(in);
+        const bool later_chunk = !chunk.first && chunk.transfer != 0 && chunk.transfer == sess.rated_transfer;
+        if (!later_chunk && !take_token(rt.bucket_full, setup_.clock(), l.request_rate)) {
+            const error over = make_error(errc::kLimitExceeded, std::format("{} sends more than {} requests a second (limits.request_rate)", rt.name, l.request_rate),
+                                          std::string{wire::to_string(in.code)});
+            return request(in, &over);
+        }
+        if (chunk.transfer != 0) {
+            sess.rated_transfer = chunk.transfer;
+        }
+    }
+    if (l.pump_requests == 0) {
+        return request(in);
+    }
+    if (rt.queued.size() >= kMaxQueued) {
+        const error full = make_error(errc::kLimitExceeded, std::format("{} has {} requests waiting for pump() (limits.pump_requests)", rt.name, rt.queued.size()),
+                                      std::string{wire::to_string(in.code)});
+        return request(in, &full);
+    }
+    rt.queued.push_back(std::move(in));
+}
+
+void engine::start_queued() {
+    const std::uint32_t budget = setup_.limits.pump_requests;
+    if (budget == 0) {
+        return;
+    }
+    // By name, as the map keeps them; looked up again before each start (a request may end an identity).
+    std::vector<std::string> turns;
+    for (const auto& [name, rt] : identities_) {
+        if (!rt.queued.empty()) {
+            turns.push_back(name);
+        }
+    }
+    if (turns.empty()) {
+        return;
+    }
+    std::ranges::rotate(turns, std::ranges::upper_bound(turns, first_turn_));
+    first_turn_ = turns.front();
+    for (std::uint32_t round = 0; round < budget; ++round) {
+        bool started = false;
+        for (const std::string& name : turns) {
+            const auto it = identities_.find(name);
+            if (it == identities_.end() || it->second.queued.empty()) {
+                continue;
+            }
+            const inbound in = std::move(it->second.queued.front());
+            it->second.queued.pop_front();
+            request(in);
+            started = true;
+        }
+        if (!started) {
+            return;
+        }
+    }
+}
+
+void engine::drop_queued(identity_runtime& rt, session_id session) {
+    const auto ended = std::ranges::stable_partition(rt.queued, [&](const inbound& in) { return in.session != session; });
+    const std::vector<inbound> gone(std::make_move_iterator(ended.begin()), std::make_move_iterator(ended.end()));
+    rt.queued.erase(ended.begin(), ended.end());
+    for (const inbound& in : gone) {
+        request(in); // audited as cancelled, as it would have been had it come before the close
     }
 }
 

@@ -178,6 +178,7 @@ struct outbound {
 class engine final : private session::handler, private gateway_sink, private script::detail::event_listener {
     static constexpr std::size_t kMaxInFlight = 4096;  // requests with an idempotency key, per session
     static constexpr std::size_t kMaxBacklog = 65'536; // requests held back while pump() is behind
+    static constexpr std::size_t kMaxQueued = 4096;    // requests one identity may have waiting for limits.pump_requests
     static constexpr std::chrono::milliseconds kEnforceInterval{20};
     static constexpr std::chrono::milliseconds kGoodbyeWait{500};
     static constexpr std::chrono::seconds kIoCallTimeout{10};
@@ -319,6 +320,9 @@ private:
         Rhp::subscription script_listener; // the sandbox's script events -> host.on_script_event and clients
         std::set<session_id> debuggers;    // sessions that set breakpoints or paused: the last one's end resets the debugger
         session_id profiler;               // started the profiler: its end stops it
+        // limits.request_rate: when the identity's token bucket is full again (take_token).
+        std::chrono::steady_clock::time_point bucket_full{};
+        std::deque<inbound> queued; // limits.pump_requests: admitted, waiting for a pump() with budget left
     };
 
     // A blob arriving on one session (one at a time).
@@ -339,7 +343,8 @@ private:
         std::set<std::string, std::less<>> script_subs;  // rhp.publish names of its identity ("*": all)
         std::set<std::string, std::less<>> program_subs; // C++ lua_event names
         std::size_t sent_this_pump = 0;
-        std::uint64_t dropped = 0; // events not sent since the last one that was
+        std::uint64_t dropped = 0;        // events not sent since the last one that was
+        std::uint64_t rated_transfer = 0; // limits.request_rate: the blob whose first chunk was admitted (its later chunks are free)
     };
 
     struct blob_sink {
@@ -616,7 +621,19 @@ private:
         }
     };
 
-    void request(const inbound& in);
+    // `refused`: turned away at admission (audited, answered with it, not run).
+    void request(const inbound& in, const error* refused = nullptr);
+
+    // A request from the network: limits.request_rate decides whether it is taken, limits.pump_requests
+    // whether it starts now or waits in its identity's queue.
+    void admit(inbound& in);
+
+    // limits.pump_requests: up to that many waiting requests of each identity, one identity's at a
+    // time in turn (the identity after the one that went first last time goes first).
+    void start_queued();
+
+    // The session ended: its requests still waiting go through request(), which finds it ended.
+    void drop_queued(identity_runtime& rt, session_id session);
 
     // ---- pump thread: one function per group of ops (request() has checked role, identity and cancels) ----
 
@@ -729,6 +746,7 @@ private:
     // Pump thread.
     std::map<session_id, pump_session> pump_sessions_;
     std::map<std::string, identity_runtime, std::less<>> identities_;
+    std::string first_turn_;                               // start_queued: the identity that went first last time
     std::vector<script::async_leftovers> async_leftovers_; // of identities that went (teardown)
     Rhp::subscription release_events_;                     // to the served manager's events
     release_bridge releases_;                              // host.serve: the release manager, if any

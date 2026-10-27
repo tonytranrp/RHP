@@ -11,6 +11,7 @@ rhp_add_test_suite(rhp_integration_tests
         stage10_tests.cpp
         stage11_tests.cpp
         stage13_network_tests.cpp
+        stage13_limits_tests.cpp
     LINKS
         Rhp::host
         Rhp::client

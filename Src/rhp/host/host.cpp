@@ -256,6 +256,7 @@ void engine::pump() {
         batch.push_back(std::move(*item));
     }
     process(batch); // while disabled, requests are answered kDisabled and closed sessions revert
+    start_queued(); // limits.pump_requests
     deliver_program_events();
     // The kill switch: no handlers, tasks or release channels run while the host is disabled (they
     // wait, as they are, until it is enabled again).
