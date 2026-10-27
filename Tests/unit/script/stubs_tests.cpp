@@ -255,36 +255,39 @@ TEST_CASE("write streams generate", "[script][stubs]") {
     REQUIRE(all.str() == stubs::generate<game_lib>());
 }
 
-TEST_CASE("rhp_api filters rhp.patch by role", "[script][stubs]") {
+TEST_CASE("rhp_api filters rhp.patch and the lasting handlers by role", "[script][stubs]") {
     const std::string observe = stubs::rhp_api(role::kObserve);
     const std::string patch = stubs::rhp_api(role::kPatch);
     const std::string admin = stubs::rhp_api();
 
     CHECK(observe.starts_with("---@meta\n\n---@class rhp\n"));
-    CHECK(!observe.contains("rhp.patch"));
     CHECK(patch.contains("---@param handler fun(original: function, ...): any\nfunction rhp.patch(id, handler) end\n\n"));
     CHECK(admin == patch);
 
-    // Observe is patch minus exactly the rhp.patch block.
-    const std::string block = "---Overrides a C++ patch point until this module is reverted.\n"
-                              "---@param id string\n"
-                              "---@param handler fun(original: function, ...): any\n"
-                              "function rhp.patch(id, handler) end\n\n";
+    // Observe is patch minus exactly the blocks (doc comment, function, blank line) of rhp.patch and
+    // of everything that registers a lasting handler.
     std::string without = patch;
-    without.erase(without.find(block), block.size());
+    for (const char* fn : {"rhp.patch(id, handler)", "rhp.timer(ms, fn, repeating)", "rhp.after(ms, fn, opts)", "rhp.every(ms, fn, opts)", "rhp.every_frame(fn, opts)",
+                           "rhp.every_frames(frames, fn, opts)", "rhp.on(event, handler, opts)", "rhp.once(event, handler, opts)", "rhp.on_error(handler, opts)",
+                           "rhp.spawn(fn, ...)"}) {
+        CAPTURE(fn);
+        const std::string line = std::string{"function "} + fn + " end\n";
+        CHECK(!observe.contains(line));
+        const auto at = without.find(line);
+        REQUIRE(at != std::string::npos);
+        const auto start = without.rfind("\n\n", at) + 2;
+        without.erase(start, at + line.size() + 1 - start);
+    }
     CHECK(without == observe);
 
     for (const std::string& api : {observe, patch}) {
-        CHECK(api.contains("function rhp.timer(ms, fn, repeating) end\n"));
         CHECK(api.contains("function require(name) end\n"));
         CHECK(api.ends_with("---@field on_restore? fun(state: any)\n"));
         CHECK(!api.ends_with("\n\n"));
-        for (const char* fn : {"function rhp.after(ms, fn, opts) end", "function rhp.every(ms, fn, opts) end", "function rhp.every_frame(fn, opts) end",
-                               "function rhp.every_frames(frames, fn, opts) end", "function rhp.pause(id) end", "function rhp.resume(id) end",
-                               "function rhp.reschedule(id, interval) end", "function rhp.timers() end", "function rhp.on(event, handler, opts) end",
-                               "function rhp.once(event, handler, opts) end", "function rhp.on_error(handler, opts) end", "function rhp.publish(event, ...) end",
-                               "function rhp.wait_event(event, timeout_ms) end", "function rhp.spawn(fn, ...) end", "function rhp.tasks() end",
-                               "function rhp.stats() end", "---@class rhp.task", "---@class rhp.handler_options"}) {
+        for (const char* fn : {"function rhp.wait(frames) end", "function rhp.sleep(ms) end", "function rhp.pause(id) end", "function rhp.resume(id) end",
+                               "function rhp.reschedule(id, interval) end", "function rhp.timers() end", "function rhp.off(id) end", "function rhp.publish(event, ...) end",
+                               "function rhp.wait_event(event, timeout_ms) end", "function rhp.tasks() end", "function rhp.stats() end", "---@class rhp.task",
+                               "---@class rhp.handler_options"}) {
             CHECK(api.contains(fn));
         }
     }

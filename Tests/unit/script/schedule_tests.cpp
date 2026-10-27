@@ -324,6 +324,32 @@ TEST_CASE("pause resume and reschedule refuse foreign and unknown ids", "[script
     CHECK(inside->at(0) == Rhp::value{false});
 }
 
+TEST_CASE("observe identities can't register lasting handlers", "[script][schedule][roles]") {
+    // Timers, frame callbacks, subscriptions and tasks change the host's schedule, not just read it.
+    capture out;
+    sandbox box{sandbox_options{.caller_role = Rhp::role::kObserve, .output = [&out](std::string_view line) { out.lines.emplace_back(line); }}};
+    for (const char* call : {"rhp.timer(1, print)", "rhp.after(1, print)", "rhp.every(1, print)", "rhp.every_frame(print)", "rhp.every_frames(2, print)",
+                             "rhp.on('tests.schedule.ping', print)", "rhp.once('tests.schedule.ping', print)", "rhp.on_error(print)", "rhp.spawn(print)"}) {
+        CAPTURE(call);
+        const auto r = box.exec(call);
+        REQUIRE_FALSE(r.has_value());
+        CHECK(r.error().code == errc::kForbidden);
+        CHECK(r.error().message == "needs role patch");
+        CHECK(r.error().where == std::string_view{call}.substr(0, std::string_view{call}.find('(')));
+    }
+    CHECK(box.exec<std::int64_t>("local s = rhp.stats() return s.timers + s.subscriptions + s.tasks") == 0);
+    // What only lasts as long as the request still works.
+    REQUIRE(box.exec("rhp.wait(1) print('waited') rhp.publish('tests.schedule.mine', 1)"));
+    pump(box, 2);
+    CHECK(out.lines == std::vector<std::string>{"waited"});
+
+    for (const Rhp::role caller : {Rhp::role::kPatch, Rhp::role::kAdmin}) {
+        CAPTURE(caller);
+        sandbox allowed{sandbox_options{.caller_role = caller, .output = [](std::string_view) {}}};
+        CHECK(allowed.exec("rhp.after(1, print) rhp.every_frame(print) rhp.on('tests.schedule.ping', print) rhp.spawn(print)"));
+    }
+}
+
 TEST_CASE("schedule functions validate their arguments", "[script][schedule]") {
     manual_clock clock;
     capture out;

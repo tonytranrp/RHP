@@ -228,6 +228,13 @@ int lua_rhp_patch(lua_State* L) {
     return 0;
 }
 
+// In place of an rhp builtin an observe identity may not use (upvalue 1: its name): raises like a
+// role check.
+int lua_needs_patch(lua_State* L) {
+    const stack s{L};
+    s.raise(make_error(errc::kForbidden, std::format("needs role {}", role::kPatch), std::string{s.upvalue_string(1)}));
+}
+
 // rhp.wait([frames]): suspends the request for `frames` pump() calls (at least 1).
 int lua_rhp_wait(lua_State* L) {
     const stack s{L};
@@ -519,6 +526,15 @@ void sandbox_impl::open_libraries() {
     for (const auto& [name, fn] : builtins) {
         lua_pushcfunction(L, fn);
         lua_setfield(L, -2, name);
+    }
+    // Observe identities can't register lasting handlers: timers, frame callbacks, subscriptions and
+    // tasks change the host's schedule, not just read it.
+    if (!allows(options_.caller_role, role::kPatch)) {
+        for (const char* name : {"timer", "after", "every", "every_frame", "every_frames", "on", "once", "on_error", "spawn"}) {
+            lua_pushfstring(L, "rhp.%s", name);
+            lua_pushcclosure(L, &lua_needs_patch, 1);
+            lua_setfield(L, -2, name);
+        }
     }
     stack{L}.push_string(to_string(options_.caller_role));
     lua_setfield(L, -2, "role");

@@ -30,7 +30,10 @@ void trim_trailing_blank(std::string& out) {
 
 } // namespace detail
 
+// Observe identities get neither rhp.patch nor what registers a lasting handler (timers, frame
+// callbacks, subscriptions, tasks): sandbox.cpp replaces those with functions that raise.
 std::string rhp_api(role caller) {
+    const bool patch = allows(caller, role::kPatch);
     std::string out = R"lua(---@meta
 
 ---@class rhp
@@ -38,7 +41,7 @@ std::string rhp_api(role caller) {
 rhp = {}
 
 )lua";
-    if (allows(caller, role::kPatch)) {
+    if (patch) {
         out += R"lua(---Overrides a C++ patch point until this module is reverted.
 ---@param id string
 ---@param handler fun(original: function, ...): any
@@ -57,7 +60,9 @@ function rhp.next_frame() end
 ---@param ms number
 function rhp.sleep(ms) end
 
----Calls `fn` after `ms` milliseconds (every `ms` if `repeating`). Removed when this module is reverted.
+)lua";
+    if (patch) {
+        out += R"lua(---Calls `fn` after `ms` milliseconds (every `ms` if `repeating`). Removed when this module is reverted.
 ---@param ms number
 ---@param fn fun()
 ---@param repeating? boolean
@@ -91,7 +96,9 @@ function rhp.every_frame(fn, opts) end
 ---@return integer id
 function rhp.every_frames(frames, fn, opts) end
 
----Stops a timer, frame callback or subscription of this module from firing until rhp.resume(id).
+)lua";
+    }
+    out += R"lua(---Stops a timer, frame callback or subscription of this module from firing until rhp.resume(id).
 ---@param id integer
 function rhp.pause(id) end
 
@@ -108,7 +115,9 @@ function rhp.reschedule(id, interval) end
 ---@return rhp.schedule_info[]
 function rhp.timers() end
 
----Calls `handler` each time the event fires: a C++ event of that name, else an rhp.publish of this identity. Removed when this module is reverted.
+)lua";
+    if (patch) {
+        out += R"lua(---Calls `handler` each time the event fires: a C++ event of that name, else an rhp.publish of this identity. Removed when this module is reverted.
 ---@param event string
 ---@param handler fun(...)
 ---@param opts? rhp.handler_options
@@ -128,7 +137,9 @@ function rhp.once(event, handler, opts) end
 ---@return integer id
 function rhp.on_error(handler, opts) end
 
----Removes a timer, frame callback or subscription, or cancels a task, made by this module.
+)lua";
+    }
+    out += R"lua(---Removes a timer, frame callback or subscription, or cancels a task, made by this module.
 ---@param id integer
 function rhp.off(id) end
 
@@ -145,13 +156,17 @@ function rhp.publish(event, ...) end
 ---@return any ...
 function rhp.wait_event(event, timeout_ms) end
 
----Runs `fn(...)` as a background task of this module, starting at the next pump(). Cancelled when this module is reverted.
+)lua";
+    if (patch) {
+        out += R"lua(---Runs `fn(...)` as a background task of this module, starting at the next pump(). Cancelled when this module is reverted.
 ---@param fn fun(...): ...
 ---@param ... any
 ---@return rhp.task
 function rhp.spawn(fn, ...) end
 
----This module's tasks that have not finished.
+)lua";
+    }
+    out += R"lua(---This module's tasks that have not finished.
 ---@return rhp.task[]
 function rhp.tasks() end
 
