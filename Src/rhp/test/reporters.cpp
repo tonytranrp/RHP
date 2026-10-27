@@ -11,6 +11,7 @@
 #include <utility>
 #include <vector>
 
+#include <rhp/core/convert.hpp>
 #include <rhp/core/json.hpp>
 #include <rhp/core/value.hpp>
 #include <rhp/test/detail/support.hpp>
@@ -53,6 +54,10 @@ std::string ms_text(double ms) {
         return std::format("{:.0f} ms", ms);
     }
     return std::format("{:.2f} ms", ms);
+}
+
+std::string_view first_line(std::string_view text) {
+    return text.substr(0, text.find('\n'));
 }
 
 std::string indent(std::string_view text, std::string_view prefix) {
@@ -371,10 +376,9 @@ public:
                 out_ << ">\n";
                 if (t.outcome == status::kFailed || t.outcome == status::kError) {
                     const char* tag = t.outcome == status::kFailed ? "failure" : "error";
-                    std::string first_line = t.message.substr(0, t.message.find('\n'));
                     // " at (file:line:1)" lets reporters that read stack lines annotate the source.
                     std::string body = std::format("{}\n    at test ({}:1)\n{}", t.message, t.where, t.traceback);
-                    out_ << std::format("      <{} message=\"{}\" type=\"{}\">{}</{}>\n", tag, xml_escape(first_line), t.outcome == status::kFailed ? "assertion" : "error",
+                    out_ << std::format("      <{} message=\"{}\" type=\"{}\">{}</{}>\n", tag, xml_escape(first_line(t.message)), t.outcome == status::kFailed ? "assertion" : "error",
                                         xml_escape(body), tag);
                 } else if (t.outcome == status::kSkipped || t.outcome == status::kPending) {
                     out_ << std::format("      <skipped message=\"{}\"/>\n", xml_escape(t.outcome == status::kPending ? t.message : "skipped"));
@@ -389,9 +393,9 @@ public:
                 out_ << "    </testcase>\n";
             }
             for (const file_error& e : f.errors) {
-                out_ << std::format("    <testcase classname=\"{}\" name=\"{}\" file=\"{}\" line=\"{}\" time=\"0\">\n", cls, xml_escape("(file) " + e.message.substr(0, e.message.find('\n'))),
+                out_ << std::format("    <testcase classname=\"{}\" name=\"{}\" file=\"{}\" line=\"{}\" time=\"0\">\n", cls, xml_escape(std::format("(file) {}", first_line(e.message))),
                                     xml_escape(e.file.empty() ? f.file : e.file), e.line);
-                out_ << std::format("      <error message=\"{}\" type=\"error\">{}</error>\n    </testcase>\n", xml_escape(e.message.substr(0, e.message.find('\n'))),
+                out_ << std::format("      <error message=\"{}\" type=\"error\">{}</error>\n    </testcase>\n", xml_escape(first_line(e.message)),
                                     xml_escape(e.message + "\n" + e.traceback));
             }
             out_ << "  </testsuite>\n";
@@ -407,19 +411,12 @@ private:
 // ---- JSON events ------------------------------------------------------------------------------------------
 
 using detail::object;
-
-value strings(const std::vector<std::string>& list) {
-    value::array out;
-    for (const std::string& s : list) {
-        out.emplace_back(s);
-    }
-    return value{std::move(out)};
-}
+using detail::test_id;
 
 value test_value(const test_result& t) {
     object o;
     o.set("event", value{"test_end"})
-        .set("id", value{std::format("{}::{}", t.file, t.name)})
+        .set("id", value{test_id(t.file, t.name)})
         .set("file", value{t.file})
         .set("name", value{t.name})
         .set("line", value{static_cast<std::int64_t>(t.line)})
@@ -430,10 +427,10 @@ value test_value(const test_result& t) {
         .set("fail_line", value{static_cast<std::int64_t>(t.fail_line)})
         .set("traceback", value{t.traceback})
         .set("ms", value{t.cost.wall_ms})
-        .set("tags", strings(t.tags))
+        .set("tags", Rhp::to_value(t.tags))
         .set("assertions", value{static_cast<std::int64_t>(t.assertions)})
-        .set("output", strings(t.output))
-        .set("notes", strings(t.notes));
+        .set("output", Rhp::to_value(t.output))
+        .set("notes", Rhp::to_value(t.notes));
     if (t.expected) {
         o.set("expected", value{*t.expected});
     }
@@ -491,10 +488,10 @@ public:
         value::array list;
         for (const test_info& t : tests) {
             list.push_back(object{}
-                               .set("id", value{std::format("{}::{}", t.file, t.name)})
+                               .set("id", value{test_id(t.file, t.name)})
                                .set("name", value{t.name})
                                .set("line", value{static_cast<std::int64_t>(t.line)})
-                               .set("tags", strings(t.tags))
+                               .set("tags", Rhp::to_value(t.tags))
                                .set("skipped", value{t.skipped})
                                .set("pending", value{t.pending})
                                .done());
@@ -503,7 +500,7 @@ public:
     }
 
     void test_started(const test_info& t) override {
-        emit(object{}.set("event", value{"test_start"}).set("id", value{std::format("{}::{}", t.file, t.name)}).set("file", value{t.file}).set("name", value{t.name}).done());
+        emit(object{}.set("event", value{"test_start"}).set("id", value{test_id(t.file, t.name)}).set("file", value{t.file}).set("name", value{t.name}).done());
     }
 
     void test_finished(const test_result& t) override { emit(test_value(t)); }
@@ -532,7 +529,7 @@ public:
             .set("file_errors", value{static_cast<std::int64_t>(r.totals.file_errors)})
             .set("ms", value{r.ms})
             .set("seed", value{static_cast<std::int64_t>(r.seed)})
-            .set("notes", strings(r.notes));
+            .set("notes", Rhp::to_value(r.notes));
         value::array coverage;
         for (const file_coverage& f : r.coverage) {
             value::array lines;
@@ -581,9 +578,8 @@ public:
         if (t.outcome != status::kFailed && t.outcome != status::kError) {
             return;
         }
-        const std::string& file = t.fail_file.empty() ? t.file : t.fail_file;
-        const std::uint32_t line = t.fail_line == 0 ? t.line : t.fail_line;
-        out_ << std::format("::error file={},line={},title={}::{}\n", gh_escape(file, true), line, gh_escape(t.name, true), gh_escape(t.message, false));
+        const detail::place at = detail::failure_place(t);
+        out_ << std::format("::error file={},line={},title={}::{}\n", gh_escape(at.file, true), at.line, gh_escape(t.name, true), gh_escape(t.message, false));
     }
 
     void file_finished(const file_result& f) override {

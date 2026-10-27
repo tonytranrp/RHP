@@ -557,13 +557,7 @@ end
 
 -- ---- running properties --------------------------------------------------------------------------------
 
-local function args_text(args)
-    local parts = {}
-    for i = 1, args.n do
-        parts[i] = T.inline(args[i])
-    end
-    return "(" .. concat(parts, ", ") .. ")"
-end
+local args_text = T.inline_list
 
 -- Whether fn(args) fails (raises, or returns false), and the error.
 local function fails(fn, args)

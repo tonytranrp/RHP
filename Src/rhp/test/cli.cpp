@@ -12,6 +12,7 @@
 #include <system_error>
 #include <vector>
 
+#include <rhp/core/convert.hpp>
 #include <rhp/core/json.hpp>
 #include <rhp/core/value.hpp>
 #include <rhp/platform/files.hpp>
@@ -89,15 +90,11 @@ int run_cli(std::span<const std::string_view> args, const install_fn& install, s
             if (as_json) {
                 value::array list;
                 for (const test_info& t : tests) {
-                    value::array tags;
-                    for (const std::string& tag : t.tags) {
-                        tags.emplace_back(tag);
-                    }
                     value::map m;
-                    m.emplace_back(value{"id"}, value{std::format("{}::{}", t.file, t.name)});
+                    m.emplace_back(value{"id"}, value{detail::test_id(t.file, t.name)});
                     m.emplace_back(value{"name"}, value{t.name});
                     m.emplace_back(value{"line"}, value{static_cast<std::int64_t>(t.line)});
-                    m.emplace_back(value{"tags"}, value{std::move(tags)});
+                    m.emplace_back(value{"tags"}, Rhp::to_value(t.tags));
                     m.emplace_back(value{"skipped"}, value{t.skipped});
                     list.emplace_back(std::move(m));
                 }

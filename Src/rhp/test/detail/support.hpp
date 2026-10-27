@@ -2,7 +2,9 @@
 
 // Private to Src/rhp/test (not installed): helpers the runner, the reporters and the command line share.
 
+#include <cstdint>
 #include <filesystem>
+#include <format>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -11,6 +13,7 @@
 #include <rhp/core/result.hpp>
 #include <rhp/core/value.hpp>
 #include <rhp/platform/files.hpp>
+#include <rhp/test/report.hpp>
 #include <rhp/utils/byte_buffer.hpp>
 
 namespace Rhp::test::detail {
@@ -35,6 +38,21 @@ private:
         std::filesystem::create_directories(path.parent_path(), ec);
     }
     return platform::replace_file(path, utils::as_bytes(text));
+}
+
+// "file::name": a test's id in the JSON report and in `--list` output.
+[[nodiscard]] inline std::string test_id(std::string_view file, std::string_view name) {
+    return std::format("{}::{}", file, name);
+}
+
+// Where a test failed: its failure's file and line, else the test's own.
+struct place {
+    std::string_view file;
+    std::uint32_t line = 0;
+};
+
+[[nodiscard]] inline place failure_place(const test_result& r) noexcept {
+    return place{r.fail_file.empty() ? std::string_view{r.file} : std::string_view{r.fail_file}, r.fail_line == 0 ? r.line : r.fail_line};
 }
 
 } // namespace Rhp::test::detail

@@ -183,15 +183,11 @@ result<cli_options> parse_args(std::span<const std::string_view> args) {
             }
         } else if (a == "--role") {
             RHP_VALUE("--role")
-            if (*v == "observe") {
-                o.caller = role::kObserve;
-            } else if (*v == "patch") {
-                o.caller = role::kPatch;
-            } else if (*v == "admin") {
-                o.caller = role::kAdmin;
-            } else {
+            const auto r = parse_role(*v);
+            if (!r) {
                 return bad(std::format("--role is observe, patch or admin, got '{}'", *v));
             }
+            o.caller = *r;
         } else if (a == "--timeout") {
             RHP_VALUE("--timeout")
             const auto n = number<std::uint64_t>(*v);

@@ -122,18 +122,20 @@ std::int64_t int_of(const value& v, std::string_view key, std::int64_t fallback 
     return fallback;
 }
 
-double number_of(const value& v, std::string_view key) {
-    const value* f = field(v, key);
-    if (f == nullptr) {
-        return 0;
-    }
-    if (const auto* i = f->get_if<std::int64_t>()) {
+// An integer or a number as a double; 0 for anything else.
+double as_number(const value& v) {
+    if (const auto* i = v.get_if<std::int64_t>()) {
         return static_cast<double>(*i);
     }
-    if (const auto* d = f->get_if<double>()) {
+    if (const auto* d = v.get_if<double>()) {
         return *d;
     }
     return 0;
+}
+
+double number_of(const value& v, std::string_view key) {
+    const value* f = field(v, key);
+    return f != nullptr ? as_number(*f) : 0;
 }
 
 bool bool_of(const value& v, std::string_view key) {
@@ -157,6 +159,40 @@ std::vector<std::string> strings_of(const value& v, std::string_view key) {
         }
     }
     return out;
+}
+
+std::string join(const std::vector<std::string>& parts, std::string_view separator) {
+    std::string out;
+    for (const std::string& p : parts) {
+        if (!out.empty()) {
+            out += separator;
+        }
+        out += p;
+    }
+    return out;
+}
+
+// An error the framework reports for a file ({message, source, line, traceback}).
+file_error file_error_of(const value& e) {
+    return file_error{text_of(e, "message"), text_of(e, "source"), static_cast<std::uint32_t>(int_of(e, "line")), text_of(e, "traceback")};
+}
+
+// A note on the globals a test created (the framework removed them after it), when it created any.
+void note_globals(const value& outcome, std::vector<std::string>& notes) {
+    if (const auto* list = array_of(outcome, "globals"); list != nullptr && !list->empty()) {
+        notes.push_back(std::format("the test set global(s) {} (removed after it)", join(strings_of(outcome, "globals"), ", ")));
+    }
+}
+
+// "file:line" of a test's failure (or of the test).
+std::string where_of(const test_result& r) {
+    const detail::place at = detail::failure_place(r);
+    return std::format("{}:{}", at.file, at.line);
+}
+
+// A module whose require()s aren't loaded yet (it waits for the next round).
+bool waits_for_require(const error& e) {
+    return e.message.find("is not loaded") != std::string::npos || e.message.find("is still loading") != std::string::npos;
 }
 
 std::string read_text(const fs::path& path, std::optional<error>& failure) {
@@ -500,7 +536,7 @@ struct runner::impl {
                     continue;
                 }
                 const error& e = loaded.error();
-                if (e.message.find("is not loaded") != std::string::npos || e.message.find("is still loading") != std::string::npos) {
+                if (waits_for_require(e)) {
                     later.push_back(s);
                     if (auto id = box.find(s->module)) {
                         (void)box.unload(*id, script::force);
@@ -515,7 +551,7 @@ struct runner::impl {
             if (later.size() == left.size()) {
                 for (const script_file* s : later) {
                     if (auto again = load_script(box, *s); !again) {
-                        const bool waiting = again.error().message.find("is not loaded") != std::string::npos || again.error().message.find("is still loading") != std::string::npos;
+                        const bool waiting = waits_for_require(again.error());
                         errors.push_back(file_error{std::format("module {} didn't load: {}", s->module, waiting ? std::string{"a require() cycle, or a module that doesn't exist"} : std::format("{}", again.error())), relative(s->path), 0, {}});
                     }
                 }
@@ -623,14 +659,17 @@ struct runner::impl {
             }
             }
         }
+        const auto too_long = [&] {
+            return fail(errc::kTimeout, std::format("the test didn't finish in {} ms of real time or {} frames", options.timeout.count(), options.max_frames), "test");
+        };
         const auto it = finished.find(id);
         if (it == finished.end()) {
-            return fail(errc::kTimeout, std::format("the test didn't finish in {} ms of real time or {} frames", options.timeout.count(), options.max_frames), "test");
+            return too_long();
         }
         result<value_list> out = std::move(it->second);
         finished.erase(it);
         if (timed_out && (out || out.error().code == errc::kCancelled)) {
-            return fail(errc::kTimeout, std::format("the test didn't finish in {} ms of real time or {} frames", options.timeout.count(), options.max_frames), "test");
+            return too_long();
         }
         return out;
     }
@@ -638,18 +677,7 @@ struct runner::impl {
     // ---- the framework's services ----
 
     result<value> host(std::string_view command, std::span<const value> args) {
-        const auto arg_number = [&](std::size_t i) -> double {
-            if (i >= args.size()) {
-                return 0;
-            }
-            if (const auto* n = args[i].get_if<std::int64_t>()) {
-                return static_cast<double>(*n);
-            }
-            if (const auto* d = args[i].get_if<double>()) {
-                return *d;
-            }
-            return 0;
-        };
+        const auto arg_number = [&](std::size_t i) { return i < args.size() ? as_number(args[i]) : 0.0; };
         const auto arg_text = [&](std::size_t i) -> std::string {
             if (i < args.size()) {
                 if (const auto* s = args[i].get_if<std::string>()) {
@@ -968,7 +996,7 @@ struct runner::impl {
         }
         if (const auto* list = array_of(listing, "errors")) {
             for (const value& e : *list) {
-                errors.push_back(file_error{text_of(e, "message"), text_of(e, "source"), static_cast<std::uint32_t>(int_of(e, "line")), text_of(e, "traceback")});
+                errors.push_back(file_error_of(e));
             }
         }
         return out;
@@ -1035,6 +1063,24 @@ struct runner::impl {
         return box;
     }
 
+    struct opened_file {
+        std::unique_ptr<sandbox> box;
+        std::vector<listed> tests; // selected, in running order
+    };
+
+    // open_file, then the selected tests of a file that loaded. The module folders' warnings come after
+    // the file's own errors.
+    opened_file open_listed(const std::string& source, std::vector<file_error>& errors) {
+        opened_file out;
+        std::vector<file_error> warnings;
+        out.box = open_file(source, errors, warnings);
+        if (errors.empty()) {
+            out.tests = selection(list_tests(*out.box, errors));
+        }
+        errors.insert(errors.end(), warnings.begin(), warnings.end());
+        return out;
+    }
+
     test_result run_one(sandbox& box, const listed& t, std::uint32_t repeat, reporter& out) {
         test_result r;
         r.id = t.id;
@@ -1067,7 +1113,7 @@ struct runner::impl {
                 r.fail_line = static_cast<std::uint32_t>(int_of(prepared->front(), "line"));
                 r.traceback = text_of(prepared->front(), "traceback");
             }
-            r.where = std::format("{}:{}", r.fail_file.empty() ? r.file : r.fail_file, r.fail_line == 0 ? r.line : r.fail_line);
+            r.where = where_of(r);
             return r;
         }
 
@@ -1188,22 +1234,10 @@ struct runner::impl {
                 limit("time_ms", r.cost.time_ms);
                 if (!over.empty() && r.outcome == status::kPassed) {
                     r.outcome = status::kFailed;
-                    std::string list;
-                    for (const std::string& o : over) {
-                        list += (list.empty() ? "" : ", ") + o;
-                    }
-                    r.message = std::format("over budget: {}", list);
+                    r.message = std::format("over budget: {}", join(over, ", "));
                 }
             }
-            if (const auto* list = array_of(v, "globals"); list != nullptr && !list->empty()) {
-                std::string names;
-                for (const value& g : *list) {
-                    if (const auto* name = g.get_if<std::string>()) {
-                        names += (names.empty() ? "" : ", ") + *name;
-                    }
-                }
-                r.notes.push_back(std::format("the test set global(s) {} (removed after it)", names));
-            }
+            note_globals(v, r.notes);
             if (bool_of(v, "strict_undo")) {
                 r.notes.emplace_back("strict-undo");
             }
@@ -1218,15 +1252,7 @@ struct runner::impl {
             if (!aborted) {
                 r.notes.push_back(std::format("its cleanup failed too: {}", aborted.error()));
             } else if (!aborted->empty()) {
-                if (const auto* globals = array_of(aborted->front(), "globals"); globals != nullptr && !globals->empty()) {
-                    std::string names;
-                    for (const value& g : *globals) {
-                        if (const auto* name = g.get_if<std::string>()) {
-                            names += (names.empty() ? "" : ", ") + *name;
-                        }
-                    }
-                    r.notes.push_back(std::format("the test set global(s) {} (removed after it)", names));
-                }
+                note_globals(aborted->front(), r.notes);
                 if (const auto* errs = array_of(aborted->front(), "errors")) {
                     for (const value& e : *errs) {
                         if (const auto* text = e.get_if<std::string>()) {
@@ -1284,11 +1310,7 @@ struct runner::impl {
         }
         if (!leaks.empty() && (r.outcome == status::kPassed || r.outcome == status::kPending)) {
             r.outcome = status::kError;
-            std::string list;
-            for (const std::string& l : leaks) {
-                list += (list.empty() ? "" : "; ") + l;
-            }
-            r.message = std::format("not everything the test did was undone: {}", list);
+            r.message = std::format("not everything the test did was undone: {}", join(leaks, "; "));
         } else if (!leaks.empty()) {
             for (std::string& l : leaks) {
                 r.notes.push_back(std::move(l));
@@ -1299,8 +1321,7 @@ struct runner::impl {
             r.message = "the test timed out";
         }
         r.cost.wall_ms = std::chrono::duration<double, std::milli>{steady::now() - started}.count();
-        const std::string& at_file = r.fail_file.empty() ? r.file : r.fail_file;
-        r.where = std::format("{}:{}", at_file, r.fail_line == 0 ? r.line : r.fail_line);
+        r.where = where_of(r);
         return r;
     }
 
@@ -1337,13 +1358,7 @@ struct runner::impl {
         store.path = path.parent_path() / "__snapshots__" / (path.stem().string() + ".snap.lua");
         snapshots = &store;
 
-        std::vector<file_error> warnings;
-        auto box = open_file(source, fr.errors, warnings);
-        std::vector<listed> tests;
-        if (fr.errors.empty()) {
-            tests = selection(list_tests(*box, fr.errors));
-        }
-        fr.errors.insert(fr.errors.end(), warnings.begin(), warnings.end());
+        auto [box, tests] = open_listed(source, fr.errors);
         std::vector<test_info> infos;
         for (const listed& l : tests) {
             infos.push_back(l.info);
@@ -1372,8 +1387,7 @@ struct runner::impl {
                     if (!options.coverage.empty()) {
                         merge_coverage(own->coverage(), current_file);
                     }
-                    auto finished_blocks = own->exec("return __rhp_t.finish()", "rhp.test/finish");
-                    (void)finished_blocks;
+                    (void)own->exec("return __rhp_t.finish()", "rhp.test/finish");
                 }
                 out.test_finished(r);
                 if (options.fail_fast && (r.outcome == status::kFailed || r.outcome == status::kError)) {
@@ -1389,7 +1403,7 @@ struct runner::impl {
             if (finished_blocks && !finished_blocks->empty()) {
                 if (const auto* list = array_of(finished_blocks->front(), "errors")) {
                     for (const value& e : *list) {
-                        fr.errors.push_back(file_error{text_of(e, "message"), text_of(e, "source"), static_cast<std::uint32_t>(int_of(e, "line")), text_of(e, "traceback")});
+                        fr.errors.push_back(file_error_of(e));
                     }
                 }
             }
@@ -1469,14 +1483,10 @@ std::vector<std::pair<file_result, std::vector<test_info>>> runner::list() {
         if (failure) {
             fr.errors.push_back(file_error{failure->message, fr.file, 0, {}});
         } else {
-            std::vector<file_error> warnings;
-            auto box = impl_->open_file(source, fr.errors, warnings);
-            if (fr.errors.empty()) {
-                for (const auto& l : impl_->selection(impl_->list_tests(*box, fr.errors))) {
-                    infos.push_back(l.info);
-                }
+            const auto opened = impl_->open_listed(source, fr.errors);
+            for (const auto& l : opened.tests) {
+                infos.push_back(l.info);
             }
-            fr.errors.insert(fr.errors.end(), warnings.begin(), warnings.end());
         }
         out.emplace_back(std::move(fr), std::move(infos));
     }

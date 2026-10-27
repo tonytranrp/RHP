@@ -90,6 +90,11 @@ local function full_name(block, name)
     return concat(parts, " ")
 end
 
+-- How setup and teardown failures name a block: "the file", or its full name.
+local function block_label(b)
+    return b.kind == "file" and "the file" or full_name(b.parent, b.name)
+end
+
 local function tags_of(name)
     local tags = {}
     for tag in gmatch(name, "#([%w_%-%.:]+)") do
@@ -420,7 +425,7 @@ function T.prepare(id)
             local s = b.setup_state
             return {
                 ok = false,
-                message = format("setup of '%s' failed: %s", b.kind == "file" and "the file" or full_name(b.parent, b.name), s.message),
+                message = format("setup of '%s' failed: %s", block_label(b), s.message),
                 source = s.source,
                 line = s.line,
                 traceback = s.traceback,
@@ -587,7 +592,7 @@ function T.finish()
                 if not ok then
                     local d = describe_error(err, nil)
                     errors[#errors + 1] = {
-                        message = format("teardown of '%s' failed: %s", b.kind == "file" and "the file" or full_name(b.parent, b.name), d.message),
+                        message = format("teardown of '%s' failed: %s", block_label(b), d.message),
                         source = d.source,
                         line = d.line,
                         traceback = d.traceback,

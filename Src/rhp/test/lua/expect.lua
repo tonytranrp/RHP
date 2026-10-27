@@ -140,19 +140,8 @@ matchers.have_been_called_with = function(v, ...)
     local s = spy_or_fail(v)
     local args = pack(...)
     return s:called_with(...), function()
-        local parts = {}
-        for i = 1, args.n do
-            parts[i] = T.is_matcher(args[i]) and tostring(args[i]) or T.inline(args[i])
-        end
-        local last = s.calls[#s.calls]
-        local got = {}
-        if last then
-            for i = 1, last.vals.n do
-                got[i] = T.inline(last.vals[i])
-            end
-        end
-        local wanted = "(" .. concat(parts, ", ") .. ")"
-        local seen = last and ("(" .. concat(got, ", ") .. ")") or "(no calls)"
+        local wanted = T.expected_list(args, 1)
+        local seen = T.call_list(s)
         return format("expected a call with %s, last call was %s", wanted, seen), format("expected no call with %s", wanted), { expected = wanted, actual = seen }
     end
 end

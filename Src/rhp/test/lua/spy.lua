@@ -355,18 +355,24 @@ end
 
 -- ---- spy assertions -------------------------------------------------------------------------------
 
-local function call_list(s)
-    local last = s.calls[#s.calls]
-    if not last then
-        return "(no calls)"
-    end
+-- "(1, 'a')": packed values (vals.n of them), shown inline.
+local function inline_list(vals)
     local parts = {}
-    for i = 1, last.vals.n do
-        parts[i] = T.inline(last.vals[i])
+    for i = 1, vals.n do
+        parts[i] = T.inline(vals[i])
     end
     return "(" .. concat(parts, ", ") .. ")"
 end
+T.inline_list = inline_list
 
+-- The arguments of a spy's last call, or "(no calls)".
+local function call_list(s)
+    local last = s.calls[#s.calls]
+    return last and inline_list(last.vals) or "(no calls)"
+end
+T.call_list = call_list
+
+-- Expected arguments args[first..n]: matchers as themselves (is_number()), values inline.
 local function expected_list(args, first)
     local parts = {}
     for i = first, args.n do
@@ -374,6 +380,7 @@ local function expected_list(args, first)
     end
     return "(" .. concat(parts, ", ") .. ")"
 end
+T.expected_list = expected_list
 
 local A = T.spy_assertions
 local function counted(rule, phrase)
@@ -420,12 +427,6 @@ A.returned_with = {
     show = function(a)
         local s = spy_of(a[1])
         local last = s.returnvals[#s.returnvals]
-        local parts = {}
-        if last then
-            for i = 1, last.vals.n do
-                parts[i] = T.inline(last.vals[i])
-            end
-        end
-        return { last and ("(" .. concat(parts, ", ") .. ")") or "(no calls)", expected_list(a, 2) }
+        return { last and inline_list(last.vals) or "(no calls)", expected_list(a, 2) }
     end,
 }
