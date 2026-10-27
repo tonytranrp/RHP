@@ -155,4 +155,20 @@ std::string key::to_base64() const {
     return base64_encode(bytes_);
 }
 
+bool key::looks_weak() const noexcept {
+    std::array<bool, 256> seen{};
+    std::size_t distinct = 0;
+    bool printable = true;
+    for (const std::byte b : bytes_) {
+        const auto v = std::to_integer<unsigned char>(b);
+        if (!seen[v]) {
+            seen[v] = true;
+            ++distinct;
+        }
+        printable = printable && v >= 0x20 && v < 0x7f;
+    }
+    secure_wipe(seen.data(), sizeof(seen)); // which values the key holds
+    return !bytes_.empty() && (printable || distinct * 2 < bytes_.size());
+}
+
 } // namespace Rhp::security

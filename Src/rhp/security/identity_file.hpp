@@ -32,8 +32,8 @@ struct identity_file {
     key psk;
     std::optional<ed25519_secret_key> signing;
     std::string signer; // empty = name
-    // What load noticed that isn't fatal: a file other users can read. Callers show them (rhp-cli
-    // prints "warning: ..."); to_text leaves them out.
+    // What parse and load noticed that isn't fatal: a psk that looks like a passphrase, a file other
+    // users can read. Callers show them (rhp-cli prints "warning: ..."); to_text leaves them out.
     std::vector<std::string> warnings;
 
     [[nodiscard]] static result<identity_file> parse(std::string_view text, const field_reader& extra = {});

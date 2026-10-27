@@ -16,7 +16,7 @@ add to the host's keyring file:   dev patch <psk from dev.rhpid>   (rhp-cli pubk
 add to the host's signers file:   dev <public key>
 ```
 
-`rhp-cli pubkey -i dev.rhpid` prints both lines whole (for scripts that write the host's files); `--show-secret` makes keygen print the keyring line whole too. `--role observe|patch|admin` (default `patch`; `admin` prints a warning) sets the keyring line's role; `-o/--out` names the file; `--force` replaces an existing one. Loading an identity file that other users can read prints a `warning:` line (never an error).
+`rhp-cli pubkey -i dev.rhpid` prints both lines whole (for scripts that write the host's files); `--show-secret` makes keygen print the keyring line whole too. `--role observe|patch|admin` (default `patch`; `admin` prints a warning) sets the keyring line's role; `-o/--out` names the file; `--force` replaces an existing one. Loading an identity file that other users can read, or whose PSK looks chosen by a person rather than random, prints a `warning:` line (never an error).
 
 | Subcommand | Example |
 |---|---|

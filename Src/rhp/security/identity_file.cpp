@@ -68,6 +68,9 @@ result<identity_file> identity_file::parse(std::string_view text, const field_re
     if (out.psk.empty()) {
         return fail(errc::kInvalidArgument, "an identity file needs a psk", "security.identity_file");
     }
+    if (out.psk.looks_weak()) {
+        out.warnings.emplace_back("the psk looks chosen by a person (printable text or a repeated pattern), not random: rhp-cli keygen makes a random one");
+    }
     return out;
 }
 
