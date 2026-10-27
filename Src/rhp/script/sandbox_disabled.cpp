@@ -28,8 +28,8 @@ public:
 
 namespace {
 
-std::unexpected<error> disabled() {
-    return fail(errc::kDisabled, "RHP is compiled out (RHP_ENABLE=0)");
+std::unexpected<error> disabled(std::string_view where = {}) {
+    return fail(errc::kDisabled, "RHP is compiled out (RHP_ENABLE=0)", std::string{where});
 }
 
 } // namespace
@@ -203,24 +203,16 @@ std::size_t async_leftovers::pump() {
 
 void async_leftovers::close() noexcept {}
 
-} // namespace Rhp::script
-
-namespace Rhp::script {
-
 result<std::vector<tunable_info>> sandbox::tunables(std::string_view) {
-    return fail(errc::kDisabled, "RHP is compiled out (RHP_ENABLE=0)", "sandbox");
+    return disabled("sandbox");
 }
 
 result<void> sandbox::tune(std::string_view, const value&) {
-    return fail(errc::kDisabled, "RHP is compiled out (RHP_ENABLE=0)", "sandbox");
+    return disabled("sandbox");
 }
 
-} // namespace Rhp::script
-
-namespace Rhp::script {
-
 result<std::vector<std::uint32_t>> sandbox::set_breakpoints(std::string_view, std::span<const std::uint32_t>) {
-    return fail(errc::kDisabled, "RHP is compiled out (RHP_ENABLE=0)", "sandbox");
+    return disabled("sandbox");
 }
 
 void sandbox::debug_pause() {}
@@ -232,23 +224,23 @@ std::vector<debug_stop> sandbox::paused() const {
 }
 
 result<void> sandbox::debug_resume(request_id, step_mode) {
-    return fail(errc::kDisabled, "RHP is compiled out (RHP_ENABLE=0)", "sandbox");
+    return disabled("sandbox");
 }
 
 result<std::vector<debug_frame>> sandbox::debug_stack(request_id) {
-    return fail(errc::kDisabled, "RHP is compiled out (RHP_ENABLE=0)", "sandbox");
+    return disabled("sandbox");
 }
 
 result<std::vector<debug_variable>> sandbox::debug_variables(request_id, std::uint32_t, debug_scope, std::span<const std::string>) {
-    return fail(errc::kDisabled, "RHP is compiled out (RHP_ENABLE=0)", "sandbox");
+    return disabled("sandbox");
 }
 
 result<debug_variable> sandbox::debug_evaluate(request_id, std::uint32_t, std::string_view) {
-    return fail(errc::kDisabled, "RHP is compiled out (RHP_ENABLE=0)", "sandbox");
+    return disabled("sandbox");
 }
 
 result<void> sandbox::start_profile(profile_options) {
-    return fail(errc::kDisabled, "RHP is compiled out (RHP_ENABLE=0)", "sandbox");
+    return disabled("sandbox");
 }
 
 profile_report sandbox::profile() const {
