@@ -15,6 +15,7 @@
 #include <rhp/build_config.hpp>
 #include <rhp/client/client.hpp>
 #include <rhp/client/detail/fleet_engine.hpp>
+#include <rhp/client/detail/replies.hpp>
 #include <rhp/client/rollout.hpp>
 #include <rhp/core/convert.hpp>
 #include <rhp/core/error.hpp>
@@ -301,13 +302,10 @@ private:
         std::vector<host_result<T>> out;
         out.reserve(raw.size());
         for (auto& o : raw) {
-            auto list = fleet_detail::values(std::move(o.body));
             if constexpr (std::same_as<T, value_list>) {
-                out.push_back({std::move(o.host), std::move(list)});
-            } else if (!list) {
-                out.push_back({std::move(o.host), std::unexpected{std::move(list).error()}});
+                out.push_back({std::move(o.host), client_detail::values(std::move(o.body))});
             } else {
-                out.push_back({std::move(o.host), Rhp::from_value<T>(list->empty() ? value{} : list->front())});
+                out.push_back({std::move(o.host), client_detail::first<T>(std::move(o.body))});
             }
         }
         return out;

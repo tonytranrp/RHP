@@ -16,6 +16,7 @@
 
 #include <rhp/build_config.hpp>
 #include <rhp/client/detail/engine.hpp>
+#include <rhp/client/detail/replies.hpp>
 #include <rhp/client/pending.hpp>
 #include <rhp/config/config.hpp>
 #include <rhp/core/convert.hpp>
@@ -30,15 +31,15 @@
 
 namespace Rhp {
 
-using wire::module_ref;
-using wire::module_status;
-using wire::revert_summary;
-using wire::release_apply_reply;
-using wire::release_status_reply;
 using wire::channel_status_message;
 using wire::debug_reply;
 using wire::debug_request;
+using wire::module_ref;
+using wire::module_status;
 using wire::profile_reply;
+using wire::release_apply_reply;
+using wire::release_status_reply;
+using wire::revert_summary;
 using wire::tunable_message;
 
 // Talks to an Rhp::host: authenticates with a credential (a key name + secret for psk_keyring),
@@ -114,18 +115,18 @@ public:
     // ---- scripts --------------------------------------------------------------------------------
 
     // Runs source in this identity's scratch module (effects kept until reverted or disconnect).
-    return_t<value_list> exec(std::string_view source, std::string_view chunk = "exec") { return finish(values(code_request(wire::op::kExec, exec_body(source, chunk)))); }
+    return_t<value_list> exec(std::string_view source, std::string_view chunk = "exec") { return finish(client_detail::values(code_request(wire::op::kExec, exec_body(source, chunk)))); }
 
     // The first returned value, converted (nil if none).
     template <from_value_convertible T>
     return_t<T> exec(std::string_view source, std::string_view chunk = "exec") {
-        return finish(first<T>(code_request(wire::op::kExec, exec_body(source, chunk))));
+        return finish(client_detail::first<T>(code_request(wire::op::kExec, exec_body(source, chunk))));
     }
 
-    return_t<module_id> load(std::string_view name, std::string_view source) { return finish(as<module_id>(code_request(wire::op::kLoad, load_body(name, source)))); }
+    return_t<module_id> load(std::string_view name, std::string_view source) { return finish(client_detail::as<module_id>(code_request(wire::op::kLoad, load_body(name, source)))); }
 
     return_t<value_list> call(module_ref mod, std::string_view function, std::span<const value> args = {}) {
-        return finish(values(send(wire::op::kCall, wire::call_request{std::move(mod), std::string{function}, value::array(args.begin(), args.end())})));
+        return finish(client_detail::values(send(wire::op::kCall, wire::call_request{std::move(mod), std::string{function}, value::array(args.begin(), args.end())})));
     }
 
     template <to_value_convertible A0, to_value_convertible... A>
@@ -138,63 +139,63 @@ public:
 
     // Transactional reload; the new revision (0 = deferred).
     return_t<revision_id> reload(module_ref mod, std::string_view source) {
-        return finish(as<revision_id>(code_request(wire::op::kReload, reload_body(std::move(mod), source))));
+        return finish(client_detail::as<revision_id>(code_request(wire::op::kReload, reload_body(std::move(mod), source))));
     }
 
     return_t<revision_id> rollback(module_ref mod, std::size_t steps = 1) {
-        return finish(as<revision_id>(send(wire::op::kRollback, wire::rollback_request{std::move(mod), steps})));
+        return finish(client_detail::as<revision_id>(send(wire::op::kRollback, wire::rollback_request{std::move(mod), steps})));
     }
 
-    return_t<revert_summary> revert(module_ref mod) { return finish(as<revert_summary>(send(wire::op::kRevert, wire::module_request{std::move(mod)}))); }
+    return_t<revert_summary> revert(module_ref mod) { return finish(client_detail::as<revert_summary>(send(wire::op::kRevert, wire::module_request{std::move(mod)}))); }
 
     // `force` unloads even while other modules require this one (they then get kUnloaded).
     return_t<revert_summary> unload(module_ref mod, bool force = false) {
-        return finish(as<revert_summary>(send(wire::op::kUnload, wire::unload_request{std::move(mod), force})));
+        return finish(client_detail::as<revert_summary>(send(wire::op::kUnload, wire::unload_request{std::move(mod), force})));
     }
 
-    return_t<void> checkpoint(std::string_view tag) { return finish(nothing(send(wire::op::kCheckpoint, wire::tag_request{std::string{tag}}))); }
+    return_t<void> checkpoint(std::string_view tag) { return finish(client_detail::nothing(send(wire::op::kCheckpoint, wire::tag_request{std::string{tag}}))); }
 
     return_t<revert_summary> revert_to(std::string_view tag) {
-        return finish(as<revert_summary>(send(wire::op::kRevertTo, wire::tag_request{std::string{tag}})));
+        return finish(client_detail::as<revert_summary>(send(wire::op::kRevertTo, wire::tag_request{std::string{tag}})));
     }
 
     // Admin: unloads every module of every identity on the host (pinned ones too).
-    return_t<revert_summary> revert_all() { return finish(as<revert_summary>(raw(wire::op::kRevertAll, value{}))); }
+    return_t<revert_summary> revert_all() { return finish(client_detail::as<revert_summary>(raw(wire::op::kRevertAll, value{}))); }
 
     // Admin: the host keeps the module (and what it requires) when this identity's last session
     // ends; revert / unload refuse it (kForbidden) until unpin.
-    return_t<void> pin(module_ref mod) { return finish(nothing(send(wire::op::kPin, wire::module_request{std::move(mod)}))); }
-    return_t<void> unpin(module_ref mod) { return finish(nothing(send(wire::op::kUnpin, wire::module_request{std::move(mod)}))); }
+    return_t<void> pin(module_ref mod) { return finish(client_detail::nothing(send(wire::op::kPin, wire::module_request{std::move(mod)}))); }
+    return_t<void> unpin(module_ref mod) { return finish(client_detail::nothing(send(wire::op::kUnpin, wire::module_request{std::move(mod)}))); }
 
     // ---- releases (a host that serves a release manager: host.serve) --------------------------------
 
     // Admin: runs a signed release envelope (a .rhprel file, Rhp::release::encode_release) in its
     // channel. `confirm`: "now", "health" or "manual".
     return_t<release_apply_reply> release_apply(std::span<const std::byte> envelope, std::string_view confirm = "now") {
-        return finish(as<release_apply_reply>(
+        return finish(client_detail::as<release_apply_reply>(
             send(wire::op::kReleaseApply, wire::release_apply_request{value::bytes(envelope.begin(), envelope.end()), std::string{confirm}})));
     }
 
     // Admin: the channel's running candidate becomes active; returns its id. With `expected` (a
     // release id), kSuperseded unless that is the candidate.
     return_t<value::bytes> release_confirm(std::string_view channel, std::span<const std::byte> expected = {}) {
-        return finish(as<value::bytes>(
+        return finish(client_detail::as<value::bytes>(
             send(wire::op::kReleaseConfirm, wire::release_channel_request{std::string{channel}, false, value::bytes(expected.begin(), expected.end())})));
     }
 
     // Admin: the channel stops what runs (falling back), or with `hold` runs nothing until a new
     // release; returns the id of what stopped. With `expected`, kSuperseded unless that release runs.
     return_t<value::bytes> release_deactivate(std::string_view channel, bool hold = false, std::span<const std::byte> expected = {}) {
-        return finish(as<value::bytes>(
+        return finish(client_detail::as<value::bytes>(
             send(wire::op::kReleaseDeactivate, wire::release_channel_request{std::string{channel}, hold, value::bytes(expected.begin(), expected.end())})));
     }
 
     // The host's channels and what they run.
-    return_t<release_status_reply> release_status() { return finish(as<release_status_reply>(raw(wire::op::kReleaseStatus, value{}))); }
+    return_t<release_status_reply> release_status() { return finish(client_detail::as<release_status_reply>(raw(wire::op::kReleaseStatus, value{}))); }
 
     // Sends a signed revocation list (a .rhprev file); returns how many channels changed.
     return_t<std::uint64_t> revoke(std::span<const std::byte> envelope) {
-        return finish(as<std::uint64_t>(send(wire::op::kRevoke, wire::revoke_request{value::bytes(envelope.begin(), envelope.end())})));
+        return finish(client_detail::as<std::uint64_t>(send(wire::op::kRevoke, wire::revoke_request{value::bytes(envelope.begin(), envelope.end())})));
     }
 
     // ---- tools: this identity's own sandbox on the host (Stage 11) ----------------------------------
@@ -202,24 +203,24 @@ public:
     // The variables the host's libs expose (::var and ::ro), with values and tags; `prefix` keeps one
     // lib or path.
     return_t<std::vector<tunable_message>> tunables(std::string_view prefix = {}) {
-        return finish(as<std::vector<tunable_message>>(send(wire::op::kTunables, wire::tunables_request{std::string{prefix}})));
+        return finish(client_detail::as<std::vector<tunable_message>>(send(wire::op::kTunables, wire::tunables_request{std::string{prefix}})));
     }
 
     // Patch: writes a ::var as a script would (its range checked, journaled like an exec).
     return_t<void> tune(std::string_view path, value to) {
-        return finish(nothing(send(wire::op::kTune, wire::tune_request{std::string{path}, std::move(to)})));
+        return finish(client_detail::nothing(send(wire::op::kTune, wire::tune_request{std::string{path}, std::move(to)})));
     }
 
     // The sampling profiler: "start" (every `interval` instructions), "read" or "stop" (which
     // returns the report). It stops by itself when this session ends.
     return_t<profile_reply> profile(std::string_view action, std::uint32_t interval = 1000) {
-        return finish(as<profile_reply>(send(wire::op::kProfile, wire::profile_request{std::string{action}, interval, 64, 10'000})));
+        return finish(client_detail::as<profile_reply>(send(wire::op::kProfile, wire::profile_request{std::string{action}, interval, 64, 10'000})));
     }
 
     // Patch: the debugger (breakpoints, steps, stacks, variables; see wire::debug_request). A script
     // that pauses publishes "rhp.debug" ({kind = "paused", request, reason, source, line, label}):
     // subscribe with on("rhp.debug", ...). Breakpoints go when the session that set them ends.
-    return_t<debug_reply> debug(const debug_request& request) { return finish(as<debug_reply>(send(wire::op::kDebug, request))); }
+    return_t<debug_reply> debug(const debug_request& request) { return finish(client_detail::as<debug_reply>(send(wire::op::kDebug, request))); }
 
     // Pushes bytes to a host blob sink (host.on_blob), in chunks, and returns the sink's verdict.
     // `name` is passed to the sink (a file name, free-form).
@@ -281,12 +282,12 @@ public:
 
     // ---- introspection ------------------------------------------------------------------------------
 
-    return_t<std::vector<module_status>> list() { return finish(as<std::vector<module_status>>(raw(wire::op::kList, value{}))); }
+    return_t<std::vector<module_status>> list() { return finish(client_detail::as<std::vector<module_status>>(raw(wire::op::kList, value{}))); }
 
-    return_t<module_status> status(module_ref mod) { return finish(as<module_status>(send(wire::op::kStatus, wire::module_request{std::move(mod)}))); }
+    return_t<module_status> status(module_ref mod) { return finish(client_detail::as<module_status>(send(wire::op::kStatus, wire::module_request{std::move(mod)}))); }
 
     // LuaLS annotations for everything this identity can use on the host.
-    return_t<std::string> describe() { return finish(as<std::string>(raw(wire::op::kDescribe, value{}))); }
+    return_t<std::string> describe() { return finish(client_detail::as<std::string>(raw(wire::op::kDescribe, value{}))); }
 
     // ---- asynchronous calls ----------------------------------------------------------------------------
 
@@ -297,21 +298,21 @@ public:
         explicit async_calls(client& c) noexcept : c_(&c) {}
 
         pending_t<value_list> exec(std::string_view source, std::string_view chunk = "exec") {
-            return c_->template start<value_list>(wire::op::kExec, c_->exec_body(source, chunk), &client::values);
+            return c_->template start<value_list>(wire::op::kExec, c_->exec_body(source, chunk), &client_detail::values);
         }
 
         template <from_value_convertible T>
         pending_t<T> exec(std::string_view source, std::string_view chunk = "exec") {
-            return c_->template start<T>(wire::op::kExec, c_->exec_body(source, chunk), &client::template first<T>);
+            return c_->template start<T>(wire::op::kExec, c_->exec_body(source, chunk), &client_detail::first<T>);
         }
 
         pending_t<module_id> load(std::string_view name, std::string_view source) {
-            return c_->template start<module_id>(wire::op::kLoad, c_->load_body(name, source), &client::template as<module_id>);
+            return c_->template start<module_id>(wire::op::kLoad, c_->load_body(name, source), &client_detail::as<module_id>);
         }
 
         pending_t<value_list> call(module_ref mod, std::string_view function, std::span<const value> args = {}) {
             return c_->template start<value_list>(
-                wire::op::kCall, Rhp::to_value(wire::call_request{std::move(mod), std::string{function}, value::array(args.begin(), args.end())}), &client::values);
+                wire::op::kCall, Rhp::to_value(wire::call_request{std::move(mod), std::string{function}, value::array(args.begin(), args.end())}), &client_detail::values);
         }
 
         template <to_value_convertible A0, to_value_convertible... A>
@@ -321,30 +322,30 @@ public:
         }
 
         pending_t<revision_id> reload(module_ref mod, std::string_view source) {
-            return c_->template start<revision_id>(wire::op::kReload, c_->reload_body(std::move(mod), source), &client::template as<revision_id>);
+            return c_->template start<revision_id>(wire::op::kReload, c_->reload_body(std::move(mod), source), &client_detail::as<revision_id>);
         }
 
         pending_t<revision_id> rollback(module_ref mod, std::size_t steps = 1) {
-            return c_->template start<revision_id>(wire::op::kRollback, Rhp::to_value(wire::rollback_request{std::move(mod), steps}), &client::template as<revision_id>);
+            return c_->template start<revision_id>(wire::op::kRollback, Rhp::to_value(wire::rollback_request{std::move(mod), steps}), &client_detail::as<revision_id>);
         }
 
         pending_t<revert_summary> revert(module_ref mod) {
-            return c_->template start<revert_summary>(wire::op::kRevert, Rhp::to_value(wire::module_request{std::move(mod)}), &client::template as<revert_summary>);
+            return c_->template start<revert_summary>(wire::op::kRevert, Rhp::to_value(wire::module_request{std::move(mod)}), &client_detail::as<revert_summary>);
         }
 
         pending_t<revert_summary> unload(module_ref mod, bool force = false) {
-            return c_->template start<revert_summary>(wire::op::kUnload, Rhp::to_value(wire::unload_request{std::move(mod), force}), &client::template as<revert_summary>);
+            return c_->template start<revert_summary>(wire::op::kUnload, Rhp::to_value(wire::unload_request{std::move(mod), force}), &client_detail::as<revert_summary>);
         }
 
         pending_t<std::vector<module_status>> list() {
-            return c_->template start<std::vector<module_status>>(wire::op::kList, value{}, &client::template as<std::vector<module_status>>);
+            return c_->template start<std::vector<module_status>>(wire::op::kList, value{}, &client_detail::as<std::vector<module_status>>);
         }
 
         pending_t<module_status> status(module_ref mod) {
-            return c_->template start<module_status>(wire::op::kStatus, Rhp::to_value(wire::module_request{std::move(mod)}), &client::template as<module_status>);
+            return c_->template start<module_status>(wire::op::kStatus, Rhp::to_value(wire::module_request{std::move(mod)}), &client_detail::as<module_status>);
         }
 
-        pending_t<std::string> describe() { return c_->template start<std::string>(wire::op::kDescribe, value{}, &client::template as<std::string>); }
+        pending_t<std::string> describe() { return c_->template start<std::string>(wire::op::kDescribe, value{}, &client_detail::as<std::string>); }
 
     private:
         client* c_;
@@ -506,40 +507,6 @@ private:
         state->complete(fail(errc::kDisabled, "RHP is compiled out (RHP_ENABLE=0)", "client"));
         return pending_t<T>{std::move(state)};
 #endif
-    }
-
-    template <class T>
-    static result<T> as(result<value>&& r) {
-        if (!r) {
-            return std::unexpected{std::move(r).error()};
-        }
-        return Rhp::from_value<T>(*r);
-    }
-
-    static result<value_list> values(result<value>&& r) {
-        if (!r) {
-            return std::unexpected{std::move(r).error()};
-        }
-        if (auto* items = r->get_if<value::array>()) {
-            return std::move(*items);
-        }
-        return value_list{std::move(*r)};
-    }
-
-    template <class T>
-    static result<T> first(result<value>&& r) {
-        auto list = values(std::move(r));
-        if (!list) {
-            return std::unexpected{std::move(list).error()};
-        }
-        return Rhp::from_value<T>(list->empty() ? value{} : list->front());
-    }
-
-    static result<void> nothing(result<value>&& r) {
-        if (!r) {
-            return std::unexpected{std::move(r).error()};
-        }
-        return {};
     }
 
     std::optional<signing_key_t> signer_;

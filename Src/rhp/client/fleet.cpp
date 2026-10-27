@@ -252,7 +252,6 @@ public:
     }
 
 private:
-
     // Until every member answered or the shared deadline passed. With zero_threads nobody else
     // runs the reactor: this thread runs every member's network meanwhile.
     void wait(collector& pending) {
@@ -344,16 +343,6 @@ std::vector<net::service_record> records(const engine& e) {
 
 std::vector<outcome> send(engine& e, wire::op code, const value& body, std::span<const std::size_t> which) {
     return e.send_to(code, body, which, wire::to_string(code));
-}
-
-result<value_list> values(result<value>&& body) {
-    if (!body) {
-        return std::unexpected{std::move(body).error()};
-    }
-    if (auto* items = body->get_if<value::array>()) {
-        return std::move(*items);
-    }
-    return value_list{std::move(*body)};
 }
 
 } // namespace Rhp::fleet_detail

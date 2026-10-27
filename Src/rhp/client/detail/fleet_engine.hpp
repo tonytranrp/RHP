@@ -91,7 +91,4 @@ void run_io(engine& e, std::stop_token stop);
 // fleet::rollout (rollout.cpp).
 [[nodiscard]] rollout_report rollout(engine& e, std::span<const std::byte> envelope, const rollout_plan& plan);
 
-// A reply body as the list of returned values (what client::exec returns).
-[[nodiscard]] result<value_list> values(result<value>&& body);
-
 } // namespace Rhp::fleet_detail

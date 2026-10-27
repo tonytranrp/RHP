@@ -9,6 +9,7 @@
 | `fleet.hpp` | `Rhp::fleet<Cfg>`: `discover` / `add` members, `exec` / `load` / `call` start on every member and collect one `host_result<T>` per host within a shared deadline, `rollout`, `release_status`; `Rhp::discover<Cfg>()`; the `broadcastable` concept |
 | `rollout.hpp` | `rollout_plan` (canaries, cumulative `rollout_stage`s with an observe time, `max_failures`, `rollback_on_failure`, `on_progress`), `rollout_host`, `rollout_report` |
 | `detail/engine.hpp` | `client_options` (`connect_timeout`, `request_timeout`, `on_output`, `on_emit`, `blob_chunk`, `blob_window`, `ack_delay_ms`, `tls`), `session_info` (what `info()` returns), `remote_event` (one `on` delivery; views valid during the callback), the type-erased `setup`, the engine's free functions |
+| `detail/replies.hpp` | `values`, `as<T>`, `first<T>`, `nothing`: a reply body as the calls (blocking, async and fleet broadcasts) return it; header-only, used with `RHP_ENABLE=0` too |
 | `detail/fleet_engine.hpp` | `fleet_options` (`client`, `timeout`, `tls`, `insecure_lan`), the fleet engine's `setup` and free functions |
 
 ```cpp
