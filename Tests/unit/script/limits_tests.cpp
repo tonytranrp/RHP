@@ -277,3 +277,63 @@ TEST_CASE("a check interval larger than Lua's hook count holds still arms the ho
     // The request's coroutine counts with the largest count Lua takes (a negative one switched it off).
     CHECK(box.exec<std::int64_t>("return select(3, debug.gethook())") == std::int64_t{(std::numeric_limits<int>::max)()});
 }
+
+TEST_CASE("limits.handlers refuses one handler more and makes room as they go", "[script][limits][handlers]") {
+    Rhp::limits limits;
+    limits.handlers = 4;
+    sandbox box = make_box(limits);
+    constexpr std::string_view kTimer = "rhp.after(1000, function() end)";
+    constexpr std::string_view kFrames = "rhp.every_frame(function() end)";
+    constexpr std::string_view kSubscription = "rhp.on('tests.handlers.ping', function() end)";
+    constexpr std::string_view kTask = "rhp.spawn(function() end)";
+    const auto refused = [&box](std::string_view source) {
+        const auto r = box.exec(source);
+        return !r && r.error().code == errc::kLimitExceeded && r.error().message.contains("limits.handlers");
+    };
+
+    // One of each kind fills it; one more of any kind is refused.
+    const auto mod = box.load("tests.handlers.full", R"lua(
+        rhp.after(1000, function() end)
+        rhp.every_frame(function() end)
+        rhp.on("tests.handlers.ping", function() end)
+        rhp.spawn(function() while true do rhp.next_frame() end end)
+    )lua");
+    REQUIRE(mod);
+    for (const std::string_view more : {kTimer, kFrames, kSubscription, kTask}) {
+        CHECK(refused(more));
+    }
+
+    // Reverting the module that registered them makes room for as many.
+    REQUIRE(box.revert(*mod));
+    REQUIRE(box.exec(R"lua(
+        rhp.after(0, function() end)
+        rhp.every_frame(function() end)
+        sub = rhp.on("tests.handlers.ping", function() end)
+        task = rhp.spawn(function() while true do rhp.next_frame() end end)
+    )lua"));
+    CHECK(refused(kTimer));
+
+    // So do rhp.off, a one-shot timer once it fired, and a task's end.
+    REQUIRE(box.exec("rhp.off(sub)"));
+    REQUIRE(box.exec(kSubscription));
+    CHECK(refused(kSubscription));
+    box.pump(); // the timer fires
+    REQUIRE(box.exec(kFrames));
+    CHECK(refused(kFrames));
+    REQUIRE(box.exec("task:cancel()"));
+    REQUIRE(box.exec(kTask));
+    CHECK(refused(kTask));
+    box.pump(); // that task runs and ends
+    REQUIRE(box.exec(kTimer));
+    CHECK(refused(kTimer));
+}
+
+TEST_CASE("without limits.handlers a sandbox keeps as many handlers as it registers", "[script][limits][handlers]") {
+    sandbox box = make_box();
+    REQUIRE(box.exec(R"lua(
+        for i = 1, 1000 do
+            rhp.after(1000, function() end)
+            rhp.on("tests.handlers.many", function() end)
+        end
+    )lua"));
+}

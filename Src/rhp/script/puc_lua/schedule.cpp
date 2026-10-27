@@ -202,6 +202,14 @@ void sandbox_impl::refuse_while_closing(lua_State* L, std::string_view where) co
     }
 }
 
+void sandbox_impl::refuse_over_handlers(lua_State* L, std::string_view where) const {
+    if (const std::uint32_t cap = options_.limits.handlers; cap != 0 && handlers_ >= cap) {
+        stack{L}.raise(make_error(errc::kLimitExceeded,
+                                  std::format("{} timers, frame callbacks, subscriptions and tasks are alive: the limit (limits.handlers); remove one first", handlers_),
+                                  std::string{where}));
+    }
+}
+
 std::uint64_t sandbox_impl::add_timer(lua_State* L, std::string_view where, double ms, int fn_index, bool repeating, const handler_opts& opts, std::string label) {
     schedule_entry entry;
     entry.kind = schedule_kind::kTimer;
@@ -227,11 +235,13 @@ std::uint64_t sandbox_impl::add_frames(lua_State* L, std::string_view where, std
 
 std::uint64_t sandbox_impl::add_schedule(lua_State* L, std::string_view where, int fn_index, schedule_entry entry, std::string label) {
     refuse_while_closing(L, where);
+    refuse_over_handlers(L, where);
     lua_pushvalue(L, fn_index);
     entry.fn_ref = luaL_ref(L, LUA_REGISTRYINDEX);
     entry.owner = current_;
     const std::uint64_t key = ++schedule_keys_;
     schedule_.emplace(key, std::move(entry));
+    ++handlers_;
     schedule_dirty_ = true;
     const std::uint64_t seq = record_effect(std::move(label), std::make_unique<schedule_effect>(*this, key));
     if (const auto it = schedule_.find(key); it != schedule_.end()) {
@@ -247,6 +257,7 @@ void sandbox_impl::remove_schedule(std::uint64_t key) noexcept {
     }
     luaL_unref(state_, LUA_REGISTRYINDEX, it->second.fn_ref);
     schedule_.erase(it);
+    --handlers_;
 }
 
 schedule_entry* sandbox_impl::schedule_by_seq(std::uint64_t seq) noexcept {

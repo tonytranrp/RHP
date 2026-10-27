@@ -171,6 +171,7 @@ void sandbox_impl::release_interest(const std::string& event) noexcept {
 
 std::uint64_t sandbox_impl::subscribe(lua_State* L, std::string_view event, int fn_index, bool once, const handler_opts& opts) {
     refuse_while_closing(L, once ? "rhp.once" : "rhp.on");
+    refuse_over_handlers(L, once ? "rhp.once" : "rhp.on");
     event_state* state = resolve_event(L, event, once ? "rhp.once" : "rhp.on");
     lua_pushvalue(L, fn_index);
     const int fn_ref = luaL_ref(L, LUA_REGISTRYINDEX);
@@ -186,6 +187,7 @@ std::uint64_t sandbox_impl::subscribe(lua_State* L, std::string_view event, int 
     sub.once = once;
     sub.policy = opts.on_error.value_or(options_.handler_errors);
     subs.insert(at, std::move(sub));
+    ++handlers_;
     ++subscriptions_version_;
     acquire_interest(event, state);
     std::string label = std::format("{} {}", once ? "rhp.once" : "rhp.on", event);
@@ -212,6 +214,7 @@ void sandbox_impl::unsubscribe(const std::string& event, std::uint64_t key) noex
     }
     luaL_unref(state_, LUA_REGISTRYINDEX, sub->fn_ref);
     subs.erase(sub);
+    --handlers_;
     ++subscriptions_version_;
     release_interest(event);
 }
