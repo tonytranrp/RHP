@@ -77,8 +77,14 @@ void check(std::string_view what, bool ok) {
     g_failures += ok ? 0 : 1;
 }
 
-std::string read_file(const std::filesystem::path& path) {
+// The whole file; nullopt (and a FAIL line) when it can't be read.
+std::optional<std::string> read_file(const std::filesystem::path& path) {
     std::ifstream in{path, std::ios::binary};
+    if (!in) {
+        ++g_failures;
+        std::println("  FAIL can't read {}", path.string());
+        return std::nullopt;
+    }
     std::ostringstream text;
     text << in.rdbuf();
     return std::move(text).str();
@@ -149,7 +155,11 @@ void tour(std::string_view title, const Rhp::endpoint& listen_at, const Rhp::sec
         }
         {
             Rhp::client<Cfg> patch_client{dial_at, patcher, developer, printing("patcher")};
-            auto mod = patch_client.load("tuning.moon", read_file(std::filesystem::path{RHP_REMOTE_SCRIPTS_DIR} / "moon.lua"));
+            const auto moon = read_file(std::filesystem::path{RHP_REMOTE_SCRIPTS_DIR} / "moon.lua");
+            if (!moon) {
+                return;
+            }
+            auto mod = patch_client.load("tuning.moon", *moon);
             expect("patch loads tuning.moon (moon gravity)", mod);
             check("the game sees gravity -1.6", gravity_becomes(-1.6f));
             if (mod) {
@@ -230,6 +240,10 @@ int main() {
             }
         }};
         auto wrong = Rhp::security::key::generate();
+        if (!wrong) {
+            std::println(stderr, "no OS randomness for keys");
+            return 1;
+        }
         Rhp::client<cfg> intruder{Rhp::endpoint::dial("remote_exec", 2), Rhp::security::psk_identity{"dev", *wrong}};
         std::println("\n== wrong key ==");
         expect_error("a wrong key is refused", intruder.exec("return 1"), Rhp::errc::kAuth);

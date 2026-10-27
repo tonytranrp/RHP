@@ -390,8 +390,12 @@ int main(int argc, char** argv) {
     if (!o->blobs.empty()) {
         std::error_code ec;
         std::filesystem::create_directories(o->blobs, ec);
+        if (ec) {
+            std::println(stderr, "can't create {}: {}", o->blobs, ec.message());
+            return 1;
+        }
         const std::filesystem::path dir{o->blobs};
-        (void)host.on_blob("files", [dir](const Rhp::blob_view& b) -> Rhp::result<void> {
+        auto blob_sink = host.on_blob("files", [dir](const Rhp::blob_view& b) -> Rhp::result<void> {
             // Only a plain file name: a blob can't write outside the folder (or to a device name).
             const std::filesystem::path name = std::filesystem::path{std::string{b.name}}.filename();
             if (!safe_file_name(name.string())) {
@@ -405,6 +409,10 @@ int main(int argc, char** argv) {
             std::println("[game] received {} ({} bytes) from {}", name.string(), b.bytes.size(), b.identity);
             return {};
         });
+        if (!blob_sink) {
+            std::println(stderr, "{}", blob_sink.error());
+            return 1;
+        }
     }
 
     if (o->reverse.empty()) {
@@ -415,7 +423,11 @@ int main(int argc, char** argv) {
         }
         std::println("headless_server listening on {}:{}", o->host, *port);
         if (!o->port_file.empty()) {
-            std::ofstream{o->port_file} << *port << '\n';
+            std::ofstream port_file{o->port_file};
+            if (!(port_file << *port << '\n') || !port_file.flush()) {
+                std::println(stderr, "can't write {}", o->port_file);
+                return 1;
+            }
         }
     } else {
         std::println("headless_server dialing {} (reverse mode)", o->reverse);
