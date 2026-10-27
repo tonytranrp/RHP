@@ -5,7 +5,6 @@
 #include <fstream>
 #include <iostream>
 #include <memory>
-#include <optional>
 #include <ostream>
 #include <span>
 #include <string>
@@ -17,6 +16,7 @@
 #include <rhp/core/value.hpp>
 #include <rhp/platform/files.hpp>
 #include <rhp/test/cli.hpp>
+#include <rhp/test/detail/support.hpp>
 #include <rhp/test/reporter.hpp>
 #include <rhp/test/runner.hpp>
 
@@ -25,14 +25,7 @@ namespace Rhp::test {
 namespace {
 
 namespace fs = std::filesystem;
-
-result<void> write_file(const fs::path& path, std::string_view text) {
-    std::error_code ec;
-    if (path.has_parent_path()) {
-        fs::create_directories(path.parent_path(), ec);
-    }
-    return platform::replace_file(path, std::span<const std::byte>{reinterpret_cast<const std::byte*>(text.data()), text.size()});
-}
+using detail::write_text;
 
 } // namespace
 
@@ -54,7 +47,7 @@ int run_cli(std::span<const std::string_view> args, const install_fn& install, s
             err << std::format("{}: describing the API failed: {}\n", program, api.error());
             return 1;
         }
-        if (auto written = write_file(cli.dump_api, json::to_text(*api, 2) + "\n"); !written) {
+        if (auto written = write_text(cli.dump_api, json::to_text(*api, 2) + "\n"); !written) {
             err << std::format("{}: can't write {}: {}\n", program, cli.dump_api.generic_string(), written.error());
             return 1;
         }
@@ -177,12 +170,12 @@ int run_cli(std::span<const std::string_view> args, const install_fn& install, s
         } else {
             continue;
         }
-        if (auto written = write_file(spec.path, text); !written) {
+        if (auto written = write_text(spec.path, text); !written) {
             err << std::format("{}: can't write {}: {}\n", program, spec.path.generic_string(), written.error());
         }
     }
     if (!o.profile_out.empty()) {
-        if (auto written = write_file(o.profile_out, folded_text(result.profile)); !written) {
+        if (auto written = write_text(o.profile_out, folded_text(result.profile)); !written) {
             err << std::format("{}: can't write {}: {}\n", program, o.profile_out.generic_string(), written.error());
         }
     }

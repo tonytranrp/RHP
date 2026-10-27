@@ -1,6 +1,5 @@
 // The compiled-chunk cache of the release manager (manager_options::bytecode_key, bytecode.hpp):
 // hits, every way an entry can be refused (and the source parsed instead), and what is never cached.
-#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>

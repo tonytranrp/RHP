@@ -2,25 +2,23 @@
 #include <cctype>
 #include <charconv>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
 #include <filesystem>
 #include <format>
-#include <functional>
 #include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
-#include <random>
 #include <regex>
 #include <set>
 #include <span>
 #include <string>
 #include <string_view>
 #include <system_error>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -31,35 +29,28 @@
 #include <rhp/platform/files.hpp>
 #include <rhp/script/sandbox.hpp>
 #include <rhp/test/detail/framework.hpp>
+#include <rhp/test/detail/support.hpp>
 #include <rhp/test/fake_registry.hpp>
 #include <rhp/test/runner.hpp>
+#include <rhp/utils/byte_buffer.hpp>
 #include <rhp/utils/crc32c.hpp>
 #include <rhp/utils/scope_guard.hpp>
 
 namespace Rhp::test {
 
-namespace fs = std::filesystem;
 using script::sandbox;
 using script::value_list;
 using steady = std::chrono::steady_clock;
 
 namespace {
 
+namespace fs = std::filesystem;
+using detail::object;
+using detail::write_text;
+
 constexpr bool kLuaEnabled = RHP_ENABLE != 0;
 
 // ---- small value helpers ----------------------------------------------------------------------------
-
-class object {
-public:
-    object& set(std::string_view key, value v) {
-        fields_.emplace_back(value{std::string{key}}, std::move(v));
-        return *this;
-    }
-    [[nodiscard]] value done() { return value{std::move(fields_)}; }
-
-private:
-    value::map fields_;
-};
 
 // A traceback without the framework's own frames (chunks "rhp.test/..."), and the first frame left
 // as file and line ("specs/x_spec.lua:12: in ..."), when there is one.
@@ -175,14 +166,6 @@ std::string read_text(const fs::path& path, std::optional<error>& failure) {
         return {};
     }
     return std::string{reinterpret_cast<const char*>(bytes->data()), bytes->size()};
-}
-
-result<void> write_text(const fs::path& path, std::string_view text) {
-    std::error_code ec;
-    if (path.has_parent_path()) {
-        fs::create_directories(path.parent_path(), ec);
-    }
-    return platform::replace_file(path, std::span<const std::byte>{reinterpret_cast<const std::byte*>(text.data()), text.size()});
 }
 
 bool is_test_file(const fs::path& p) {
@@ -864,7 +847,7 @@ struct runner::impl {
             safe.resize(70);
         }
         // The hash of the exact name: "a+b" and "a b", or names differing only in case, don't share inputs.
-        safe = std::format("{}_{:08x}", safe, utils::crc32c(utils::bytes_view{reinterpret_cast<const std::byte*>(name.data()), name.size()}));
+        safe = std::format("{}_{:08x}", safe, utils::crc32c(utils::as_bytes(name)));
         const fs::path file{current_file};
         return root / file.parent_path() / "__fuzz__" / file.stem() / safe;
     }
@@ -894,7 +877,7 @@ struct runner::impl {
     }
 
     value corpus_save(const std::string& name, const std::string& text, const std::string& kind) {
-        const std::uint32_t hash = utils::crc32c(utils::bytes_view{reinterpret_cast<const std::byte*>(text.data()), text.size()});
+        const std::uint32_t hash = utils::crc32c(utils::as_bytes(text));
         const std::string_view what = kind == "crash" || kind == "cov" ? std::string_view{kind} : std::string_view{"input"};
         const fs::path path = corpus_dir(name) / std::format("{}-{:08x}.lua", what, hash);
         std::error_code ec;
@@ -1025,7 +1008,7 @@ struct runner::impl {
         }
         if (options.shuffle) {
             // Fisher-Yates over splitmix64: the same order for a seed with every standard library.
-            std::uint64_t state = seed ^ utils::crc32c(utils::bytes_view{reinterpret_cast<const std::byte*>(current_file.data()), current_file.size()});
+            std::uint64_t state = seed ^ utils::crc32c(utils::as_bytes(current_file));
             const auto next = [&state] {
                 std::uint64_t z = (state += 0x9E3779B97F4A7C15ull);
                 z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;

@@ -2,9 +2,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
-#include <ctime>
 #include <format>
-#include <iterator>
 #include <map>
 #include <memory>
 #include <ostream>
@@ -15,6 +13,7 @@
 
 #include <rhp/core/json.hpp>
 #include <rhp/core/value.hpp>
+#include <rhp/test/detail/support.hpp>
 #include <rhp/test/reporter.hpp>
 #include <rhp/utils/utf8.hpp>
 
@@ -407,17 +406,7 @@ private:
 
 // ---- JSON events ------------------------------------------------------------------------------------------
 
-class object {
-public:
-    object& set(std::string_view key, value v) {
-        fields_.emplace_back(value{std::string{key}}, std::move(v));
-        return *this;
-    }
-    [[nodiscard]] value done() { return value{std::move(fields_)}; }
-
-private:
-    value::map fields_;
-};
+using detail::object;
 
 value strings(const std::vector<std::string>& list) {
     value::array out;

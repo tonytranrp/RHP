@@ -29,6 +29,7 @@
 #include <rhp/script/sandbox.hpp>
 #include <rhp/security/ed25519.hpp>
 #include <rhp/security/hash.hpp>
+#include <rhp/utils/byte_buffer.hpp>
 
 namespace Rhp::release {
 
@@ -1060,7 +1061,7 @@ private:
             const module_entry& m = r.body.modules[i];
             std::vector<std::byte> code;
             if (!chunks.made[i].empty()) {
-                const auto bytes = std::as_bytes(std::span{chunks.made[i].data(), chunks.made[i].size()});
+                const auto bytes = utils::as_bytes(chunks.made[i]);
                 code.assign(bytes.begin(), bytes.end());
             } else if (const std::string_view stored = chunks.stored_code(i); !stored.empty()) {
                 code = chunks.stored->modules[i].code;
@@ -1087,7 +1088,7 @@ private:
                         return;
                     }
                     ++cache_stats_.compiled;
-                    const auto bytes = std::as_bytes(std::span{made->data(), made->size()});
+                    const auto bytes = utils::as_bytes(*made);
                     code.assign(bytes.begin(), bytes.end());
                 }
             }
