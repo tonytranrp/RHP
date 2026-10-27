@@ -1157,7 +1157,9 @@ struct runner::impl {
         if (box && !options.coverage.empty() && options.share == isolation::kFile) {
             coverage.merge(box->coverage(), chunk_files, options.coverage_tests, current_file);
         }
-        detail::save_snapshots(store, options.update_snapshots, current_file, relative(store.path), run_notes);
+        if (store.loaded && store.broken.empty()) { // relative() asks the file system: only for a file with snapshots
+            detail::save_snapshots(store, options.update_snapshots, current_file, relative(store.path), run_notes);
+        }
         snapshots = nullptr;
         box.reset();
         fr.ms = std::chrono::duration<double, std::milli>{steady::now() - started}.count();
