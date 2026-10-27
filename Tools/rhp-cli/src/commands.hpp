@@ -1,27 +1,43 @@
 #pragma once
 
-// rhp-cli's subcommands, one translation unit per family; main.cpp parses and dispatches.
+// rhp-cli's subcommands. Each add_<name> adds one to the command line, with an options struct of its
+// own that the function running it (run_<name>, file-local) reads once it is parsed; the families
+// live in a translation unit each, and main.cpp adds them in help order and runs the one given.
 
-#include <string>
+#include <functional>
+#include <utility>
 #include <vector>
 
-#include "release_files.hpp"
+#include <CLI/CLI.hpp>
 
 namespace rhp_cli {
 
-// keys.cpp
-int keygen(const std::string& name, const std::string& out_path, const std::string& role_text, bool force);
-int pubkey(const std::string& identity, const std::string& role_text);
-int sign(const std::string& file, const std::string& identity);
+// A subcommand: its CLI11 node and what runs it once parsed (the exit status).
+struct command {
+    command(CLI::App* parsed_by, std::function<int()> runs, bool interruptible = true) : cli(parsed_by), run(std::move(runs)), catches_interrupt(interruptible) {}
 
-// releases.cpp
-int release_build(const release_spec& spec, const std::vector<std::string>& identities, const std::string& out_path);
-int revoke_build(const revocation_spec& spec, const std::vector<std::string>& identities, const std::string& out_path);
-int release_sign(const std::string& file, const std::string& identity);
-int revoke_sign(const std::string& file, const std::string& identity);
-int inspect(const std::string& path);
+    CLI::App* cli;
+    std::function<int()> run;
+    // Ctrl+C sets rhp-cli's interrupted flag (cancels a running script) instead of ending rhp-cli.
+    bool catches_interrupt;
+};
+using command_list = std::vector<command>;
 
-// test_command.cpp
-int test_command(std::vector<std::string> args);
+// keys.cpp: identity files and script signatures (no network).
+void add_keygen(CLI::App& app, command_list& out);
+void add_pubkey(CLI::App& app, command_list& out);
+void add_sign(CLI::App& app, command_list& out);
+
+// fleet.cpp: DNS-SD discovery, fleet broadcasts and rollouts.
+void add_discover(CLI::App& app, command_list& out);
+void add_fleet(CLI::App& app, command_list& out);
+void add_rollout(CLI::App& app, command_list& out);
+
+// releases.cpp: `release build|sign|inspect|apply|status|confirm|deactivate`, `revoke build|sign|apply`.
+void add_release(CLI::App& app, command_list& out);
+void add_revoke(CLI::App& app, command_list& out);
+
+// test_command.cpp: the offline Lua test runner.
+void add_test(CLI::App& app, command_list& out);
 
 } // namespace rhp_cli

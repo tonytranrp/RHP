@@ -20,12 +20,14 @@
 
 namespace rhp_cli {
 
+namespace {
+
 // rhp-cli test [--exe PROGRAM] [--api-from HOST:PORT -i ID [--tls ...]] <test runner arguments>
 //   --exe PROGRAM   run the program's own test executable (Rhp::test::main, its real libs) with the
 //                   remaining arguments; its exit status is rhp-cli's
 //   --api-from      fetch the API description of a running host (rhp.api()) and fake its libs
 //   otherwise       run the tests here with the `rhp` API only, or the fakes of --api FILE.json
-int test_command(std::vector<std::string> args) {
+int run_test(std::vector<std::string> args) {
     std::string exe;
     connection_options conn;
     std::vector<std::string> rest;
@@ -98,6 +100,16 @@ int test_command(std::vector<std::string> args) {
     }
     std::vector<std::string_view> views{rest.begin(), rest.end()};
     return Rhp::test::run_cli(views, {}, "rhp-cli test", std::cout, std::cerr, api ? &*api : nullptr);
+}
+
+} // namespace
+
+void add_test(CLI::App& app, command_list& out) {
+    auto* cmd = app.add_subcommand("test", "run Lua test files offline (`rhp-cli test --help`; --exe runs a program's own test executable)");
+    cmd->prefix_command(); // everything after `test` belongs to the test runner
+    cmd->set_help_flag();
+    // Ctrl+C ends the runner as it would any test executable.
+    out.emplace_back(cmd, [cmd] { return run_test(cmd->remaining()); }, false);
 }
 
 } // namespace rhp_cli

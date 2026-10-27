@@ -16,6 +16,7 @@ add_executable(rhp-cli
     src/commands.hpp
     src/connection.cpp
     src/connection.hpp
+    src/fleet.cpp
     src/keys.cpp
     src/releases.cpp
     src/test_command.cpp
