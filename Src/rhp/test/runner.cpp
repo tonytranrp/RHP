@@ -772,6 +772,7 @@ struct runner::impl {
     struct opened_file {
         std::unique_ptr<sandbox> box;
         std::vector<listed> tests; // selected, in running order
+        bool loaded = false;       // the file loaded and its tests were listed: they run, and so does its teardown
     };
 
     // open_file, then the selected tests of a file that loaded. The module folders' warnings come after
@@ -780,7 +781,8 @@ struct runner::impl {
         opened_file out;
         std::vector<file_error> warnings;
         out.box = open_file(source, errors, warnings);
-        if (errors.empty()) {
+        out.loaded = errors.empty();
+        if (out.loaded) {
             out.tests = selection(list_tests(*out.box, errors));
         }
         errors.insert(errors.end(), warnings.begin(), warnings.end());
@@ -1099,7 +1101,7 @@ struct runner::impl {
         store.path = path.parent_path() / "__snapshots__" / (path.stem().string() + ".snap.lua");
         snapshots = &store;
 
-        auto [box, tests] = open_listed(source, fr.errors);
+        auto [box, tests, loaded] = open_listed(source, fr.errors);
         std::vector<test_info> infos;
         for (const listed& l : tests) {
             infos.push_back(l.info);
@@ -1137,7 +1139,9 @@ struct runner::impl {
                 fr.tests.push_back(std::move(r));
             }
         }
-        if (box && fr.errors.empty()) {
+        // The teardown runs whenever the file's tests did: neither the module folders' warnings nor a
+        // failing describe body skip it.
+        if (box && loaded) {
             std::uint64_t frames = 0;
             bool timed_out = false;
             auto finished_blocks = run_request(*box, "return __rhp_t.finish()", "rhp.test/finish", frames, timed_out);

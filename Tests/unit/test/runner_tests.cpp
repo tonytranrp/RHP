@@ -1177,3 +1177,20 @@ TEST_CASE("a module that doesn't load doesn't stop the tests", "[test][modules]"
     CHECK(x.result.files[0].errors[0].message.find("module game.broken didn't load") != std::string::npos);
     CHECK_FALSE(x.result.totals.ok());
 }
+
+TEST_CASE("a file whose modules warn still runs its teardown", "[test][modules]") {
+    const temp_tree tree{"warnteardown", {}};
+    temp_tree::write_file(tree.root / "scripts" / "game" / "broken.lua", "return +\n");
+    temp_tree::write_file(tree.root / "specs" / "teardown_spec.lua",
+                          "teardown(function() error('the teardown ran') end)\n"
+                          "it('runs (ok)', function() end)\n");
+    const run x = run_specs(tree.options({"teardown_spec.lua"}));
+    INFO(x.text);
+    REQUIRE(x.result.files.size() == 1);
+    CHECK(outcome_of(x, "runs (ok)") == status::kPassed);
+    const auto& errors = x.result.files[0].errors;
+    REQUIRE(errors.size() == 2);
+    CHECK(errors[0].message.find("module game.broken didn't load") != std::string::npos);
+    CHECK(errors[1].message.find("teardown of 'the file' failed") != std::string::npos);
+    CHECK(errors[1].message.find("the teardown ran") != std::string::npos);
+}
