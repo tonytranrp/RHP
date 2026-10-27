@@ -58,7 +58,7 @@ struct manager_options {
     std::string build;                                                             // compared with manifest::builds
     std::string platform{platform::to_string(platform::kOs)};                      // compared with manifest::platforms
     role max_role = role::kPatch;                                                  // releases asking to run as more are refused
-    std::chrono::seconds clock_skew{300};                                          // allowance on not_before / not_after
+    std::chrono::seconds clock_skew{300};                                          // allowance on not_before / not_after (negative: none)
     bool expire_running = true;                                                    // a running release past not_after is deactivated
     std::uint32_t max_boot_attempts = 2;                                           // restarts a candidate may run through unconfirmed before it is quarantined (above 1000: never)
     std::chrono::milliseconds health_window{60'000};                               // kHealth: confirmed after this long without a failure

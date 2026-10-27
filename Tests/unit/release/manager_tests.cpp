@@ -5,9 +5,9 @@
 #include <format>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <random>
 #include <span>
-#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -218,6 +218,24 @@ TEST_CASE("release manager refuses releases out of scope, expired, too privilege
     }
     CHECK(fx::g_speed == 1);
     CHECK(m.status().empty());
+}
+
+TEST_CASE("a negative clock skew counts as none", "[release][manager]") {
+    fixture f;
+    auto o = f.options();
+    o.clock_skew = std::chrono::seconds{-300};
+    auto m = f.make(std::move(o));
+    auto man = manifest_for("game.balance", 1, {{"a", "game.speed = 2"}});
+    man.not_before = 1'760'000'000 - 100; // valid for 100 s already (the fake wall clock is 1'760'000'000)
+    man.not_after = 1'760'000'000 + 100;  // and for 100 s more
+    REQUIRE(m.apply(envelope(man, {{"a", "game.speed = 2"}}, {&f.dev})));
+    m.pump();
+    CHECK(fx::g_speed == 2);
+    CHECK(status_of(m.status(), "game.balance")->running == slot::kActive);
+    f.clocks->wall += std::chrono::seconds{101};
+    m.pump();
+    CHECK(fx::g_speed == 1);
+    CHECK(status_of(m.status(), "game.balance")->running == slot::kEmpty);
 }
 
 TEST_CASE("a release that fails to load leaves the old one running", "[release][manager]") {
@@ -742,7 +760,7 @@ TEST_CASE("a held channel falls back to what it held after the next release", "[
     fixture f;
     auto m = f.make();
     REQUIRE(m.apply(f.speed_release(1, 2)));
-    REQUIRE(m.apply(f.speed_release(2, 3)));                         // active 2, previous 1
+    REQUIRE(m.apply(f.speed_release(2, 3)));                        // active 2, previous 1
     REQUIRE(m.apply(f.speed_release(3, 9), confirm_mode::kManual)); // candidate 3
     REQUIRE(m.deactivate("game.balance", true));
     CHECK(fx::g_speed == 1);

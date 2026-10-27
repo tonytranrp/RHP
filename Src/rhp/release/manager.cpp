@@ -420,7 +420,7 @@ public:
     void pump() {
         const auto now = steady_now();
         const std::uint64_t wall = unix_seconds(wall_now());
-        const auto skew = static_cast<std::uint64_t>(options_.clock_skew.count());
+        const std::uint64_t skew = skew_seconds();
         for (auto& [name, c] : channels_) {
             if (c.box) {
                 pumping_ = true; // a channel's script calling back into the manager is refused
@@ -552,7 +552,7 @@ private:
             return std::unexpected{refused(errc::kOutOfScope, std::format("not made for platform '{}'", options_.platform), channel)};
         }
         const std::uint64_t now = unix_seconds(wall_now());
-        const auto skew = static_cast<std::uint64_t>(options_.clock_skew.count());
+        const std::uint64_t skew = skew_seconds();
         if (m.not_before != 0 && now + skew < m.not_before) {
             return std::unexpected{refused(errc::kExpired, "not valid yet (not_before is in the future)", channel)};
         }
@@ -1091,6 +1091,11 @@ private:
 
     [[nodiscard]] static release_info info_of(const checked_release& r) {
         return release_info{r.r.id, r.r.body.seq, r.r.body.label, r.signers};
+    }
+
+    // manager_options::clock_skew in seconds; a negative skew counts as none.
+    [[nodiscard]] std::uint64_t skew_seconds() const noexcept {
+        return static_cast<std::uint64_t>(std::max(options_.clock_skew, std::chrono::seconds{0}).count());
     }
 
     [[nodiscard]] steady::time_point steady_now() const { return options_.clock ? options_.clock() : steady::now(); }
