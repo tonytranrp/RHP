@@ -124,8 +124,10 @@ public:
 
     void start();
 
-    // Sends a sequenced message (`code` is a request or reply op). Ready or detached (it waits for
-    // the resume); kTransport otherwise, kLimitExceeded if the encoded payload exceeds max_frame.
+    // Sends a sequenced message (`code` is a request or reply op; kInvalidArgument otherwise). Ready
+    // or detached (it waits for the resume); kTransport otherwise, kLimitExceeded if the encoded
+    // payload exceeds max_frame, and kTransport when the peer has left more than
+    // options::max_unacked_bytes unacknowledged (the session is then dropped).
     result<void> send(wire::op code, const value& body);
 
     // Tells the peer why (best effort), then closes. on_closed follows (with `why`).
@@ -161,6 +163,10 @@ public:
     [[nodiscard]] const counters& stats() const noexcept { return stats_; }
 
 private:
+    using handshake_state = std::variant<std::unique_ptr<security::host_handshake>, std::unique_ptr<security::client_handshake>>;
+
+    session(net::io_context& io, std::unique_ptr<net::link> link, handshake_state handshake, handler& h, options opts, bool host_side, session_id id);
+
     struct unacked_frame {
         std::uint64_t seq = 0;
         wire::op code = wire::op::kResult;
@@ -176,9 +182,17 @@ private:
     void receive(utils::bytes_view data);
 
     void handle(const wire::frame_view& frame);
+    void handle_control(const wire::frame_view& frame);
+    void deliver(const wire::frame_view& frame);
+    // The frame carries a MAC that verifies under the peer's key.
+    [[nodiscard]] bool mac_ok(const wire::frame_view& frame) const;
     void handle_handshake(const wire::frame_view& frame);
     void host_handshake_step(const wire::frame_view& frame);
+    void host_hello(const value& body);
+    void host_response(const value& body);
     void client_handshake_step(const wire::frame_view& frame);
+    void client_challenge(const wire::frame_view& frame);
+    void client_welcome(const wire::frame_view& frame);
     void become_ready();
 
     // Resume: the fresh connection's side, the resumed session's side, the dialer's side.
@@ -186,12 +200,15 @@ private:
     [[nodiscard]] result<void> adopt(session& fresh, const wire::frame_view& frame);
     void handle_resume_reply(const wire::frame_view& frame);
     [[nodiscard]] bool sealed_control(const wire::frame_view& frame) const;
+    void enter_resumed(const wire::frame_view& frame);
+    void finish_resumed();
     void detach(error why);
+    // A sealed kResume or kWelcome {session, proof over `label` and the link's channel binding}.
+    [[nodiscard]] result<void> write_resume_frame(wire::op code, std::string_view label);
     void send_resume();
     // Detached: the link a resume was tried on is given up (it failed, timed out, or carried
     // something wrong); the dialing side tries another. Never ends the session.
     void lose_resume_link(error why);
-    [[nodiscard]] wire::mac_bytes resume_proof(const wire::frame_sealer& sealer, std::string_view label, std::span<const std::byte> binding) const;
     [[nodiscard]] bool resume_proof_ok(std::string_view label, std::span<const std::byte> binding, const value::bytes& proof) const;
     void retire_link();
     void attach(std::unique_ptr<net::link> link, std::unique_ptr<link_port> port);
@@ -199,10 +216,12 @@ private:
     [[nodiscard]] result<value> decode(utils::bytes_view payload) const;
     // The Rhp::error a peer's kError frame carries, or `fallback` if it doesn't decode.
     [[nodiscard]] error peer_error(utils::bytes_view payload, error fallback) const;
-    // Encodes one frame and writes it (when there is a link). Sequenced ones are kept until acked.
-    result<void> write(wire::op code, std::uint64_t seq, utils::bytes_view payload, bool sealed);
-    result<void> write(wire::op code, std::uint64_t seq, utils::byte_buffer&& payload, bool sealed); // keeps it for resends
+    // Encodes one frame and writes it (when there is a link).
     result<void> write_frame(wire::op code, std::uint64_t seq, utils::bytes_view payload, bool sealed);
+    // A handshake or control frame, or a session-ending kError: written now (nothing while detached).
+    result<void> write_unsequenced(wire::op code, std::uint64_t seq, utils::bytes_view payload, bool sealed);
+    // A sequenced frame (always sealed): kept in the resend window until acked, sent from there.
+    result<void> queue_sequenced(wire::op code, std::uint64_t seq, utils::byte_buffer&& payload);
     result<void> write_value(wire::op code, const value& body, bool sealed);
     void write_control(wire::op code);
     void acknowledge(std::uint64_t ack);
@@ -226,7 +245,7 @@ private:
     std::unique_ptr<link_port> port_;
     std::unique_ptr<net::link> link_; // destroyed before port_
     std::vector<retired_link> retired_;
-    std::variant<std::unique_ptr<security::host_handshake>, std::unique_ptr<security::client_handshake>> handshake_;
+    handshake_state handshake_;
     handler& handler_;
     options opts_;
     bool host_side_;

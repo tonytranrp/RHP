@@ -41,10 +41,12 @@ public:
     [[nodiscard]] std::string_view backend() const noexcept { return backend_; }
 
 private:
-    net::endpoint ep_;
     net::endpoint transport_ep_;
-    bool network_ = false;
+    bool dialing_ = true; // as net::endpoint's default direction: a default policy wraps nothing
     bool dial_tls_ = false;
+    // Listening: plaintext is accepted from any peer / from a peer whose link is loopback.
+    bool plaintext_from_anyone_ = false;
+    bool plaintext_from_loopback_ = false;
     std::shared_ptr<security::tls::context> context_;
     std::string_view backend_;
 };

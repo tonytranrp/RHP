@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <chrono>
+#include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
@@ -43,6 +44,28 @@ constexpr std::string_view kResumedLabel = "rhp/resumed";
     return std::chrono::milliseconds{n};
 }
 
+// What a resume proof is a MAC over: label || the connection's channel binding.
+[[nodiscard]] utils::byte_buffer resume_transcript(std::string_view label, std::span<const std::byte> binding) {
+    utils::byte_buffer what;
+    what.append(label);
+    what.append(binding);
+    return what;
+}
+
+[[nodiscard]] wire::mac_bytes resume_proof(const wire::frame_sealer& sealer, std::string_view label, std::span<const std::byte> binding) {
+    return sealer.seal(resume_transcript(label, binding).view());
+}
+
+// Runs `fn` later on `io`'s thread, unless the session `alive` belongs to is gone by then.
+template <std::invocable F>
+void post_guarded(net::io_context& io, const std::shared_ptr<bool>& alive_flag, F work) {
+    io.post([alive = std::weak_ptr<bool>{alive_flag}, fn = std::move(work)] {
+        if (const auto still = alive.lock(); still != nullptr && *still) {
+            fn();
+        }
+    });
+}
+
 } // namespace
 
 struct session::link_port final : net::link_handler {
@@ -63,33 +86,22 @@ struct session::link_port final : net::link_handler {
 
 session::session(net::io_context& io, std::unique_ptr<net::link> link, std::unique_ptr<security::host_handshake> handshake, handler& h, options opts,
                  session_id id)
-    : io_(io),
-      port_(std::make_unique<link_port>()),
-      link_(std::move(link)),
-      handshake_(std::move(handshake)),
-      handler_(h),
-      opts_(std::move(opts)),
-      host_side_(true),
-      id_(id),
-      peer_(link_->peer()),
-      decoder_(kHandshakeMaxFrame < opts_.limits.max_frame ? kHandshakeMaxFrame : opts_.limits.max_frame),
-      handshake_timer_(io),
-      heartbeat_timer_(io),
-      ack_timer_(io),
-      resume_timer_(io) {
-    port_->owner = this;
-}
+    : session(io, std::move(link), handshake_state{std::move(handshake)}, h, std::move(opts), true, id) {}
 
 session::session(net::io_context& io, std::unique_ptr<net::link> link, std::unique_ptr<security::client_handshake> handshake, handler& h, options opts)
+    : session(io, std::move(link), handshake_state{std::move(handshake)}, h, std::move(opts), false, session_id{}) {}
+
+session::session(net::io_context& io, std::unique_ptr<net::link> link, handshake_state handshake, handler& h, options opts, bool host_side, session_id id)
     : io_(io),
       port_(std::make_unique<link_port>()),
       link_(std::move(link)),
       handshake_(std::move(handshake)),
       handler_(h),
       opts_(std::move(opts)),
-      host_side_(false),
+      host_side_(host_side),
+      id_(id),
       peer_(link_->peer()),
-      decoder_(kHandshakeMaxFrame < opts_.limits.max_frame ? kHandshakeMaxFrame : opts_.limits.max_frame),
+      decoder_(std::min(kHandshakeMaxFrame, opts_.limits.max_frame)),
       handshake_timer_(io),
       heartbeat_timer_(io),
       ack_timer_(io),
@@ -117,7 +129,7 @@ void session::start() {
         });
     }
     if (host_side_ && opts_.speaks_first) {
-        (void)write(wire::op::kPing, 0, utils::bytes_view{}, false);
+        (void)write_unsequenced(wire::op::kPing, 0, utils::bytes_view{}, false);
     }
     if (!host_side_) {
         auto& hs = std::get<std::unique_ptr<security::client_handshake>>(handshake_);
@@ -229,7 +241,7 @@ void session::handle(const wire::frame_view& frame) {
         handle_handshake(frame);
         return;
     }
-    if (!wire::has(frame.header.flags, wire::frame_flag::kMac) || !incoming_->verify(frame.sealed, frame.mac.first<wire::kMacSize>())) {
+    if (!mac_ok(frame)) {
         fail_with(make_error(errc::kAuth, std::format("a {} frame failed its MAC check", frame.header.code), peer_));
         return;
     }
@@ -244,6 +256,16 @@ void session::handle(const wire::frame_view& frame) {
         ack_sent_ = 0; // forces an ack at the end of this read
         ack_now_ = true;
     }
+    if (!wire::is_sequenced(code) || frame.header.seq == 0) {
+        handle_control(frame);
+        return;
+    }
+    deliver(frame);
+}
+
+// Ready: an unsequenced frame, or a sequenced op without a sequence number.
+void session::handle_control(const wire::frame_view& frame) {
+    const wire::op code = frame.header.code;
     if (!wire::is_sequenced(code)) {
         // Control frames carry their own counter in `seq`: a replayed one (say, a captured nack
         // that would make us resend the whole window) is dropped.
@@ -252,21 +274,22 @@ void session::handle(const wire::frame_view& frame) {
         }
         control_in_ = frame.header.seq;
     }
-    if (!wire::is_sequenced(code) || frame.header.seq == 0) {
-        switch (code) {
-        case wire::op::kPing: write_control(wire::op::kPong); return;
-        case wire::op::kPong:
-        case wire::op::kAck: return;
-        case wire::op::kNack: resend_after(frame.header.ack); return;
-        case wire::op::kError: {
-            // seq 0: the peer is closing the session and says why.
-            shutdown(peer_error(frame.payload, make_error(errc::kProtocol, "the peer closed the session", peer_)));
-            return;
-        }
-        default: fail_with(make_error(errc::kProtocol, std::format("{} frame without a sequence number", code), peer_)); return;
-        }
+    switch (code) {
+    case wire::op::kPing: write_control(wire::op::kPong); return;
+    case wire::op::kPong:
+    case wire::op::kAck: return;
+    case wire::op::kNack: resend_after(frame.header.ack); return;
+    case wire::op::kError: {
+        // seq 0: the peer is closing the session and says why.
+        shutdown(peer_error(frame.payload, make_error(errc::kProtocol, "the peer closed the session", peer_)));
+        return;
     }
+    default: fail_with(make_error(errc::kProtocol, std::format("{} frame without a sequence number", code), peer_)); return;
+    }
+}
 
+// Ready: a sequenced frame, delivered once and in order.
+void session::deliver(const wire::frame_view& frame) {
     if (frame.header.seq < expected_) {
         ++stats_.duplicates;
         ack_sent_ = 0; // our ack may have been lost: repeat it
@@ -284,7 +307,11 @@ void session::handle(const wire::frame_view& frame) {
     }
     ++expected_;
     ++stats_.received;
-    handler_.on_message(*this, code, std::move(*body));
+    handler_.on_message(*this, frame.header.code, std::move(*body));
+}
+
+bool session::mac_ok(const wire::frame_view& frame) const {
+    return incoming_ != nullptr && wire::has(frame.header.flags, wire::frame_flag::kMac) && incoming_->verify(frame.sealed, frame.mac.first<wire::kMacSize>());
 }
 
 void session::handle_handshake(const wire::frame_view& frame) {
@@ -303,125 +330,142 @@ void session::handle_handshake(const wire::frame_view& frame) {
 }
 
 void session::host_handshake_step(const wire::frame_view& frame) {
-    auto& hs = *std::get<std::unique_ptr<security::host_handshake>>(handshake_);
+    // Decoded before the op is looked at: an undecodable frame reports that, whatever its op.
     auto body = decode(frame.payload);
     if (!body) {
         fail_with(std::move(body).error());
         return;
     }
     if (frame.header.code == wire::op::kHello && !challenged_) {
-        auto hello = Rhp::from_value<wire::hello>(*body);
-        if (!hello) {
-            fail_with(std::move(hello).error());
-            return;
-        }
-        if (hello->revision != wire::kProtocolRevision) {
-            fail_with(make_error(errc::kProtocolRevisionMismatch, std::format("the client speaks protocol revision {}, the host {}", hello->revision, wire::kProtocolRevision),
-                                 peer_));
-            return;
-        }
-        peer_platform_ = hello->platform;
-        hs.bind_channel(link_->channel_binding());
-        auto auth = hs.challenge(hello->auth);
-        if (!auth) {
-            fail_with(std::move(auth).error());
-            return;
-        }
-        challenged_ = true;
-        const wire::challenge challenge{wire::kProtocolRevision, opts_.platform, std::move(*auth)};
-        if (auto sent = write_value(wire::op::kChallenge, Rhp::to_value(challenge), false); !sent) {
-            fail_with(std::move(sent).error());
-        }
+        host_hello(*body);
         return;
     }
     if (frame.header.code == wire::op::kResponse && challenged_) {
-        auto response = Rhp::from_value<wire::response>(*body);
-        if (!response) {
-            fail_with(std::move(response).error());
-            return;
-        }
-        auto grant = hs.verify(response->auth);
-        if (!grant) {
-            fail_with(std::move(grant).error());
-            return;
-        }
-        identity_ = std::move(grant->identity);
-        granted_ = grant->granted;
-        outgoing_ = std::move(grant->outgoing);
-        incoming_ = std::move(grant->incoming);
-        const wire::welcome welcome{id_, identity_, granted_, opts_.limits.heartbeat_ms, opts_.platform};
-        if (auto sent = write_value(wire::op::kWelcome, Rhp::to_value(welcome), true); !sent) {
-            fail_with(std::move(sent).error());
-            return;
-        }
-        become_ready();
+        host_response(*body);
         return;
     }
     fail_with(make_error(errc::kProtocol, std::format("unexpected {} during the handshake", frame.header.code), peer_));
 }
 
+void session::host_hello(const value& body) {
+    auto hello = Rhp::from_value<wire::hello>(body);
+    if (!hello) {
+        fail_with(std::move(hello).error());
+        return;
+    }
+    if (hello->revision != wire::kProtocolRevision) {
+        fail_with(make_error(errc::kProtocolRevisionMismatch, std::format("the client speaks protocol revision {}, the host {}", hello->revision, wire::kProtocolRevision),
+                             peer_));
+        return;
+    }
+    peer_platform_ = hello->platform;
+    auto& hs = *std::get<std::unique_ptr<security::host_handshake>>(handshake_);
+    hs.bind_channel(link_->channel_binding());
+    auto auth = hs.challenge(hello->auth);
+    if (!auth) {
+        fail_with(std::move(auth).error());
+        return;
+    }
+    challenged_ = true;
+    const wire::challenge challenge{wire::kProtocolRevision, opts_.platform, std::move(*auth)};
+    if (auto sent = write_value(wire::op::kChallenge, Rhp::to_value(challenge), false); !sent) {
+        fail_with(std::move(sent).error());
+    }
+}
+
+void session::host_response(const value& body) {
+    auto response = Rhp::from_value<wire::response>(body);
+    if (!response) {
+        fail_with(std::move(response).error());
+        return;
+    }
+    auto grant = std::get<std::unique_ptr<security::host_handshake>>(handshake_)->verify(response->auth);
+    if (!grant) {
+        fail_with(std::move(grant).error());
+        return;
+    }
+    identity_ = std::move(grant->identity);
+    granted_ = grant->granted;
+    outgoing_ = std::move(grant->outgoing);
+    incoming_ = std::move(grant->incoming);
+    const wire::welcome welcome{id_, identity_, granted_, opts_.limits.heartbeat_ms, opts_.platform};
+    if (auto sent = write_value(wire::op::kWelcome, Rhp::to_value(welcome), true); !sent) {
+        fail_with(std::move(sent).error());
+        return;
+    }
+    become_ready();
+}
+
 void session::client_handshake_step(const wire::frame_view& frame) {
-    auto& hs = *std::get<std::unique_ptr<security::client_handshake>>(handshake_);
     if (frame.header.code == wire::op::kChallenge && !challenged_) {
-        auto body = decode(frame.payload);
-        if (!body) {
-            fail_with(std::move(body).error());
-            return;
-        }
-        auto challenge = Rhp::from_value<wire::challenge>(*body);
-        if (!challenge) {
-            fail_with(std::move(challenge).error());
-            return;
-        }
-        if (challenge->revision != wire::kProtocolRevision) {
-            fail_with(make_error(errc::kProtocolRevisionMismatch,
-                                 std::format("the host speaks protocol revision {}, the client {}", challenge->revision, wire::kProtocolRevision), peer_));
-            return;
-        }
-        peer_platform_ = challenge->platform;
-        hs.bind_channel(link_->channel_binding());
-        auto auth = hs.respond(challenge->auth);
-        if (!auth) {
-            fail_with(std::move(auth).error());
-            return;
-        }
-        auto grant = hs.finish();
-        if (!grant) {
-            fail_with(std::move(grant).error());
-            return;
-        }
-        identity_ = std::move(grant->identity);
-        outgoing_ = std::move(grant->outgoing);
-        incoming_ = std::move(grant->incoming);
-        challenged_ = true;
-        if (auto sent = write_value(wire::op::kResponse, Rhp::to_value(wire::response{std::move(*auth)}), false); !sent) {
-            fail_with(std::move(sent).error());
-        }
+        client_challenge(frame);
         return;
     }
     if (frame.header.code == wire::op::kWelcome && challenged_) {
-        // The first frame under the agreed keys: it proves the host derived them too.
-        if (!wire::has(frame.header.flags, wire::frame_flag::kMac) || !incoming_->verify(frame.sealed, frame.mac.first<wire::kMacSize>())) {
-            fail_with(make_error(errc::kAuth, "the host's welcome failed its MAC check", peer_));
-            return;
-        }
-        auto body = decode(frame.payload);
-        if (!body) {
-            fail_with(std::move(body).error());
-            return;
-        }
-        auto welcome = Rhp::from_value<wire::welcome>(*body);
-        if (!welcome) {
-            fail_with(std::move(welcome).error());
-            return;
-        }
-        id_ = welcome->session;
-        identity_ = std::move(welcome->identity);
-        granted_ = welcome->granted;
-        become_ready();
+        client_welcome(frame);
         return;
     }
     fail_with(make_error(errc::kProtocol, std::format("unexpected {} during the handshake", frame.header.code), peer_));
+}
+
+void session::client_challenge(const wire::frame_view& frame) {
+    auto body = decode(frame.payload);
+    if (!body) {
+        fail_with(std::move(body).error());
+        return;
+    }
+    auto challenge = Rhp::from_value<wire::challenge>(*body);
+    if (!challenge) {
+        fail_with(std::move(challenge).error());
+        return;
+    }
+    if (challenge->revision != wire::kProtocolRevision) {
+        fail_with(make_error(errc::kProtocolRevisionMismatch,
+                             std::format("the host speaks protocol revision {}, the client {}", challenge->revision, wire::kProtocolRevision), peer_));
+        return;
+    }
+    peer_platform_ = challenge->platform;
+    auto& hs = *std::get<std::unique_ptr<security::client_handshake>>(handshake_);
+    hs.bind_channel(link_->channel_binding());
+    auto auth = hs.respond(challenge->auth);
+    if (!auth) {
+        fail_with(std::move(auth).error());
+        return;
+    }
+    auto grant = hs.finish();
+    if (!grant) {
+        fail_with(std::move(grant).error());
+        return;
+    }
+    identity_ = std::move(grant->identity);
+    outgoing_ = std::move(grant->outgoing);
+    incoming_ = std::move(grant->incoming);
+    challenged_ = true;
+    if (auto sent = write_value(wire::op::kResponse, Rhp::to_value(wire::response{std::move(*auth)}), false); !sent) {
+        fail_with(std::move(sent).error());
+    }
+}
+
+void session::client_welcome(const wire::frame_view& frame) {
+    // The first frame under the agreed keys: it proves the host derived them too.
+    if (!mac_ok(frame)) {
+        fail_with(make_error(errc::kAuth, "the host's welcome failed its MAC check", peer_));
+        return;
+    }
+    auto body = decode(frame.payload);
+    if (!body) {
+        fail_with(std::move(body).error());
+        return;
+    }
+    auto welcome = Rhp::from_value<wire::welcome>(*body);
+    if (!welcome) {
+        fail_with(std::move(welcome).error());
+        return;
+    }
+    id_ = welcome->session;
+    identity_ = std::move(welcome->identity);
+    granted_ = welcome->granted;
+    become_ready();
 }
 
 void session::become_ready() {
@@ -436,8 +480,7 @@ void session::become_ready() {
 // ---- resume -------------------------------------------------------------------------------------------
 
 bool session::sealed_control(const wire::frame_view& frame) const {
-    return incoming_ != nullptr && wire::has(frame.header.flags, wire::frame_flag::kMac) && incoming_->verify(frame.sealed, frame.mac.first<wire::kMacSize>()) &&
-           frame.header.seq > control_in_;
+    return mac_ok(frame) && frame.header.seq > control_in_;
 }
 
 // A fresh connection (no handshake yet) whose first frame asks to continue another session.
@@ -466,11 +509,7 @@ void session::request_resume(const wire::frame_view& frame) {
     closed_ = true;
     state_ = state::kClosed;
     handshake_timer_.cancel();
-    io_.post([this, alive = std::weak_ptr<bool>{alive_}, id = request->session] {
-        if (const auto still = alive.lock(); still != nullptr && *still) {
-            handler_.on_closed(*this, make_error(errc::kOk, std::format("resumed session {}", id), peer_));
-        }
-    });
+    post_guarded(io_, alive_, [this, id = request->session] { handler_.on_closed(*this, make_error(errc::kOk, std::format("resumed session {}", id), peer_)); });
 }
 
 // This session takes over `fresh`'s link, if `frame` (its first) is a valid resume request for it.
@@ -486,7 +525,6 @@ result<void> session::adopt(session& fresh, const wire::frame_view& frame) {
     if (!request || !resume_proof_ok(kResumeLabel, fresh.link_->channel_binding(), request->proof)) {
         return fail(errc::kAuth, "the resume request isn't bound to this connection (a relay in between?)", fresh.peer_);
     }
-    control_in_ = frame.header.seq;
     // Not inside any callback of this session's own links: they can go now.
     retired_.clear();
     if (link_ != nullptr) {
@@ -494,23 +532,13 @@ result<void> session::adopt(session& fresh, const wire::frame_view& frame) {
         link_.reset();
     }
     attach(std::move(fresh.link_), std::move(fresh.port_));
-    state_ = state::kReady;
-    resuming_ = false;
     resume_pending_ = false;
-    resume_timer_.cancel();
-    handshake_timer_.cancel();
-    acknowledge(frame.header.ack);
-    const wire::mac_bytes proof = resume_proof(*outgoing_, kResumedLabel, link_->channel_binding());
-    utils::byte_buffer payload;
-    if (auto encoded = opts_.codec.encode(Rhp::to_value(wire::resume{id_, value::bytes(proof.begin(), proof.end())}), payload); !encoded) {
-        fail_with(std::move(encoded).error());
+    enter_resumed(frame);
+    if (auto sent = write_resume_frame(wire::op::kWelcome, kResumedLabel); !sent) {
+        fail_with(std::move(sent).error());
         return {};
     }
-    (void)write_frame(wire::op::kWelcome, ++control_out_, payload.view(), true);
-    resend_after(peer_acked_);
-    ++stats_.resumes;
-    start_heartbeat();
-    handler_.on_resumed(*this);
+    finish_resumed();
     return {};
 }
 
@@ -567,43 +595,49 @@ void session::handle_resume_reply(const wire::frame_view& frame) {
         lose_resume_link(make_error(errc::kAuth, "the resume answer isn't bound to this connection (a relay in between?)", peer_));
         return;
     }
+    enter_resumed(frame);
+    finish_resumed();
+}
+
+// Both sides, once the resume frame checked out: ready on the new link, with the peer's ack taken.
+void session::enter_resumed(const wire::frame_view& frame) {
     control_in_ = frame.header.seq;
     state_ = state::kReady;
     resuming_ = false;
     resume_timer_.cancel();
     handshake_timer_.cancel();
     acknowledge(frame.header.ack);
+}
+
+// ... then resend what the peer hasn't acknowledged and carry on.
+void session::finish_resumed() {
     resend_after(peer_acked_);
     ++stats_.resumes;
     start_heartbeat();
     handler_.on_resumed(*this);
 }
 
-wire::mac_bytes session::resume_proof(const wire::frame_sealer& sealer, std::string_view label, std::span<const std::byte> binding) const {
-    utils::byte_buffer what;
-    what.append(label);
-    what.append(binding);
-    return sealer.seal(what.view());
-}
-
 bool session::resume_proof_ok(std::string_view label, std::span<const std::byte> binding, const value::bytes& proof) const {
     if (incoming_ == nullptr || proof.size() != wire::kMacSize) {
         return false;
     }
-    utils::byte_buffer what;
-    what.append(label);
-    what.append(binding);
-    return incoming_->verify(what.view(), std::span<const std::byte, wire::kMacSize>{proof.data(), wire::kMacSize});
+    return incoming_->verify(resume_transcript(label, binding).view(), std::span<const std::byte, wire::kMacSize>{proof.data(), wire::kMacSize});
+}
+
+result<void> session::write_resume_frame(wire::op code, std::string_view label) {
+    const wire::mac_bytes proof = resume_proof(*outgoing_, label, link_->channel_binding());
+    utils::byte_buffer payload;
+    if (auto encoded = opts_.codec.encode(Rhp::to_value(wire::resume{id_, value::bytes(proof.begin(), proof.end())}), payload); !encoded) {
+        return encoded;
+    }
+    (void)write_frame(code, ++control_out_, payload.view(), true);
+    return {};
 }
 
 void session::send_resume() {
-    const wire::mac_bytes proof = resume_proof(*outgoing_, kResumeLabel, link_->channel_binding());
-    utils::byte_buffer payload;
-    if (auto encoded = opts_.codec.encode(Rhp::to_value(wire::resume{id_, value::bytes(proof.begin(), proof.end())}), payload); !encoded) {
-        shutdown(std::move(encoded).error());
-        return;
+    if (auto sent = write_resume_frame(wire::op::kResume, kResumeLabel); !sent) {
+        shutdown(std::move(sent).error());
     }
-    (void)write_frame(wire::op::kResume, ++control_out_, payload.view(), true);
 }
 
 void session::lose_resume_link(error why) {
@@ -614,8 +648,8 @@ void session::lose_resume_link(error why) {
     resume_pending_ = false;
     handshake_timer_.cancel();
     retire_link();
-    io_.post([this, alive = std::weak_ptr<bool>{alive_}, why = std::move(why)] {
-        if (const auto still = alive.lock(); still != nullptr && *still && state_ == state::kDetached && !resuming_) {
+    post_guarded(io_, alive_, [this, why = std::move(why)] {
+        if (state_ == state::kDetached && !resuming_) {
             handler_.on_detached(*this, why);
         }
     });
@@ -634,8 +668,8 @@ void session::detach(error why) {
         }
     });
     // Posted: the dialing side may dial (and call resume()) right away, outside this link's callback.
-    io_.post([this, alive = std::weak_ptr<bool>{alive_}, why = std::move(why)] {
-        if (const auto still = alive.lock(); still != nullptr && *still && state_ == state::kDetached) {
+    post_guarded(io_, alive_, [this, why = std::move(why)] {
+        if (state_ == state::kDetached) {
             handler_.on_detached(*this, why);
         }
     });
@@ -694,10 +728,9 @@ result<void> session::write_frame(wire::op code, std::uint64_t seq, utils::bytes
     header.seq = seq;
     header.ack = expected_ - 1;
     if (link_->encrypted()) {
-        header.flags = static_cast<std::uint8_t>(header.flags | static_cast<std::uint8_t>(wire::frame_flag::kCrcOmitted));
+        header.flags = header.flags | wire::frame_flag::kCrcOmitted;
     }
     utils::byte_buffer bytes;
-    bytes.reserve(wire::kHeaderSize + payload.size() + wire::kCrcSize + (sealed ? wire::kMacSize : 0));
     if (auto ok = wire::encode_frame(header, payload, bytes, sealed ? outgoing_.get() : nullptr, opts_.limits.max_frame); !ok) {
         return ok;
     }
@@ -706,15 +739,9 @@ result<void> session::write_frame(wire::op code, std::uint64_t seq, utils::bytes
     return {};
 }
 
-result<void> session::write(wire::op code, std::uint64_t seq, utils::bytes_view payload, bool sealed) {
-    if (seq != 0 && wire::is_sequenced(code)) {
-        utils::byte_buffer kept;
-        kept.append(payload);
-        return write(code, seq, std::move(kept), sealed);
-    }
-    if (payload.size() > opts_.limits.max_frame) {
-        return fail(errc::kLimitExceeded, std::format("{} payload of {} bytes exceeds the {}-byte frame limit", code, payload.size(), opts_.limits.max_frame),
-                    "wire.frame");
+result<void> session::write_unsequenced(wire::op code, std::uint64_t seq, utils::bytes_view payload, bool sealed) {
+    if (auto ok = wire::check_payload(code, payload.size(), opts_.limits.max_frame); !ok) {
+        return ok;
     }
     if (state_ == state::kDetached) {
         return {};
@@ -722,14 +749,9 @@ result<void> session::write(wire::op code, std::uint64_t seq, utils::bytes_view 
     return write_frame(code, seq, payload, sealed);
 }
 
-// A sequenced frame: its payload moves into the resend window and is sent from there.
-result<void> session::write(wire::op code, std::uint64_t seq, utils::byte_buffer&& payload, bool sealed) {
-    if (seq == 0 || !wire::is_sequenced(code)) {
-        return write(code, seq, payload.view(), sealed);
-    }
-    if (payload.size() > opts_.limits.max_frame) {
-        return fail(errc::kLimitExceeded, std::format("{} payload of {} bytes exceeds the {}-byte frame limit", code, payload.size(), opts_.limits.max_frame),
-                    "wire.frame");
+result<void> session::queue_sequenced(wire::op code, std::uint64_t seq, utils::byte_buffer&& payload) {
+    if (auto ok = wire::check_payload(code, payload.size(), opts_.limits.max_frame); !ok) {
+        return ok;
     }
     unacked_frame f;
     f.seq = seq;
@@ -744,7 +766,7 @@ result<void> session::write(wire::op code, std::uint64_t seq, utils::byte_buffer
     if (state_ == state::kDetached) {
         return {}; // goes out (from the resend window) once the session resumes
     }
-    return write_frame(code, seq, unacked_.back().payload.view(), sealed);
+    return write_frame(code, seq, unacked_.back().payload.view(), true);
 }
 
 result<void> session::write_value(wire::op code, const value& body, bool sealed) {
@@ -752,7 +774,7 @@ result<void> session::write_value(wire::op code, const value& body, bool sealed)
     if (auto encoded = opts_.codec.encode(body, payload); !encoded) {
         return encoded;
     }
-    return write(code, 0, payload.view(), sealed);
+    return write_unsequenced(code, 0, payload.view(), sealed);
 }
 
 result<void> session::send(wire::op code, const value& body) {
@@ -766,7 +788,7 @@ result<void> session::send(wire::op code, const value& body) {
     if (auto encoded = opts_.codec.encode(body, payload); !encoded) {
         return encoded;
     }
-    if (auto ok = write(code, next_seq_, std::move(payload), true); !ok) {
+    if (auto ok = queue_sequenced(code, next_seq_, std::move(payload)); !ok) {
         return ok;
     }
     ++next_seq_;
@@ -776,7 +798,7 @@ result<void> session::send(wire::op code, const value& body) {
 
 void session::write_control(wire::op code) {
     const bool sealed = state_ == state::kReady;
-    (void)write(code, sealed ? ++control_out_ : 0, utils::bytes_view{}, sealed);
+    (void)write_unsequenced(code, sealed ? ++control_out_ : 0, utils::bytes_view{}, sealed);
 }
 
 void session::acknowledge(std::uint64_t ack) {
@@ -889,10 +911,7 @@ void session::fail_with(error why) {
         why.where = peer_;
     }
     // Tell the peer (unsequenced kError), sealed once both sides have keys.
-    utils::byte_buffer payload;
-    if (opts_.codec.encode(Rhp::to_value(why), payload)) {
-        (void)write(wire::op::kError, 0, payload.view(), state_ == state::kReady);
-    }
+    (void)write_value(wire::op::kError, Rhp::to_value(why), state_ == state::kReady);
     shutdown(std::move(why));
 }
 
@@ -923,11 +942,7 @@ void session::shutdown(error why) {
     if (link_ != nullptr) {
         link_->close(); // writes what is queued (the error frame), then closes
     }
-    io_.post([this, alive = std::weak_ptr<bool>{alive_}, why = std::move(why)] {
-        if (const auto still = alive.lock(); still != nullptr && *still) {
-            handler_.on_closed(*this, why);
-        }
-    });
+    post_guarded(io_, alive_, [this, why = std::move(why)] { handler_.on_closed(*this, why); });
 }
 
 } // namespace Rhp::session

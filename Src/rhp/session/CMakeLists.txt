@@ -16,6 +16,5 @@ rhp_add_module(session
         Rhp::net
         Rhp::security
         Rhp::tls
-        Rhp::exec
         Rhp::wire
 )

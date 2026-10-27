@@ -1,4 +1,5 @@
 #include <cstddef>
+#include <cstdint>
 #include <format>
 #include <memory>
 #include <optional>
@@ -38,11 +39,6 @@ public:
           tls_(std::move(tls)),
           mode_(mode::kSniff),
           plaintext_ok_(plaintext_ok) {}
-
-    ~secure_link() override = default; // destroying inner_ aborts it: no callbacks after this
-
-    secure_link(const secure_link&) = delete;
-    secure_link& operator=(const secure_link&) = delete;
 
     void start(net::link_handler& handler) override {
         handler_ = &handler;
@@ -197,7 +193,7 @@ private:
         inner_->close();
     }
 
-    std::unique_ptr<net::link> inner_;
+    std::unique_ptr<net::link> inner_; // destroying it aborts it: no callbacks after this
     std::unique_ptr<security::tls::engine> engine_;
     std::shared_ptr<security::tls::context> tls_;
     mode mode_;
@@ -214,13 +210,14 @@ private:
 result<channel_policy> channel_policy::make(const net::endpoint& ep, bool network_transport, const security::tls::backend_ops& backend,
                                             const security::tls::settings& settings) {
     channel_policy p;
-    p.ep_ = ep;
     p.transport_ep_ = ep;
-    p.network_ = network_transport;
     p.backend_ = backend.name;
     const bool required = ep.tls == net::tls_mode::kRequire;
     const bool remote = network_transport && !ep.insecure_lan && !net::is_loopback_host(ep.host);
     const bool dialing = ep.direction == net::endpoint::mode::kDial;
+    p.dialing_ = dialing;
+    p.plaintext_from_loopback_ = !required;
+    p.plaintext_from_anyone_ = !required && (ep.insecure_lan || !network_transport || net::is_loopback_host(ep.host));
     if (required || remote) {
         p.transport_ep_.tls = net::tls_mode::kRequire; // TLS goes on top of what the transport carries
     }
@@ -263,7 +260,7 @@ result<channel_policy> channel_policy::make(const net::endpoint& ep, bool networ
 }
 
 result<std::unique_ptr<net::link>> channel_policy::wrap(std::unique_ptr<net::link> link) const {
-    if (ep_.direction == net::endpoint::mode::kDial) {
+    if (dialing_) {
         if (!dial_tls_) {
             return link;
         }
@@ -273,7 +270,7 @@ result<std::unique_ptr<net::link>> channel_policy::wrap(std::unique_ptr<net::lin
         }
         return tls_client(std::move(link), std::move(*engine));
     }
-    const bool plaintext_ok = ep_.tls != net::tls_mode::kRequire && (ep_.insecure_lan || !network_ || net::is_loopback_host(ep_.host) || link->loopback());
+    const bool plaintext_ok = plaintext_from_anyone_ || (plaintext_from_loopback_ && link->loopback());
     if (context_ == nullptr && plaintext_ok) {
         return link;
     }
