@@ -22,8 +22,9 @@ namespace {
 struct keygen_options {
     std::string name;
     std::string out_path;
-    std::string role = "admin";
+    std::string role = "patch";
     bool force = false;
+    bool show_secret = false;
 };
 
 int run_keygen(const keygen_options& o) {
@@ -47,15 +48,24 @@ int run_keygen(const keygen_options& o) {
         std::println(stderr, "{}", saved.error());
         return 1;
     }
+    if (*granted == Rhp::role::kAdmin) {
+        std::println(stderr, "warning: an admin identity may use the host's whole Lua library (io, os) and admin operations (revert_all, pin); patch loads and calls modules");
+    }
+    // The keyring line holds the PSK: it stays in the file (off the screen and the scrollback) unless
+    // asked for; pubkey prints it whole for scripts that write the host's files.
     std::println("wrote {} (keep it private)", path);
-    std::println("add to the host's keyring file:   {}", id->keyring_line(*granted));
+    if (o.show_secret) {
+        std::println("add to the host's keyring file:   {}", id->keyring_line(*granted));
+    } else {
+        std::println("add to the host's keyring file:   {} {} <psk from {}>   (rhp-cli pubkey -i {} --role {} prints it whole)", id->name, *granted, path, path, *granted);
+    }
     std::println("add to the host's signers file:   {}", *id->signers_line());
     return 0;
 }
 
 struct pubkey_options {
     std::string identity;
-    std::string role = "admin";
+    std::string role = "patch";
 };
 
 int run_pubkey(const pubkey_options& o) {
@@ -112,16 +122,17 @@ void add_keygen(CLI::App& app, command_list& out) {
     auto* cmd = app.add_subcommand("keygen", "create an identity file (PSK + Ed25519 signing key)");
     cmd->add_option("name", o->name, "the key name the host will know")->required();
     cmd->add_option("-o,--out", o->out_path, "identity file to write (default <name>.rhpid)");
-    cmd->add_option("--role", o->role, "role printed in the keyring line (observe, patch, admin)");
+    cmd->add_option("--role", o->role, "role for the keyring line (observe, patch, admin; default patch)");
     cmd->add_flag("--force", o->force, "replace an existing file");
+    cmd->add_flag("--show-secret", o->show_secret, "print the keyring line with the PSK (default: it stays in the file)");
     out.emplace_back(cmd, [o] { return run_keygen(*o); });
 }
 
 void add_pubkey(CLI::App& app, command_list& out) {
     auto o = std::make_shared<pubkey_options>();
-    auto* cmd = app.add_subcommand("pubkey", "print the host's keyring and signers lines for an identity");
+    auto* cmd = app.add_subcommand("pubkey", "print the host's keyring line (it holds the PSK) and signers line for an identity");
     cmd->add_option("-i,--identity", o->identity, "identity file")->required()->envname("RHP_IDENTITY");
-    cmd->add_option("--role", o->role, "role for the keyring line");
+    cmd->add_option("--role", o->role, "role for the keyring line (default patch)");
     out.emplace_back(cmd, [o] { return run_pubkey(*o); });
 }
 

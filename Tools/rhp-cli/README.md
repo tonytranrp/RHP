@@ -8,12 +8,20 @@ The REPL and scripting client for RHP hosts. Every script it sends is signed wit
 rhp-cli keygen dev
 ```
 
-Writes `dev.rhpid` (name, PSK, signing key) atomically and owner-only on every OS (mode 0600 on POSIX, a DACL for your account alone on Windows): keep it private. It prints the two lines the host needs after a label (`add to the host's keyring file:   dev admin <psk>`, `add to the host's signers file:   dev <public key>`): copy the part after the colon. `--role observe|patch|admin` (default `admin`) sets the keyring line's role; `-o/--out` names the file; `--force` replaces an existing one. Loading an identity file that other users can read prints a `warning:` line (never an error).
+Writes `dev.rhpid` (name, PSK, signing key) atomically and owner-only on every OS (mode 0600 on POSIX, a DACL for your account alone on Windows): keep it private. It prints the two lines the host needs after a label; the PSK stays in the file:
+
+```text
+wrote dev.rhpid (keep it private)
+add to the host's keyring file:   dev patch <psk from dev.rhpid>   (rhp-cli pubkey -i dev.rhpid --role patch prints it whole)
+add to the host's signers file:   dev <public key>
+```
+
+`rhp-cli pubkey -i dev.rhpid` prints both lines whole (for scripts that write the host's files); `--show-secret` makes keygen print the keyring line whole too. `--role observe|patch|admin` (default `patch`; `admin` prints a warning) sets the keyring line's role; `-o/--out` names the file; `--force` replaces an existing one. Loading an identity file that other users can read prints a `warning:` line (never an error).
 
 | Subcommand | Example |
 |---|---|
-| `keygen <name> [-o file] [--role r] [--force]` | `rhp-cli keygen ci --role patch -o ci.rhpid` |
-| `pubkey -i id [--role r]` | `rhp-cli pubkey -i dev.rhpid --role patch` (the bare keyring and signers lines again) |
+| `keygen <name> [-o file] [--role r] [--force] [--show-secret]` | `rhp-cli keygen ci --role observe -o ci.rhpid` |
+| `pubkey -i id [--role r]` | `rhp-cli pubkey -i dev.rhpid --role admin` (the bare keyring line, with the PSK, and the signers line; role default `patch`) |
 | `sign <file> -i id` | `rhp-cli sign patch.lua -i dev.rhpid` (prints `signer base64-signature` for other tools) |
 
 ## Connection options

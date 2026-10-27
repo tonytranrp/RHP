@@ -17,7 +17,7 @@ Who may connect, what each frame proves, and who signed a script. Namespace `Rhp
 
 ```cpp
 auto me = *Rhp::security::identity_file::load("dev.rhpid");      // rhp-cli keygen dev
-std::println("{}", me.keyring_line(Rhp::role::kAdmin));            // for the host's keyring file
+std::println("{}", me.keyring_line(Rhp::role::kPatch));            // for the host's keyring file
 auto keys = *Rhp::security::keyring::from_file("keys.txt");       // host
 auto signers = *Rhp::security::trusted_signers::from_file("signers.pub");
 auto who = signers.verify(source, *me.signer_key()->sign(source)); // "dev", or kBadSignature
