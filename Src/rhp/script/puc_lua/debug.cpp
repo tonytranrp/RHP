@@ -25,6 +25,7 @@
 #include <rhp/core/result.hpp>
 #include <rhp/core/value.hpp>
 #include <rhp/script/debug.hpp>
+#include <rhp/script/puc_lua/keys.hpp>
 #include <rhp/script/puc_lua/lua_internals.hpp>
 #include <rhp/script/puc_lua/sandbox_impl.hpp>
 #include <rhp/script/puc_lua/tools.hpp>
@@ -273,7 +274,7 @@ bool is_lib_proxy(lua_State* L, int index) {
     if (lua_getmetatable(L, index) == 0) {
         return false;
     }
-    lua_pushliteral(L, "__rhp_lib");
+    lua_pushstring(L, kLibMarker);
     const bool lib = lua_rawget(L, -2) == LUA_TBOOLEAN;
     lua_pop(L, 2);
     return lib;

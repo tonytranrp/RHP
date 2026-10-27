@@ -66,3 +66,5 @@ rhp_add_module(script
 # RHP_UNITY_BUILD: these keep their own translation unit (file-local helpers named like ones in the
 # sources batched with them).
 set_source_files_properties(patch_registry.cpp puc_lua/debug.cpp puc_lua/profile.cpp puc_lua/testing.cpp PROPERTIES SKIP_UNITY_BUILD_INCLUSION ON)
+# Lua's private headers define macros (cast, G, ...) that must not reach the sources batched with it.
+set_source_files_properties(puc_lua/lua_internals.cpp PROPERTIES SKIP_UNITY_BUILD_INCLUSION ON)

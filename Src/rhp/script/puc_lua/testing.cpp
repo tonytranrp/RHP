@@ -30,6 +30,7 @@
 #include <rhp/script/detail/event_registry.hpp>
 #include <rhp/script/detail/patch_registry.hpp>
 #include <rhp/script/ledger.hpp>
+#include <rhp/script/puc_lua/keys.hpp>
 #include <rhp/script/puc_lua/lua_internals.hpp>
 #include <rhp/script/puc_lua/sandbox_impl.hpp>
 #include <rhp/script/puc_lua/tools.hpp>
@@ -40,12 +41,6 @@
 namespace Rhp::script::detail {
 
 namespace {
-
-constexpr const char* kBridgeName = "__rhp_test";
-constexpr const char* kLibMarker = "__rhp_lib";        // lib proxies' metatables (lib_proxy.cpp)
-constexpr const char* kHandleTypeField = "__rhp_type"; // handle metatables (stack.cpp)
-constexpr const char* kMethodsField = "__rhp_methods"; // a handle metatable's methods
-constexpr const char* kGettersField = "__rhp_getters"; // and its properties
 
 // Runs a callable inside lua_pcall (see sandbox.cpp): any Lua error becomes an error result.
 template <class F>
@@ -142,10 +137,10 @@ target_kind kind_of(lua_State* L, int index) {
         if (metatable_has(L, index, kLibMarker)) {
             return target_kind::kLib;
         }
-        if (luaL_testudata(L, index, "rhp.module") != nullptr) {
+        if (luaL_testudata(L, index, kModuleProxyKey) != nullptr) {
             return target_kind::kModule;
         }
-        if (metatable_has(L, index, kHandleTypeField)) {
+        if (metatable_has(L, index, kTypeTagField)) {
             return target_kind::kHandle;
         }
         return target_kind::kOther;
@@ -935,7 +930,7 @@ result<void> sandbox_impl::enable_testing(testing_options options) {
         }
         lua_rawgeti(L, LUA_REGISTRYINDEX, record(scratch_)->live.env_ref);
         lua_insert(L, -2);
-        lua_setfield(L, -2, kBridgeName); // the scratch module's own global: modules can't see it
+        lua_setfield(L, -2, kTestBridgeName); // the scratch module's own global: modules can't see it
         lua_pop(L, 1);
 
         if (testing_.fake_os_epoch) {

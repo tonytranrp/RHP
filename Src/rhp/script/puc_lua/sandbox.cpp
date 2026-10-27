@@ -31,6 +31,7 @@
 #include <rhp/script/detail/patch_layers.hpp>
 #include <rhp/script/detail/patch_registry.hpp>
 #include <rhp/script/puc_lua/builtins.hpp>
+#include <rhp/script/puc_lua/keys.hpp>
 #include <rhp/script/puc_lua/lua_internals.hpp>
 #include <rhp/script/puc_lua/sandbox_impl.hpp>
 #include <rhp/script/puc_lua/tools.hpp>
@@ -67,8 +68,6 @@ double checked_ms(lua_State* L, int index, std::string_view where) {
 
 namespace {
 
-constexpr std::size_t kAlignment = alignof(std::max_align_t);
-
 // The alloc_kind of a new block from the tag Lua passes as its old size (the object's basic type).
 constexpr std::size_t alloc_kind_of(std::size_t tag) noexcept {
     switch (tag) {
@@ -90,9 +89,6 @@ constexpr std::size_t kSpareRequests = 64;
 // protected setup takes (a pooled coroutine has room for them without growing its stack).
 constexpr std::size_t kCallKeys = 32;
 constexpr std::size_t kUnprotectedArgs = 8;
-constexpr const char* kModuleProxyKey = "rhp.module";             // metatable of require() proxies
-constexpr const char* kModuleProxiesKey = "rhp.module_proxies";   // registry: module id → its proxy
-constexpr const char* kRequestThreadsKey = "rhp.request_threads"; // registry: weak set of request coroutines
 
 // Every load / reload request runs this: the module's top level, then on_load, then the exports.
 constexpr std::string_view kLoaderSource = R"lua(
@@ -132,7 +128,7 @@ result<void> protect(lua_State* L, F&& fn) {
 }
 
 std::uint32_t source_hash(std::string_view source) noexcept {
-    return utils::crc32c(utils::bytes_view{reinterpret_cast<const std::byte*>(source.data()), source.size()});
+    return utils::crc32c(utils::as_bytes(source));
 }
 
 // Nil, booleans and numbers: values that cross between C++ and Lua without an allocation.
@@ -818,7 +814,7 @@ void sandbox_impl::free_block(void* block, std::size_t size) noexcept {
     } else if (memory_ == nullptr) {
         std::free(block);
     } else {
-        memory_->deallocate(block, size, kAlignment);
+        memory_->deallocate(block, size, small_alloc::kAlignment);
     }
 }
 
@@ -827,7 +823,7 @@ void* sandbox_impl::heap_allocate(std::size_t size) noexcept {
         return std::malloc(size);
     }
     try {
-        return memory_->allocate(size, kAlignment);
+        return memory_->allocate(size, small_alloc::kAlignment);
     } catch (...) {
         return nullptr;
     }
@@ -907,7 +903,7 @@ void* sandbox_impl::allocate(void* ud, void* ptr, std::size_t old_size, std::siz
         }
         if (ptr != nullptr) {
             std::memcpy(block, ptr, std::min(old_size, new_size));
-            self.memory_->deallocate(ptr, old_size, kAlignment);
+            self.memory_->deallocate(ptr, old_size, small_alloc::kAlignment);
         }
     }
     self.memory_used_ = self.memory_used_ - old_size + new_size;

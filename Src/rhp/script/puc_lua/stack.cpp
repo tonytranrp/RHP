@@ -12,6 +12,7 @@
 #include <lua.h>
 
 #include <rhp/script/detail/context.hpp>
+#include <rhp/script/puc_lua/keys.hpp>
 #include <rhp/script/puc_lua/sandbox_impl.hpp>
 #include <rhp/script/puc_lua/views_impl.hpp>
 #include <rhp/script/stack.hpp>
@@ -21,10 +22,6 @@ namespace Rhp::script {
 namespace {
 
 constexpr int kMaxValueDepth = 64;
-constexpr const char* kTypeTagField = "__rhp_type";
-constexpr const char* kHandleTagsKey = "rhp.handle_tags"; // registry: type tag → metatable key
-constexpr const char* kMethodsField = "__rhp_methods";    // a handle metatable's methods (name -> function)
-constexpr const char* kGettersField = "__rhp_getters";    // and its properties (name -> getter(self))
 
 int handle_newindex(lua_State* L); // __newindex of every handle: members are read-only
 
@@ -361,7 +358,7 @@ result<void> stack::define_userdata_type(std::string_view key, std::string_view 
                                          c_function tostring) const {
     const std::string k{key};
     if (luaL_getmetatable(state_, k.c_str()) != LUA_TNIL) {
-        lua_getfield(state_, -1, kTypeTagField);
+        lua_getfield(state_, -1, detail::kTypeTagField);
         const bool same = lua_touserdata(state_, -1) == type_tag;
         lua_pop(state_, 2);
         if (!same) {
@@ -374,7 +371,7 @@ result<void> stack::define_userdata_type(std::string_view key, std::string_view 
     push_string(display_name);
     lua_setfield(state_, -2, "__name");
     lua_pushlightuserdata(state_, const_cast<void*>(type_tag));
-    lua_setfield(state_, -2, kTypeTagField);
+    lua_setfield(state_, -2, detail::kTypeTagField);
     lua_pushcfunction(state_, eq);
     lua_setfield(state_, -2, "__eq");
     lua_pushcfunction(state_, tostring);
@@ -384,17 +381,17 @@ result<void> stack::define_userdata_type(std::string_view key, std::string_view 
     // Members (add_handle_member) live in this table; without any, every key reads as nil.
     lua_createtable(state_, 0, 4);
     lua_pushvalue(state_, -1);
-    lua_setfield(state_, -3, kMethodsField);
+    lua_setfield(state_, -3, detail::kMethodsField);
     lua_setfield(state_, -2, "__index");
     lua_pushcfunction(state_, &handle_newindex);
     lua_setfield(state_, -2, "__newindex");
     lua_pop(state_, 1);
 
-    if (lua_getfield(state_, LUA_REGISTRYINDEX, kHandleTagsKey) != LUA_TTABLE) {
+    if (lua_getfield(state_, LUA_REGISTRYINDEX, detail::kHandleTagsKey) != LUA_TTABLE) {
         lua_pop(state_, 1);
         lua_newtable(state_);
         lua_pushvalue(state_, -1);
-        lua_setfield(state_, LUA_REGISTRYINDEX, kHandleTagsKey);
+        lua_setfield(state_, LUA_REGISTRYINDEX, detail::kHandleTagsKey);
     }
     // The first handle name declared for a C++ type stays the one handles of that type are pushed
     // as (events, other libs); a second name for the same type keeps its own metatable for its lib.
@@ -464,7 +461,7 @@ result<void> stack::handle_member_free(std::string_view key, std::string_view na
         return fail(errc::kNotFound, std::format("handle type '{}' is not defined", key));
     }
     bool taken = false;
-    for (const char* field : {kMethodsField, kGettersField}) {
+    for (const char* field : {detail::kMethodsField, detail::kGettersField}) {
         if (lua_getfield(state_, -1, field) == LUA_TTABLE) {
             push_string(name);
             taken = taken || lua_rawget(state_, -2) != LUA_TNIL;
@@ -486,18 +483,18 @@ void stack::add_handle_member(std::string_view key, std::string_view name, bool 
     const std::string k{key};
     luaL_getmetatable(state_, k.c_str());
     const int mt = fn + 1;
-    push_member_table(state_, mt, kMethodsField);
+    push_member_table(state_, mt, detail::kMethodsField);
     const int methods = fn + 2;
     if (!property) {
         push_string(name);
         lua_pushvalue(state_, fn);
         lua_rawset(state_, methods);
     }
-    lua_getfield(state_, mt, kGettersField);
+    lua_getfield(state_, mt, detail::kGettersField);
     const bool has_getters = lua_istable(state_, -1);
     lua_pop(state_, 1);
     if (property || has_getters) {
-        push_member_table(state_, mt, kGettersField);
+        push_member_table(state_, mt, detail::kGettersField);
         if (property) {
             push_string(name);
             lua_pushvalue(state_, fn);
@@ -513,7 +510,7 @@ void stack::add_handle_member(std::string_view key, std::string_view name, bool 
 }
 
 bool stack::push_handle(const void* type_tag, const void* data, std::size_t size) const {
-    if (lua_getfield(state_, LUA_REGISTRYINDEX, kHandleTagsKey) != LUA_TTABLE) {
+    if (lua_getfield(state_, LUA_REGISTRYINDEX, detail::kHandleTagsKey) != LUA_TTABLE) {
         lua_pop(state_, 1);
         return false;
     }
@@ -623,11 +620,7 @@ void stack::raise(const error& err) const {
     lua_pushlstring(state_, text.data(), text.size());
     impl.last_raised = detail::sandbox_impl::raised_error{std::move(text), err};
     lua_error(state_);
-#if defined(_MSC_VER) && !defined(__clang__)
-    __assume(false);
-#else
-    __builtin_unreachable();
-#endif
+    std::unreachable();
 }
 
 // ---- asynchronous bindings ---------------------------------------------------------------------
@@ -655,11 +648,7 @@ namespace Rhp::script::detail {
 void yield_async(lua_State* L) {
     (void)lua_yieldk(L, 0, 0, &continue_async);
     // A yield from a C function never returns here: it unwinds (or jumps) back into lua_resume.
-#if defined(_MSC_VER) && !defined(__clang__)
-    __assume(false);
-#else
-    __builtin_unreachable();
-#endif
+    std::unreachable();
 }
 
 } // namespace Rhp::script::detail

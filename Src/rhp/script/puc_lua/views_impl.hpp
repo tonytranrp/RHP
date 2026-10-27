@@ -16,6 +16,7 @@
 
 #include <rhp/core/result.hpp>
 #include <rhp/script/ledger.hpp>
+#include <rhp/script/puc_lua/keys.hpp> // kSpanKey, kBufferKey
 #include <rhp/script/stack.hpp>
 #include <rhp/script/views.hpp>
 
@@ -24,9 +25,6 @@ struct lua_State;
 namespace Rhp::script::detail {
 
 class context;
-
-inline constexpr const char* kSpanKey = "rhp.span";     // typed views (host spans, slices, buffer views)
-inline constexpr const char* kBufferKey = "rhp.buffer"; // byte buffers and their slices
 
 enum class node_shape : std::uint8_t {
     kBytes, // a byte buffer (elem kU8)

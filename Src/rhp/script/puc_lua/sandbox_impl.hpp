@@ -802,7 +802,7 @@ private:
     std::atomic<std::thread::id> thread_;
     std::atomic<bool> cancel_running_{false};
     std::atomic<bool> cancel_ids_pending_{false};
-    std::mutex inbox_mutex_; // guards cancel_ids_ and inbox_
+    mutable std::mutex inbox_mutex_; // guards cancel_ids_ and inbox_ (stats() reads inbox_)
     std::vector<request_id> cancel_ids_;
     std::vector<std::pair<std::string, std::function<int(stack&)>>> inbox_;
     std::atomic<std::uint64_t> dropped_events_{0};

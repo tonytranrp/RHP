@@ -13,13 +13,12 @@
 #include <lua.h>
 
 #include <rhp/script/puc_lua/builtins.hpp>
+#include <rhp/script/puc_lua/keys.hpp>
 #include <rhp/script/puc_lua/sandbox_impl.hpp>
 
 namespace Rhp::script::detail {
 
 namespace {
-
-constexpr const char* kTaskKey = "rhp.task"; // metatable of task handles
 
 // Userdata payload of a task handle.
 struct task_handle {

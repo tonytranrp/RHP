@@ -480,8 +480,7 @@ sandbox_stats sandbox_impl::stats() const {
     sandbox_stats out;
     out.dropped_events = dropped_events_.load(std::memory_order_relaxed);
     {
-        const std::scoped_lock lock{const_cast<std::mutex&>(inbox_mutex_)}; // only the lock is taken
-
+        const std::scoped_lock lock{inbox_mutex_};
         out.queued_events = inbox_.size() + script_events_.size();
     }
     out.schedule_entries = schedule_.size();

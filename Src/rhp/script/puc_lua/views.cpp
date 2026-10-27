@@ -32,10 +32,6 @@ namespace {
 // The node, padded so a payload after it is aligned for anything.
 constexpr std::size_t kNodeSize = (sizeof(view_node) + alignof(std::max_align_t) - 1) / alignof(std::max_align_t) * alignof(std::max_align_t);
 
-constexpr const char* kFieldsField = "__rhp_fields";     // a view type's fields: name -> light userdata (field_desc)
-constexpr const char* kOrderField = "__rhp_order";       // their names in declaration order
-constexpr const char* kTypeTagField = "__rhp_view_type"; // the C++ type (view_type_info::type_tag; not a handle's __rhp_type)
-
 [[noreturn]] void raise(lua_State* L, error err) {
     stack{L}.raise(err);
 }
@@ -476,7 +472,7 @@ int object_eq(lua_State* L) {
 
 // for name, value in pairs(view): the fields in declaration order.
 int object_next(lua_State* L) {
-    if (lua_getmetatable(L, 1) == 0 || lua_getfield(L, -1, kOrderField) != LUA_TTABLE) {
+    if (lua_getmetatable(L, 1) == 0 || lua_getfield(L, -1, kViewOrderField) != LUA_TTABLE) {
         return 0;
     }
     const int order = lua_gettop(L);
@@ -1003,15 +999,15 @@ result<void> stack::define_view_type(const detail::view_type_info& type, const d
     if (luaL_getmetatable(L, key.text) != LUA_TNIL) {
         // Defined by another lib: the same C++ type, and fields that agree with the ones it has.
         const int mt = lua_gettop(L);
-        lua_getfield(L, mt, detail::kTypeTagField);
+        lua_getfield(L, mt, detail::kViewTypeTagField);
         const bool same_type = lua_touserdata(L, -1) == type.type_tag;
         lua_pop(L, 1);
         if (!same_type) {
             lua_pop(L, 1);
             return fail(errc::kAlreadyLoaded, std::format("view type '{}' is already defined for a different C++ type", type.name));
         }
-        lua_getfield(L, mt, detail::kFieldsField);
-        lua_getfield(L, mt, detail::kOrderField);
+        lua_getfield(L, mt, detail::kViewFieldsField);
+        lua_getfield(L, mt, detail::kViewOrderField);
         const int table = mt + 1;
         const int order = mt + 2;
         for (std::size_t i = 0; i < count; ++i) {
@@ -1043,7 +1039,7 @@ result<void> stack::define_view_type(const detail::view_type_info& type, const d
     lua_pushlstring(L, type.name.data(), type.name.size());
     lua_setfield(L, mt, "__name");
     lua_pushlightuserdata(L, const_cast<void*>(type.type_tag));
-    lua_setfield(L, mt, detail::kTypeTagField);
+    lua_setfield(L, mt, detail::kViewTypeTagField);
     lua_createtable(L, 0, static_cast<int>(count));
     const int table = lua_gettop(L);
     lua_createtable(L, static_cast<int>(count), 0);
@@ -1056,9 +1052,9 @@ result<void> stack::define_view_type(const detail::view_type_info& type, const d
         lua_rawseti(L, order, static_cast<lua_Integer>(i + 1));
     }
     lua_pushvalue(L, order);
-    lua_setfield(L, mt, detail::kOrderField);
+    lua_setfield(L, mt, detail::kViewOrderField);
     lua_pushvalue(L, table);
-    lua_setfield(L, mt, detail::kFieldsField);
+    lua_setfield(L, mt, detail::kViewFieldsField);
     lua_pushvalue(L, table);
     lua_pushcclosure(L, &detail::object_index, 1);
     lua_setfield(L, mt, "__index");
