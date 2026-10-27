@@ -20,6 +20,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <type_traits>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -58,9 +59,46 @@ class sandbox_impl;
 // Message handler for lua_pcall: stores a traceback in the sandbox and returns the error unchanged.
 int traceback_handler(lua_State* L);
 
-// Milliseconds argument (>= 0) or a raised error naming `where`.
-double checked_ms(lua_State* L, int index, std::string_view where);
+// Runs fn() inside lua_pcall (stack::run_protected), so every Lua API call it makes is protected: an
+// error (an allocation that fails under a memory limit) becomes an error result instead of a panic.
+template <class F>
+result<void> protect(lua_State* L, F&& fn) {
+    struct holder {
+        std::remove_reference_t<F>* fn;
+    } h{&fn};
+    return stack{L}.run_protected(
+        [](lua_State* inner) -> int {
+            (*static_cast<holder*>(stack{inner}.to_light_userdata(1))->fn)();
+            return 0;
+        },
+        &h);
+}
+
+// Arguments of the rhp builtins: each raises (naming `where`) when the argument doesn't fit.
+double checked_ms(lua_State* L, int index, std::string_view where);        // milliseconds >= 0
+void check_function(lua_State* L, int index, std::string_view where);      // a function
+std::uint64_t checked_id(lua_State* L, int index, std::string_view where); // an id the script holds (> 0)
+
 steady::duration milliseconds(double ms);
+[[nodiscard]] inline double milliseconds_of(steady::duration d) noexcept {
+    return std::chrono::duration<double, std::milli>{d}.count();
+}
+
+// The '@' (a module) or '=' (an exec, the loader) in front of a chunk name RHP gives; a chunk a
+// script load()s without a name has its source text there instead.
+[[nodiscard]] constexpr bool has_chunk_marker(std::string_view source) noexcept {
+    return !source.empty() && (source.front() == '@' || source.front() == '=');
+}
+// "@game.combat" -> "game.combat"; a source without a marker as it is.
+[[nodiscard]] constexpr std::string_view without_chunk_marker(std::string_view source) noexcept {
+    return has_chunk_marker(source) ? source.substr(1) : source;
+}
+
+// Nil, booleans and numbers cross between C++ and Lua without an allocation (stack.cpp).
+// Pushes a scalar as stack::push_value does (no stack check: the caller made room).
+void push_scalar(lua_State* L, const value& v) noexcept;
+// Appends what stack::to_value makes of the scalar at `index`; false (nothing appended) for anything else.
+bool append_scalar(value_list& out, lua_State* L, int index);
 
 // Stops a run for good once a limit is hit: re-raised at every hook tick, so pcall can't swallow it.
 enum class sticky_stop : std::uint8_t {
@@ -104,6 +142,12 @@ struct module_record {
     std::uint32_t revisions_made = 0;
     std::optional<error> fault;
 };
+
+// The _ENV of a module's code of `revision`: the reload in flight's when it is that revision, else
+// the live one's.
+[[nodiscard]] inline int env_ref_of(const module_record& mod, revision_id revision) noexcept {
+    return mod.pending && mod.pending->revision == revision ? mod.pending->env_ref : mod.live.env_ref;
+}
 
 enum class request_kind : std::uint8_t {
     kExec,
@@ -442,6 +486,8 @@ public:
     // result or raise.
     std::uint64_t add_timer(lua_State* L, double ms, int fn_index, bool repeating, const handler_opts& opts, std::string label);
     std::uint64_t add_frames(lua_State* L, std::uint64_t every, int fn_index, const handler_opts& opts);
+    // add_timer's and add_frames' common part: `entry` with the function at `fn_index`, as the running code's.
+    std::uint64_t add_schedule(lua_State* L, std::string_view where, int fn_index, schedule_entry entry, std::string label);
     std::uint64_t subscribe(lua_State* L, std::string_view event, int fn_index, bool once, const handler_opts& opts);
     void remove_by_id(lua_State* L, std::uint64_t seq);
     void set_paused(lua_State* L, std::uint64_t seq, bool paused);
@@ -548,6 +594,11 @@ private:
     // kEverything), else on request coroutines and, while an operation runs, the main thread.
     void reset_hook() noexcept;
     void arm_hook(lua_State* L, bool armed) noexcept;
+    // The hook mask of a thread `armed` (or not) for cancels and limits, with what the meter, the
+    // profiler, coverage and the debugger add.
+    [[nodiscard]] int hook_mask(bool armed) const noexcept;
+    // Whether a request's coroutine is armed for cancels and limits.
+    [[nodiscard]] bool armed_for(const request_record& req) const noexcept { return hook_everywhere() || req.checked; }
     [[nodiscard]] bool hook_everywhere() const noexcept;
     [[nodiscard]] bool checks_requests() const noexcept; // cancel_checks isn't kNone
     // Requests that check for cancel() (exec, load, call, tasks; cancel_scope::kRequests).
@@ -588,6 +639,8 @@ private:
     request_record& restart_request(request_record& req, request_kind kind, const effect_owner& owner, int nargs);
     // An idle record kept for a next handler that never came: its coroutine and node go back to the pools.
     void release_kept(request_record& req) noexcept;
+    // A finished request's map node (with its record) back to the pool, while it has room (else freed).
+    void recycle(std::map<request_id, std::unique_ptr<request_record>>::node_type&& node) noexcept;
     // Where a failure of `req` happened when the script gives no location.
     [[nodiscard]] std::string where_of(const request_record& req) const;
     // `kept` (deliveries): a request that finishes normally keeps its record and coroutine for the
@@ -612,6 +665,9 @@ private:
     // Makes `req` request `id` and moves the function and `nargs` arguments on the main stack into `co`.
     void prepare_request(request_record& req, lua_State* co, request_kind kind, const effect_owner& owner, request_id id, int nargs);
     result<value_list> complete_load(module_record& mod, revision_id revision, lua_State* thread);
+    // Pushes the exported function `name` (on_save, on_restore, on_unload) of the exports table
+    // `exports_ref` onto the main stack (true), or nothing when it exports none (false).
+    bool push_export(int exports_ref, const char* name);
     // Ends suspended requests matching `pred` without faulting anyone (their module is going away).
     template <class Pred>
     void abandon_requests(Pred pred, std::string_view why);
@@ -619,6 +675,10 @@ private:
 
     // A synchronous call of the function below `nargs` args on the main stack, as `owner`'s code.
     [[nodiscard]] result<void> call_sync(const effect_owner& owner, int nargs, int nresults);
+    // Runs fn() (a result<void>) as `owner`'s code: inside a running script part of that run, from
+    // outside one a run of its own (a budget of its own, whose stop is the result's error).
+    template <class F>
+    [[nodiscard]] result<void> run_as(const effect_owner& owner, F&& fn);
     [[nodiscard]] error sticky_error(sticky_stop stop) const;
     [[nodiscard]] value_list collect_results(lua_State* L, int first, int last);
 

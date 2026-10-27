@@ -38,22 +38,6 @@ private:
     std::uint64_t key_;
 };
 
-void check_function(lua_State* L, int index, std::string_view where) {
-    if (lua_type(L, index) != LUA_TFUNCTION) {
-        const stack s{L};
-        s.raise(make_error(errc::kTypeMismatch, std::format("expected function, got {}", s.type_name(index)), std::string{where}));
-    }
-}
-
-std::uint64_t checked_id(lua_State* L, int index, std::string_view where) {
-    const stack s{L};
-    const auto id = s.to_integer(index);
-    if (!id || *id <= 0) {
-        s.raise(make_error(errc::kTypeMismatch, std::format("expected an id, got {}", s.type_name(index)), std::string{where}));
-    }
-    return static_cast<std::uint64_t>(*id);
-}
-
 std::uint64_t checked_frames(lua_State* L, int index, std::string_view where) {
     const stack s{L};
     const auto n = s.to_integer(index);
@@ -61,10 +45,6 @@ std::uint64_t checked_frames(lua_State* L, int index, std::string_view where) {
         s.raise(make_error(errc::kInvalidArgument, std::format("expected a frame count from 1 to 1e15, got {}", s.type_name(index)), std::string{where}));
     }
     return static_cast<std::uint64_t>(*n);
-}
-
-double to_ms(steady::duration d) {
-    return std::chrono::duration<double, std::milli>{d}.count();
 }
 
 } // namespace
@@ -223,46 +203,37 @@ void sandbox_impl::refuse_while_closing(lua_State* L, std::string_view where) co
 }
 
 std::uint64_t sandbox_impl::add_timer(lua_State* L, double ms, int fn_index, bool repeating, const handler_opts& opts, std::string label) {
-    refuse_while_closing(L, "rhp.timer");
-    lua_pushvalue(L, fn_index);
-    const int fn_ref = luaL_ref(L, LUA_REGISTRYINDEX);
-    const std::uint64_t key = ++schedule_keys_;
     schedule_entry entry;
-    entry.owner = current_;
-    entry.fn_ref = fn_ref;
     entry.kind = schedule_kind::kTimer;
     entry.repeating = repeating;
     entry.interval = milliseconds(ms);
     entry.due = script_now() + entry.interval;
     entry.times = repeating ? opts.times : std::optional<std::uint32_t>{1};
     entry.policy = opts.on_error.value_or(options_.handler_errors);
-    schedule_.emplace(key, std::move(entry));
-    schedule_dirty_ = true;
-    const std::uint64_t seq = record_effect(std::move(label), std::make_unique<schedule_effect>(*this, key));
-    if (const auto it = schedule_.find(key); it != schedule_.end()) {
-        it->second.seq = seq;
-    }
-    return seq;
+    return add_schedule(L, "rhp.timer", fn_index, std::move(entry), std::move(label));
 }
 
 std::uint64_t sandbox_impl::add_frames(lua_State* L, std::uint64_t every, int fn_index, const handler_opts& opts) {
-    refuse_while_closing(L, "rhp.every_frame");
-    lua_pushvalue(L, fn_index);
-    const int fn_ref = luaL_ref(L, LUA_REGISTRYINDEX);
-    const std::uint64_t key = ++schedule_keys_;
     schedule_entry entry;
-    entry.owner = current_;
-    entry.fn_ref = fn_ref;
     entry.kind = schedule_kind::kFrames;
     entry.repeating = true;
     entry.every = every;
     entry.next_frame = frame_ + every;
     entry.times = opts.times;
     entry.policy = opts.on_error.value_or(options_.handler_errors);
+    return add_schedule(L, "rhp.every_frame", fn_index, std::move(entry),
+                        every == 1 ? std::string{"rhp.every_frame"} : std::format("rhp.every_frames {}", every));
+}
+
+std::uint64_t sandbox_impl::add_schedule(lua_State* L, std::string_view where, int fn_index, schedule_entry entry, std::string label) {
+    refuse_while_closing(L, where);
+    lua_pushvalue(L, fn_index);
+    entry.fn_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+    entry.owner = current_;
+    const std::uint64_t key = ++schedule_keys_;
     schedule_.emplace(key, std::move(entry));
     schedule_dirty_ = true;
-    const std::uint64_t seq =
-        record_effect(every == 1 ? std::string{"rhp.every_frame"} : std::format("rhp.every_frames {}", every), std::make_unique<schedule_effect>(*this, key));
+    const std::uint64_t seq = record_effect(std::move(label), std::make_unique<schedule_effect>(*this, key));
     if (const auto it = schedule_.find(key); it != schedule_.end()) {
         it->second.seq = seq;
     }
@@ -361,9 +332,9 @@ void sandbox_impl::push_timers(lua_State* L) {
         if (e.kind == schedule_kind::kTimer) {
             lua_pushliteral(L, "timer");
             lua_setfield(L, -2, "kind");
-            lua_pushnumber(L, to_ms(e.interval));
+            lua_pushnumber(L, milliseconds_of(e.interval));
             lua_setfield(L, -2, "interval");
-            lua_pushnumber(L, to_ms(e.paused ? e.remaining : (e.due > now ? e.due - now : steady::duration{})));
+            lua_pushnumber(L, milliseconds_of(e.paused ? e.remaining : (e.due > now ? e.due - now : steady::duration{})));
             lua_setfield(L, -2, "remaining");
         } else {
             lua_pushliteral(L, "frames");

@@ -25,10 +25,6 @@ constexpr int kMaxValueDepth = 64;
 
 int handle_newindex(lua_State* L); // __newindex of every handle: members are read-only
 
-detail::sandbox_impl& impl_of(lua_State* L) noexcept {
-    return static_cast<detail::sandbox_impl&>(**static_cast<detail::context**>(lua_getextraspace(L)));
-}
-
 std::string to_std_string(lua_State* L, int index) {
     std::size_t len = 0;
     const char* s = lua_tolstring(L, index, &len);
@@ -191,10 +187,10 @@ void stack::push_string(std::string_view s) const {
 void stack::push_value(const value& v) const {
     luaL_checkstack(state_, 3, "rhp: value too deep");
     switch (v.type()) {
-    case value::kind::kNil: lua_pushnil(state_); break;
-    case value::kind::kBool: lua_pushboolean(state_, *v.get_if<bool>() ? 1 : 0); break;
-    case value::kind::kInteger: lua_pushinteger(state_, static_cast<lua_Integer>(*v.get_if<std::int64_t>())); break;
-    case value::kind::kNumber: lua_pushnumber(state_, static_cast<lua_Number>(*v.get_if<double>())); break;
+    case value::kind::kNil:
+    case value::kind::kBool:
+    case value::kind::kInteger:
+    case value::kind::kNumber: detail::push_scalar(state_, v); break;
     case value::kind::kString: push_string(*v.get_if<std::string>()); break;
     case value::kind::kBytes: {
         const auto& b = *v.get_if<value::bytes>();
@@ -615,7 +611,7 @@ void* stack::to_light_userdata(int index) const noexcept {
 // ---- errors --------------------------------------------------------------------------------------
 
 void stack::raise(const error& err) const {
-    auto& impl = impl_of(state_);
+    auto& impl = detail::impl_of(state_);
     std::string text = std::format("{}", err);
     lua_pushlstring(state_, text.data(), text.size());
     impl.last_raised = detail::sandbox_impl::raised_error{std::move(text), err};
@@ -684,6 +680,30 @@ error take_lua_error(lua_State* L, int status) {
     err.traceback = std::move(impl.pending_traceback);
     impl.pending_traceback.clear();
     return err;
+}
+
+void push_scalar(lua_State* L, const value& v) noexcept {
+    switch (v.type()) {
+    case value::kind::kBool: lua_pushboolean(L, *v.get_if<bool>() ? 1 : 0); break;
+    case value::kind::kInteger: lua_pushinteger(L, static_cast<lua_Integer>(*v.get_if<std::int64_t>())); break;
+    case value::kind::kNumber: lua_pushnumber(L, static_cast<lua_Number>(*v.get_if<double>())); break;
+    default: lua_pushnil(L); break;
+    }
+}
+
+bool append_scalar(value_list& out, lua_State* L, int index) {
+    switch (lua_type(L, index)) {
+    case LUA_TNIL: out.emplace_back(); return true;
+    case LUA_TBOOLEAN: out.emplace_back(lua_toboolean(L, index) != 0); return true;
+    case LUA_TNUMBER:
+        if (lua_isinteger(L, index) != 0) {
+            out.emplace_back(static_cast<std::int64_t>(lua_tointeger(L, index)));
+        } else {
+            out.emplace_back(static_cast<double>(lua_tonumber(L, index)));
+        }
+        return true;
+    default: return false;
+    }
 }
 
 int traceback_handler(lua_State* L) {

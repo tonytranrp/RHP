@@ -14,6 +14,7 @@
 #include <string_view>
 #include <utility>
 
+#include <rhp/core/error.hpp>
 #include <rhp/core/result.hpp>
 #include <rhp/script/ledger.hpp>
 #include <rhp/script/puc_lua/keys.hpp> // kSpanKey, kBufferKey
@@ -74,6 +75,9 @@ struct place {
 
 // ---- views.cpp ---------------------------------------------------------------------------------
 
+// stack::raise of `err`, or of an error made of `code`, `message` and `where`.
+[[noreturn]] void raise(lua_State* L, error err);
+[[noreturn]] void raise(lua_State* L, errc code, std::string message, std::string_view where);
 // The node a span view or buffer at `index` is, or nullptr.
 [[nodiscard]] view_node* to_span_node(lua_State* L, int index) noexcept;
 // Where `node` is now, or why it isn't (the caller labels the error).

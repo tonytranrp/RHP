@@ -52,16 +52,9 @@ std::string_view checked_name(lua_State* L, int index, std::string_view where) {
     return *event;
 }
 
-void check_handler(lua_State* L, int index, std::string_view where) {
-    if (lua_type(L, index) != LUA_TFUNCTION) {
-        const stack s{L};
-        s.raise(make_error(errc::kTypeMismatch, std::format("expected function, got {}", s.type_name(index)), std::string{where}));
-    }
-}
-
 int subscribe_builtin(lua_State* L, std::string_view where, bool once) {
     const std::string event{checked_name(L, 1, where)};
-    check_handler(L, 2, where);
+    check_function(L, 2, where);
     auto& impl = impl_of(L);
     const handler_opts opts = impl.read_opts(L, 3, where, sandbox_impl::kOptPriority | sandbox_impl::kOptOnError);
     lua_pushinteger(L, static_cast<lua_Integer>(impl.subscribe(L, event, 2, once, opts)));
@@ -88,7 +81,7 @@ int lua_rhp_once(lua_State* L) {
 
 // rhp.on_error(handler [, opts]) → id: rhp.on("rhp.handler_failed", handler).
 int lua_rhp_on_error(lua_State* L) {
-    check_handler(L, 1, "rhp.on_error");
+    check_function(L, 1, "rhp.on_error");
     auto& impl = impl_of(L);
     const handler_opts opts = impl.read_opts(L, 2, "rhp.on_error", sandbox_impl::kOptPriority | sandbox_impl::kOptOnError);
     lua_pushinteger(L, static_cast<lua_Integer>(impl.subscribe(L, kHandlerFailedEvent, 1, false, opts)));

@@ -107,10 +107,7 @@ int lua_task_tostring(lua_State* L) {
 
 // rhp.spawn(fn, ...) → task: runs fn(...) as a background task of the calling module.
 int lua_rhp_spawn(lua_State* L) {
-    if (lua_type(L, 1) != LUA_TFUNCTION) {
-        const stack s{L};
-        s.raise(make_error(errc::kTypeMismatch, std::format("expected function, got {}", s.type_name(1)), "rhp.spawn"));
-    }
+    check_function(L, 1, "rhp.spawn");
     impl_of(L).spawn(L);
     return 1;
 }

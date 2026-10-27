@@ -42,27 +42,11 @@ constexpr std::size_t kMaxCount = 1'000;        // fields counted per table (sho
 constexpr std::size_t kMaxBreakpoints = 10'000; // lines per source
 constexpr std::size_t kMaxPaused = 32;          // requests paused at once; more breakpoint stops are reported as hits
 
-template <class F>
-result<void> protect(lua_State* L, F&& fn) {
-    struct holder {
-        std::remove_reference_t<F>* fn;
-    } h{&fn};
-    return stack{L}.run_protected(
-        [](lua_State* inner) -> int {
-            (*static_cast<holder*>(lua_touserdata(inner, 1))->fn)();
-            return 0;
-        },
-        &h);
-}
-
 // The module (or exec chunk) name a function was compiled under, without '@' / '='; for code a
 // script load()ed without a name, Lua's short form ([string "..."]).
 std::string_view chunk_of(const lua_Debug& ar) noexcept {
     const std::string_view source = ar.source != nullptr ? std::string_view{ar.source, ar.srclen} : std::string_view{};
-    if (!source.empty() && (source.front() == '@' || source.front() == '=')) {
-        return source.substr(1);
-    }
-    return std::string_view{ar.short_src};
+    return has_chunk_marker(source) ? source.substr(1) : std::string_view{ar.short_src};
 }
 
 int stack_depth(lua_State* L) noexcept {
@@ -482,6 +466,36 @@ std::optional<std::vector<std::string>> parse_path(std::string_view text) {
     return out;
 }
 
+// Runs read(ar) protected on the main state `L` with frame `frame` of the paused coroutine `co` in
+// `ar` and room on both stacks for what reading pushes. `read` returns an error of its own, or
+// nullopt.
+template <class F>
+result<void> with_paused_frame(lua_State* L, lua_State* co, request_id id, std::uint32_t frame, F&& read) {
+    std::optional<error> failure;
+    auto ran = protect(L, [&] {
+        lua_Debug ar{};
+        if (lua_getstack(co, static_cast<int>(frame), &ar) == 0) {
+            failure = make_error(errc::kOutOfRange, std::format("request {} has no frame {}", id, frame), "debug");
+            return;
+        }
+        luaL_checkstack(L, 8, "rhp: debug");
+        // The paused coroutine stopped in a Lua frame whose top is its own top: room for the values
+        // lua_getlocal / lua_getinfo push onto it while reading (popped again before this returns).
+        if (lua_checkstack(co, 4) == 0) {
+            failure = make_error(errc::kLimitExceeded, "the paused coroutine's stack is full", "debug");
+            return;
+        }
+        failure = read(ar);
+    });
+    if (!ran) {
+        return ran;
+    }
+    if (failure) {
+        return std::unexpected{std::move(*failure)};
+    }
+    return {};
+}
+
 } // namespace
 
 // ---- the line hook ---------------------------------------------------------------------------------
@@ -502,8 +516,8 @@ void sandbox_impl::scope_lines(lua_State* L, lua_Debug* ar) noexcept {
     bool on = false;
     if (proto != nullptr) {
         on = true;
-        std::string_view source = internals::proto_source(proto);
-        if (!source.empty() && (source.front() == '@' || source.front() == '=')) {
+        const std::string_view source = internals::proto_source(proto);
+        if (has_chunk_marker(source)) {
             const auto [first, last] = internals::proto_lines(proto);
             debugger_state::scope_answer& seen = debugger_->last_scope;
             if (seen.source == source.data() && seen.first == first && seen.last == last) {
@@ -757,13 +771,7 @@ std::string sandbox_impl::outer_name(const request_record& req) {
 
 int sandbox_impl::env_of(const request_record& req) const noexcept {
     const module_record* mod = record(req.owner.module);
-    if (mod == nullptr) {
-        return kNoRef;
-    }
-    if (mod->pending && req.owner.revision == mod->pending->revision) {
-        return mod->pending->env_ref;
-    }
-    return mod->live.env_ref;
+    return mod != nullptr ? env_ref_of(*mod, req.owner.revision) : kNoRef;
 }
 
 result<std::vector<debug_variable>> sandbox_impl::debug_variables(request_id id, std::uint32_t frame, debug_scope scope, std::span<const std::string> path) {
@@ -771,53 +779,35 @@ result<std::vector<debug_variable>> sandbox_impl::debug_variables(request_id id,
     if (!co) {
         return std::unexpected{std::move(co).error()};
     }
-    std::optional<error> failure;
     std::vector<debug_variable> out;
-    auto read = protect(state_, [&] {
+    auto read = with_paused_frame(state_, *co, id, frame, [&](lua_Debug& ar) -> std::optional<error> {
         lua_State* L = state_;
-        lua_Debug ar{};
-        if (lua_getstack(*co, static_cast<int>(frame), &ar) == 0) {
-            failure = make_error(errc::kOutOfRange, std::format("request {} has no frame {}", id, frame), "debug");
-            return;
-        }
-        luaL_checkstack(L, 8, "rhp: debug");
-        // The paused coroutine stopped in a Lua frame whose top is its own top: room for the values
-        // lua_getlocal / lua_getinfo push onto it while reading (popped again before this returns).
-        if (lua_checkstack(*co, 4) == 0) {
-            failure = make_error(errc::kLimitExceeded, "the paused coroutine's stack is full", "debug");
-            return;
-        }
         const int env_ref = env_of(*requests_.at(id));
         if (path.empty()) {
             out = list_scope(*co, L, ar, scope, env_ref);
-            return;
+            return std::nullopt;
         }
         const int top = lua_gettop(L);
         if (!push_named(*co, L, ar, scope, path.front(), env_ref)) {
             lua_settop(L, top);
-            failure = make_error(errc::kNotFound, std::format("no {} variable '{}'", to_string(scope), path.front()), "debug");
-            return;
+            return make_error(errc::kNotFound, std::format("no {} variable '{}'", to_string(scope), path.front()), "debug");
         }
         for (std::size_t i = 1; i < path.size(); ++i) {
             if (!descend(L, path[i])) {
                 lua_settop(L, top);
-                failure = make_error(errc::kNotFound, std::format("'{}' has no field {}", path[i - 1], path[i]), "debug");
-                return;
+                return make_error(errc::kNotFound, std::format("'{}' has no field {}", path[i - 1], path[i]), "debug");
             }
         }
         if (lua_type(L, -1) != LUA_TTABLE) {
             lua_settop(L, top);
-            failure = make_error(errc::kTypeMismatch, std::format("'{}' is not a table", path.back()), "debug");
-            return;
+            return make_error(errc::kTypeMismatch, std::format("'{}' is not a table", path.back()), "debug");
         }
         out = fields_of(L);
         lua_settop(L, top);
+        return std::nullopt;
     });
     if (!read) {
         return std::unexpected{std::move(read).error()};
-    }
-    if (failure) {
-        return std::unexpected{std::move(*failure)};
     }
     return out;
 }
@@ -831,22 +821,9 @@ result<debug_variable> sandbox_impl::debug_evaluate(request_id id, std::uint32_t
     if (!path) {
         return fail(errc::kInvalidArgument, std::format("'{}' is not a variable path (name, .field, [index])", expression), "debug");
     }
-    std::optional<error> failure;
     debug_variable out;
-    auto read = protect(state_, [&] {
+    auto read = with_paused_frame(state_, *co, id, frame, [&](lua_Debug& ar) -> std::optional<error> {
         lua_State* L = state_;
-        lua_Debug ar{};
-        if (lua_getstack(*co, static_cast<int>(frame), &ar) == 0) {
-            failure = make_error(errc::kOutOfRange, std::format("request {} has no frame {}", id, frame), "debug");
-            return;
-        }
-        luaL_checkstack(L, 8, "rhp: debug");
-        // The paused coroutine stopped in a Lua frame whose top is its own top: room for the values
-        // lua_getlocal / lua_getinfo push onto it while reading (popped again before this returns).
-        if (lua_checkstack(*co, 4) == 0) {
-            failure = make_error(errc::kLimitExceeded, "the paused coroutine's stack is full", "debug");
-            return;
-        }
         const int top = lua_gettop(L);
         const std::string& name = path->front();
         bool found = push_local(*co, L, ar, name) || push_upvalue(*co, L, ar, name);
@@ -862,8 +839,7 @@ result<debug_variable> sandbox_impl::debug_evaluate(request_id id, std::uint32_t
         }
         if (!found) {
             lua_settop(L, top);
-            failure = make_error(errc::kNotFound, std::format("no variable '{}'", name), "debug");
-            return;
+            return make_error(errc::kNotFound, std::format("no variable '{}'", name), "debug");
         }
         for (std::size_t i = 1; i < path->size(); ++i) {
             const std::string& key = (*path)[i];
@@ -876,18 +852,15 @@ result<debug_variable> sandbox_impl::debug_evaluate(request_id id, std::uint32_t
             }
             if (!descend(L, key)) {
                 lua_settop(L, top);
-                failure = make_error(errc::kNotFound, std::format("'{}' has no field {}", (*path)[i - 1], key), "debug");
-                return;
+                return make_error(errc::kNotFound, std::format("'{}' has no field {}", (*path)[i - 1], key), "debug");
             }
         }
         out = render(L, -1, std::string{expression});
         lua_settop(L, top);
+        return std::nullopt;
     });
     if (!read) {
         return std::unexpected{std::move(read).error()};
-    }
-    if (failure) {
-        return std::unexpected{std::move(*failure)};
     }
     return out;
 }

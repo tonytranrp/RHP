@@ -66,6 +66,22 @@ double checked_ms(lua_State* L, int index, std::string_view where) {
     return *ms;
 }
 
+void check_function(lua_State* L, int index, std::string_view where) {
+    if (lua_type(L, index) != LUA_TFUNCTION) {
+        const stack s{L};
+        s.raise(make_error(errc::kTypeMismatch, std::format("expected function, got {}", s.type_name(index)), std::string{where}));
+    }
+}
+
+std::uint64_t checked_id(lua_State* L, int index, std::string_view where) {
+    const stack s{L};
+    const auto id = s.to_integer(index);
+    if (!id || *id <= 0) {
+        s.raise(make_error(errc::kTypeMismatch, std::format("expected an id, got {}", s.type_name(index)), std::string{where}));
+    }
+    return static_cast<std::uint64_t>(*id);
+}
+
 namespace {
 
 // The alloc_kind of a new block from the tag Lua passes as its old size (the object's basic type).
@@ -112,21 +128,6 @@ int on_panic(lua_State* L) {
     std::abort();
 }
 
-// Runs a callable inside lua_pcall, so every Lua API call it makes is protected (an allocation
-// failure under a memory limit becomes an error result instead of a panic).
-template <class F>
-result<void> protect(lua_State* L, F&& fn) {
-    struct holder {
-        std::remove_reference_t<F>* fn;
-    } h{&fn};
-    return stack{L}.run_protected(
-        [](lua_State* inner) -> int {
-            (*static_cast<holder*>(lua_touserdata(inner, 1))->fn)();
-            return 0;
-        },
-        &h);
-}
-
 std::uint32_t source_hash(std::string_view source) noexcept {
     return utils::crc32c(utils::as_bytes(source));
 }
@@ -141,30 +142,28 @@ bool is_scalar(const value& v) noexcept {
     return k == value::kind::kNil || k == value::kind::kBool || k == value::kind::kInteger || k == value::kind::kNumber;
 }
 
-// What stack::push_value pushes for a scalar (no stack check: the caller made room).
-void push_scalar(lua_State* L, const value& v) noexcept {
-    switch (v.type()) {
-    case value::kind::kBool: lua_pushboolean(L, *v.get_if<bool>() ? 1 : 0); break;
-    case value::kind::kInteger: lua_pushinteger(L, static_cast<lua_Integer>(*v.get_if<std::int64_t>())); break;
-    case value::kind::kNumber: lua_pushnumber(L, static_cast<lua_Number>(*v.get_if<double>())); break;
-    default: lua_pushnil(L); break;
-    }
+// What revert, unload, revert_to and revert_all return when a run is active: they happen when it ends.
+revert_report deferred_report() {
+    revert_report report;
+    report.deferred = true;
+    return report;
 }
 
-// Appends what stack::to_value makes of the scalar at `index`; false (nothing appended) for anything else.
-bool append_scalar(value_list& out, lua_State* L, int index) {
-    switch (lua_type(L, index)) {
-    case LUA_TNIL: out.emplace_back(); return true;
-    case LUA_TBOOLEAN: out.emplace_back(lua_toboolean(L, index) != 0); return true;
-    case LUA_TNUMBER:
-        if (lua_isinteger(L, index) != 0) {
-            out.emplace_back(static_cast<std::int64_t>(lua_tointeger(L, index)));
-        } else {
-            out.emplace_back(static_cast<double>(lua_tonumber(L, index)));
-        }
-        return true;
-    default: return false;
+// A module name is dotted lowercase.
+result<void> check_module_name(std::string_view name) {
+    if (!utils::is_dotted_name(name)) {
+        return fail(errc::kInvalidArgument, std::format("'{}' is not a module name (dotted lowercase, e.g. combat.low_grav)", name));
     }
+    return {};
+}
+
+// take_lua_error for a chunk Lua couldn't load: what isn't a memory error is a compile error.
+error compile_error(lua_State* L, int status) {
+    error err = take_lua_error(L, status);
+    if (err.code == errc::kRuntime) {
+        err.code = errc::kCompile;
+    }
+    return err;
 }
 
 // ---- Lua-side builtins ---------------------------------------------------------------------------
@@ -331,12 +330,7 @@ int lua_rhp_emit(lua_State* L) {
 
 // rhp.off(id): removes a timer, frame callback or subscription, or cancels a task, the calling module made.
 int lua_rhp_off(lua_State* L) {
-    const stack s{L};
-    const auto id = s.to_integer(1);
-    if (!id || *id <= 0) {
-        s.raise(make_error(errc::kTypeMismatch, std::format("expected an id, got {}", s.type_name(1)), "rhp.off"));
-    }
-    impl_of(L).remove_by_id(L, static_cast<std::uint64_t>(*id));
+    impl_of(L).remove_by_id(L, checked_id(L, 1, "rhp.off"));
     return 0;
 }
 
@@ -723,10 +717,13 @@ std::uint32_t sandbox_impl::hook_count() const noexcept {
 // line events.
 void sandbox_impl::arm_hook(lua_State* L, bool armed) noexcept {
     credit_hook_progress(L); // lua_sethook restarts the countdown: the meter keeps what ran of it
-    // Line events: every line, or by function (internals::set_line_events switches them without
-    // restarting the instruction countdown, so limits and cancels keep working in loops of calls).
-    const int mask = (armed || counts_everywhere() ? LUA_MASKCOUNT : 0) | line_mask();
-    install_hook(L, mask, static_cast<int>(hook_count()));
+    install_hook(L, hook_mask(armed), static_cast<int>(hook_count()));
+}
+
+// Line events: every line, or by function (internals::set_line_events switches them without
+// restarting the instruction countdown, so limits and cancels keep working in loops of calls).
+int sandbox_impl::hook_mask(bool armed) const noexcept {
+    return (armed || counts_everywhere() ? LUA_MASKCOUNT : 0) | line_mask();
 }
 
 // Cancels and limits only need a bound, so a hook that does nothing else counts at safe points (loop
@@ -753,7 +750,7 @@ void sandbox_impl::rearm_all() noexcept {
     reset_hook();
     for (const auto& [id, req] : requests_) {
         if (req->thread != nullptr) {
-            arm_hook(req->thread, hook_everywhere() || req->checked);
+            arm_hook(req->thread, armed_for(*req));
         }
     }
 }
@@ -773,7 +770,7 @@ bool sandbox_impl::checked_now() const noexcept {
 }
 
 void sandbox_impl::sync_hook(lua_State* L, bool checked) noexcept {
-    const int mask = (checked || counts_everywhere() ? LUA_MASKCOUNT : 0) | line_mask();
+    const int mask = hook_mask(checked);
     const int count = static_cast<int>(hook_count());
     // By function, a thread's line events come and go with its calls: either is in step.
     const int ignored = lines_wanted() == line_mode::kByFunction ? LUA_MASKLINE : 0;
@@ -1058,14 +1055,15 @@ std::uint64_t sandbox_impl::record_effect(std::string label, std::unique_ptr<eff
     return ledger_.record(owner, std::move(label), std::move(e));
 }
 
-result<void> sandbox_impl::run_handler(const effect_owner& owner, c_function fn, void* data) {
-    // Inside a running script the handler is part of that run; from game code it is a run of its own.
+template <class F>
+result<void> sandbox_impl::run_as(const effect_owner& owner, F&& fn) {
+    // Inside a running script this is part of that run; from game code it is a run of its own.
     run_budget local;
     run_budget* budget = running_.empty() ? &local : nullptr;
     result<void> ran;
     {
         const active_scope scope{*this, budget, nullptr, nullptr, owner};
-        ran = stack{state_}.run_protected(fn, data);
+        ran = fn();
     }
     if (budget != nullptr && local.sticky != sticky_stop::kNone) {
         error stop = sticky_error(local.sticky);
@@ -1075,6 +1073,10 @@ result<void> sandbox_impl::run_handler(const effect_owner& owner, c_function fn,
         ran.error().code = stop.code;
     }
     return ran;
+}
+
+result<void> sandbox_impl::run_handler(const effect_owner& owner, c_function fn, void* data) {
+    return run_as(owner, [&] { return stack{state_}.run_protected(fn, data); });
 }
 
 void sandbox_impl::report_fault(const effect_owner& owner, error err) noexcept {
@@ -1091,14 +1093,7 @@ void sandbox_impl::report_fault(const effect_owner& owner, error err) noexcept {
 }
 
 void sandbox_impl::output_line(std::string_view line) {
-    if (options_.on_output) {
-        options_.on_output(current_.request, current_.module, line);
-    } else if (options_.output) {
-        options_.output(line);
-    } else {
-        std::fwrite(line.data(), 1, line.size(), stdout);
-        std::fputc('\n', stdout);
-    }
+    output_for(current_.request, current_.module, line);
 }
 
 void sandbox_impl::emit(const value& v) {
@@ -1129,10 +1124,7 @@ int sandbox_impl::current_env() const noexcept {
     if (mod == nullptr) {
         mod = record(scratch_);
     }
-    if (mod->pending && mod->pending->revision == current_.revision) {
-        return mod->pending->env_ref;
-    }
-    return mod->live.env_ref;
+    return env_ref_of(*mod, current_.revision);
 }
 
 steady::time_point sandbox_impl::script_now() const {
@@ -1421,17 +1413,13 @@ result<void> sandbox_impl::compile(std::string_view source, const std::string& c
             }
         }
         if (status != LUA_OK) {
-            error err = take_lua_error(L, status);
-            if (err.code == errc::kRuntime) {
-                err.code = errc::kCompile;
-            }
-            return std::unexpected{std::move(err)};
+            return std::unexpected{compile_error(L, status)};
         }
     }
     lua_rawgeti(L, LUA_REGISTRYINDEX, env_ref);
     lua_setupvalue(L, -2, 1); // a main chunk's first upvalue is _ENV
     if (coverage_) {
-        coverage_compiled(L, std::string_view{chunk_name}.substr(1));
+        coverage_compiled(L, without_chunk_marker(chunk_name));
     }
     return {};
 }
@@ -1457,9 +1445,7 @@ void sandbox_impl::abandon_requests(Pred pred, std::string_view why) {
         if (req.suspended_once) {
             finished_.emplace_back(id, outcome);
         }
-        if (spare_requests_.size() < kSpareRequests) {
-            spare_requests_.push_back(std::move(node)); // reserved in the constructor: no allocation
-        }
+        recycle(std::move(node));
     }
 }
 
@@ -1537,7 +1523,7 @@ void sandbox_impl::prepare_request(request_record& req, lua_State* co, request_k
     // A handler started while a checked run is active is part of that run's work (an event fired
     // synchronously by its code): it checks too.
     req.checked = checks_requests() && (checked_kind(kind) || checked_depth_ != 0);
-    arm_hook(co, hook_everywhere() || req.checked);
+    arm_hook(co, armed_for(req));
     // lua_xmove never grows the destination: a new coroutine has room for about 20 values.
     if (lua_checkstack(co, nargs + 1) == 0) {
         req.start_error = make_error(errc::kLimitExceeded, std::format("{} arguments don't fit a coroutine stack", nargs));
@@ -1568,7 +1554,11 @@ void sandbox_impl::release_kept(request_record& req) noexcept {
     if (req.thread != nullptr) {
         close_thread(req, false);
     }
-    if (spare_requests_.size() < kSpareRequests) {
+    recycle(std::move(node));
+}
+
+void sandbox_impl::recycle(std::map<request_id, std::unique_ptr<request_record>>::node_type&& node) noexcept {
+    if (!node.empty() && spare_requests_.size() < kSpareRequests) {
         spare_requests_.push_back(std::move(node)); // reserved in the constructor: no allocation
     }
 }
@@ -1599,7 +1589,7 @@ void sandbox_impl::list_request(request_record& req) noexcept {
     req.listed = true;
     // A profiler or debugger that started while it ran re-armed the listed coroutines only (rearm_all).
     if (!hook_dirty_) {
-        sync_hook(req.thread, hook_everywhere() || req.checked);
+        sync_hook(req.thread, armed_for(req));
     }
 }
 
@@ -1776,9 +1766,7 @@ result<value_list> sandbox_impl::complete(request_record& req, result<int> outco
     if (keepable) {
         node = take_unlisted(req);
     }
-    if (!node.empty() && spare_requests_.size() < kSpareRequests) {
-        spare_requests_.push_back(std::move(node)); // reserved in the constructor: no allocation
-    }
+    recycle(std::move(node));
     return out;
 }
 
@@ -1803,33 +1791,21 @@ result<value_list> sandbox_impl::complete_load(module_record& mod, revision_id r
     const effect_owner new_owner{mod.id, revision};
     const int base = lua_gettop(L);
     lua_pushnil(L); // the saved state
-    if (mod.state == module_state::kActive && mod.live.exports_ref != kNoRef) {
-        lua_rawgeti(L, LUA_REGISTRYINDEX, mod.live.exports_ref);
-        lua_getfield(L, -1, "on_save");
-        lua_remove(L, -2);
-        if (lua_type(L, -1) == LUA_TFUNCTION) {
-            if (auto saved = call_sync(old_owner, 0, 1); !saved) {
-                lua_settop(L, base);
-                saved.error().where = std::format("{}.on_save", mod.name);
-                return std::unexpected{std::move(saved).error()};
-            }
-            lua_replace(L, base + 1);
-        } else {
-            lua_pop(L, 1);
+    if (mod.state == module_state::kActive && mod.live.exports_ref != kNoRef && push_export(mod.live.exports_ref, "on_save")) {
+        if (auto saved = call_sync(old_owner, 0, 1); !saved) {
+            lua_settop(L, base);
+            saved.error().where = std::format("{}.on_save", mod.name);
+            return std::unexpected{std::move(saved).error()};
         }
+        lua_replace(L, base + 1);
     }
-    lua_rawgeti(L, LUA_REGISTRYINDEX, mod.pending->exports_ref);
-    lua_getfield(L, -1, "on_restore");
-    lua_remove(L, -2);
-    if (lua_type(L, -1) == LUA_TFUNCTION) {
+    if (push_export(mod.pending->exports_ref, "on_restore")) {
         lua_pushvalue(L, base + 1);
         if (auto restored = call_sync(new_owner, 1, 0); !restored) {
             lua_settop(L, base);
             restored.error().where = std::format("{}.on_restore", mod.name);
             return std::unexpected{std::move(restored).error()};
         }
-    } else {
-        lua_pop(L, 1);
     }
     lua_settop(L, base);
 
@@ -1853,6 +1829,18 @@ result<value_list> sandbox_impl::complete_load(module_record& mod, revision_id r
     return value_list{};
 }
 
+bool sandbox_impl::push_export(int exports_ref, const char* name) {
+    lua_State* L = state_;
+    lua_rawgeti(L, LUA_REGISTRYINDEX, exports_ref);
+    lua_getfield(L, -1, name);
+    lua_remove(L, -2);
+    if (lua_type(L, -1) == LUA_TFUNCTION) {
+        return true;
+    }
+    lua_pop(L, 1);
+    return false;
+}
+
 void sandbox_impl::close_thread(request_record& req, bool failed) noexcept {
     if (failed) {
         // Runs the pending to-be-closed variables of a coroutine that didn't return normally.
@@ -1874,21 +1862,10 @@ void sandbox_impl::close_thread(request_record& req, bool failed) noexcept {
 }
 
 result<void> sandbox_impl::call_sync(const effect_owner& owner, int nargs, int nresults) {
-    run_budget local;
-    run_budget* budget = running_.empty() ? &local : nullptr;
     const int base = lua_gettop(state_) - nargs - 1;
-    result<void> called;
-    {
-        const active_scope scope{*this, budget, nullptr, nullptr, owner};
-        called = stack{state_}.call(nargs, nresults);
-    }
-    if (budget != nullptr && local.sticky != sticky_stop::kNone) {
-        error stop = sticky_error(local.sticky);
-        if (called) {
-            lua_settop(state_, base);
-            return std::unexpected{std::move(stop)};
-        }
-        called.error().code = stop.code;
+    result<void> called = run_as(owner, [&] { return stack{state_}.call(nargs, nresults); });
+    if (!called) {
+        lua_settop(state_, base); // a stop after the call returned: its results go (a failed call left none)
     }
     return called;
 }
@@ -2308,8 +2285,8 @@ result<value_list> sandbox_impl::exec(std::string_view source, std::string_view 
 }
 
 result<std::string> sandbox_impl::compile_module(std::string_view name, std::string_view source) {
-    if (!utils::is_dotted_name(name)) {
-        return fail(errc::kInvalidArgument, std::format("'{}' is not a module name (dotted lowercase, e.g. combat.low_grav)", name));
+    if (auto named = check_module_name(name); !named) {
+        return std::unexpected{std::move(named).error()};
     }
     const std::string chunk = std::format("@{}", name);
     result<std::string> out = std::string{};
@@ -2317,11 +2294,7 @@ result<std::string> sandbox_impl::compile_module(std::string_view name, std::str
         lua_State* L = state_;
         const int status = luaL_loadbufferx(L, source.data(), source.size(), chunk.c_str(), "t");
         if (status != LUA_OK) {
-            error err = take_lua_error(L, status);
-            if (err.code == errc::kRuntime) {
-                err.code = errc::kCompile;
-            }
-            out = std::unexpected{std::move(err)};
+            out = std::unexpected{compile_error(L, status)};
             return;
         }
         std::string dumped;
@@ -2344,8 +2317,8 @@ result<std::string> sandbox_impl::compile_module(std::string_view name, std::str
 result<module_id> sandbox_impl::load(std::string_view name, std::string_view source, std::string_view bytecode) {
     const operation_scope operation{*this};
     drain();
-    if (!utils::is_dotted_name(name)) {
-        return fail(errc::kInvalidArgument, std::format("'{}' is not a module name (dotted lowercase, e.g. combat.low_grav)", name));
+    if (auto named = check_module_name(name); !named) {
+        return std::unexpected{std::move(named).error()};
     }
     if (const auto existing = find(name)) {
         auto reloaded = reload(*existing, source, bytecode);
@@ -2672,9 +2645,7 @@ result<revert_report> sandbox_impl::revert(module_id id) {
                 (void)revert_module(*mod);
             }
         })) {
-        revert_report report;
-        report.deferred = true;
-        return report;
+        return deferred_report();
     }
     drain();
     module_record* mod = record(id);
@@ -2692,10 +2663,7 @@ revert_report sandbox_impl::unload_module(module_record& mod) {
         (void)protect(state_, [&] {
             lua_State* L = state_;
             const int base = lua_gettop(L);
-            lua_rawgeti(L, LUA_REGISTRYINDEX, mod.live.exports_ref);
-            lua_getfield(L, -1, "on_unload");
-            lua_remove(L, -2);
-            if (lua_type(L, -1) == LUA_TFUNCTION) {
+            if (push_export(mod.live.exports_ref, "on_unload")) {
                 (void)call_sync(effect_owner{mod.id, mod.live.revision}, 0, 0);
             }
             lua_settop(L, base);
@@ -2739,9 +2707,7 @@ result<revert_report> sandbox_impl::unload(module_id id, bool forced) {
                 (void)unload_module(*mod);
             }
         })) {
-        revert_report report;
-        report.deferred = true;
-        return report;
+        return deferred_report();
     }
     drain();
     module_record* mod = record(id);
@@ -2770,9 +2736,7 @@ result<revert_report> sandbox_impl::revert_to(std::string_view tag) {
         return report;
     };
     if (defer_if_running([apply] { (void)apply(); })) {
-        revert_report report;
-        report.deferred = true;
-        return report;
+        return deferred_report();
     }
     drain();
     auto report = apply();
@@ -2799,9 +2763,7 @@ revert_report sandbox_impl::revert_all() {
         return report;
     };
     if (defer_if_running([apply] { (void)apply(); })) {
-        revert_report report;
-        report.deferred = true;
-        return report;
+        return deferred_report();
     }
     drain();
     auto report = apply();

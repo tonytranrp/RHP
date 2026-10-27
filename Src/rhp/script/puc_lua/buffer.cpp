@@ -32,14 +32,10 @@ namespace {
 
 constexpr std::string_view kBufferLabel = "rhp.buffer";
 
-[[noreturn]] void raise_buffer(lua_State* L, errc code, std::string message, std::string_view where) {
-    stack{L}.raise(make_error(code, std::move(message), std::string{where}));
-}
-
 view_node& self_buffer(lua_State* L, std::string_view method) {
     auto* n = static_cast<view_node*>(luaL_testudata(L, 1, kBufferKey));
     if (n == nullptr) {
-        raise_buffer(L, errc::kTypeMismatch, std::format("expected a buffer, got {}", stack{L}.type_name(1)), std::format("buffer:{}", method));
+        raise(L, errc::kTypeMismatch, std::format("expected a buffer, got {}", stack{L}.type_name(1)), std::format("buffer:{}", method));
     }
     return *n;
 }
@@ -59,7 +55,7 @@ view_node* new_buffer(lua_State* L, std::size_t size) {
 std::size_t size_arg(lua_State* L, int index) {
     const lua_Integer size = luaL_checkinteger(L, index);
     if (size < 0) {
-        raise_buffer(L, errc::kOutOfRange, std::format("a buffer's size can't be negative ({})", size), "rhp.buffer.new");
+        raise(L, errc::kOutOfRange, std::format("a buffer's size can't be negative ({})", size), "rhp.buffer.new");
     }
     return static_cast<std::size_t>(size);
 }
@@ -69,7 +65,7 @@ int buffer_new(lua_State* L) {
     const std::size_t size = size_arg(L, 1);
     const lua_Integer fill = luaL_optinteger(L, 2, 0);
     if (fill < 0 || fill > 255) {
-        raise_buffer(L, errc::kOutOfRange, std::format("{} does not fit a byte", fill), "rhp.buffer.new");
+        raise(L, errc::kOutOfRange, std::format("{} does not fit a byte", fill), "rhp.buffer.new");
     }
     view_node* n = new_buffer(L, size);
     std::memset(n->data, static_cast<int>(fill), size);
@@ -91,14 +87,14 @@ int buffer_from(lua_State* L) {
         std::memcpy(n->data, p.data, p.size);
         return 1;
     }
-    raise_buffer(L, errc::kTypeMismatch, std::format("expected a string, a buffer or a span, got {}", stack{L}.type_name(1)), "rhp.buffer.from");
+    raise(L, errc::kTypeMismatch, std::format("expected a string, a buffer or a span, got {}", stack{L}.type_name(1)), "rhp.buffer.from");
 }
 
 // The byte range [pos, pos + len) as an offset, raising when it isn't inside `size` bytes (labelled
 // "buffer:<method>").
 std::size_t position(lua_State* L, lua_Integer pos, std::size_t len, std::size_t size, std::string_view method) {
     if (pos < 1 || static_cast<lua_Unsigned>(pos) - 1 > size || len > size - (static_cast<std::size_t>(pos) - 1)) {
-        raise_buffer(L, errc::kOutOfRange, std::format("bytes [{}, {}] out of range [1, {}]", pos, pos + static_cast<lua_Integer>(len) - 1, size),
+        raise(L, errc::kOutOfRange, std::format("bytes [{}, {}] out of range [1, {}]", pos, pos + static_cast<lua_Integer>(len) - 1, size),
                      std::format("buffer:{}", method));
     }
     return static_cast<std::size_t>(pos) - 1;
@@ -118,7 +114,7 @@ bool big_endian(lua_State* L, int index, std::string_view where) {
     if (order == "be") {
         return true;
     }
-    raise_buffer(L, errc::kInvalidArgument, std::format("byte order must be \"le\" or \"be\", got {}", stack{L}.type_name(index)), where);
+    raise(L, errc::kInvalidArgument, std::format("byte order must be \"le\" or \"be\", got {}", stack{L}.type_name(index)), where);
 }
 
 void order_bytes(std::byte* p, std::size_t n, bool big) noexcept {
@@ -167,7 +163,7 @@ int buffer_write(lua_State* L) {
     }
     order_bytes(bytes, es, big);
     if (!n.writable) {
-        raise_buffer(L, errc::kInvalidArgument, "the buffer is read-only", method_label(L));
+        raise(L, errc::kInvalidArgument, "the buffer is read-only", method_label(L));
     }
     const place p = locate_or_raise(L, n);
     const std::size_t at = position(L, pos, es, p.size, method_name(L));
@@ -184,7 +180,7 @@ int buffer_read_string(lua_State* L) {
     const lua_Integer pos = luaL_checkinteger(L, 2);
     const lua_Integer len = luaL_checkinteger(L, 3);
     if (len < 0) {
-        raise_buffer(L, errc::kOutOfRange, std::format("a length can't be negative ({})", len), "buffer:read_string");
+        raise(L, errc::kOutOfRange, std::format("a length can't be negative ({})", len), "buffer:read_string");
     }
     const place p = locate_or_raise(L, n);
     const std::size_t at = position(L, pos, static_cast<std::size_t>(len), p.size, "read_string");
@@ -199,7 +195,7 @@ int buffer_write_string(lua_State* L) {
     std::size_t len = 0;
     const char* s = luaL_checklstring(L, 3, &len);
     if (!n.writable) {
-        raise_buffer(L, errc::kInvalidArgument, "the buffer is read-only", "buffer:write_string");
+        raise(L, errc::kInvalidArgument, "the buffer is read-only", "buffer:write_string");
     }
     const place p = locate_or_raise(L, n);
     const std::size_t at = position(L, pos, len, p.size, "write_string");
@@ -238,7 +234,7 @@ int buffer_view(lua_State* L) {
     const char* name = luaL_checklstring(L, 2, &len);
     elem_kind k{};
     if (!parse_kind(std::string_view{name, len}, k)) {
-        raise_buffer(L, errc::kInvalidArgument, std::format("unknown element type '{}' (i8, u8, i16, u16, i32, u32, i64, u64, f32, f64, byte)", std::string_view{name, len}),
+        raise(L, errc::kInvalidArgument, std::format("unknown element type '{}' (i8, u8, i16, u16, i32, u32, i64, u64, f32, f64, byte)", std::string_view{name, len}),
                      "buffer:view");
     }
     const lua_Integer pos = luaL_optinteger(L, 3, 1);
@@ -248,7 +244,7 @@ int buffer_view(lua_State* L) {
     const std::size_t fit = (p.size - from) / es;
     const lua_Integer count = luaL_optinteger(L, 4, static_cast<lua_Integer>(fit));
     if (count < 0 || static_cast<lua_Unsigned>(count) > fit) {
-        raise_buffer(L, errc::kOutOfRange, std::format("{} elements of {} bytes from byte {} don't fit a buffer of {}", count, es, pos, p.size), "buffer:view");
+        raise(L, errc::kOutOfRange, std::format("{} elements of {} bytes from byte {} don't fit a buffer of {}", count, es, pos, p.size), "buffer:view");
     }
     push_part(L, 1, from, static_cast<std::size_t>(count), node_shape::kSpan, k);
     return 1;
@@ -261,7 +257,7 @@ int buffer_pack(lua_State* L) {
     const lua_Integer pos = luaL_checkinteger(L, 2);
     luaL_checkstring(L, 3);
     if (!n.writable) {
-        raise_buffer(L, errc::kInvalidArgument, "the buffer is read-only", "buffer:pack");
+        raise(L, errc::kInvalidArgument, "the buffer is read-only", "buffer:pack");
     }
     const int top = lua_gettop(L);
     lua_pushvalue(L, lua_upvalueindex(1));

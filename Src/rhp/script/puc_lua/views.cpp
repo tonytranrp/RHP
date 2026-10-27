@@ -32,14 +32,6 @@ namespace {
 // The node, padded so a payload after it is aligned for anything.
 constexpr std::size_t kNodeSize = (sizeof(view_node) + alignof(std::max_align_t) - 1) / alignof(std::max_align_t) * alignof(std::max_align_t);
 
-[[noreturn]] void raise(lua_State* L, error err) {
-    stack{L}.raise(err);
-}
-
-[[noreturn]] void raise(lua_State* L, errc code, std::string message, std::string_view where) {
-    stack{L}.raise(make_error(code, std::move(message), std::string{where}));
-}
-
 std::string_view type_name_of(lua_State* L, int index) {
     return stack{L}.type_name(index);
 }
@@ -355,6 +347,16 @@ int seq_writable(lua_State* L) {
 
 // ---- struct views ------------------------------------------------------------------------------------
 
+// Copies a fixed string key into a C string for luaL_* (keys are short).
+struct c_key {
+    explicit c_key(std::string_view key) noexcept {
+        const std::size_t len = std::min(key.size(), sizeof text - 1);
+        std::memcpy(text, key.data(), len);
+        text[len] = '\0';
+    }
+    char text[128];
+};
+
 const field_desc* field_of(lua_State* L, int key) {
     lua_pushvalue(L, key);
     const field_desc* f = lua_rawget(L, lua_upvalueindex(1)) == LUA_TLIGHTUSERDATA ? static_cast<const field_desc*>(lua_touserdata(L, -1)) : nullptr;
@@ -379,11 +381,8 @@ void push_field(lua_State* L, view_node& n, const place& p, const field_desc& f)
     }
     case field_shape::kObject: {
         const view_type_info* type = f.nested();
-        char key[128];
-        const std::size_t len = std::min(type->key.size(), sizeof key - 1);
-        std::memcpy(key, type->key.data(), len);
-        key[len] = '\0';
-        view_node* child = new_node(L, 0, key);
+        const c_key key{type->key};
+        view_node* child = new_node(L, 0, key.text);
         child->shape = node_shape::kObject;
         child->origin = node_origin::kParent;
         child->writable = n.writable && f.writable;
@@ -511,19 +510,45 @@ bool same_field(const field_desc& a, const field_desc& b) noexcept {
            a.ranged == b.ranged && a.min == b.min && a.max == b.max;
 }
 
-// Copies a fixed string key into a C string for luaL_* (keys are short).
-struct c_key {
-    explicit c_key(std::string_view key) noexcept {
-        const std::size_t len = std::min(key.size(), sizeof text - 1);
-        std::memcpy(text, key.data(), len);
-        text[len] = '\0';
+// The role check and the journal of a write to host memory at `p` (bytes [offset, offset + len) of
+// its root region) by the code running in `ctx`: whether it may be written (false: the sandbox is
+// closing), or an error without a location (kForbidden: `action` needs the patch role;
+// kMemoryExceeded: journaling `object` failed).
+result<bool> journal_host_write(context& ctx, journal_cache& cache, const place& p, std::size_t offset, std::size_t len, std::string_view action,
+                                std::string_view object) {
+    // A node that journaled in this sandbox already passed the check (the role is the sandbox's).
+    if (cache.ctx != &ctx && !allows(ctx.caller_role(), role::kPatch)) {
+        return fail(errc::kForbidden, std::format("{} needs role {}", action, role::kPatch));
     }
-    char text[128];
-};
+    try {
+        return journal_touch(ctx, cache, p, offset, len);
+    } catch (const std::exception& e) {
+        return fail(errc::kMemoryExceeded, std::format("journaling {} failed: {}", object, e.what()));
+    }
+}
+
+// Narrows `p`, where a part's parent is, to the part `n`: false when it no longer fits (the parent shrank).
+bool narrow_to_part(const view_node& n, place& p) noexcept {
+    const std::size_t size = n.shape == node_shape::kObject ? n.type->size : n.count * elem_size(n.elem);
+    if (n.offset > p.size || size > p.size - n.offset) {
+        return false;
+    }
+    p.data += n.offset;
+    p.size = size;
+    return true;
+}
 
 } // namespace
 
 // ---- nodes -------------------------------------------------------------------------------------------
+
+void raise(lua_State* L, error err) {
+    stack{L}.raise(err);
+}
+
+void raise(lua_State* L, errc code, std::string message, std::string_view where) {
+    stack{L}.raise(make_error(code, std::move(message), std::string{where}));
+}
 
 view_node* to_span_node(lua_State* L, int index) noexcept {
     if (lua_type(L, index) != LUA_TUSERDATA) {
@@ -547,15 +572,9 @@ result<place> locate(const view_node& n) {
     }
     case node_origin::kParent: {
         result<place> p = locate(*n.parent);
-        if (!p) {
-            return p;
-        }
-        const std::size_t size = n.shape == node_shape::kObject ? n.type->size : n.count * elem_size(n.elem);
-        if (n.offset > p->size || size > p->size - n.offset) {
+        if (p && !narrow_to_part(n, *p)) {
             return fail(errc::kOutOfRange, "the view no longer fits the memory it is part of (it shrank)");
         }
-        p->data += n.offset;
-        p->size = size;
         return p;
     }
     }
@@ -573,18 +592,7 @@ bool find_place(const view_node& n, place& out) noexcept {
         out = place{r.data, r.size, &n, r.data, r.size};
         return true;
     }
-    case node_origin::kParent: {
-        if (!find_place(*n.parent, out)) {
-            return false;
-        }
-        const std::size_t size = n.shape == node_shape::kObject ? n.type->size : n.count * elem_size(n.elem);
-        if (n.offset > out.size || size > out.size - n.offset) {
-            return false;
-        }
-        out.data += n.offset;
-        out.size = size;
-        return true;
-    }
+    case node_origin::kParent: return find_place(*n.parent, out) && narrow_to_part(n, out);
     }
     return false;
 }
@@ -610,24 +618,14 @@ bool before_write(lua_State* L, view_node& writer, const place& p, std::size_t o
     if (p.root == nullptr) {
         return true; // a script's own buffer
     }
-    const stack s{L};
-    context& ctx = s.context();
-    const auto what = [&] { return field != nullptr ? field_label(writer, *field) : std::string{writer.label}; };
-    // A node that journaled in this sandbox already passed the check (the role is the sandbox's).
-    if (writer.cache.ctx != &ctx && !allows(ctx.caller_role(), role::kPatch)) {
-        raise(L, errc::kForbidden, std::format("writing host memory needs role {}", role::kPatch), what());
+    result<bool> ok = journal_host_write(stack{L}.context(), writer.cache, p, static_cast<std::size_t>(p.data - p.root_data) + offset, len,
+                                         "writing host memory", "the write");
+    if (!ok) {
+        error err = std::move(ok).error();
+        err.where = field != nullptr ? field_label(writer, *field) : std::string{writer.label};
+        raise(L, std::move(err));
     }
-    std::optional<error> failed;
-    bool ok = false;
-    try {
-        ok = journal_touch(ctx, writer.cache, p, static_cast<std::size_t>(p.data - p.root_data) + offset, len);
-    } catch (const std::exception& e) {
-        failed = make_error(errc::kMemoryExceeded, std::format("journaling the write failed: {}", e.what()), what());
-    }
-    if (failed) {
-        raise(L, std::move(*failed));
-    }
-    return ok;
+    return *ok;
 }
 
 void push_elem(lua_State* L, elem_kind k, const std::byte* p) {
@@ -935,17 +933,12 @@ result<detail::span_arg> stack::to_span(int index, const detail::span_request& r
             }
             if (p->root != nullptr) {
                 // C++ may write any of it: journaled first, like a script's writes.
-                detail::context& ctx = context();
-                if (!allows(ctx.caller_role(), role::kPatch)) {
-                    return fail(errc::kForbidden, std::format("passing host memory to be written needs role {}", role::kPatch));
-                }
-                bool ok = false;
-                try {
-                    ok = detail::journal_touch(ctx, n->cache, *p, static_cast<std::size_t>(p->data - p->root_data), p->size);
-                } catch (const std::exception& e) {
-                    return fail(errc::kMemoryExceeded, std::format("journaling the span failed: {}", e.what()));
-                }
+                const result<bool> ok = detail::journal_host_write(context(), n->cache, *p, static_cast<std::size_t>(p->data - p->root_data), p->size,
+                                                                   "passing host memory to be written", "the span");
                 if (!ok) {
+                    return std::unexpected{ok.error()};
+                }
+                if (!*ok) {
                     return fail(errc::kUnloaded, "the sandbox is closing");
                 }
             }

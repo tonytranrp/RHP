@@ -42,24 +42,6 @@ namespace Rhp::script::detail {
 
 namespace {
 
-// Runs a callable inside lua_pcall (see sandbox.cpp): any Lua error becomes an error result.
-template <class F>
-result<void> protect(lua_State* L, F&& fn) {
-    struct holder {
-        std::remove_reference_t<F>* fn;
-    } h{&fn};
-    return stack{L}.run_protected(
-        [](lua_State* inner) -> int {
-            (*static_cast<holder*>(lua_touserdata(inner, 1))->fn)();
-            return 0;
-        },
-        &h);
-}
-
-double milliseconds_of(steady::duration d) {
-    return std::chrono::duration<double, std::milli>{d}.count();
-}
-
 // Swapped table slots, put back when undone: {table, key, original} as registry references.
 class slot_swap_effect final : public effect {
 public:
@@ -543,10 +525,7 @@ int bridge_frames(lua_State* L) {
             break;
         }
         lua_createtable(L, 0, 4);
-        std::string_view source = ar.source != nullptr ? std::string_view{ar.source, ar.srclen} : std::string_view{};
-        if (!source.empty() && (source.front() == '@' || source.front() == '=')) {
-            source.remove_prefix(1);
-        }
+        const std::string_view source = without_chunk_marker(ar.source != nullptr ? std::string_view{ar.source, ar.srclen} : std::string_view{});
         lua_pushlstring(L, source.data(), source.size());
         lua_setfield(L, -2, "source");
         lua_pushinteger(L, ar.currentline);
@@ -869,10 +848,7 @@ void sandbox_impl::coverage_line(lua_State* /*L*/, lua_Debug* ar) noexcept {
         } else {
             // A prototype seen before maps to its chunk; one that wasn't compiled while recording (or
             // whose address a newer function reuses) is found by its source name.
-            std::string_view source = raw_source;
-            if (!source.empty() && (source.front() == '@' || source.front() == '=')) {
-                source.remove_prefix(1);
-            }
+            const std::string_view source = without_chunk_marker(raw_source);
             const auto it = c.by_proto.find(proto);
             if (it != c.by_proto.end() && c.chunks[it->second].name == source) {
                 index = it->second;

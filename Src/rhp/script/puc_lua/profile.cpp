@@ -32,10 +32,7 @@ constexpr std::size_t kMaxStacks = 100'000;
 // The chunk name a module or exec was compiled under ("@game.combat", "=exec") without its marker.
 std::string_view chunk_of(const lua_Debug& ar) noexcept {
     const std::string_view source = ar.source != nullptr ? std::string_view{ar.source, ar.srclen} : std::string_view{};
-    if (!source.empty() && (source.front() == '@' || source.front() == '=')) {
-        return source.substr(1);
-    }
-    return "?";
+    return has_chunk_marker(source) ? source.substr(1) : std::string_view{"?"};
 }
 
 // "boost (game.combat:40)", "game.combat (main)", "spawn [C]". `name` stands in when Lua knows none.
