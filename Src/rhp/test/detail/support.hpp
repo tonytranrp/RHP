@@ -5,11 +5,13 @@
 #include <cstdint>
 #include <filesystem>
 #include <format>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <system_error>
 #include <utility>
 
+#include <rhp/core/error.hpp>
 #include <rhp/core/result.hpp>
 #include <rhp/core/value.hpp>
 #include <rhp/platform/files.hpp>
@@ -30,6 +32,21 @@ public:
 private:
     value::map fields_;
 };
+
+// A file's text; empty, with `failure` set, when it can't be read.
+[[nodiscard]] inline std::string read_text(const std::filesystem::path& path, std::optional<error>& failure) {
+    auto bytes = platform::read_file(path);
+    if (!bytes) {
+        failure = std::move(bytes).error();
+        return {};
+    }
+    return std::string{reinterpret_cast<const char*>(bytes->data()), bytes->size()};
+}
+
+// A path with '/' separators, as reports show it.
+[[nodiscard]] inline std::string generic(const std::filesystem::path& p) {
+    return p.generic_string();
+}
 
 // Writes `text` to `path` as a whole (platform::replace_file), creating its folder first.
 [[nodiscard]] inline result<void> write_text(const std::filesystem::path& path, std::string_view text) {

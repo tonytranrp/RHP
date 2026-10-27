@@ -596,6 +596,39 @@ private:
 
 } // namespace
 
+// ---- reporter_list ---------------------------------------------------------------------------------------
+
+void reporter_list::run_started(std::uint64_t seed, std::size_t files) {
+    for (auto& r : list_) {
+        r->run_started(seed, files);
+    }
+}
+void reporter_list::file_started(const std::string& file, const std::vector<test_info>& tests) {
+    for (auto& r : list_) {
+        r->file_started(file, tests);
+    }
+}
+void reporter_list::test_started(const test_info& test) {
+    for (auto& r : list_) {
+        r->test_started(test);
+    }
+}
+void reporter_list::test_finished(const test_result& result) {
+    for (auto& r : list_) {
+        r->test_finished(result);
+    }
+}
+void reporter_list::file_finished(const file_result& result) {
+    for (auto& r : list_) {
+        r->file_finished(result);
+    }
+}
+void reporter_list::run_finished(const run_result& result) {
+    for (auto& r : list_) {
+        r->run_finished(result);
+    }
+}
+
 std::unique_ptr<reporter> make_text_reporter(std::ostream& out, bool color, bool verbose, std::vector<coverage_spec> coverage) {
     return std::make_unique<text_reporter>(out, color, verbose, std::move(coverage));
 }

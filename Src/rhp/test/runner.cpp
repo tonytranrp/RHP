@@ -1,5 +1,4 @@
 #include <algorithm>
-#include <cctype>
 #include <charconv>
 #include <chrono>
 #include <cmath>
@@ -11,10 +10,8 @@
 #include <limits>
 #include <map>
 #include <memory>
-#include <mutex>
 #include <optional>
 #include <regex>
-#include <set>
 #include <span>
 #include <string>
 #include <string_view>
@@ -26,9 +23,11 @@
 #include <rhp/core/error.hpp>
 #include <rhp/core/result.hpp>
 #include <rhp/core/value.hpp>
-#include <rhp/platform/files.hpp>
 #include <rhp/script/sandbox.hpp>
+#include <rhp/test/detail/coverage.hpp>
 #include <rhp/test/detail/framework.hpp>
+#include <rhp/test/detail/fuzz_corpus.hpp>
+#include <rhp/test/detail/snapshots.hpp>
 #include <rhp/test/detail/support.hpp>
 #include <rhp/test/fake_registry.hpp>
 #include <rhp/test/runner.hpp>
@@ -45,8 +44,10 @@ using steady = std::chrono::steady_clock;
 namespace {
 
 namespace fs = std::filesystem;
+using detail::generic;
 using detail::object;
-using detail::write_text;
+using detail::read_text;
+using detail::snapshot_store;
 
 constexpr bool kLuaEnabled = RHP_ENABLE != 0;
 
@@ -195,22 +196,9 @@ bool waits_for_require(const error& e) {
     return e.message.find("is not loaded") != std::string::npos || e.message.find("is still loading") != std::string::npos;
 }
 
-std::string read_text(const fs::path& path, std::optional<error>& failure) {
-    auto bytes = platform::read_file(path);
-    if (!bytes) {
-        failure = std::move(bytes).error();
-        return {};
-    }
-    return std::string{reinterpret_cast<const char*>(bytes->data()), bytes->size()};
-}
-
 bool is_test_file(const fs::path& p) {
     const std::string name = p.filename().string();
     return p.extension() == ".lua" && (name.ends_with("_spec.lua") || name.ends_with(".spec.lua") || name.ends_with("_test.lua") || name.starts_with("test_"));
-}
-
-std::string generic(const fs::path& p) {
-    return p.generic_string();
 }
 
 // "scripts/game/combat.lua" under "scripts" -> "game.combat"; init.lua names its folder.
@@ -236,45 +224,6 @@ std::optional<std::string> module_name(const fs::path& relative) {
     return name;
 }
 
-// Long-bracket Lua text for a string: [==[...]==] at a level the text doesn't close.
-// A Lua long string holding `text` exactly: [[...]], [=[...]=], ... (multi-line text starts on its
-// own line: Lua drops a newline right after the opening bracket).
-std::string long_bracket(std::string_view text) {
-    std::size_t level = 0;
-    while (true) {
-        const std::string close = "]" + std::string(level, '=');
-        if (text.find(close + "]") == std::string_view::npos && !text.ends_with(close)) {
-            break;
-        }
-        ++level;
-    }
-    const std::string eq(level, '=');
-    const bool own_line = text.find('\n') != std::string_view::npos || text.starts_with('\r');
-    return std::format("[{}[{}{}]{}]", eq, own_line ? "\n" : "", text, eq);
-}
-
-// A Lua string literal in double quotes.
-std::string lua_quoted(std::string_view text) {
-    std::string out = "\"";
-    for (const char c : text) {
-        switch (c) {
-        case '"': out += "\\\""; break;
-        case '\\': out += "\\\\"; break;
-        case '\n': out += "\\n"; break;
-        case '\r': out += "\\r"; break;
-        case '\t': out += "\\t"; break;
-        default:
-            if (static_cast<unsigned char>(c) < 0x20 || c == 0x7f) {
-                out += std::format("\\{:03}", static_cast<unsigned char>(c));
-            } else {
-                out += c;
-            }
-        }
-    }
-    out += '"';
-    return out;
-}
-
 bool name_matches(const std::string& name, const std::string& filter) {
     if (filter.size() >= 2 && filter.front() == '/' && filter.back() == '/') {
         try {
@@ -285,44 +234,6 @@ bool name_matches(const std::string& name, const std::string& filter) {
     }
     return name.find(filter) != std::string::npos;
 }
-
-// Lines between "-- rhp: coverage off" and "-- rhp: coverage on" (also luacov's disable / enable).
-std::set<std::uint32_t> excluded_lines(std::string_view source) {
-    std::set<std::uint32_t> out;
-    bool off = false;
-    std::uint32_t line = 1;
-    std::size_t start = 0;
-    while (start <= source.size()) {
-        const std::size_t end = std::min(source.find('\n', start), source.size());
-        const std::string_view text = source.substr(start, end - start);
-        if (text.find("rhp: coverage off") != std::string_view::npos || text.find("luacov: disable") != std::string_view::npos) {
-            off = true;
-        }
-        if (off) {
-            out.insert(line);
-        }
-        if (text.find("rhp: coverage on") != std::string_view::npos || text.find("luacov: enable") != std::string_view::npos) {
-            off = false;
-        }
-        if (end >= source.size()) {
-            break;
-        }
-        start = end + 1;
-        ++line;
-    }
-    return out;
-}
-
-// ---- the snapshot store of one test file ---------------------------------------------------------------
-
-struct snapshot_store {
-    fs::path path;
-    bool loaded = false;
-    std::map<std::string, std::string> stored;  // key -> serialized value
-    std::map<std::string, std::string> written; // what this run checked or stored
-    bool dirty = false;
-    std::string broken; // why the file can't be read: its tests fail, and it isn't rewritten
-};
 
 } // namespace
 
@@ -366,9 +277,8 @@ struct runner::impl {
     std::vector<std::string> run_notes;
 
     // Coverage and profile of the whole run.
-    std::map<std::string, std::map<std::uint32_t, std::uint64_t>> coverage_hits; // file -> line -> hits
-    std::map<std::string, std::set<std::uint32_t>> coverage_lines;               // file -> executable lines
-    std::map<std::string, std::uint64_t> profile;                                // stack -> samples
+    detail::coverage_totals coverage;
+    std::map<std::string, std::uint64_t> profile; // stack -> samples
 
     impl(run_options o, install_fn i) : options(std::move(o)), install(std::move(i)) {
         std::error_code ec;
@@ -726,13 +636,16 @@ struct runner::impl {
             return value{value::array{failures.begin(), failures.end()}};
         }
         if (command == "snapshot") {
-            return snapshot(arg_text(0), arg_text(1));
+            if (snapshots == nullptr) {
+                return object{}.set("status", value{"missing"}).done();
+            }
+            return detail::check_snapshot(*snapshots, arg_text(0), arg_text(1), options.ci, options.update_snapshots);
         }
         if (command == "corpus_load") {
-            return corpus_load(arg_text(0));
+            return detail::corpus_load(detail::corpus_dir(root, current_file, arg_text(0)));
         }
         if (command == "corpus_save") {
-            return corpus_save(arg_text(0), arg_text(1), arg_text(2));
+            return detail::corpus_save(detail::corpus_dir(root, current_file, arg_text(0)), arg_text(1), arg_text(2), run_notes);
         }
         if (command == "api") {
             return options.api ? *options.api : value{value::map{}};
@@ -754,213 +667,6 @@ struct runner::impl {
             return value{};
         }
         return fail(errc::kNotFound, std::format("the runner has no service '{}'", command));
-    }
-
-    // Snapshots of the current file: __snapshots__/<file name>.snap.lua next to it, a Lua chunk
-    // returning {[key] = text}. Read with a sandbox of its own.
-    void load_snapshots(snapshot_store& store) {
-        store.loaded = true;
-        std::error_code ec;
-        if (!fs::exists(store.path, ec)) {
-            return;
-        }
-        std::optional<error> failure;
-        const std::string source = read_text(store.path, failure);
-        if (failure) {
-            store.broken = std::format("can't read {}: {}", generic(store.path), failure->message);
-            return;
-        }
-        script::sandbox_options reader_options{.caller_role = role::kObserve, .output = [](std::string_view) {}};
-        reader_options.limits.instructions = 100'000'000; // a corrupted file can't hang the run
-        reader_options.limits.wall_ms = 10'000;
-        sandbox reader{std::move(reader_options)};
-        auto values = reader.exec(source, generic(store.path));
-        const auto* as_array = values && !values->empty() ? values->front().get_if<value::array>() : nullptr;
-        if (as_array != nullptr && as_array->empty()) {
-            return; // `return {}`: no snapshots left
-        }
-        if (!values || values->empty() || values->front().get_if<value::map>() == nullptr) {
-            store.broken = std::format("{} isn't a snapshot file (fix or delete it): {}", generic(store.path),
-                                       !values ? std::format("{}", values.error()) : std::string{"it doesn't return a table"});
-            return;
-        }
-        if (const auto* m = values->front().get_if<value::map>()) {
-            for (const auto& [k, v] : *m) {
-                const auto* key = k.get_if<std::string>();
-                const auto* text = v.get_if<std::string>();
-                if (key != nullptr && text != nullptr) {
-                    store.stored[*key] = *text;
-                }
-            }
-        }
-    }
-
-    value snapshot(const std::string& key, const std::string& text) {
-        if (snapshots == nullptr) {
-            return object{}.set("status", value{"missing"}).done();
-        }
-        snapshot_store& store = *snapshots;
-        if (!store.loaded) {
-            load_snapshots(store);
-        }
-        if (!store.broken.empty()) {
-            return object{}.set("status", value{"broken"}).set("message", value{store.broken}).done();
-        }
-        if (const auto seen = store.written.find(key); seen != store.written.end() && seen->second != text) {
-            return object{}
-                .set("status", value{"broken"})
-                .set("message", value{std::format("two snapshots are named '{}' in this run (tests with the same full name? name them: assert.snapshot(v, 'name'))", key)})
-                .done();
-        }
-        store.written[key] = text;
-        const auto it = store.stored.find(key);
-        if (it == store.stored.end()) {
-            if (options.ci && !options.update_snapshots) {
-                return object{}.set("status", value{"missing"}).done();
-            }
-            store.dirty = true;
-            return object{}.set("status", value{"new"}).done();
-        }
-        if (it->second == text) {
-            return object{}.set("status", value{"match"}).done();
-        }
-        if (options.update_snapshots) {
-            store.dirty = true;
-            return object{}.set("status", value{"updated"}).done();
-        }
-        return object{}.set("status", value{"mismatch"}).set("stored", value{it->second}).done();
-    }
-
-    void save_snapshots(snapshot_store& store) {
-        if (!store.loaded || !store.broken.empty()) {
-            return;
-        }
-        // Keys no test checked are obsolete: kept, or dropped with --update-snapshots.
-        std::map<std::string, std::string> out = store.written;
-        std::size_t obsolete = 0;
-        for (const auto& [k, v] : store.stored) {
-            if (!store.written.contains(k)) {
-                if (options.update_snapshots) {
-                    store.dirty = true;
-                } else {
-                    out.emplace(k, v);
-                }
-                ++obsolete;
-            } else if (!options.update_snapshots && store.written.at(k) != v) {
-                out[k] = v; // a mismatch keeps the stored value
-            }
-        }
-        if (obsolete != 0 && !options.update_snapshots) {
-            run_notes.push_back(std::format("{}: {} snapshot(s) no test checked (obsolete: --update-snapshots removes them)", relative(store.path), obsolete));
-        }
-        if (!store.dirty) {
-            return;
-        }
-        std::string text = std::format("-- Snapshots of {} (Rhp::test). Review changes to it like code.\nreturn {{\n", current_file);
-        for (const auto& [k, v] : out) {
-            text += std::format("  [{}] = {},\n", lua_quoted(k), long_bracket(v));
-        }
-        text += "}\n";
-        if (auto written = write_text(store.path, text); !written) {
-            run_notes.push_back(std::format("can't write {}: {}", relative(store.path), written.error()));
-        }
-    }
-
-    fs::path corpus_dir(const std::string& name) const {
-        std::string safe;
-        for (const char c : name) {
-            safe += (std::isalnum(static_cast<unsigned char>(c)) != 0 || c == '-' || c == '_') ? c : '_';
-        }
-        if (safe.size() > 70) {
-            safe.resize(70);
-        }
-        // The hash of the exact name: "a+b" and "a b", or names differing only in case, don't share inputs.
-        safe = std::format("{}_{:08x}", safe, utils::crc32c(utils::as_bytes(name)));
-        const fs::path file{current_file};
-        return root / file.parent_path() / "__fuzz__" / file.stem() / safe;
-    }
-
-    value corpus_load(const std::string& name) {
-        value::array out;
-        std::error_code ec;
-        const fs::path dir = corpus_dir(name);
-        if (!fs::is_directory(dir, ec)) {
-            return value{std::move(out)};
-        }
-        std::vector<fs::path> files;
-        for (fs::directory_iterator it{dir, ec}, end; !ec && it != end; it.increment(ec)) {
-            if (it->is_regular_file() && it->path().extension() == ".lua") {
-                files.push_back(it->path());
-            }
-        }
-        std::ranges::sort(files);
-        for (const fs::path& p : files) {
-            std::optional<error> failure;
-            std::string text = read_text(p, failure);
-            if (!failure) {
-                out.emplace_back(std::move(text));
-            }
-        }
-        return value{std::move(out)};
-    }
-
-    value corpus_save(const std::string& name, const std::string& text, const std::string& kind) {
-        const std::uint32_t hash = utils::crc32c(utils::as_bytes(text));
-        const std::string_view what = kind == "crash" || kind == "cov" ? std::string_view{kind} : std::string_view{"input"};
-        const fs::path path = corpus_dir(name) / std::format("{}-{:08x}.lua", what, hash);
-        std::error_code ec;
-        if (!fs::exists(path, ec)) {
-            if (auto written = write_text(path, text); !written) {
-                run_notes.push_back(std::format("can't save a fuzz input to {}: {}", generic(path), written.error()));
-            }
-        }
-        return value{generic(path)};
-    }
-
-    // ---- coverage ----
-
-    void merge_coverage(const script::coverage_report& report, const std::string& test_file) {
-        for (const script::coverage_chunk& c : report.chunks) {
-            std::string file;
-            if (const auto it = chunk_files.find(c.chunk); it != chunk_files.end()) {
-                file = it->second;
-            } else if (options.coverage_tests && c.chunk == test_file) {
-                file = test_file;
-            } else {
-                continue; // the framework, exec chunks
-            }
-            auto& lines = coverage_lines[file];
-            auto& hits = coverage_hits[file];
-            for (std::size_t i = 0; i < c.lines.size(); ++i) {
-                lines.insert(c.lines[i]);
-                hits[c.lines[i]] += c.hits[i];
-            }
-        }
-    }
-
-    std::vector<file_coverage> coverage_result() const {
-        std::vector<file_coverage> out;
-        for (const auto& [file, lines] : coverage_lines) {
-            std::set<std::uint32_t> skip;
-            std::optional<error> failure;
-            const std::string source = read_text(root / file, failure);
-            if (!failure) {
-                skip = excluded_lines(source);
-            }
-            file_coverage fc;
-            fc.file = file;
-            const auto& hits = coverage_hits.at(file);
-            for (const std::uint32_t line : lines) {
-                if (skip.contains(line)) {
-                    continue;
-                }
-                fc.lines.push_back(line);
-                const auto h = hits.find(line);
-                fc.hits.push_back(h != hits.end() ? h->second : 0);
-            }
-            out.push_back(std::move(fc));
-        }
-        return out;
     }
 
     // ---- one file ----
@@ -1420,7 +1126,7 @@ struct runner::impl {
                 test_result r = run_one(*use, t, round, out);
                 if (own) {
                     if (!options.coverage.empty()) {
-                        merge_coverage(own->coverage(), current_file);
+                        coverage.merge(own->coverage(), chunk_files, options.coverage_tests, current_file);
                     }
                     (void)own->exec("return __rhp_t.finish()", "rhp.test/finish");
                 }
@@ -1444,9 +1150,9 @@ struct runner::impl {
             }
         }
         if (box && !options.coverage.empty() && options.share == isolation::kFile) {
-            merge_coverage(box->coverage(), current_file);
+            coverage.merge(box->coverage(), chunk_files, options.coverage_tests, current_file);
         }
-        save_snapshots(store);
+        detail::save_snapshots(store, options.update_snapshots, current_file, relative(store.path), run_notes);
         snapshots = nullptr;
         box.reset();
         fr.ms = std::chrono::duration<double, std::milli>{steady::now() - started}.count();
@@ -1484,7 +1190,7 @@ struct runner::impl {
             }
         }
         if (!options.coverage.empty()) {
-            rr.coverage = coverage_result();
+            rr.coverage = coverage.result(root);
         }
         for (const auto& [stack, samples] : profile) {
             rr.profile.push_back(script::profile_stack{stack, samples});
@@ -1537,105 +1243,6 @@ result<value> describe_api(const install_fn& install, role caller) {
         }
     }
     return box.api();
-}
-
-// ---- reporter_list ---------------------------------------------------------------------------------------
-
-void reporter_list::run_started(std::uint64_t seed, std::size_t files) {
-    for (auto& r : list_) {
-        r->run_started(seed, files);
-    }
-}
-void reporter_list::file_started(const std::string& file, const std::vector<test_info>& tests) {
-    for (auto& r : list_) {
-        r->file_started(file, tests);
-    }
-}
-void reporter_list::test_started(const test_info& test) {
-    for (auto& r : list_) {
-        r->test_started(test);
-    }
-}
-void reporter_list::test_finished(const test_result& result) {
-    for (auto& r : list_) {
-        r->test_finished(result);
-    }
-}
-void reporter_list::file_finished(const file_result& result) {
-    for (auto& r : list_) {
-        r->file_finished(result);
-    }
-}
-void reporter_list::run_finished(const run_result& result) {
-    for (auto& r : list_) {
-        r->run_finished(result);
-    }
-}
-
-// ---- fake_registry ----------------------------------------------------------------------------------------
-
-fake_registry& fake_registry::instance() {
-    static fake_registry registry;
-    return registry;
-}
-
-void fake_registry::record(std::string_view path, std::vector<value> args) {
-    const std::scoped_lock lock{mutex_};
-    auto it = calls_.find(path);
-    if (it == calls_.end()) {
-        it = calls_.emplace(std::string{path}, std::vector<std::vector<value>>{}).first;
-    }
-    it->second.push_back(std::move(args));
-}
-
-std::vector<std::vector<value>> fake_registry::calls(std::string_view path) const {
-    const std::scoped_lock lock{mutex_};
-    const auto it = calls_.find(path);
-    return it != calls_.end() ? it->second : std::vector<std::vector<value>>{};
-}
-
-void fake_registry::set_returns(std::string_view path, std::vector<value> values) {
-    const std::scoped_lock lock{mutex_};
-    returns_.insert_or_assign(std::string{path}, std::move(values));
-}
-
-std::optional<std::vector<value>> fake_registry::returns(std::string_view path) const {
-    const std::scoped_lock lock{mutex_};
-    const auto it = returns_.find(path);
-    if (it == returns_.end()) {
-        return std::nullopt;
-    }
-    return it->second;
-}
-
-void fake_registry::reset(std::string_view path) {
-    const std::scoped_lock lock{mutex_};
-    if (path.empty()) {
-        calls_.clear();
-        returns_.clear();
-        return;
-    }
-    if (const auto it = calls_.find(path); it != calls_.end()) {
-        calls_.erase(it);
-    }
-    if (const auto it = returns_.find(path); it != returns_.end()) {
-        returns_.erase(it);
-    }
-}
-
-void fake_registry::clear_calls() {
-    const std::scoped_lock lock{mutex_};
-    calls_.clear();
-}
-
-void fake_registry::set_strict(bool strict) {
-    const std::scoped_lock lock{mutex_};
-    strict_ = strict;
-}
-
-bool fake_registry::strict() const {
-    const std::scoped_lock lock{mutex_};
-    return strict_;
 }
 
 } // namespace Rhp::test

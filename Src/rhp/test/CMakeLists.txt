@@ -34,6 +34,10 @@ rhp_add_module(test
         detail/framework.hpp
     SOURCES
         cli.cpp
+        detail/coverage.cpp
+        detail/fuzz_corpus.cpp
+        detail/snapshots.cpp
+        fake_registry.cpp
         options.cpp
         reporters.cpp
         runner.cpp

@@ -15,6 +15,8 @@
 | `detail/framework.hpp` | the framework's Lua sources, embedded at configure time |
 | `lua/*.lua` | the framework: `core` (DSL, protocol), `format` (display, deep equality, serializer), `assert`, `spy`, `test` (clock, measuring), `expect`, `property` (snapshots, properties, fuzzing), `fakes` (from an API description) |
 
+Private (not installed): `detail/support.hpp` (helpers the runner, the reporters and the command line share), `detail/snapshots.hpp` (a test file's snapshot store), `detail/fuzz_corpus.hpp` (saved fuzz inputs), `detail/coverage.hpp` (a run's coverage totals); `fake_registry.cpp` implements `fake_registry.hpp`.
+
 ```cpp
 // lua_tests_main.cpp: the program's real libs, its own test executable
 int main(int argc, char** argv) {
