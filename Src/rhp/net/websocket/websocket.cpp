@@ -252,6 +252,9 @@ private:
                 return;
             }
             if (phase_ == phase::kOpen) {
+                // The peer started the close: reported like the other transports report a peer's
+                // close (a Close answering ours ends close() with kOk).
+                failure_ = make_error(errc::kTransport, "the peer closed the WebSocket", kWhere);
                 send_frame(ws::opcode::kClose, payload); // echo the status (RFC 6455 §5.5.1)
             }
             finish();

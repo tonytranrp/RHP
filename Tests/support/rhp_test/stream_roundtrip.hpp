@@ -50,6 +50,11 @@ void stream_roundtrip(Rhp::endpoint ep, bool release_on_close = false) {
     }
     REQUIRE(poll_until({&io}, [&] { return host.closed && (release_on_close || client.closed); }));
     CHECK(host.text() == big + "lastgoodbye");
+    // The peer's close is a lost link; the end that closed sees its close() finish.
+    CHECK(host.reason.code == Rhp::errc::kTransport);
+    if (!release_on_close) {
+        CHECK(client.reason.code == Rhp::errc::kOk);
+    }
 }
 
 } // namespace rhp_test
