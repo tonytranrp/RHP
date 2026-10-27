@@ -1,9 +1,8 @@
 #pragma once
 
 #include <memory>
-#include <mutex>
 #include <ostream>
-#include <string>
+#include <string_view>
 
 #include <rhp/core/result.hpp>
 #include <rhp/event/events.hpp>
@@ -19,7 +18,7 @@ namespace Rhp::audit {
 // If the file can't be opened the sink drops events; ok() says why.
 class file_sink {
 public:
-    explicit file_sink(const std::string& path);
+    explicit file_sink(std::string_view path);
 
     void operator()(const event::any& e) const;
 

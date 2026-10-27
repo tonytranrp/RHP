@@ -4,6 +4,7 @@
 #include <mutex>
 #include <ostream>
 #include <string>
+#include <string_view>
 
 #include <rhp/audit/sinks.hpp>
 #include <rhp/core/error.hpp>
@@ -18,9 +19,9 @@ struct file_sink::state {
     std::string path;
 };
 
-file_sink::file_sink(const std::string& path) : state_(std::make_shared<state>()) {
-    state_->path = path;
-    state_->out.open(path, std::ios::binary | std::ios::app);
+file_sink::file_sink(std::string_view path) : state_(std::make_shared<state>()) {
+    state_->path = std::string{path};
+    state_->out.open(state_->path, std::ios::binary | std::ios::app);
 }
 
 void file_sink::operator()(const event::any& e) const {
