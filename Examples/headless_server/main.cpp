@@ -287,6 +287,9 @@ int main(int argc, char** argv) {
         std::println(stderr, "{}", keys.error());
         return 1;
     }
+    for (const std::string& warning : keys->warnings()) {
+        std::println(stderr, "warning: {}", warning);
+    }
     Rhp::security::trusted_signers signers;
     if (!o->signers.empty()) {
         auto loaded = Rhp::security::trusted_signers::from_file(o->signers);

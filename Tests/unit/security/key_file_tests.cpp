@@ -1,4 +1,4 @@
-// Identity and dev session files on disk: owner-only, atomic, and the warnings their loaders give.
+// Identity, dev session and keyring files on disk: owner-only, atomic, and the warnings their loaders give.
 #include <array>
 #include <cstddef>
 #include <cstdlib>
@@ -19,6 +19,7 @@
 #include <rhp/security/dev_session.hpp>
 #include <rhp/security/identity_file.hpp>
 #include <rhp/security/key.hpp>
+#include <rhp/security/keyring.hpp>
 #include <rhp/utils/scope_guard.hpp>
 
 using Rhp::errc;
@@ -107,6 +108,26 @@ TEST_CASE("a psk that looks like a passphrase loads with a warning", "[security]
     CHECK(weak->warnings.front().find("not random") != std::string::npos);
     auto strong = identity_file::generate("dev");
     CHECK(identity_file::parse(strong->to_text())->warnings.empty());
+}
+
+TEST_CASE("a keyring file other users can read loads with a warning", "[security][files]") {
+    temp_folder dir;
+    const fs::path path = dir.path / "keys.txt";
+    const std::string text = "dev patch " + key::generate()->to_base64() + "\n";
+    REQUIRE(Rhp::platform::write_private_file(path, std::as_bytes(std::span{text})));
+    auto ring = keyring::from_file(path.string());
+    REQUIRE(ring);
+    CHECK(ring->find("dev") != nullptr);
+    CHECK(ring->warnings().empty());
+
+    // It still loads: the warning is only a warning.
+    let_everyone_read(path);
+    ring = keyring::from_file(path.string());
+    REQUIRE(ring);
+    CHECK(ring->find("dev") != nullptr);
+    REQUIRE(ring->warnings().size() == 1);
+    CHECK(ring->warnings().front().find("other users") != std::string::npos);
+    CHECK(keyring::parse(text)->warnings().empty()); // text alone has no file to judge
 }
 
 TEST_CASE("dev session files round-trip owner-only", "[security][dev_session]") {
