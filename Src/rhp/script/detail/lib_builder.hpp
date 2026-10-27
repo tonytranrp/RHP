@@ -194,9 +194,6 @@ int push_return(stack& s, const Label& label, R& r) {
     return err;
 }
 
-template <class Entry>
-inline constexpr bool is_member_v = Entry::kind == entry_kind::kMethod || Entry::kind == entry_kind::kProperty;
-
 template <class T>
 inline constexpr bool is_vector_v = false;
 
@@ -273,7 +270,7 @@ int invoke_fn(stack& s, Label label, std::index_sequence<Is...>) {
     std::tuple<result<pulled_t<Handles, utils::at_t<args, Is>>>...> pulled{
         pull_arg<Handles, utils::at_t<args, Is>>(s, static_cast<int>(Is) + 1)...};
     std::optional<error> bad;
-    ((bad || std::get<Is>(pulled) ? void() : void(bad = arg_error(std::get<Is>(pulled).error(), label, Is + 1, is_member_v<Entry>))), ...);
+    ((bad || std::get<Is>(pulled) ? void() : void(bad = arg_error(std::get<Is>(pulled).error(), label, Is + 1, is_member_entry<Entry>::value))), ...);
     if (bad) {
         s.raise(*bad);
     }
@@ -607,7 +604,7 @@ int call_view(stack& s, Label label, std::index_sequence<Is...>) {
     std::tuple<result<pulled_t<Handles, utils::at_t<args, Is>>>...> pulled{
         pull_arg<Handles, utils::at_t<args, Is>>(s, static_cast<int>(Is) + 1)...};
     std::optional<error> bad;
-    ((bad || std::get<Is>(pulled) ? void() : void(bad = arg_error(std::get<Is>(pulled).error(), label, Is + 1, is_member_v<Entry>))), ...);
+    ((bad || std::get<Is>(pulled) ? void() : void(bad = arg_error(std::get<Is>(pulled).error(), label, Is + 1, is_member_entry<Entry>::value))), ...);
     if (bad) {
         s.raise(*bad);
     }
@@ -737,7 +734,7 @@ int start_async(stack& s, context& ctx, std::string_view label, std::index_seque
     std::tuple<result<storage_t<utils::at_t<args, Is>>>...> pulled{
         pull_arg<Handles, utils::at_t<args, Is>>(s, static_cast<int>(Is) + 1)...};
     std::optional<error> bad;
-    ((bad || std::get<Is>(pulled) ? void() : void(bad = arg_error(std::get<Is>(pulled).error(), label, Is + 1, is_member_v<Entry>))), ...);
+    ((bad || std::get<Is>(pulled) ? void() : void(bad = arg_error(std::get<Is>(pulled).error(), label, Is + 1, is_member_entry<Entry>::value))), ...);
     if (bad) {
         s.raise(*bad);
     }
@@ -1034,11 +1031,13 @@ struct view_fields<Handles, utils::type_list<Fs...>, V> {
     static constexpr std::array<field_desc, count> fields = make();
 };
 
-template <class Handles, class Fields, class List>
+template <class Handles, class Fields>
 struct view_definer;
 
-template <class Handles, class Fields, class... Hs>
-struct view_definer<Handles, Fields, utils::type_list<Hs...>> {
+template <class... Hs, class Fields>
+struct view_definer<utils::type_list<Hs...>, Fields> {
+    using handles = utils::type_list<Hs...>;
+
     // Defines every view type of the tree with its fields (a type another lib defined gets the
     // fields it lacks; a field defined differently fails with kAlreadyLoaded).
     static result<void> define([[maybe_unused]] stack& s) {
@@ -1046,7 +1045,7 @@ struct view_definer<Handles, Fields, utils::type_list<Hs...>> {
         const auto one = [&]<class V>(std::type_identity<V>) {
             if constexpr (V::kind == entry_kind::kView) {
                 if (r) {
-                    using fields = view_fields<Handles, Fields, V>;
+                    using fields = view_fields<handles, Fields, V>;
                     r = s.define_view_type(view_type_of<V>::info, fields::fields.data(), fields::fields.size());
                 }
             }
@@ -1065,7 +1064,7 @@ int install_lib_tree(lua_State* L) {
     if (auto defined = handle_definer<handles>::define(s); !defined) {
         s.raise(defined.error());
     }
-    if (auto defined = view_definer<handles, fields_in_t<Lib>, handles>::define(s); !defined) {
+    if (auto defined = view_definer<handles, fields_in_t<Lib>>::define(s); !defined) {
         s.raise(defined.error());
     }
     member_installer<handles, members_of_t<Lib>>::install(s);

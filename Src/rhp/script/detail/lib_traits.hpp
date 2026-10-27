@@ -47,41 +47,51 @@ inline constexpr auto handle_key_v = concat_fixed<utils::fixed_string{"rhp.handl
 template <class Entry>
 inline constexpr auto view_key_v = concat_fixed<utils::fixed_string{"rhp.view."}, Entry::fixed_name>();
 
-// ---- collecting handles (and view types) across a lib tree ---------------------------------------
-//
-// `Handles` below is every ::handle and ::view entry of the tree: the types a binding's parameters
-// and results may name. find_handle_t / find_view_t pick one kind.
+// ---- walking a lib tree --------------------------------------------------------------------------
+
+template <class Lib>
+struct flat_entries;
 
 template <class Entry>
-struct handles_of_entry {
-    using type = utils::type_list<>;
+struct flat_entry {
+    using type = utils::type_list<Entry>;
 };
 
 template <class Lib>
-struct handles_of;
-
-template <utils::fixed_string N, class H, auto IsAlive>
-struct handles_of_entry<handle_entry<N, H, IsAlive>> {
-    using type = utils::type_list<handle_entry<N, H, IsAlive>>;
-};
-
-template <utils::fixed_string N, class T>
-struct handles_of_entry<view_entry<N, T>> {
-    using type = utils::type_list<view_entry<N, T>>;
-};
-
-template <class Lib>
-struct handles_of_entry<sub_entry<Lib>> {
-    using type = typename handles_of<Lib>::type;
+struct flat_entry<sub_entry<Lib>> {
+    using type = typename flat_entries<Lib>::type;
 };
 
 template <utils::fixed_string Name, class... Entries>
-struct handles_of<lib<Name, Entries...>> {
-    using type = utils::concat_t<utils::type_list<>, typename handles_of_entry<Entries>::type...>;
+struct flat_entries<lib<Name, Entries...>> {
+    using type = utils::concat_t<utils::type_list<>, typename flat_entry<Entries>::type...>;
 };
 
+// Every entry of a lib tree in declaration order, each ::sub replaced by the entries of its lib.
 template <class Lib>
-using handles_of_t = typename handles_of<Lib>::type;
+using flat_entries_t = typename flat_entries<Lib>::type;
+
+template <class Entry>
+struct is_type_entry : std::bool_constant<Entry::kind == entry_kind::kHandle || Entry::kind == entry_kind::kView> {};
+
+template <class Entry>
+struct is_member_entry : std::bool_constant<Entry::kind == entry_kind::kMethod || Entry::kind == entry_kind::kProperty> {};
+
+template <class Entry>
+struct is_field_entry : std::bool_constant<Entry::kind == entry_kind::kField> {};
+
+// Every ::handle and ::view entry of a lib tree: the types a binding's parameters and results may
+// name (`Handles` below). find_handle_t / find_view_t pick one kind.
+template <class Lib>
+using handles_of_t = utils::filter_t<flat_entries_t<Lib>, is_type_entry>;
+
+// Every method and property of a lib tree.
+template <class Lib>
+using members_of_t = utils::filter_t<flat_entries_t<Lib>, is_member_entry>;
+
+// Every ::field of a lib tree.
+template <class Lib>
+using fields_in_t = utils::filter_t<flat_entries_t<Lib>, is_field_entry>;
 
 // The entry of kind K for C++ type T in Handles, or void.
 template <class Handles, class T, entry_kind K>
@@ -316,67 +326,6 @@ struct view_result<Handles, const std::span<E>> : view_result<Handles, std::span
 template <class Handles, class Entry>
 inline constexpr bool returns_view_v = view_result<Handles, typename Entry::traits::return_type>::is_view;
 
-// ---- methods, properties and fields across a lib tree ------------------------------------------------
-
-// Every method and property across a lib tree.
-template <class Entry>
-struct members_of_entry {
-    using type = utils::type_list<>;
-};
-
-template <class Lib>
-struct members_of;
-
-template <utils::fixed_string N, auto F, class... Tags>
-struct members_of_entry<method_entry<N, F, Tags...>> {
-    using type = utils::type_list<method_entry<N, F, Tags...>>;
-};
-
-template <utils::fixed_string N, auto F, class... Tags>
-struct members_of_entry<property_entry<N, F, Tags...>> {
-    using type = utils::type_list<property_entry<N, F, Tags...>>;
-};
-
-template <class Lib>
-struct members_of_entry<sub_entry<Lib>> {
-    using type = typename members_of<Lib>::type;
-};
-
-template <utils::fixed_string Name, class... Entries>
-struct members_of<lib<Name, Entries...>> {
-    using type = utils::concat_t<utils::type_list<>, typename members_of_entry<Entries>::type...>;
-};
-
-template <class Lib>
-using members_of_t = typename members_of<Lib>::type;
-
-template <class Entry>
-struct fields_in_entry {
-    using type = utils::type_list<>;
-};
-
-template <utils::fixed_string N, auto Member, bool ReadOnly, class... Tags>
-struct fields_in_entry<field_entry<N, Member, ReadOnly, Tags...>> {
-    using type = utils::type_list<field_entry<N, Member, ReadOnly, Tags...>>;
-};
-
-template <class Lib>
-struct fields_in;
-
-template <class Lib>
-struct fields_in_entry<sub_entry<Lib>> {
-    using type = typename fields_in<Lib>::type;
-};
-
-template <utils::fixed_string Name, class... Entries>
-struct fields_in<lib<Name, Entries...>> {
-    using type = utils::concat_t<utils::type_list<>, typename fields_in_entry<Entries>::type...>;
-};
-
-// Every ::field across a lib tree.
-template <class Lib>
-using fields_in_t = typename fields_in<Lib>::type;
-
 // An array field's element type and count.
 template <class T>
 struct array_traits {};
@@ -395,14 +344,11 @@ struct array_traits<std::array<E, N>> {
 
 // ---- install-time checks ---------------------------------------------------------------------------------------
 
-template <class Entry, class Handles>
-struct entry_installable : std::true_type {};
-
 template <class List, class Handles>
-struct params_ok;
+inline constexpr bool params_pull_ok_v = false;
 
 template <class... Args, class Handles>
-struct params_ok<utils::type_list<Args...>, Handles> : std::bool_constant<(arg_traits<Handles, Args>::pull_ok && ...)> {};
+inline constexpr bool params_pull_ok_v<utils::type_list<Args...>, Handles> = (arg_traits<Handles, Args>::pull_ok && ...);
 
 // A view binding is called again on every access with copies of its arguments: they own their data
 // (no span, no struct view parameter), and the binding has nothing to undo and never waits.
@@ -423,46 +369,40 @@ consteval bool view_binding_ok() {
     }
 }
 
-template <utils::fixed_string N, auto F, class... Tags, class Handles>
-struct entry_installable<fn_entry<N, F, Tags...>, Handles>
-    : std::bool_constant<params_ok<utils::args_t<decltype(F)>, Handles>::value &&
-                         (returns_view_v<Handles, fn_entry<N, F, Tags...>>
-                              ? view_binding_ok<fn_entry<N, F, Tags...>, Handles>()
-                              : return_traits<Handles, std::remove_cvref_t<utils::return_type_t<decltype(F)>>>::ok &&
-                                    !std::is_reference_v<utils::return_type_t<decltype(F)>>)> {};
+// One entry of a flat lib tree, installed with the tree's Handles: a binding's parameters and result
+// cross the Lua boundary (a method's or property's handle is one of the tree's), a variable's type
+// crosses both ways (a ::ro's only out), a field belongs to a view type of the tree and a struct
+// field's type is one too.
+template <class Entry, class Handles>
+consteval bool entry_ok() {
+    constexpr entry_kind kind = Entry::kind;
+    if constexpr (kind == entry_kind::kFn || kind == entry_kind::kMethod || kind == entry_kind::kProperty) {
+        using R = typename Entry::traits::return_type;
+        bool ok = params_pull_ok_v<typename Entry::traits::args, Handles>;
+        if constexpr (kind != entry_kind::kFn) {
+            ok = ok && is_handle_v<Handles, typename Entry::self_type>;
+        }
+        if constexpr (returns_view_v<Handles, Entry>) {
+            return ok && view_binding_ok<Entry, Handles>();
+        } else {
+            return ok && return_traits<Handles, std::remove_cvref_t<R>>::ok && !std::is_reference_v<R>;
+        }
+    } else if constexpr (kind == entry_kind::kVar) {
+        return arg_traits<Handles, typename Entry::value_type>::pull_ok && arg_traits<Handles, typename Entry::value_type>::push_ok;
+    } else if constexpr (kind == entry_kind::kRo) {
+        return arg_traits<Handles, typename Entry::value_type>::push_ok;
+    } else if constexpr (kind == entry_kind::kField) {
+        return is_view_v<Handles, typename Entry::owner_type> && (Entry::shape != 3 || is_view_v<Handles, typename Entry::value_type>);
+    } else {
+        return true; // a handle or a view type
+    }
+}
 
-// A field belongs to a view type declared in the tree; a struct field's type is declared too.
-template <utils::fixed_string N, auto Member, bool ReadOnly, class... Tags, class Handles>
-struct entry_installable<field_entry<N, Member, ReadOnly, Tags...>, Handles>
-    : std::bool_constant<is_view_v<Handles, member_owner_t<Member>> &&
-                         (field_entry<N, Member, ReadOnly, Tags...>::shape != 3 ||
-                          is_view_v<Handles, typename field_entry<N, Member, ReadOnly, Tags...>::value_type>)> {};
+template <class Entries, class Handles>
+inline constexpr bool entries_ok_v = false;
 
-template <utils::fixed_string N, auto F, class... Tags, class Handles>
-struct entry_installable<method_entry<N, F, Tags...>, Handles>
-    : std::bool_constant<entry_installable<fn_entry<N, F, Tags...>, Handles>::value && is_handle_v<Handles, self_t<F>>> {};
-
-template <utils::fixed_string N, auto F, class... Tags, class Handles>
-struct entry_installable<property_entry<N, F, Tags...>, Handles>
-    : std::bool_constant<entry_installable<fn_entry<N, F, Tags...>, Handles>::value && is_handle_v<Handles, self_t<F>>> {};
-
-template <utils::fixed_string N, auto Ptr, class... Tags, class Handles>
-struct entry_installable<var_entry<N, Ptr, Tags...>, Handles>
-    : std::bool_constant<arg_traits<Handles, typename var_entry<N, Ptr, Tags...>::value_type>::pull_ok &&
-                         arg_traits<Handles, typename var_entry<N, Ptr, Tags...>::value_type>::push_ok> {};
-
-template <utils::fixed_string N, auto Ptr, class... Tags, class Handles>
-struct entry_installable<ro_entry<N, Ptr, Tags...>, Handles>
-    : std::bool_constant<arg_traits<Handles, typename ro_entry<N, Ptr, Tags...>::value_type>::push_ok> {};
-
-template <class Lib, class Handles>
-struct lib_installable;
-
-template <class Lib, class Handles>
-struct entry_installable<sub_entry<Lib>, Handles> : lib_installable<Lib, Handles> {};
-
-template <utils::fixed_string Name, class... Entries, class Handles>
-struct lib_installable<lib<Name, Entries...>, Handles> : std::bool_constant<(entry_installable<Entries, Handles>::value && ...)> {};
+template <class... Entries, class Handles>
+inline constexpr bool entries_ok_v<utils::type_list<Entries...>, Handles> = (entry_ok<Entries, Handles>() && ...);
 
 template <class Handles>
 struct handles_distinct;
@@ -518,7 +458,7 @@ namespace Rhp::script {
 // tree, every method or property belongs to a handle of the tree under a name of its own, and every
 // field to a view type of the tree.
 template <class L>
-concept installable = lib_type<L> && detail::lib_installable<L, detail::handles_of_t<L>>::value &&
+concept installable = lib_type<L> && detail::entries_ok_v<detail::flat_entries_t<L>, detail::handles_of_t<L>> &&
                       detail::handles_distinct<detail::handles_of_t<L>>::value && detail::members_distinct<detail::members_of_t<L>>::value &&
                       detail::fields_distinct<detail::fields_in_t<L>>::value;
 
