@@ -14,6 +14,7 @@
 #include <asio/ip/udp.hpp>
 #include <asio/steady_timer.hpp>
 
+#include <rhp/net/detail/asio_support.hpp>
 #include <rhp/net/udp_reliable/detail/packet.hpp>
 #include <rhp/net/udp_reliable/udp_reliable.hpp>
 #include <rhp/platform/random.hpp>
@@ -25,6 +26,7 @@ namespace {
 namespace rudp = detail::rudp;
 using udp = asio::ip::udp;
 using clock = std::chrono::steady_clock;
+using detail::context_of;
 using std::chrono::milliseconds;
 
 constexpr const char* kWhere = "net.udp_reliable";
@@ -39,18 +41,6 @@ constexpr milliseconds kMinRto{25};
 constexpr milliseconds kMaxRto{2000};
 constexpr std::chrono::seconds kNoProgress{10}; // outstanding work without an ACK closes the link
 constexpr std::chrono::seconds kFinLinger{12};  // a lost final ACK can still be answered
-
-[[nodiscard]] bool is_loopback(const asio::ip::address& address) noexcept {
-    if (address.is_v4()) {
-        return address.to_v4().is_loopback();
-    }
-    const auto v6 = address.to_v6();
-    return v6.is_loopback() || (v6.is_v4_mapped() && asio::ip::make_address_v4(asio::ip::v4_mapped, v6).is_loopback());
-}
-
-[[nodiscard]] asio::io_context& context_of(io_context& io) {
-    return *static_cast<asio::io_context*>(io.native_handle());
-}
 
 struct peer_state;
 using peer_key = std::pair<udp::endpoint, std::uint64_t>;
@@ -432,11 +422,8 @@ public:
         }
     }
 
-    [[nodiscard]] std::string peer() const override {
-        const auto address = state_->remote.address();
-        return address.is_v6() ? std::format("[{}]:{}", address.to_string(), state_->remote.port()) : std::format("{}:{}", address.to_string(), state_->remote.port());
-    }
-    [[nodiscard]] bool loopback() const noexcept override { return is_loopback(state_->remote.address()); }
+    [[nodiscard]] std::string peer() const override { return detail::address_text(state_->remote.address(), state_->remote.port()); }
+    [[nodiscard]] bool loopback() const noexcept override { return detail::is_loopback(state_->remote.address()); }
 
 private:
     std::shared_ptr<peer_state> state_;
@@ -619,16 +606,12 @@ private:
     return {};
 }
 
-// Same address rule as TCP: plaintext UDP off loopback only with insecure_lan, unless the session adds TLS.
-[[nodiscard]] bool allowed(const endpoint& ep, const asio::ip::address& address) {
-    return ep.insecure_lan || ep.tls == tls_mode::kRequire || is_loopback(address);
-}
-
 [[nodiscard]] result<udp::endpoint> choose(const endpoint& ep, const std::error_code& ec, const udp::resolver::results_type& found) {
     if (ec || found.empty()) {
         return fail(errc::kTransport, std::format("can't resolve {}: {}", ep.host, ec ? ec.message() : "no address"), kWhere);
     }
-    const auto it = std::ranges::find_if(found, [&](const auto& entry) { return allowed(ep, entry.endpoint().address()); });
+    // Same address rule as TCP: plaintext UDP off loopback only with insecure_lan, unless the session adds TLS.
+    const auto it = std::ranges::find_if(found, [&](const auto& entry) { return detail::address_allowed(ep, entry.endpoint().address()); });
     if (it == found.end()) {
         return fail(errc::kForbidden, std::format("{} is not a loopback address: plain UDP there needs Rhp::net::insecure_lan or TLS", ep.host), kWhere);
     }

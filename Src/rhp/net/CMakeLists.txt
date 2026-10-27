@@ -14,7 +14,8 @@ if(RHP_ENABLE)
         websocket/websocket.cpp
         udp_reliable/detail/packet.cpp
     )
-    # The translation units that include Asio (see rhp_net_asio below).
+    # The translation units that include Asio (see rhp_net_asio below). The private header they share,
+# detail/asio_support.hpp, is deliberately not in HEADERS: it includes Asio and is not installed.
     set(rhp_net_asio_sources
         io_context.cpp
         tcp/tcp.cpp

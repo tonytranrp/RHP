@@ -9,7 +9,8 @@
 
 namespace Rhp::net {
 
-// The network reactor (Asio's io_context behind a wall: asio.hpp is only in Rhp::net's .cpp files).
+// The network reactor (Asio's io_context behind a wall: Asio is only in Rhp::net's backend .cpp files
+// and the private header they share, detail/asio_support.hpp).
 // Every link, listener, timer and session lives on it and is only touched from the thread that is
 // running it; other threads hand it work with post().
 class io_context {

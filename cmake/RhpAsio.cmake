@@ -1,7 +1,9 @@
 include_guard(GLOBAL)
 
 # rhp_asio: standalone Asio (header-only). Only Rhp::net links it, PRIVATE and build tree only, and
-# only its .cpp files include asio.hpp, so Asio never reaches a consumer (nor the installed package).
+# only its backend .cpp files (and Src/rhp/net/detail/asio_support.hpp, a private header only they
+# include and that isn't installed) include Asio, so Asio never reaches a consumer (nor the installed
+# package).
 # SYSTEM keeps upstream warnings out of RHP's warnings-as-errors build.
 if(NOT DEFINED asio_SOURCE_DIR)
     message(FATAL_ERROR "RHP: include RhpAsio after CPMAddPackage(NAME asio ...)")

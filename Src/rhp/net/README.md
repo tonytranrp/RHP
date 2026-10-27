@@ -38,7 +38,7 @@ using cfg = Rhp::config<>::transport<my_transport>;   // checked by Rhp::net::tr
 
 ## Rules
 
-- Asio stays in backend `.cpp` files and native test backends; `io_context::native_handle()` reaches the reactor. Public headers contain no Asio types. With `RHP_ENABLE=OFF` the headers stay (configs still name transports) but nothing is compiled and Asio is not fetched.
+- Asio stays in backend `.cpp` files, `detail/asio_support.hpp` (private: not in the installed header set, included only by those `.cpp` files; the shared stream link, `context_of`, `is_loopback`, the address text and the plaintext address rule) and native test backends; `io_context::native_handle()` reaches the reactor. Public headers contain no Asio types. With `RHP_ENABLE=OFF` the headers stay (configs still name transports) but nothing is compiled and Asio is not fetched.
 - Everything about a link, listener or timer happens on its io_context's thread; other threads only `post`. Code that may outlive the context (native callbacks, cross-thread transports) posts through `shared_poster()`, which refuses once the context shuts down.
 - `on_closed` is reported from a posted handler, never re-entrantly from `close()`, and never after the link is destroyed.
 - No default port: every endpoint names one (0 = any free port for TCP and UDP listeners; `local_ipc` requires 0).

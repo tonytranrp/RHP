@@ -1,17 +1,15 @@
-#include <array>
 #include <chrono>
 #include <cstddef>
-#include <deque>
 #include <filesystem>
 #include <format>
+#include <memory>
 #include <optional>
+#include <string>
+#include <system_error>
 #include <utility>
-#include <vector>
 
 #include <asio/io_context.hpp>
-#include <asio/post.hpp>
 #include <asio/steady_timer.hpp>
-#include <asio/write.hpp>
 #if defined(RHP_PLATFORM_WINDOWS)
 #include <asio/windows/overlapped_ptr.hpp>
 #include <asio/windows/stream_handle.hpp>
@@ -23,6 +21,7 @@
 #include <unistd.h>
 #endif
 
+#include <rhp/net/detail/asio_support.hpp>
 #include <rhp/net/local/local.hpp>
 
 namespace Rhp::net {
@@ -35,9 +34,7 @@ using stream = asio::windows::stream_handle;
 using stream = asio::local::stream_protocol::socket;
 #endif
 
-asio::io_context& context_of(io_context& io) {
-    return *static_cast<asio::io_context*>(io.native_handle());
-}
+using detail::context_of;
 
 result<void> check_endpoint(const endpoint& ep) {
     if (ep.port != 0 || ep.host.empty() || ep.host.find('\0') != std::string::npos) {
@@ -60,118 +57,15 @@ result<void> check_endpoint(const endpoint& ep) {
     return {};
 }
 
-struct stream_state : std::enable_shared_from_this<stream_state> {
-    stream_state(stream s, std::string name) : socket(std::move(s)), peer(std::move(name)) {}
-    stream socket;
-    std::string peer;
-    link_handler* handler = nullptr;
-    std::array<std::byte, 65536> input{};
-    std::deque<utils::byte_buffer> writes;
-    std::vector<asio::const_buffer> gather; // the front buffers one write sends (see tcp.cpp)
-    bool writing = false;
-    bool closing = false;
-    bool closed = false;
-
-    void finish(error why) {
-        if (std::exchange(closed, true)) {
-            return;
-        }
-        std::error_code ignored;
-        socket.close(ignored);
-        asio::post(socket.get_executor(), [self = shared_from_this(), why = std::move(why)] {
-            if (auto* handler = std::exchange(self->handler, nullptr)) {
-                handler->on_closed(why);
-            }
-        });
-    }
-
-    void read() {
-        socket.async_read_some(asio::buffer(input), [self = shared_from_this()](const std::error_code& ec, std::size_t n) {
-            if (self->closed) {
-                return;
-            }
-            if (ec) {
-                self->finish(make_error(errc::kTransport, ec.message(), self->peer));
-                return;
-            }
-            if (self->handler != nullptr) {
-                self->handler->on_bytes({self->input.data(), n});
-            }
-            if (!self->closed) {
-                self->read();
-            }
-        });
-    }
-
-    void write() {
-        constexpr std::size_t kMaxGather = 16;
-        writing = true;
-        gather.clear();
-        for (const auto& b : writes) {
-            gather.emplace_back(b.view().data(), b.size());
-            if (gather.size() == kMaxGather) {
-                break;
-            }
-        }
-        asio::async_write(socket, gather, [self = shared_from_this()](const std::error_code& ec, std::size_t) {
-            self->writing = false;
-            if (self->closed) {
-                return;
-            }
-            if (ec) {
-                self->finish(make_error(errc::kTransport, ec.message(), self->peer));
-                return;
-            }
-            self->writes.erase(self->writes.begin(), self->writes.begin() + static_cast<std::ptrdiff_t>(self->gather.size()));
-            if (!self->writes.empty()) {
-                self->write();
-            } else if (self->closing) {
-                self->finish({});
-            }
-        });
-    }
+struct ipc_traits {
+    static error read_error(const std::error_code& ec, const std::string& peer) { return make_error(errc::kTransport, ec.message(), peer); }
+    static void before_close(stream&) noexcept {}
 };
 
-class local_link final : public link {
-public:
-    local_link(stream s, std::string name) : state_(std::make_shared<stream_state>(std::move(s), std::move(name))) {}
-    ~local_link() override {
-        state_->handler = nullptr;
-        if (state_->closing && state_->writing) {
-            return;
-        }
-        state_->closed = true;
-        std::error_code ignored;
-        state_->socket.close(ignored);
-    }
-    void start(link_handler& handler) override {
-        state_->handler = &handler;
-        state_->read();
-    }
-    void send(utils::byte_buffer bytes) override {
-        if (state_->closed || state_->closing || bytes.empty()) {
-            return;
-        }
-        state_->writes.push_back(std::move(bytes));
-        if (!state_->writing) {
-            state_->write();
-        }
-    }
-    void close() noexcept override {
-        try {
-            state_->closing = true;
-            if (!state_->writing) {
-                state_->finish({});
-            }
-        } catch (...) {
-        }
-    }
-    [[nodiscard]] std::string peer() const override { return state_->peer; }
-    [[nodiscard]] bool loopback() const noexcept override { return true; }
-
-private:
-    std::shared_ptr<stream_state> state_;
-};
+// The other end is always on this machine.
+[[nodiscard]] std::unique_ptr<link> make_link(stream socket, std::string name) {
+    return std::make_unique<detail::stream_link<stream, ipc_traits>>(std::move(socket), std::move(name), true);
+}
 
 #if defined(RHP_PLATFORM_WINDOWS)
 
@@ -237,7 +131,7 @@ struct listener_state : std::enable_shared_from_this<listener_state> {
             auto connected = std::move(self->pending);
             self->replenish();
             if (!ec) {
-                self->accepted(std::make_unique<local_link>(std::move(*connected), "pipe:" + self->name));
+                self->accepted(make_link(std::move(*connected), "pipe:" + self->name));
             }
         });
         if (ConnectNamedPipe(pending->native_handle(), op.get()) != FALSE) {
@@ -287,7 +181,7 @@ struct dial_state : std::enable_shared_from_this<dial_state> {
             CloseHandle(pipe);
             connected(fail(errc::kTransport, ec.message(), name));
         } else {
-            connected(std::make_unique<local_link>(std::move(socket), "pipe:" + name));
+            connected(make_link(std::move(socket), "pipe:" + name));
         }
     }
 };
@@ -332,7 +226,7 @@ struct listener_state : std::enable_shared_from_this<listener_state> {
                 return;
             }
             if (!ec && allowed_peer(socket)) {
-                self->accepted(std::make_unique<local_link>(std::move(socket), "unix:" + self->path));
+                self->accepted(make_link(std::move(socket), "unix:" + self->path));
             }
             if (self->open) {
                 self->accept();
@@ -447,7 +341,7 @@ void local_ipc::dial(io_context& io, const endpoint& ep, connect_fn on_connect) 
         } else if (!allowed_peer(*socket)) {
             fn(fail(errc::kForbidden, "the IPC listener runs as another user", path));
         } else {
-            fn(std::make_unique<local_link>(std::move(*socket), "unix:" + path));
+            fn(make_link(std::move(*socket), "unix:" + path));
         }
     });
 #endif

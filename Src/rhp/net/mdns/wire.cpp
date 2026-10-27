@@ -17,6 +17,7 @@
 #include <net/if.h>
 #endif
 
+#include <rhp/net/detail/asio_support.hpp>
 #include <rhp/net/mdns/detail/dns.hpp>
 #include <rhp/net/mdns/mdns.hpp>
 #include <rhp/platform/random.hpp>
@@ -30,6 +31,7 @@ namespace {
 
 using udp = asio::ip::udp;
 using clock = std::chrono::steady_clock;
+using detail::context_of;
 using detail::rr_type;
 using std::chrono::milliseconds;
 
@@ -51,10 +53,6 @@ constexpr unsigned kMaxFollowUps = 64; // per round of missing SRV/TXT/A/AAAA qu
 
 [[nodiscard]] udp::endpoint group_v6(unsigned scope) {
     return {asio::ip::address_v6{{0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xfb}, scope}, detail::kMdnsPort};
-}
-
-[[nodiscard]] asio::io_context& context_of(io_context& io) {
-    return *static_cast<asio::io_context*>(io.native_handle());
 }
 
 // Indices of the interfaces that can carry IPv6 multicast.

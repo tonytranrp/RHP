@@ -1,6 +1,3 @@
-#include <array>
-#include <cstddef>
-#include <deque>
 #include <format>
 #include <memory>
 #include <string>
@@ -9,197 +6,56 @@
 #include <vector>
 
 #include <asio/connect.hpp>
+#include <asio/error.hpp>
 #include <asio/io_context.hpp>
 #include <asio/ip/address.hpp>
 #include <asio/ip/tcp.hpp>
-#include <asio/post.hpp>
-#include <asio/write.hpp>
 
 #include <rhp/core/error.hpp>
 #include <rhp/core/result.hpp>
+#include <rhp/net/detail/asio_support.hpp>
 #include <rhp/net/endpoint.hpp>
 #include <rhp/net/io_context.hpp>
 #include <rhp/net/link.hpp>
 #include <rhp/net/tcp/tcp.hpp>
 #include <rhp/platform/os.hpp>
-#include <rhp/utils/byte_buffer.hpp>
 
 namespace Rhp::net {
 
 namespace {
 
 using atcp = asio::ip::tcp;
-
-[[nodiscard]] asio::io_context& context_of(io_context& io) {
-    return *static_cast<asio::io_context*>(io.native_handle());
-}
-
-[[nodiscard]] bool is_loopback(const asio::ip::address& a) noexcept {
-    if (a.is_v4()) {
-        return a.to_v4().is_loopback();
-    }
-    const auto v6 = a.to_v6();
-    return v6.is_loopback() || (v6.is_v4_mapped() && asio::ip::make_address_v4(asio::ip::v4_mapped, v6).is_loopback());
-}
+using detail::address_allowed;
+using detail::address_text;
+using detail::context_of;
 
 [[nodiscard]] std::string describe(const atcp::endpoint& ep) {
-    const auto addr = ep.address();
-    return addr.is_v6() ? std::format("[{}]:{}", addr.to_string(), ep.port()) : std::format("{}:{}", addr.to_string(), ep.port());
-}
-
-[[nodiscard]] error transport_error(const std::error_code& ec, std::string where) {
-    return make_error(errc::kTransport, ec.message(), std::move(where));
+    return address_text(ep.address(), ep.port());
 }
 
 // ---- link ----------------------------------------------------------------------------------------
 
-// Shared with in-flight Asio operations, so a completion after the link died finds `closed`.
-struct link_state : std::enable_shared_from_this<link_state> {
-    explicit link_state(atcp::socket s) : socket(std::move(s)) {}
-
-    atcp::socket socket;
-    std::string peer;
-    link_handler* handler = nullptr;
-    std::array<std::byte, 64 * 1024> buffer{};
-    std::deque<utils::byte_buffer> writes;
-    // The front buffers one gathered write sends: frames queued behind a write in flight go out
-    // together in the next one (one system call instead of one each).
-    std::vector<asio::const_buffer> gather;
-    bool writing = false;
-    bool closing = false; // close() asked: finish once the queue is written
-    bool closed = false;
-
-    void read() {
-        socket.async_read_some(asio::buffer(buffer), [self = shared_from_this()](const std::error_code& ec, std::size_t n) {
-            if (self->closed) {
-                return;
-            }
-            if (ec) {
-                self->finish(ec == asio::error::eof ? make_error(errc::kTransport, "the peer closed the connection", self->peer)
-                                                    : transport_error(ec, self->peer));
-                return;
-            }
-            if (self->handler != nullptr) {
-                self->handler->on_bytes(utils::bytes_view{self->buffer.data(), n});
-            }
-            if (!self->closed) {
-                self->read();
-            }
-        });
+struct tcp_traits {
+    static error read_error(const std::error_code& ec, const std::string& peer) {
+        return make_error(errc::kTransport, ec == asio::error::eof ? std::string{"the peer closed the connection"} : ec.message(), peer);
     }
-
-    void write_next() {
-        constexpr std::size_t kMaxGather = 16;
-        writing = true;
-        gather.clear();
-        for (const auto& b : writes) {
-            gather.emplace_back(b.view().data(), b.size());
-            if (gather.size() == kMaxGather) {
-                break;
-            }
-        }
-        asio::async_write(socket, gather, [self = shared_from_this()](const std::error_code& ec, std::size_t) {
-            self->writing = false;
-            if (self->closed) {
-                return;
-            }
-            if (ec) {
-                self->finish(transport_error(ec, self->peer));
-                return;
-            }
-            self->writes.erase(self->writes.begin(), self->writes.begin() + static_cast<std::ptrdiff_t>(self->gather.size()));
-            if (!self->writes.empty()) {
-                self->write_next();
-            } else if (self->closing) {
-                self->finish({});
-            }
-        });
-    }
-
-    // Closes the socket and reports `why` once, from a posted handler (never re-entrantly).
-    void finish(error why) {
-        if (closed) {
-            return;
-        }
-        closed = true;
+    // close() shuts the connection down first (the destructor's abort doesn't).
+    static void before_close(atcp::socket& socket) noexcept {
         std::error_code ignored;
         socket.shutdown(atcp::socket::shutdown_both, ignored);
-        socket.close(ignored);
-        // `writes` is kept: an async_write in flight may still read its front buffer (the state
-        // lives until that completion runs, and frees it then).
-        asio::post(socket.get_executor(), [self = shared_from_this(), why = std::move(why)] {
-            if (link_handler* h = std::exchange(self->handler, nullptr)) {
-                h->on_closed(why);
-            }
-        });
     }
 };
 
-class tcp_link final : public link {
-public:
-    explicit tcp_link(atcp::socket socket) : state_(std::make_shared<link_state>(std::move(socket))) {
-        std::error_code ec;
-        state_->socket.set_option(atcp::no_delay{true}, ec);
-        const auto remote = state_->socket.remote_endpoint(ec);
-        state_->peer = ec ? std::string{"tcp:?"} : describe(remote);
-        loopback_ = !ec && is_loopback(remote.address());
-    }
+using tcp_link = detail::stream_link<atcp::socket, tcp_traits>;
 
-    ~tcp_link() override {
-        state_->handler = nullptr;
-        if (state_->closed) {
-            return;
-        }
-        if (state_->closing && state_->writing) {
-            // close() asked for the queue to be written first (a session's last error frame):
-            // the pending write completes on the shared state, which closes the socket after it.
-            return;
-        }
-        state_->closed = true;
-        std::error_code ignored;
-        state_->socket.close(ignored);
-    }
-
-    tcp_link(const tcp_link&) = delete;
-    tcp_link& operator=(const tcp_link&) = delete;
-
-    void start(link_handler& handler) override {
-        state_->handler = &handler;
-        if (!state_->closed) {
-            state_->read();
-        }
-    }
-
-    void send(utils::byte_buffer bytes) override {
-        if (state_->closed || state_->closing || bytes.empty()) {
-            return;
-        }
-        state_->writes.push_back(std::move(bytes));
-        if (!state_->writing) {
-            state_->write_next();
-        }
-    }
-
-    void close() noexcept override {
-        try {
-            if (state_->closed || state_->closing) {
-                return;
-            }
-            state_->closing = true;
-            if (!state_->writing) {
-                state_->finish({});
-            }
-        } catch (...) { // finish() failed to post: the destructor still closes the socket
-        }
-    }
-
-    [[nodiscard]] std::string peer() const override { return state_->peer; }
-    [[nodiscard]] bool loopback() const noexcept override { return loopback_; }
-
-private:
-    std::shared_ptr<link_state> state_;
-    bool loopback_ = false;
-};
+[[nodiscard]] std::unique_ptr<link> make_link(atcp::socket socket) {
+    std::error_code ec;
+    socket.set_option(atcp::no_delay{true}, ec);
+    const auto remote = socket.remote_endpoint(ec);
+    std::string name = ec ? std::string{"tcp:?"} : describe(remote);
+    const bool on_this_machine = !ec && detail::is_loopback(remote.address());
+    return std::make_unique<tcp_link>(std::move(socket), std::move(name), on_this_machine);
+}
 
 // ---- addresses -------------------------------------------------------------------------------------
 
@@ -243,7 +99,7 @@ struct listener_state : std::enable_shared_from_this<listener_state> {
                 return;
             }
             if (!ec) {
-                self->on_accept(std::make_unique<tcp_link>(std::move(socket)));
+                self->on_accept(make_link(std::move(socket)));
             }
             // A failed accept (the peer reset before we got to it, out of descriptors) doesn't stop listening.
             if (self->open) {
@@ -278,13 +134,46 @@ private:
 
 // ---- dial ------------------------------------------------------------------------------------------
 
+// Resolves, keeps the addresses the rules allow, connects to the first that answers.
 struct dial_state : std::enable_shared_from_this<dial_state> {
-    explicit dial_state(asio::io_context& ctx) : resolver(ctx), socket(ctx) {}
+    dial_state(asio::io_context& ctx, endpoint ep, connect_fn fn) : resolver(ctx), socket(ctx), target(std::move(ep)), on_connect(std::move(fn)) {}
 
     atcp::resolver resolver;
     atcp::socket socket;
     endpoint target;
     connect_fn on_connect;
+
+    void start() {
+        resolver.async_resolve(target.host, std::to_string(target.port), atcp::resolver::numeric_service,
+                               [self = shared_from_this()](const std::error_code& ec, const atcp::resolver::results_type& found) { self->resolved(ec, found); });
+    }
+
+    void resolved(const std::error_code& ec, const atcp::resolver::results_type& found) {
+        if (ec) {
+            fail_with(make_error(errc::kTransport, std::format("can't resolve {}: {}", target.host, ec.message()), "net.tcp"));
+            return;
+        }
+        std::vector<atcp::endpoint> allowed;
+        for (const auto& entry : found) {
+            if (address_allowed(target, entry.endpoint().address())) {
+                allowed.push_back(entry.endpoint());
+            }
+        }
+        if (allowed.empty()) {
+            fail_with(forbidden(target).error());
+            return;
+        }
+        asio::async_connect(socket, allowed, [self = shared_from_this()](const std::error_code& connect_ec, const atcp::endpoint&) { self->connected(connect_ec); });
+    }
+
+    void connected(const std::error_code& ec) {
+        if (ec) {
+            fail_with(make_error(errc::kTransport, std::format("can't connect to {}:{}: {}", target.host, target.port, ec.message()), "net.tcp"));
+            return;
+        }
+        auto fn = std::move(on_connect);
+        fn(make_link(std::move(socket)));
+    }
 
     void fail_with(error err) {
         auto fn = std::move(on_connect);
@@ -303,7 +192,7 @@ result<std::unique_ptr<listener>> tcp::listen(io_context& io, const endpoint& ep
     // Bind the first address the rules allow.
     const atcp::endpoint* chosen = nullptr;
     for (const auto& a : *addresses) {
-        if (ep.insecure_lan || ep.tls == tls_mode::kRequire || is_loopback(a.address())) {
+        if (address_allowed(ep, a.address())) {
             chosen = &a;
             break;
         }
@@ -335,36 +224,7 @@ result<std::unique_ptr<listener>> tcp::listen(io_context& io, const endpoint& ep
 }
 
 void tcp::dial(io_context& io, const endpoint& ep, connect_fn on_connect) {
-    auto state = std::make_shared<dial_state>(context_of(io));
-    state->target = ep;
-    state->on_connect = std::move(on_connect);
-    state->resolver.async_resolve(ep.host, std::to_string(ep.port), atcp::resolver::numeric_service,
-                                  [state](const std::error_code& ec, const atcp::resolver::results_type& found) {
-                                      if (ec) {
-                                          state->fail_with(make_error(errc::kTransport, std::format("can't resolve {}: {}", state->target.host, ec.message()), "net.tcp"));
-                                          return;
-                                      }
-                                      std::vector<atcp::endpoint> allowed;
-                                      for (const auto& entry : found) {
-                                          if (state->target.insecure_lan || state->target.tls == tls_mode::kRequire || is_loopback(entry.endpoint().address())) {
-                                              allowed.push_back(entry.endpoint());
-                                          }
-                                      }
-                                      if (allowed.empty()) {
-                                          state->fail_with(forbidden(state->target).error());
-                                          return;
-                                      }
-                                      asio::async_connect(state->socket, allowed, [state](const std::error_code& connect_ec, const atcp::endpoint&) {
-                                          if (connect_ec) {
-                                              state->fail_with(make_error(errc::kTransport,
-                                                                          std::format("can't connect to {}:{}: {}", state->target.host, state->target.port, connect_ec.message()),
-                                                                          "net.tcp"));
-                                              return;
-                                          }
-                                          auto fn = std::move(state->on_connect);
-                                          fn(std::unique_ptr<link>{std::make_unique<tcp_link>(std::move(state->socket))});
-                                      });
-                                  });
+    std::make_shared<dial_state>(context_of(io), ep, std::move(on_connect))->start();
 }
 
 } // namespace Rhp::net
