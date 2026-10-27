@@ -46,22 +46,6 @@ private:
     value::map fields_;
 };
 
-template <utils::type_list_like Handles, class R>
-void append_returns(value::array& out) {
-    using U = std::remove_cvref_t<R>;
-    if constexpr (std::is_void_v<U>) {
-        return;
-    } else if constexpr (script::detail::is_tuple_v<U>) {
-        [&]<class... Ts>(std::type_identity<std::tuple<Ts...>>) {
-            (out.emplace_back(stubs::detail::type_name<Handles, Ts>()), ...);
-        }(std::type_identity<U>{});
-    } else if constexpr (is_result_v<U> || is_async_v<U>) {
-        append_returns<Handles, typename U::value_type>(out);
-    } else {
-        out.emplace_back(stubs::detail::type_name<Handles, U>());
-    }
-}
-
 template <utils::type_list_like Handles, utils::type_list_like Args, std::size_t First, std::size_t... Is>
 value params([[maybe_unused]] std::index_sequence<Is...>) {
     value::array out;
@@ -74,7 +58,8 @@ template <utils::type_list_like Handles, class Entry, std::size_t Skip>
 value function() {
     using traits = typename Entry::traits;
     value::array returns;
-    append_returns<Handles, typename traits::return_type>(returns);
+    script::detail::for_each_result_type<typename traits::return_type>(
+        [&]<class T>(std::type_identity<T>) { returns.emplace_back(stubs::detail::type_name<Handles, T>()); });
     object o;
     o.set("name", value{std::string{Entry::name}})
         .set("params", params<Handles, typename traits::args, Skip>(std::make_index_sequence<traits::arity - Skip>{}))
@@ -140,7 +125,7 @@ value view(role caller, utils::type_list<Fs...>) {
             object o;
             o.set("name", value{std::string{F::name}})
                 .set("type", value{stubs::detail::field_type<Handles, F>()})
-                .set("writable", value{F::shape == script::detail::field_shape::kValue && F::writable && allows(caller, role::kPatch)});
+                .set("writable", value{stubs::detail::assignable<F>(caller)});
             describe_tags<typename F::meta>(o);
             fields.push_back(o.done());
         }

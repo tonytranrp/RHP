@@ -177,6 +177,17 @@ int push_return(stack& s, const Label& label, R& r) {
     return make_error(errc::kForbidden, std::format("needs role {}", need), std::string{label});
 }
 
+// Raises kForbidden unless the caller has role R (every caller has kObserve). `label` converts to
+// std::string_view (read only when it raises).
+template <role R, class Label>
+void check_role(stack& s, const Label& label) {
+    if constexpr (R != role::kObserve) {
+        if (!allows(s.context().caller_role(), R)) {
+            s.raise(forbidden(label, R));
+        }
+    }
+}
+
 [[nodiscard]] inline error out_of_range(std::string_view label, double min, double max) {
     return make_error(errc::kOutOfRange, std::format("must lie in [{}, {}]", min, max), std::string{label});
 }
@@ -791,11 +802,7 @@ int start_async(stack& s, context& ctx, std::string_view label, std::index_seque
 template <class Handles, class Entry>
 int call_fn(lua_State* L) {
     stack s{L};
-    if constexpr (Entry::required != role::kObserve) { // every caller has observe
-        if (!allows(s.context().caller_role(), Entry::required)) {
-            s.raise(forbidden(s.upvalue_string(1), Entry::required));
-        }
-    }
+    check_role<Entry::required>(s, binding_label{s});
     if constexpr (Entry::is_async) {
         context& ctx = s.context();
         const std::string_view label = s.upvalue_string(1);
@@ -822,11 +829,7 @@ int get_property(lua_State* L) {
     using H = find_handle_t<Handles, typename M::self_type>;
     using label = static_label<concat_fixed<concat_fixed<H::fixed_name, utils::fixed_string{"."}>(), M::fixed_name>()>;
     stack s{L};
-    if constexpr (M::required != role::kObserve) {
-        if (!allows(s.context().caller_role(), M::required)) {
-            s.raise(forbidden(label{}, M::required));
-        }
-    }
+    check_role<M::required>(s, label{});
     if constexpr (returns_view_v<Handles, M>) {
         return call_view<Handles, M>(s, label{}, std::make_index_sequence<M::traits::arity>{});
     } else {
@@ -852,9 +855,7 @@ int set_var(lua_State* L) {
     stack s{L};
     context& ctx = s.context();
     const std::string_view label = s.upvalue_string(1);
-    if (!allows(ctx.caller_role(), role::kPatch)) {
-        s.raise(forbidden(label, role::kPatch));
-    }
+    check_role<role::kPatch>(s, label);
     using T = typename Entry::value_type;
     auto incoming = pull_arg<Handles, T>(s, 1);
     if (!incoming) {

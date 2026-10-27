@@ -74,22 +74,10 @@ template <utils::type_list_like Handles, class T>
     }
 }
 
-// One "---@return" per Lua result: tuples spread, Rhp::result<T> and Rhp::async<T> are T (errors
-// are raised).
+// One "---@return" per Lua result (script::detail::for_each_result_type).
 template <utils::type_list_like Handles, class R>
 void append_returns(std::string& out) {
-    using U = std::remove_cvref_t<R>;
-    if constexpr (std::is_void_v<U>) {
-        return;
-    } else if constexpr (script::detail::is_tuple_v<U>) {
-        [&]<class... Ts>(std::type_identity<std::tuple<Ts...>>) {
-            ((out += std::format("---@return {}\n", type_name<Handles, Ts>())), ...);
-        }(std::type_identity<U>{});
-    } else if constexpr (is_result_v<U> || is_async_v<U>) {
-        append_returns<Handles, typename U::value_type>(out);
-    } else {
-        out += std::format("---@return {}\n", type_name<Handles, U>());
-    }
+    script::detail::for_each_result_type<R>([&]<class T>(std::type_identity<T>) { out += std::format("---@return {}\n", type_name<Handles, T>()); });
 }
 
 template <utils::type_list_like Handles, utils::type_list_like Args, std::size_t... Is>
@@ -103,20 +91,9 @@ void append_params([[maybe_unused]] std::string& out, std::index_sequence<Is...>
 // The LuaLS type of a method's results: "" (none), "integer", "integer, string".
 template <utils::type_list_like Handles, class R>
 [[nodiscard]] std::string result_types() {
-    using U = std::remove_cvref_t<R>;
-    if constexpr (std::is_void_v<U>) {
-        return {};
-    } else if constexpr (script::detail::is_tuple_v<U>) {
-        return [&]<class... Ts>(std::type_identity<std::tuple<Ts...>>) {
-            std::string out;
-            ((out += (out.empty() ? "" : ", ") + type_name<Handles, Ts>()), ...);
-            return out;
-        }(std::type_identity<U>{});
-    } else if constexpr (is_result_v<U> || is_async_v<U>) {
-        return result_types<Handles, typename U::value_type>();
-    } else {
-        return type_name<Handles, U>();
-    }
+    std::string out;
+    script::detail::for_each_result_type<R>([&]<class T>(std::type_identity<T>) { out += (out.empty() ? "" : ", ") + type_name<Handles, T>(); });
+    return out;
 }
 
 // "fun(self: entity, arg1: number): vec2" for a method ("async fun(...)" when it waits).
@@ -173,6 +150,13 @@ template <class Meta>
     return out;
 }
 
+// Whether a caller may assign a field (t.x = v): a value field, writable, and the caller has kPatch.
+// An array or struct field is read-only itself (its elements or fields aren't).
+template <class F>
+[[nodiscard]] bool assignable(role caller) noexcept {
+    return F::shape == script::detail::field_shape::kValue && F::writable && allows(caller, role::kPatch);
+}
+
 // The LuaLS type of a view type's field: its value, a span for an array, the nested view's name.
 template <utils::type_list_like Handles, class F>
 [[nodiscard]] std::string field_type() {
@@ -195,7 +179,7 @@ void append_view_class(std::string& out, role caller, utils::type_list<Fs...>) {
     out += std::format("---@class {}\n", V::name);
     const auto field = [&]<class F>(std::type_identity<F>) {
         if constexpr (std::is_same_v<typename F::owner_type, typename V::type>) {
-            const bool writable = F::shape == script::detail::field_shape::kValue && F::writable && allows(caller, role::kPatch);
+            const bool writable = assignable<F>(caller);
             out += std::format("---@field {} {}{}{}\n", F::name, field_type<Handles, F>(), writable ? "" : " read-only", described<typename F::meta>());
         }
     };

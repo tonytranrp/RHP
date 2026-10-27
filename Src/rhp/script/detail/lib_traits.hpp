@@ -141,6 +141,10 @@ consteval view_param view_param_kind() {
 
 // ---- parameters and results ------------------------------------------------------------------------
 
+// Taken by value or const reference.
+template <class T>
+inline constexpr bool by_value_or_const_ref_v = !std::is_reference_v<T> || std::is_const_v<std::remove_reference_t<T>>;
+
 template <class Handles, class T>
 struct arg_traits {
     using U = std::remove_cvref_t<T>;
@@ -155,16 +159,10 @@ struct arg_traits {
     // std::span<E> / std::span<const E>: a typed view, a buffer or (read-only) a table (span_type_ok).
     static constexpr bool span = is_span_v<U>;
     static constexpr view_param view = view_param_kind<Handles, T>();
-    static constexpr bool by_value_or_const_ref = !std::is_reference_v<T> || std::is_const_v<std::remove_reference_t<T>>;
+    static constexpr bool by_value_or_const_ref = by_value_or_const_ref_v<T>;
     static constexpr bool pull_ok = by_value_or_const_ref && (handle || optional_handle || span || view != view_param::kNone || pullable<U>);
     static constexpr bool push_ok = handle || optional_handle || pushable<U>;
 };
-
-template <class T>
-inline constexpr bool is_tuple_v = false;
-
-template <class... Ts>
-inline constexpr bool is_tuple_v<std::tuple<Ts...>> = true;
 
 template <class Handles, class R>
 struct return_traits {
@@ -190,6 +188,20 @@ template <class Handles, class T>
 struct return_traits<Handles, Rhp::async<T>> {
     static constexpr bool ok = return_traits<Handles, T>::ok;
 };
+
+// Calls fn(std::type_identity<T>{}) for each Lua result of a binding returning R, in order: a
+// std::tuple spreads, Rhp::result<T> and Rhp::async<T> are T (their errors are raised), void is none.
+template <class R, class Fn>
+constexpr void for_each_result_type([[maybe_unused]] Fn&& fn) {
+    using U = std::remove_cvref_t<R>;
+    if constexpr (is_tuple_v<U>) {
+        [&]<class... Ts>(std::type_identity<std::tuple<Ts...>>) { (fn(std::type_identity<Ts>{}), ...); }(std::type_identity<U>{});
+    } else if constexpr (is_result_v<U> || is_async_v<U>) {
+        for_each_result_type<typename U::value_type>(fn);
+    } else if constexpr (!std::is_void_v<U>) {
+        fn(std::type_identity<U>{});
+    }
+}
 
 template <class T>
 using storage_t = std::remove_cvref_t<T>;
@@ -266,10 +278,6 @@ struct plain_arg<std::span<const E>> {
         return true;
     }
 };
-
-// Taken by value or const reference.
-template <class T>
-inline constexpr bool by_value_or_const_ref_v = !std::is_reference_v<T> || std::is_const_v<std::remove_reference_t<T>>;
 
 // A parameter the plain trampoline takes: a type with a plain_arg reader, or a handle (checked with
 // pull_handle, as on the general path).

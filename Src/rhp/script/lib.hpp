@@ -286,6 +286,10 @@ inline constexpr std::size_t count_tag_v = (std::size_t{0} + ... + (std::same_as
 template <class... Tags>
 inline constexpr std::size_t undo_count_v = (std::size_t{0} + ... + (is_undo_v<Tags> ? 1u : 0u));
 
+// Tags that journal every call: an undo<G> or irreversible.
+template <class... Tags>
+inline constexpr std::size_t journal_tag_count_v = undo_count_v<Tags...> + count_tag_v<irreversible, Tags...>;
+
 template <class... Tags>
 inline constexpr std::size_t role_count_v = (std::size_t{0} + ... + (is_requires_role_v<Tags> ? 1u : 0u));
 
@@ -391,7 +395,7 @@ consteval undo_feed undo_feed_of() {
 }
 
 template <auto F, class... Tags>
-concept valid_fn_tags = (undo_count_v<Tags...> + count_tag_v<irreversible, Tags...> <= 1) && (role_count_v<Tags...> <= 1) &&
+concept valid_fn_tags = (journal_tag_count_v<Tags...> <= 1) && (role_count_v<Tags...> <= 1) &&
                         (undo_feed_of<F, undo_of_t<Tags...>>() != undo_feed::kInvalid);
 
 // ---- spans -------------------------------------------------------------------------------------------
@@ -429,7 +433,7 @@ consteval bool spans_ok() {
     if constexpr (!span_params_ok_v<utils::args_t<decltype(F)>> || !span_type_ok<U>()) {
         return false;
     } else if constexpr (is_span_v<std::remove_cv_t<U>>) {
-        return undo_count_v<Tags...> + count_tag_v<irreversible, Tags...> == 0 && !is_async_v<std::remove_cvref_t<R>>;
+        return journal_tag_count_v<Tags...> == 0 && !is_async_v<std::remove_cvref_t<R>>;
     } else {
         return true;
     }
@@ -461,7 +465,7 @@ struct fn_entry {
     // Returns Rhp::async<T>: the calling script suspends until the result arrives.
     static constexpr bool is_async = is_async_v<std::remove_cvref_t<typename traits::return_type>>;
     static constexpr role required = [] {
-        role r = (undo_count_v<Tags...> + count_tag_v<irreversible, Tags...>) > 0 ? role::kPatch : role::kObserve;
+        role r = journal_tag_count_v<Tags...> > 0 ? role::kPatch : role::kObserve;
         ((is_requires_role_v<Tags> ? void(r = role_value<Tags>::value) : void()), ...);
         return r;
     }();
@@ -557,28 +561,26 @@ concept method_function = bindable_function<F> && (utils::function_traits<declty
                           (!std::is_reference_v<typename first_arg<utils::args_t<decltype(F)>>::type> ||
                            std::is_const_v<std::remove_reference_t<typename first_arg<utils::args_t<decltype(F)>>::type>>);
 
+// A std::tuple result is several Lua results (push_return spreads it).
 template <class T>
-inline constexpr bool is_tuple_like_v = false;
+inline constexpr bool is_tuple_v = false;
 
 template <class... Ts>
-inline constexpr bool is_tuple_like_v<std::tuple<Ts...>> = true;
-
-template <class A, class B>
-inline constexpr bool is_tuple_like_v<std::pair<A, B>> = true;
+inline constexpr bool is_tuple_v<std::tuple<Ts...>> = true;
 
 // A property reads exactly one value of its handle: one parameter (the handle), one Lua value
-// back (not void, not a tuple, not an async; a Rhp::result of one value is fine), nothing to
+// back (not void, not a std::tuple, not an async; a Rhp::result of one value is fine), nothing to
 // undo, no waiting.
 template <auto F>
 consteval bool one_value_result() {
     using R = std::remove_cvref_t<utils::return_type_t<decltype(F)>>;
     using V = typename unwrap_result<R>::type;
-    return !std::is_void_v<V> && !is_tuple_like_v<std::remove_cvref_t<V>> && !is_async_v<R> && !is_async_v<std::remove_cvref_t<V>>;
+    return !std::is_void_v<V> && !is_tuple_v<std::remove_cvref_t<V>> && !is_async_v<R> && !is_async_v<std::remove_cvref_t<V>>;
 }
 
 template <auto F, class... Tags>
 concept property_function = method_function<F> && (utils::function_traits<decltype(F)>::arity == 1) && one_value_result<F>() &&
-                            (undo_count_v<Tags...> + count_tag_v<irreversible, Tags...> == 0) && (role_count_v<Tags...> <= 1);
+                            (journal_tag_count_v<Tags...> == 0) && (role_count_v<Tags...> <= 1);
 
 template <utils::fixed_string Name, auto F, class... Tags>
 struct method_entry : fn_entry<Name, F, Tags...> {
