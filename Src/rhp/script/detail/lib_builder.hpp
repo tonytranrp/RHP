@@ -340,15 +340,21 @@ int invoke_fn(stack& s, Label label, std::index_sequence<Is...> seq) {
     };
     const auto call = [&]() -> R { return std::invoke(Entry::function, arg.template operator()<Is>()...); };
 
+    // The journal entry's label is made before the call: once the C++ effect happened, only its
+    // record may fail.
+    [[maybe_unused]] std::string journal_label;
+    if constexpr (journaled) {
+        journal_label = std::string_view{label};
+    }
     // The C++ effect happened: journal it before pushing results (pushing may raise). An undo<G> fed
     // with the result gets a copy of `result`.
     [[maybe_unused]] const auto journal = [&]([[maybe_unused]] auto&... result) {
         if constexpr (Entry::feed == undo_feed::kResult) {
-            record_binding_effect<Entry, undo_input_t<Entry::function>>(s.context(), std::string{std::string_view{label}}, result...);
+            record_binding_effect<Entry, undo_input_t<Entry::function>>(s.context(), std::move(journal_label), result...);
         } else if constexpr (keep_args) {
-            record_binding_effect<Entry, capture_t<utils::at_t<args, Is>>...>(s.context(), std::string{std::string_view{label}}, *std::get<Is>(pulled)...);
+            record_binding_effect<Entry, capture_t<utils::at_t<args, Is>>...>(s.context(), std::move(journal_label), *std::get<Is>(pulled)...);
         } else { // irreversible
-            record_binding_effect<Entry>(s.context(), std::string{std::string_view{label}});
+            record_binding_effect<Entry>(s.context(), std::move(journal_label));
         }
     };
 
@@ -690,6 +696,12 @@ public:
 
     int finish(stack& s, context& ctx) override {
         settled_ = true;
+        // The journal entry's label is made before the result is taken: after that, only its record
+        // may fail.
+        [[maybe_unused]] std::string journal_label;
+        if constexpr (Entry::feed != undo_feed::kNone || Entry::is_irreversible) {
+            journal_label = label_;
+        }
         result<value_type> r = later_.take();
         if (!r) {
             error err = std::move(r).error();
@@ -700,11 +712,11 @@ public:
         }
         // The C++ effect happened: journal it before pushing results (pushing may raise).
         if constexpr (Entry::feed == undo_feed::kResult) {
-            record_binding_effect<Entry, value_type>(ctx, label_, *r);
+            record_binding_effect<Entry, value_type>(ctx, std::move(journal_label), *r);
         } else if constexpr (Entry::feed == undo_feed::kArgs) {
-            std::apply([&](const Captured&... a) { record_binding_effect<Entry, Captured...>(ctx, label_, a...); }, captured_.values);
+            std::apply([&](const Captured&... a) { record_binding_effect<Entry, Captured...>(ctx, std::move(journal_label), a...); }, captured_.values);
         } else if constexpr (Entry::is_irreversible) {
-            record_binding_effect<Entry>(ctx, label_);
+            record_binding_effect<Entry>(ctx, std::move(journal_label));
         }
         if constexpr (std::is_void_v<value_type>) {
             return 0;
@@ -866,8 +878,9 @@ int set_var(lua_State* L) {
             s.raise(out_of_range(label, *Entry::meta::lower(), *Entry::meta::upper()));
         }
     }
+    std::string path{label}; // before the write: once it happened, only its record may fail
     auto fx = var_layers<Entry::pointer>::assign(std::move(*incoming));
-    ctx.record_effect(std::string{label}, std::move(fx));
+    ctx.record_effect(std::move(path), std::move(fx));
     return 0;
 }
 
