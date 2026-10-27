@@ -15,8 +15,10 @@
 
 namespace Rhp::net {
 
-// Tag: this endpoint may speak plaintext to non-loopback peers (no TLS). Only on networks you
-// trust: frames are still authenticated (keyed MAC) but anyone on the path can read them.
+// Tag: this endpoint may speak plaintext to non-loopback peers (no TLS), as long as they are local:
+// private (RFC 1918, RFC 4193) or link-local addresses (ip_address::is_local); anyone else still
+// needs TLS. Only on networks you trust: frames are still authenticated (keyed MAC) but anyone on the
+// path can read them.
 struct insecure_lan_t {
     explicit constexpr insecure_lan_t() = default;
 };
@@ -30,7 +32,8 @@ inline constexpr require_tls_t require_tls{};
 
 // When a host or client wraps a connection in TLS (Rhp::config<>::tls<...>):
 //   kAuto     over a network transport (TCP) to or from a non-loopback address, unless the endpoint
-//             says insecure_lan; a host also accepts TLS from anyone who offers it
+//             says insecure_lan and the peer's address is local; a host also accepts TLS from anyone
+//             who offers it
 //   kRequire  always (Rhp::net::require_tls); a host refuses plaintext
 enum class tls_mode : std::uint8_t {
     kAuto,

@@ -110,6 +110,7 @@ if(RHP_ENABLE)
     rhp_add_test_suite(rhp_session_tests
         SOURCES
             session/admission_tests.cpp
+            session/channel_policy_tests.cpp
             session/session_tests.cpp
         LINKS
             Rhp::session

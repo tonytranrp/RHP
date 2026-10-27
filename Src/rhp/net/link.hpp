@@ -55,7 +55,8 @@ public:
     [[nodiscard]] virtual std::span<const std::byte> channel_binding() const noexcept { return {}; }
     // The peer's IP address when the transport has one (TCP, WebSocket, reliable UDP); nullopt for
     // the others (in-process, IPC, a custom transport that doesn't say). Hosts and listening clients
-    // cap unauthenticated connections per source by it.
+    // cap unauthenticated connections per source by it, and insecure_lan speaks plaintext over a
+    // network transport only to a local one (ip_address::is_local; unknown counts as not local).
     [[nodiscard]] virtual std::optional<ip_address> address() const noexcept { return std::nullopt; }
 
 protected:

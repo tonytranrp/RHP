@@ -11,7 +11,7 @@ namespace Rhp::net {
 
 // An IP address. IPv4 is kept in its IPv4-mapped IPv6 form (::ffff:a.b.c.d), so one comparison covers
 // both. Network transports report their peer's (link::address()): admission control counts
-// unauthenticated connections per source by it.
+// unauthenticated connections per source by it, and insecure_lan speaks plaintext only to local ones.
 class ip_address {
 public:
     using bytes_type = std::array<std::uint8_t, 16>;
@@ -38,6 +38,39 @@ public:
         }
         return bytes_[10] == 0xff && bytes_[11] == 0xff;
     }
+
+    // 127.0.0.0/8, ::1
+    [[nodiscard]] constexpr bool is_loopback() const noexcept {
+        if (is_v4()) {
+            return bytes_[12] == 127;
+        }
+        for (std::size_t i = 0; i < 15; ++i) {
+            if (bytes_[i] != 0) {
+                return false;
+            }
+        }
+        return bytes_[15] == 1;
+    }
+
+    // RFC 1918 (10/8, 172.16/12, 192.168/16) and RFC 4193 unique local (fc00::/7)
+    [[nodiscard]] constexpr bool is_private() const noexcept {
+        if (is_v4()) {
+            return bytes_[12] == 10 || (bytes_[12] == 172 && (bytes_[13] & 0xf0) == 16) || (bytes_[12] == 192 && bytes_[13] == 168);
+        }
+        return (bytes_[0] & 0xfe) == 0xfc;
+    }
+
+    // 169.254/16, fe80::/10
+    [[nodiscard]] constexpr bool is_link_local() const noexcept {
+        if (is_v4()) {
+            return bytes_[12] == 169 && bytes_[13] == 254;
+        }
+        return bytes_[0] == 0xfe && (bytes_[1] & 0xc0) == 0x80;
+    }
+
+    // This machine or its site: loopback, private or link-local. Shared address space (CGNAT's
+    // 100.64/10) is not: the far side of a carrier NAT is other people.
+    [[nodiscard]] constexpr bool is_local() const noexcept { return is_loopback() || is_private() || is_link_local(); }
 
     // Who a connection comes from, for per-source limits: the IPv4 address, or the IPv6 /64 (one
     // machine usually holds a whole /64).

@@ -5,9 +5,11 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <utility>
 
 #include <rhp/core/error.hpp>
+#include <rhp/net/address.hpp>
 #include <rhp/net/link.hpp>
 #include <rhp/security/tls/tls.hpp>
 #include <rhp/session/secure_link.hpp>
@@ -19,6 +21,16 @@ namespace {
 
 // The first byte of every TLS record that starts a handshake (ContentType handshake = 22).
 constexpr std::byte kTlsHandshake{0x16};
+
+constexpr std::string_view kTlsRequired = "plaintext connection refused: this endpoint requires TLS";
+constexpr std::string_view kNotLocal = "plaintext connection refused: insecure_lan takes plaintext only from loopback, private (RFC 1918, RFC 4193) and "
+                                       "link-local addresses; anyone else needs TLS";
+
+// Whether insecure_lan may speak plaintext with this link's peer: on this machine, or at a local address.
+[[nodiscard]] bool local_peer(const net::link& link) noexcept {
+    const auto address = link.address();
+    return link.loopback() || (address && address->is_local());
+}
 
 class secure_link final : public net::link, private net::link_handler {
 public:
@@ -34,11 +46,13 @@ public:
           engine_(std::move(engine)),
           mode_(mode::kClient) {}
 
-    secure_link(std::unique_ptr<net::link> inner, std::shared_ptr<security::tls::context> tls, bool plaintext_ok)
+    // `refusal` says why plaintext isn't taken (when it isn't).
+    secure_link(std::unique_ptr<net::link> inner, std::shared_ptr<security::tls::context> tls, bool plaintext_ok, std::string_view refusal = kTlsRequired)
         : inner_(std::move(inner)),
           tls_(std::move(tls)),
           mode_(mode::kSniff),
-          plaintext_ok_(plaintext_ok) {}
+          plaintext_ok_(plaintext_ok),
+          refusal_(refusal) {}
 
     void start(net::link_handler& handler) override {
         handler_ = &handler;
@@ -162,7 +176,7 @@ private:
             return true;
         }
         if (!plaintext_ok_) {
-            fail(make_error(errc::kForbidden, "plaintext connection refused: this endpoint requires TLS", inner_->peer()));
+            fail(make_error(errc::kForbidden, std::string{refusal_}, inner_->peer()));
             return false;
         }
         mode_ = mode::kPlain;
@@ -199,6 +213,7 @@ private:
     std::shared_ptr<security::tls::context> tls_;
     mode mode_;
     bool plaintext_ok_ = false;
+    std::string_view refusal_ = kTlsRequired;
     net::link_handler* handler_ = nullptr;
     utils::byte_buffer held_;
     std::optional<security::tls::channel_binding> binding_;
@@ -214,11 +229,22 @@ result<channel_policy> channel_policy::make(const net::endpoint& ep, bool networ
     p.transport_ep_ = ep;
     p.backend_ = backend.name;
     const bool required = ep.tls == net::tls_mode::kRequire;
-    const bool remote = network_transport && !ep.insecure_lan && !net::is_loopback_host(ep.host);
+    const bool loopback_host = net::is_loopback_host(ep.host);
+    const bool remote = network_transport && !ep.insecure_lan && !loopback_host;
+    // insecure_lan over a network transport: plaintext, with local peers only.
+    const bool lan = network_transport && ep.insecure_lan && !required && !loopback_host;
     const bool dialing = ep.direction == net::endpoint::mode::kDial;
     p.dialing_ = dialing;
+    p.lan_dial_ = dialing && lan;
     p.plaintext_from_loopback_ = !required;
-    p.plaintext_from_anyone_ = !required && (ep.insecure_lan || !network_transport || net::is_loopback_host(ep.host));
+    p.plaintext_from_local_ = lan;
+    p.plaintext_from_anyone_ = !required && (!network_transport || loopback_host);
+    if (const auto ip = net::ip_address::parse(ep.host); p.lan_dial_ && ip && !ip->is_local()) {
+        return fail(errc::kForbidden,
+                    std::format("{}: insecure_lan reaches only loopback, private (RFC 1918, RFC 4193) and link-local addresses, and {} is none of them; use TLS",
+                                ep, ep.host),
+                    "tls");
+    }
     if (required || remote) {
         p.transport_ep_.tls = net::tls_mode::kRequire; // TLS goes on top of what the transport carries
     }
@@ -263,6 +289,12 @@ result<channel_policy> channel_policy::make(const net::endpoint& ep, bool networ
 result<std::unique_ptr<net::link>> channel_policy::wrap(std::unique_ptr<net::link> link) const {
     if (dialing_) {
         if (!dial_tls_) {
+            if (lan_dial_ && !local_peer(*link)) {
+                return fail(errc::kForbidden,
+                            std::format("{} is not a local address: insecure_lan reaches only loopback, private (RFC 1918, RFC 4193) and link-local addresses; use TLS",
+                                        link->peer()),
+                            "tls");
+            }
             return link;
         }
         auto engine = context_->make_engine();
@@ -271,11 +303,15 @@ result<std::unique_ptr<net::link>> channel_policy::wrap(std::unique_ptr<net::lin
         }
         return tls_client(std::move(link), std::move(*engine));
     }
-    const bool plaintext_ok = plaintext_from_anyone_ || (plaintext_from_loopback_ && link->loopback());
-    if (context_ == nullptr && plaintext_ok) {
-        return link;
+    const bool plaintext_ok = plaintext_from_anyone_ || (plaintext_from_loopback_ && link->loopback()) || (plaintext_from_local_ && local_peer(*link));
+    const std::string_view refusal = plaintext_from_local_ ? kNotLocal : kTlsRequired;
+    if (context_ == nullptr) {
+        if (plaintext_ok) {
+            return link;
+        }
+        return fail(errc::kForbidden, std::string{refusal}, link->peer()); // and no TLS to offer instead
     }
-    return tls_server(std::move(link), context_, plaintext_ok);
+    return std::unique_ptr<net::link>{std::make_unique<secure_link>(std::move(link), context_, plaintext_ok, refusal)};
 }
 
 result<std::unique_ptr<net::link>> channel_policy::wrap(result<std::unique_ptr<net::link>> dialed) const {
