@@ -50,6 +50,7 @@ using detail::read_text;
 using detail::snapshot_store;
 
 constexpr bool kLuaEnabled = RHP_ENABLE != 0;
+constexpr std::string_view kNoLua = "this build has no Lua (RHP_ENABLE=OFF): Lua tests can't run";
 
 // ---- small value helpers ----------------------------------------------------------------------------
 
@@ -1076,7 +1077,7 @@ struct runner::impl {
             file_result fr;
             current_file = relative(path);
             fr.file = current_file;
-            fr.errors.push_back(file_error{"this build has no Lua (RHP_ENABLE=OFF): Lua tests can't run", current_file, 0, {}});
+            fr.errors.push_back(file_error{std::string{kNoLua}, current_file, 0, {}});
             out.file_started(current_file, {});
             out.file_finished(fr);
             return fr;
@@ -1226,15 +1227,19 @@ std::vector<std::pair<file_result, std::vector<test_info>>> runner::list() {
         file_result fr;
         impl_->current_file = impl_->relative(path);
         fr.file = impl_->current_file;
-        std::optional<error> failure;
-        const std::string source = read_text(path, failure);
         std::vector<test_info> infos;
-        if (failure) {
-            fr.errors.push_back(file_error{failure->message, fr.file, 0, {}});
+        if constexpr (!kLuaEnabled) {
+            fr.errors.push_back(file_error{std::string{kNoLua}, fr.file, 0, {}}); // as run() reports it
         } else {
-            const auto opened = impl_->open_listed(source, fr.errors);
-            for (const auto& l : opened.tests) {
-                infos.push_back(l.info);
+            std::optional<error> failure;
+            const std::string source = read_text(path, failure);
+            if (failure) {
+                fr.errors.push_back(file_error{failure->message, fr.file, 0, {}});
+            } else {
+                const auto opened = impl_->open_listed(source, fr.errors);
+                for (const auto& l : opened.tests) {
+                    infos.push_back(l.info);
+                }
             }
         }
         out.emplace_back(std::move(fr), std::move(infos));

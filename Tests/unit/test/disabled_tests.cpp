@@ -41,6 +41,13 @@ TEST_CASE("without Lua test files report that they can't run", "[test][disabled]
     REQUIRE(result.files[0].errors.size() == 1);
     CHECK(result.files[0].errors[0].message.find("RHP_ENABLE=OFF") != std::string::npos);
     CHECK_FALSE(result.totals.ok());
+
+    // Listing says the same, not why a sandbox couldn't enable testing.
+    const auto listed = r.list();
+    REQUIRE(listed.size() == 1);
+    CHECK(listed[0].second.empty());
+    REQUIRE(listed[0].first.errors.size() == 1);
+    CHECK(listed[0].first.errors[0].message == result.files[0].errors[0].message);
 }
 
 TEST_CASE("without Lua the API is still described and fakes still build", "[test][disabled]") {
