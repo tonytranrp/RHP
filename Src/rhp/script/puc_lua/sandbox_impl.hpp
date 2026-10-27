@@ -664,7 +664,7 @@ private:
     // `results`: an exec's or a call's results already converted (call_unprotected).
     result<value_list> complete(request_record& req, result<int> outcome, bool* kept = nullptr, value_list* results = nullptr);
     // sandbox::call without the protected run around its setup, when nothing before or after its
-    // lua_resume can raise or throw (sandbox.cpp says when). nullopt: not taken, nothing done.
+    // lua_resume can raise or throw (modules.cpp says when). nullopt: not taken, nothing done.
     std::optional<result<value_list>> call_unprotected(module_record& mod, std::string_view function, std::span<const value> args);
     // The registry ref of an exported function's name sandbox::call looked up before (kNoRef if none);
     // remember_call_key (protected) interns one.
