@@ -12,7 +12,7 @@ The types every other module speaks. Namespace `Rhp` (the logger concept and log
 | `ids.hpp` | `strong_id<Tag>`: `module_id`, `request_id`, `session_id`, `identity_id`, `revision_id`; `id_generator` |
 | `log.hpp` | `log_level`, the `Rhp::core::logger` concept, `null_logger`, `stderr_logger`, `Rhp::log(...)` |
 | `role.hpp` | `Rhp::role` (`kObserve` < `kPatch` < `kAdmin`), `Rhp::allows(have, need)`, `parse_role`, `to_string` |
-| `limits.hpp` | `Rhp::limits` (structural, so it is a template argument: `config<>::limits<Rhp::limits{...}>`), `kDefaultLimits`, `cancel_scope` (`kNone` / `kRequests` / `kEverything`: which runs check for cancels) |
+| `limits.hpp` | `Rhp::limits` (structural, so it is a template argument: `config<>::limits<Rhp::limits{...}>`), `kDefaultLimits`, `cancel_scope` (`kNone` / `kRequests` / `kEverything`: which runs check for cancels); per identity `request_rate` and `pump_requests` (host) |
 | `async.hpp` | `Rhp::async<T>` / `Rhp::promise<T>` / `Rhp::make_async<T>()`: a result a binding delivers later, from any thread; `promise::stop_requested()` once the reader is gone; `is_async_v` |
 | `json.hpp` | `Rhp::json::parse` / `to_text(value, indent)`: JSON for `Rhp::value` (rhp-cli, test reports, API descriptions); integers stay integers, floats keep a decimal point |
 | `subscription.hpp` | `Rhp::subscribable` (hands out ids) and `Rhp::subscription` (RAII, move-only, may outlive its source) |

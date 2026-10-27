@@ -45,6 +45,8 @@ struct limits {
     cancel_scope cancel_checks = cancel_scope::kRequests; // which runs check for cancel() (see cancel_scope)
     std::uint32_t event_queue = 65'536;                   // events queued per sandbox for its next pump() (other threads' fires, rhp.publish); 0 = unlimited
     std::uint32_t async_ms = 0;                           // script time an asynchronous binding (Rhp::async<T>) may take before the script gets kTimeout; 0 = no limit
+    std::uint32_t request_rate = 0;                       // requests per second per identity, in bursts of up to as many (a token bucket on the host's clock; a blob counts once); one over it is answered kLimitExceeded without running; 0 = no limit
+    std::uint32_t pump_requests = 0;                      // requests started per identity per pump(), identities taking turns; the rest wait in order for the next pump(); 0 = every one that arrived
 
     [[nodiscard]] constexpr bool operator==(const limits&) const = default;
 };
