@@ -189,6 +189,7 @@ void sandbox_impl::push_task_handle(lua_State* L, task_record& t) {
 
 void sandbox_impl::spawn(lua_State* L) {
     refuse_while_closing(L, "rhp.spawn");
+    refuse_over_handlers(L, "rhp.spawn");
     const int nargs = lua_gettop(L) - 1;
     const std::uint64_t key = ++task_keys_;
     // The function and its arguments go to the main stack, where start_request takes them from.
@@ -219,6 +220,7 @@ void sandbox_impl::spawn(lua_State* L) {
     t.owner = effect_owner{current_.module, current_.revision};
     t.request = req.id;
     tasks_.emplace(key, std::move(t));
+    ++handlers_;
     // Owned by the spawning request too, so a failed exec (or a failed handler under "report") takes
     // back what it spawned.
     const std::uint64_t seq = record_effect(where_of(req), std::make_unique<task_effect>(*this, key));
@@ -313,6 +315,7 @@ void sandbox_impl::finish_task(request_record& req, const result<value_list>* ou
         return;
     }
     t->finished = true;
+    --handlers_;
     t->request = {};
     try {
         if (!abandoned && outcome != nullptr && outcome->has_value()) {

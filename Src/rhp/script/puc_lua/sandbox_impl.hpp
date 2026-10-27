@@ -529,6 +529,8 @@ public:
     void handle_released(std::uint64_t key) noexcept; // a task handle was collected
     // Raises (naming `where`) while lua_close runs finalizers: nothing may be scheduled, subscribed or spawned.
     void refuse_while_closing(lua_State* L, std::string_view where) const;
+    // Raises (naming `where`) when limits.handlers timers, frame callbacks, subscriptions and tasks are alive.
+    void refuse_over_handlers(lua_State* L, std::string_view where) const;
 
     // Called by the effects behind the schedule and subscriptions when undone or destroyed.
     void remove_schedule(std::uint64_t key) noexcept;
@@ -858,6 +860,9 @@ private:
     std::uint64_t subscription_keys_ = 0;
     std::map<std::uint64_t, task_record> tasks_;
     std::uint64_t task_keys_ = 0;
+    // schedule_ entries, subscriptions and unfinished tasks (limits.handlers): counted where they are
+    // added and removed, so a check never walks them.
+    std::size_t handlers_ = 0;
     std::vector<std::uint64_t> collected_tasks_;     // handles collected (__gc only appends)
     bool closing_ = false;                           // the destructor runs: __gc does nothing
     bool closing_lua_ = false;                       // lua_close runs: builtins refuse, effects are undone at once
