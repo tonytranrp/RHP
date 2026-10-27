@@ -34,6 +34,7 @@ endif()
 
 rhp_add_module(net
     HEADERS
+        address.hpp
         endpoint.hpp
         io_context.hpp
         link.hpp

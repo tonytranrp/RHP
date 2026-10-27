@@ -88,6 +88,7 @@ public:
 
     [[nodiscard]] std::string peer() const override { return inner_->peer(); }
     [[nodiscard]] bool loopback() const noexcept override { return inner_->loopback(); }
+    [[nodiscard]] std::optional<net::ip_address> address() const noexcept override { return inner_->address(); }
     [[nodiscard]] bool encrypted() const noexcept override { return mode_ != mode::kPlain && mode_ != mode::kSniff; }
     [[nodiscard]] std::span<const std::byte> channel_binding() const noexcept override {
         return binding_ ? std::span<const std::byte>{*binding_} : std::span<const std::byte>{};

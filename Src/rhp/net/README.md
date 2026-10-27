@@ -4,9 +4,10 @@ Transports (ordered, reliable byte streams between a host and a client) and disc
 
 | Header | What |
 |---|---|
+| `address.hpp` | `ip_address`: an IPv4 or IPv6 address (IPv4 kept IPv4-mapped), `parse` (strict: host names such as `cafe1` are not addresses), `is_v4`, `source` (an IPv4 address or IPv6 /64, for per-source limits); constexpr, no I/O |
 | `endpoint.hpp` | `endpoint::listen` / `endpoint::dial` (host, port, and the tags `insecure_lan` / `require_tls`), `reversed()`, `with_port()`, `tls_mode`, `is_loopback_host`; the `transport` concept (a transport must declare `network`), `transport_ops` / `transport_ops_for<T>`, `accept_fn` / `connect_fn` |
 | `io_context.hpp` | the reactor (Asio behind a wall): `post`, `shared_poster()` (posts from threads that may outlive it), `poll`, `run_one_for`, `run(stop_token)`, `running_in_this_thread`, `native_handle`, one-shot `timer` |
-| `link.hpp` | `link` (a connected stream: `start`, `send`, `close`, `peer`; `loopback`, `encrypted`, `channel_binding` with defaults), `link_decorator` (forwards all of them), `link_handler` (`on_bytes`, `on_closed`), `listener` (`port`) |
+| `link.hpp` | `link` (a connected stream: `start`, `send`, `close`, `peer`; `loopback`, `encrypted`, `channel_binding`, `address` with defaults), `link_decorator` (forwards all of them), `link_handler` (`on_bytes`, `on_closed`), `listener` (`port`) |
 | `loopback/loopback.hpp` | `loopback`: in-process transport, named channels (host + port name the channel), no sockets; ends may live on different threads (`network = false`) |
 | `tcp/tcp.hpp` | `tcp` on Asio (`network = true`); a non-loopback address only with `insecure_lan` or when TLS is layered on top (hosts and clients do that) |
 | `websocket/websocket.hpp` | `websocket`: RFC 6455 binary tunnel over TCP ([websocket/README.md](websocket/README.md)) |
@@ -34,7 +35,7 @@ struct my_transport {
 using cfg = Rhp::config<>::transport<my_transport>;   // checked by Rhp::net::transport here
 ```
 
-`network` is required and must be a constant: a transport without it doesn't compile, so none is silently treated as local. Links you hand out implement `Rhp::net::link`; a link that wraps another derives from `link_decorator`, which forwards `loopback()`, `encrypted()` and `channel_binding()` (the session's security depends on them). Use `io_context::post` to get back onto the context's thread. A complete one: [Examples/custom_transport](../../../Examples/custom_transport).
+`network` is required and must be a constant: a transport without it doesn't compile, so none is silently treated as local. Links you hand out implement `Rhp::net::link`; a link that wraps another derives from `link_decorator`, which forwards `loopback()`, `encrypted()`, `channel_binding()` and `address()` (the session's security depends on them). A transport that reaches other machines reports its peer's IP address in `address()`: hosts and listening clients cap unauthenticated connections per source by it (without one, its connections only count toward the total). Use `io_context::post` to get back onto the context's thread. A complete one: [Examples/custom_transport](../../../Examples/custom_transport).
 
 ## Rules
 

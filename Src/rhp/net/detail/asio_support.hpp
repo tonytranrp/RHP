@@ -10,6 +10,7 @@
 #include <deque>
 #include <format>
 #include <memory>
+#include <optional>
 #include <string>
 #include <system_error>
 #include <utility>
@@ -22,6 +23,7 @@
 #include <asio/write.hpp>
 
 #include <rhp/core/error.hpp>
+#include <rhp/net/address.hpp>
 #include <rhp/net/endpoint.hpp>
 #include <rhp/net/io_context.hpp>
 #include <rhp/net/link.hpp>
@@ -40,6 +42,11 @@ namespace Rhp::net::detail {
     }
     const auto v6 = address.to_v6();
     return v6.is_loopback() || (v6.is_v4_mapped() && asio::ip::make_address_v4(asio::ip::v4_mapped, v6).is_loopback());
+}
+
+// The address as link::address() reports it (IPv4 in its IPv4-mapped form).
+[[nodiscard]] inline ip_address to_ip_address(const asio::ip::address& address) noexcept {
+    return ip_address{address.is_v4() ? asio::ip::make_address_v6(asio::ip::v4_mapped, address.to_v4()).to_bytes() : address.to_v6().to_bytes()};
 }
 
 // "127.0.0.1:7777" or "[::1]:7777".
@@ -152,12 +159,13 @@ struct stream_state : std::enable_shared_from_this<stream_state<Socket, Traits>>
     }
 };
 
-// A link over one connected stream. `name` is what peer() reports; `on_this_machine` is loopback().
+// A link over one connected stream. `name` is what peer() reports, `on_this_machine` loopback() and
+// `ip` address().
 template <stream_socket Socket, stream_traits<Socket> Traits>
 class stream_link final : public link {
 public:
-    stream_link(Socket s, std::string name, bool on_this_machine)
-        : state_(std::make_shared<stream_state<Socket, Traits>>(std::move(s), std::move(name))), loopback_(on_this_machine) {}
+    stream_link(Socket s, std::string name, bool on_this_machine, std::optional<ip_address> ip = std::nullopt)
+        : state_(std::make_shared<stream_state<Socket, Traits>>(std::move(s), std::move(name))), loopback_(on_this_machine), address_(ip) {}
 
     ~stream_link() override {
         state_->handler = nullptr;
@@ -209,10 +217,12 @@ public:
 
     [[nodiscard]] std::string peer() const override { return state_->peer; }
     [[nodiscard]] bool loopback() const noexcept override { return loopback_; }
+    [[nodiscard]] std::optional<ip_address> address() const noexcept override { return address_; }
 
 private:
     std::shared_ptr<stream_state<Socket, Traits>> state_;
     bool loopback_ = false;
+    std::optional<ip_address> address_;
 };
 
 } // namespace Rhp::net::detail

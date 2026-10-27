@@ -22,7 +22,7 @@ while (running) { host.pump(); game::update(); }
 
 ## What it does
 
-- **Sessions:** the network thread authenticates every connection (`config<>::auth`), at most `limits.pending_handshakes` at a time, and hands requests to `pump()` through SPSC rings.
+- **Sessions:** the network thread authenticates every connection (`config<>::auth`) and hands requests to `pump()` through SPSC rings. Unauthenticated connections, native and HTTP together, go through one `session::admission`: `limits.pending_handshakes` at a time, `limits.handshakes_per_source` from one IPv4 address or IPv6 /64, nothing sent within `limits.first_byte_ms` closes one, and a new connection takes the slot of the oldest silent one rather than being refused. `auth_failed` names the key a refused client tried (its hello's, or its HTTP proof's).
 - **Identities:** one sandbox per key identity, created on its first session. When its last session ends everything it did is reverted and the sandbox closed — unless an admin pinned some of its modules (`pin`): those, and the modules they require, stay (with the calls running in them); the rest is reverted. `revert` / `unload` / `revert_to` refuse to touch pinned modules. Asynchronous calls still running are handed on (`release_async`) so a late success is still taken back.
 - **Roles and signatures:** each request's least role is checked (`wire::required_role`); `exec`, `load` and `reload` must carry a signature by a trusted signer (`config<>::signer`, Ed25519 by default) unless the session is observe. A signature that is present must verify.
 - **Idempotent retries:** replies are kept per session by the client's idempotency key (`host_options::idempotency_cache` / `idempotency_bytes`), so a resent request runs once.

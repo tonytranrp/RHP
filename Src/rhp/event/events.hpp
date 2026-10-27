@@ -53,12 +53,13 @@ struct session_closed {
     error reason;
 };
 
-// A connection never authenticated (wrong key, unknown key name, timeout, garbage).
+// A connection never authenticated (wrong key, unknown key name, timeout, garbage, no room).
 struct auth_failed {
     static constexpr std::string_view name = "auth_failed";
     time_point time;
     std::string peer;
     error reason;
+    std::string key{}; // the key name the peer tried (its hello's or its HTTP proof's); empty when it named none
 };
 
 // A request that runs code or changes state: exec, load, reload, rollback, call, revert, unload,

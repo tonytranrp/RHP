@@ -3,11 +3,12 @@
 # security::host_handshake / client_handshake), so it compiles once, not per config.
 set(rhp_session_sources "")
 if(RHP_ENABLE)
-    set(rhp_session_sources session.cpp secure_link.cpp backoff.cpp)
+    set(rhp_session_sources session.cpp secure_link.cpp backoff.cpp admission.cpp)
 endif()
 
 rhp_add_module(session
     HEADERS
+        admission.hpp
         backoff.hpp
         secure_link.hpp
         session.hpp

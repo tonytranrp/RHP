@@ -91,6 +91,7 @@ public:
 
     [[nodiscard]] std::string peer() const { return stream_->peer(); }
     [[nodiscard]] bool loopback() const noexcept { return stream_->loopback(); }
+    [[nodiscard]] std::optional<ip_address> address() const noexcept { return stream_->address(); }
 
 private:
     enum class phase : std::uint8_t {
@@ -408,6 +409,7 @@ public:
     void close() noexcept override { state_->close(); }
     [[nodiscard]] std::string peer() const override { return state_->peer(); }
     [[nodiscard]] bool loopback() const noexcept override { return state_->loopback(); }
+    [[nodiscard]] std::optional<ip_address> address() const noexcept override { return state_->address(); }
 
 private:
     std::shared_ptr<websocket_state<Self>> state_;

@@ -143,7 +143,7 @@ std::string to_json(const any& e) {
                                   .err("reason", x.reason)
                                   .done();
                           },
-                          [](const auth_failed& x) { return json_object{x.name, x.time}.string("peer", x.peer).err("reason", x.reason).done(); },
+                          [](const auth_failed& x) { return json_object{x.name, x.time}.string("peer", x.peer).string("key", x.key).err("reason", x.reason).done(); },
                           [](const script_executed& x) {
                               return json_object{x.name, x.time}
                                   .number("session", x.session.value())

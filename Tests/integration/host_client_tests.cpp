@@ -532,30 +532,41 @@ TEST_CASE("host+client: over TCP on 127.0.0.1", "[integration][tcp]") {
 }
 
 TEST_CASE("host: unauthenticated connections are capped", "[integration][host]") {
-    using capped_cfg = loopback_cfg::limits<Rhp::limits{.pending_handshakes = 2, .handshake_timeout_ms = 60'000}>;
+    using capped_cfg = loopback_cfg::limits<Rhp::limits{.pending_handshakes = 2, .handshake_timeout_ms = 60'000, .first_byte_ms = 60'000}>;
     keys k;
     const auto at = Rhp::endpoint::listen("itest.capped", 1);
     running_host<capped_cfg> host{at, k};
     Rhp::net::io_context io;
     std::vector<std::unique_ptr<Rhp::net::link>> raw;
     std::vector<std::unique_ptr<rhp_test::recorder>> events;
-    for (int i = 0; i < 3; ++i) {
+    const auto open = [&] {
+        const std::size_t before = raw.size();
         Rhp::net::loopback::dial(io, Rhp::endpoint::dial("itest.capped", 1), [&](Rhp::result<std::unique_ptr<Rhp::net::link>> l) {
             REQUIRE(l);
             events.push_back(std::make_unique<rhp_test::recorder>());
             (*l)->start(*events.back());
             raw.push_back(std::move(*l));
         });
-        REQUIRE(rhp_test::poll_until({&io}, [&] { return raw.size() == static_cast<std::size_t>(i + 1); }));
+        REQUIRE(rhp_test::poll_until({&io}, [&] { return raw.size() == before + 1; }));
         std::this_thread::sleep_for(20ms); // let the host accept in order
+    };
+    for (int i = 0; i < 3; ++i) {
+        open();
     }
-    // The third is closed at once; the first two wait for their handshake.
-    REQUIRE(rhp_test::poll_until({&io}, [&] { return events[2]->closed; }));
+    // The third takes the place of the first (the oldest that said nothing); the second waits.
+    REQUIRE(rhp_test::poll_until({&io}, [&] { return events[0]->closed; }));
     rhp_test::poll_for({&io}, 50ms);
-    CHECK_FALSE(events[0]->closed);
+    CHECK_FALSE(events[1]->closed);
+    CHECK_FALSE(events[2]->closed);
+    // Connections that have started talking keep their slots: the next one is closed at once.
+    raw[1]->send(rhp_test::buffer_of("R"));
+    raw[2]->send(rhp_test::buffer_of("R"));
+    rhp_test::poll_for({&io}, 50ms);
+    open();
+    REQUIRE(rhp_test::poll_until({&io}, [&] { return events[3]->closed; }));
     CHECK_FALSE(events[1]->closed);
     // An authenticated client still gets in once one of them leaves.
-    raw[0].reset();
+    raw[1].reset();
     std::this_thread::sleep_for(50ms);
     Rhp::client<capped_cfg> c{host.dial_at(at), k.as_patch(), k.signer()};
     CHECK(c.exec<int>("return 1") == 1);

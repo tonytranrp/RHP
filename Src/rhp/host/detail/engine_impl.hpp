@@ -49,6 +49,7 @@
 #include <rhp/script/ledger.hpp>
 #include <rhp/script/sandbox.hpp>
 #include <rhp/security/hash.hpp>
+#include <rhp/session/admission.hpp>
 #include <rhp/session/backoff.hpp>
 #include <rhp/session/secure_link.hpp>
 #include <rhp/session/session.hpp>
@@ -150,7 +151,7 @@ struct inbound {
 
     kind what = kind::kRequest;
     session_id session;
-    std::string identity;
+    std::string identity; // kAuthFailed: the key name the peer tried, if it named one
     role granted = role::kObserve;
     std::shared_ptr<cancel_relay> relay;
     wire::op code = wire::op::kExec;
@@ -284,10 +285,6 @@ private:
     // Pump thread: how far the host's clock is from steady_clock, for the network thread's reads.
     void sample_clock() noexcept;
 
-    [[nodiscard]] bool acquire_handshake() noexcept override;
-
-    void release_handshake() noexcept override { --pending_handshakes_; }
-
     [[nodiscard]] result<security::http_grant> authorize(const security::http_proof& request) override;
 
     [[nodiscard]] session_id open_http(const security::http_grant& grant, const http_peer& peer) override;
@@ -360,6 +357,7 @@ private:
 
     struct io_session {
         std::unique_ptr<session::session> s;
+        session::admission::ticket ticket = 0; // an accepted connection's slot until it authenticates
         bool ready = false;
         std::string identity;
         std::map<std::uint64_t, std::uint64_t> req_idem; // in-flight req -> idempotency key
@@ -376,13 +374,18 @@ private:
 
     void accept(std::unique_ptr<net::link> link);
 
-    // A connection that never got to authenticate (auth_failed, when anyone listens).
-    void refused(std::string peer, error why) override;
+    // A connection that never got to authenticate (auth_failed, when anyone listens); `key` is the key
+    // name it tried, if it named one.
+    void refused(std::string peer, error why, std::string key) override;
 
     // Closes a link we won't serve; it dies once the next connection arrives or the host does.
     void park(std::unique_ptr<net::link> link);
 
-    session_id start_session(std::unique_ptr<net::link> link, bool dialed = false);
+    // An accepted connection holds `ticket` (admission_) until it authenticates; a dialed one none.
+    void start_session(session_id id, std::unique_ptr<net::link> link, bool dialed, session::admission::ticket ticket);
+
+    // The admission gave up on an unauthenticated session (no room, or it sent nothing in time).
+    void drop_unauthenticated(session_id id, const error& why);
 
     // ---- network thread: reverse mode -------------------------------------------------------------------
 
@@ -679,6 +682,7 @@ private:
 
     // Network thread. io_ is declared first so it is destroyed last.
     net::io_context io_;
+    session::admission admission_{io_, setup_.limits}; // unauthenticated connections, native and HTTP
     std::unique_ptr<net::listener> listener_;
     std::optional<error> listen_error_;
     std::unique_ptr<http_gateway> gateway_;
@@ -694,7 +698,6 @@ private:
     std::atomic<bool> said_goodbye_{false}; // goodbye()'s posted work ran (sessions closed, gateway stopped)
     std::map<std::string, io_identity, std::less<>> io_identities_;
     id_generator<session_id> session_ids_;
-    std::size_t pending_handshakes_ = 0;
     std::deque<std::unique_ptr<net::link>> closing_links_;
     std::deque<inbound> inbox_backlog_;
     std::atomic<bool> inbox_backlog_waiting_{false};     // read by pump() to decide whether to wake us

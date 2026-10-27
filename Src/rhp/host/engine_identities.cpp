@@ -26,7 +26,7 @@ void engine::process(std::vector<inbound>& batch) {
         case inbound::kind::kRequest: request(in); break;
         case inbound::kind::kAuthFailed:
             if (wants<event::auth_failed>()) {
-                publish(event::auth_failed{now(), std::move(in.peer), std::move(in.reason)});
+                publish(event::auth_failed{now(), std::move(in.peer), std::move(in.reason), std::move(in.identity)});
             }
             break;
         case inbound::kind::kResumed:
