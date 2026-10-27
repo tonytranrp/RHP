@@ -5,7 +5,7 @@
     python -m rhp_client -i dev.rhpid 127.0.0.1:7777 call low_grav set 1.6
     python -m rhp_client -i dev.rhpid 127.0.0.1:7777 list
     python -m rhp_client -i dev.rhpid 127.0.0.1:7777 events game.round_over
-    python -m rhp_client keygen dev                   # writes dev.rhpid, prints the host lines
+    python -m rhp_client keygen dev                   # writes dev.rhpid (owner-only), prints the host lines
 
 Values print as JSON-ish Python reprs; call arguments are parsed as JSON when they parse, else
 passed as strings. Exit status: 0 ok, 1 an RHP error, 2 bad usage.
@@ -40,21 +40,53 @@ def _module(text: str):
     return int(text) if text.isdigit() else text
 
 
-def _keygen(name: str) -> int:
-    psk = os.urandom(32)
-    seed = os.urandom(32)
-    path = name + ".rhpid"
+def _write_private(path: str, data: bytes) -> None:
+    """Writes `data` to `path` for its owner only: a new temporary file next to it, created exclusively
+    with mode 0600, then renamed over `path`. On Windows the mode only sets the read-only flag, so the
+    file gets its folder's permissions (a user's own folders are private to that user)."""
+    temp = "%s.%d.%s.tmp" % (path, os.getpid(), os.urandom(4).hex())
+    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600)
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(temp, path)
+    except BaseException:
+        try:
+            os.unlink(temp)
+        except OSError:
+            pass
+        raise
+
+
+def _keygen(argv) -> int:
+    parser = argparse.ArgumentParser(prog="python -m rhp_client keygen", description="Write NAME.rhpid: a new identity (pre-shared key and Ed25519 signing key).")
+    parser.add_argument("name")
+    parser.add_argument("--role", choices=("observe", "patch", "admin"), default="patch", help="the role in the host's keyring line (default patch)")
+    parser.add_argument("--show-secret", action="store_true", help="print the keyring line with the pre-shared key (default: it stays in the file)")
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit as exc:
+        return 2 if exc.code else 0
+    path = args.name + ".rhpid"
     if os.path.exists(path):
         print("%s exists; not overwriting it" % path, file=sys.stderr)
         return 1  # as rhp-cli keygen: 1 for a failure, 2 for a usage error
-    text = '# RHP identity (keep it private)\nname = "%s"\npsk = "%s"\nsigning_key = "%s"\n' % (
-        name, base64.b64encode(psk).decode(), base64.b64encode(seed).decode())
-    with open(path, "w", encoding="utf-8", newline="\n") as fh:
-        fh.write(text)
+    psk = base64.b64encode(os.urandom(32)).decode()
+    text = '# RHP identity (keep it private)\nname = "%s"\npsk = "%s"\nsigning_key = "%s"\n' % (args.name, psk, base64.b64encode(os.urandom(32)).decode())
+    try:
+        _write_private(path, text.encode("utf-8"))
+    except OSError as exc:
+        print("can't write %s: %s" % (path, exc), file=sys.stderr)
+        return 1
     identity = Identity.parse(text)
-    print("wrote %s" % path)
-    print("keyring file:  %s admin %s" % (name, base64.b64encode(psk).decode()))
-    print("signers file:  %s %s" % (name, base64.b64encode(identity.public_key()).decode()))
+    if args.role == "admin":
+        print("warning: an admin identity may use the host's whole Lua library (io, os) and admin operations (revert_all, pin); patch loads and calls modules", file=sys.stderr)
+    print("wrote %s (keep it private)" % path)
+    # The keyring line holds the pre-shared key: it stays in the file unless asked for.
+    print("keyring file:  %s %s %s" % (args.name, args.role, psk if args.show_secret else "<psk from %s>" % path))
+    print("signers file:  %s %s" % (args.name, base64.b64encode(identity.public_key()).decode()))
     return 0
 
 
@@ -62,10 +94,7 @@ def main(argv=None) -> int:
     if argv is None:
         argv = sys.argv[1:]
     if argv[:1] == ["keygen"]:
-        if len(argv) != 2:
-            print("usage: python -m rhp_client keygen NAME", file=sys.stderr)
-            return 2
-        return _keygen(argv[1])
+        return _keygen(argv[1:])
 
     parser = argparse.ArgumentParser(prog="python -m rhp_client", description="Talk to an RHP host.")
     parser.add_argument("-i", "--identity", required=True, help="identity file (rhp-cli keygen / python -m rhp_client keygen)")

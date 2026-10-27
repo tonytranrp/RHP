@@ -82,7 +82,9 @@ python -m rhp_client -i dev.rhpid 127.0.0.1:7777 events game.round_over
 python -m rhp_client keygen dev
 ```
 
-Commands: `exec`, `load`, `call` (arguments parse as JSON when they can, else stay strings), `unload [--force]`, `revert`, `list`, `describe`, `events`. Options: `--tls` (TLS on loopback too), `--plain` (no TLS; the host must allow it with `insecure_lan`), `--ca FILE`. `keygen NAME` writes `NAME.rhpid` (never overwriting) and prints the host's keyring and signers lines. Exit status: 0 ok, 1 an RHP error, 2 bad usage.
+Commands: `exec`, `load`, `call` (arguments parse as JSON when they can, else stay strings), `unload [--force]`, `revert`, `list`, `describe`, `events`. Options: `--tls` (TLS on loopback too), `--plain` (no TLS; the host must allow it with `insecure_lan`), `--ca FILE`. Exit status: 0 ok, 1 an RHP error, 2 bad usage.
+
+`keygen NAME [--role observe|patch|admin] [--show-secret]` writes `NAME.rhpid` (never overwriting) and prints the host's keyring and signers lines, as `rhp-cli keygen` does: the role defaults to `patch` (`admin` prints a warning), and the keyring line shows `<psk from NAME.rhpid>` instead of the key unless `--show-secret` is given. The file is written to a temporary created exclusively with mode 0600, then renamed into place. On Windows Python's mode only sets the read-only flag, so the file gets its folder's permissions (your own folders are private to you; `rhp-cli keygen` sets an owner-only DACL instead).
 
 ## Threads
 
@@ -95,4 +97,4 @@ pip install "./clients/python[test]"
 pytest clients/python/tests
 ```
 
-`tests/test_protocol.py` checks the codec, frames, handshake derivations and Ed25519 against golden vectors (`tests/vectors.json`; RHP's C++ suite checks the same frames). `tests/test_live.py` runs sessions against RHP's own host when `RHP_HEADLESS_SERVER` names a built `headless_server` and is skipped otherwise; RHP's ctest sets it (`python.client`, when Python 3 with pytest is found and `RHP_BUILD_EXAMPLES` is on).
+`tests/test_keygen.py` checks keygen's file and output. `tests/test_protocol.py` checks the codec, frames, handshake derivations and Ed25519 against golden vectors (`tests/vectors.json`; RHP's C++ suite checks the same frames). `tests/test_live.py` runs sessions against RHP's own host when `RHP_HEADLESS_SERVER` names a built `headless_server` and is skipped otherwise; RHP's ctest sets it (`python.client`, when Python 3 with pytest is found and `RHP_BUILD_EXAMPLES` is on).

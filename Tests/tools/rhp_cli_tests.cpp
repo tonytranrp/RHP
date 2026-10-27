@@ -40,6 +40,7 @@
 #include <rhp/platform/random.hpp>
 #include <rhp/script/lib.hpp>
 #include <rhp/security/ed25519.hpp>
+#include <rhp/security/identity_file.hpp>
 #include <rhp/security/key.hpp>
 #include <rhp/security/keyring.hpp>
 #include <rhp/security/psk_keyring.hpp>
@@ -631,6 +632,23 @@ TEST_CASE("rhp-cli: the full lifecycle against a headless_server process", "[cli
     CHECK(audit.find(R"("event":"blob_received")") != std::string::npos);
     CHECK(audit.find(R"("code":"bad_signature")") != std::string::npos);
     CHECK(audit.find(R"("pinned":1)") != std::string::npos);
+}
+
+TEST_CASE("rhp-cli: keygen keeps the PSK in the file and makes patch identities", "[cli][process]") {
+    scratch_dir dir;
+    const auto id = dir.path / "dev.rhpid";
+    REQUIRE(run(std::format("{} keygen dev --out {} > {}", kCli, q(id), q(dir.path / "keygen.txt"))) == 0);
+    const auto identity = Rhp::security::identity_file::load(id.string());
+    REQUIRE(identity);
+    CHECK(dir.read("keygen.txt").find(identity->psk.to_base64()) == std::string::npos); // not printed unless asked
+    CHECK(dir.read("keygen.txt").find("dev patch <psk from") != std::string::npos);     // patch unless admin is asked for
+    REQUIRE(run(std::format("{} pubkey -i {} > {}", kCli, q(id), q(dir.path / "lines.txt"))) == 0);
+    CHECK(dir.read("lines.txt").starts_with(identity->keyring_line(Rhp::role::kPatch))); // pubkey is patch too
+
+    const auto shown = dir.path / "shown.rhpid";
+    REQUIRE(run(std::format("{} keygen shown --role admin --show-secret --out {} > {} 2> {}", kCli, q(shown), q(dir.path / "shown.txt"), q(dir.path / "shown_err.txt"))) == 0);
+    CHECK(dir.read("shown.txt").find(Rhp::security::identity_file::load(shown.string())->keyring_line(Rhp::role::kAdmin)) != std::string::npos);
+    CHECK(dir.read("shown_err.txt").find("warning: an admin identity") != std::string::npos);
 }
 
 TEST_CASE("rhp-cli: test runs Lua tests offline and with a host's API faked", "[cli][process]") {
