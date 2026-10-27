@@ -737,11 +737,14 @@ RHP/
 │   ├── audit/      sinks(.cpp) — file_sink, ostream_sink
 │   ├── session/    session(.cpp): handshake · seq/ack/nack · MAC · heartbeat · resume · secure_link(.cpp)
 │   ├── config/     config — the Rhp::config<> chain
-│   ├── host/       host · detail/engine — host.cpp (engine) · gateway.cpp (HTTP frontend)
-│   └── client/     client · pending · fleet · detail/ — client.cpp · fleet.cpp
+│   ├── host/       host · detail/engine · detail/releases (the serve bridge, releases.cpp) — host.cpp · engine_network.cpp ·
+│   │               engine_identities.cpp · engine_requests.cpp (the engine; private detail/engine_impl.hpp) · gateway.cpp
+│   │               (HTTP frontend; private detail/gateway.hpp)
+│   └── client/     client · pending · rollout · fleet · detail/ (engine · fleet_engine · replies · requests) — client.cpp ·
+│                   fleet.cpp · rollout.cpp
 ├── Tests/
 │   ├── unit/          mirrors Src/rhp/* — files named `<thing>_tests.cpp`
-│   ├── integration/   host_client · stage4 · stage5 · stage6 · stage6_fleet · stage7
+│   ├── integration/   host_client · stage4 · stage5 · stage6 · stage6_fleet · stage7 · stage9 · stage10 · stage11
 │   ├── tools/         rhp-cli in-process + as a process against headless_server
 │   ├── package/       a consumer project built against the installed package (find_package / subdirectory)
 │   ├── compile_fail/  bad concepts, duplicate names — ctest WILL_FAIL
@@ -1211,7 +1214,7 @@ Choices made while building Stage 3 beyond the round-5 questionnaire (§24). Eac
 
 | # | Topic | Decision |
 |---|---|---|
-| X1 | Compile once | `Rhp::host<Cfg>` / `Rhp::client<Cfg>` are thin templates: the config is type-erased into a `setup` (`net::transport_ops`, `wire::codec_ops`, a handshake factory, limits, logger, clock) and the engines (`host.cpp`, `client.cpp`) compile once. The session layer never sees a policy type: only `net::link`, `wire::codec_ops`, `security::host_handshake` / `client_handshake` and `wire::frame_sealer` |
+| X1 | Compile once | `Rhp::host<Cfg>` / `Rhp::client<Cfg>` are thin templates: the config is type-erased into a `setup` (`net::transport_ops`, `wire::codec_ops`, a handshake factory, limits, logger, clock) and the engines (`host.cpp` with `engine_network.cpp` / `engine_identities.cpp` / `engine_requests.cpp`, `client.cpp`) compile once. The session layer never sees a policy type: only `net::link`, `wire::codec_ops`, `security::host_handshake` / `client_handshake` and `wire::frame_sealer` |
 | X2 | Modules | new folders: `platform` (OS name, secure random — the only OS `#ifdef`s), `wire`, `net`, `security`, `exec`, `session`, `config`, `host`, `client`. `net` depends on `platform` (not `wire`); `session` on `net`, `security`, `exec`, `wire`; `config` on all four policy layers |
 | X3 | Messages | every request and reply payload is an `envelope {req, idem, body}`; `wire/messages.hpp` defines each body with an `Rhp::convert` specialization. A request gets exactly one `kResult` or `kError`; `kOutput` / `kEmit` carry the request id (0 = none). Modules are named by id or name (`wire::module_ref`). Decoders ignore unknown keys |
 | X4 | Handshake | hello → challenge (host proof) → response (client proof, sent only after the host's proof checks out) → welcome, the first MAC'd frame. An unknown key name gets a normal challenge made with a random secret. Garbage before the handshake closes the connection at once; after it, three resync strikes |
@@ -1221,7 +1224,7 @@ Choices made while building Stage 3 beyond the round-5 questionnaire (§24). Eac
 | X8 | Cancel path | `kCancel` never goes to `pump()`: the network thread applies it through a per-identity *cancel relay* (mutex; cleared before the sandbox dies) that **records** it — per session: cancelled request ids, a cancel-all mark over the network's arrival order, and `dead` once the session ends. The record stops the request running in `pump()` (`sandbox::cancel()`, re-applied every 20 ms because a cancel landing just before the sandbox opens its run scope is cleared by it), suspended ones (`sandbox::cancel(request)`, also checked when a request suspends), and queued ones (answered `kCancelled` without running; a dead session's are dropped). A session that ends stops its own requests even when its identity lives on |
 | X9 | Suspended requests | a request whose script suspends (`rhp.wait`, `rhp.sleep`, a time slice) is answered when `sandbox_options::on_result` reports it; the sandbox gained `pending(request)` and a request-aware `on_output` for this |
 | X10 | Idempotency | per session, keyed by the client's `idem` (63 random bits): a retry of a finished request is answered from the cache (256 entries), a retry of one in flight waits for the same result |
-| X11 | Limits | a reply larger than `max_frame` becomes a `kLimitExceeded` error for that request; an oversized request fails on the client. At most `pending_handshakes` (64) unauthenticated connections; more are closed at once. Before the handshake frames may carry 16 KiB. The MessagePack decoder caps total values (`decode_limits::max_elements`, 2^20) and never reserves more than 256 slots on a count's word. Per session: 4096 requests in flight with an idempotency key, 65 536 held back while `pump()` is behind, 256 / 16 MiB of cached replies — past those the session is closed with `kLimitExceeded`. An exception while receiving ends that session, not the network thread |
+| X11 | Limits | a reply larger than `max_frame` becomes a `kLimitExceeded` error for that request; an oversized request fails on the client. At most `pending_handshakes` (64) unauthenticated connections; more are closed at once. Before the handshake frames may carry 16 KiB. The MessagePack decoder caps total values (`decode_limits::max_elements`, 2^20) and never reserves more than 256 slots on a count's word. Per session: 4096 requests in flight with an idempotency key and 65 536 held back while `pump()` is behind — past those the session is closed with `kLimitExceeded`. Replies kept for retries are bounded by `host_options::idempotency_cache` / `idempotency_bytes` (256 / 16 MiB): the oldest are dropped first, and a reply larger than the byte budget is kept as a `kLimitExceeded` error, so its retry is refused instead of run twice. An exception while receiving ends that session, not the network thread |
 | X12 | TCP | `TCP_NODELAY` on every socket; `SO_REUSEADDR` only off Windows (there it would allow port stealing); port 0 = any free port, reported by `host.port()` |
 | X13 | Reverse mode | Stage 3 hosts listen and clients dial; the other directions fail with `kInvalidArgument` until Stage 4 |
 | X14 | Core additions | `Rhp::value_list`; `Rhp::convert` for `strong_id` (as an integer) and `Rhp::error` (a map; unknown code names decode as `kRuntime`) |

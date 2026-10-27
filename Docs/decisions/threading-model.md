@@ -7,7 +7,7 @@
 - Multiple hosts per process, no globals in hosts.
 - Patch points and `lua_event`s use one process-wide registry.
 - A patched point hit off the pump thread runs the C++ default and counts a miss.
-- Stage 8: the host checks a script's Ed25519 signature on the network thread as the request arrives (about 0.1 ms each); `pump()` uses that verdict. `trusted_signers` is immutable once the host is built, so the check needs no lock. A custom `signer` policy's `trust::verify` runs there too and must be safe to call concurrently (`security/signer.hpp`).
+- Stage 8: the host checks a script's Ed25519 signature on the network thread as the request arrives (about 0.1 ms each); `pump()` uses that verdict. `trusted_signers` is immutable once the host is built, so the check needs no lock. A custom `signer` policy's `trust::verify` runs there too and must be safe to call concurrently (`security/signer.hpp`). Requests that arrive through the HTTP gateway are the exception: their signatures are checked on the pump thread, in `pump()` (the gateway hands their bodies over unchecked).
 - `lua_event` is synchronous on the pump thread, queued otherwise, fire-and-forget.
 - The clock is injectable (`steady_clock` default).
 - Current injection covers a standalone sandbox's Lua allocator and explicitly constructed `utils::byte_buffer`s. Other C++ containers/effects use their normal allocators; host-wide memory-resource injection is not implemented.

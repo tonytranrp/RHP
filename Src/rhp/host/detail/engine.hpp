@@ -73,7 +73,7 @@ using blob_fn = std::function<result<void>(const blob_view&)>;
 
 namespace Rhp::host_detail {
 
-// Everything the engine needs from a config, type-erased so the engine compiles once (host.cpp).
+// Everything the engine needs from a config, type-erased so the engine compiles once (host.cpp and engine_*.cpp).
 struct setup {
     net::endpoint ep;
     net::transport_ops transport;

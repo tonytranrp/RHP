@@ -19,7 +19,7 @@ Rhp::host<> observe_only{endpoint, authenticator}; // no signers: only observe s
 | `pump()` | **call every frame.** Runs requests that arrived, resumes suspended scripts, fires timers and queued events, hands replies to the network. With `io<zero_threads>` it also polls the network |
 | `port()` | bound network port after port 0, or a setup failure; IPC, dialing hosts and loopback report 0 |
 | `gateway_port()` | the optional HTTP listener's bound port or setup error |
-| `advertise(options)` / `discovery_status()` | explicit DNS-SD registration/update and subsequent provider errors; pump thread |
+| `advertise(options)` / `discovery_status()` | explicit DNS-SD registration/update and subsequent provider errors; `advertise` on the pump thread, `discovery_status` from any thread with an owned I/O thread (the pump thread with `io<zero_threads>`) |
 | `sessions()` / `identities()` | authenticated sessions, including detached resumable ones and HTTP logical sessions / identities with a live sandbox, including sessionless pinned ones (any thread) |
 | `set_enabled(bool)` / `enabled()` | runtime kill switch: while off, new connections are closed and every request answers `kDisabled` (what already ran stays; send `revert_all` first to undo it) |
 | `logger()` / `clock()` | references to policy objects; callers must synchronize mutation with their use by RHP |
@@ -176,7 +176,7 @@ auto stream = host.on_any(Rhp::audit::ostream_sink{std::clog});
 auto mine = host.on<Rhp::event::session_opened>([](const auto& e) { /* ... */ });
 ```
 
-`script_executed` is emitted for every request that runs code or changes state (exec, load, reload, rollback, call, revert, unload, checkpoint, revert_to, revert_all, pin, unpin), including refused ones, with the BLAKE2b-256 hash of the source and who signed it.
+`script_executed` is emitted for every request that runs code or changes state (exec, load, reload, rollback, call, revert, unload, checkpoint, revert_to, revert_all, pin, unpin, tune, the debugger actions that change what scripts do — break, pause, continue, steps, reset — and, with a served release manager, release_apply / confirm / deactivate and revoke), including refused ones, with the BLAKE2b-256 hash of the source and who signed it.
 
 Keep each returned subscription alive for the desired observation period; an immediately destroyed subscription unsubscribes. `file_sink::ok()` reports open/write failure, so check it at startup and when audit availability matters. `ostream_sink` borrows its stream, which must outlive the subscription. A callback already executing when unsubscribed may finish. A thrown event-handler exception is caught and logged; remaining handlers in that publication are not guaranteed to run.
 

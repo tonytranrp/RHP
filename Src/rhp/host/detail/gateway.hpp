@@ -1,6 +1,6 @@
 #pragma once
 
-// Private to host.cpp and gateway.cpp (not installed): the HTTP frontend and the engine's side of it.
+// Private to the host engine's sources and gateway.cpp (not installed): the HTTP frontend and the engine's side of it.
 
 #include <chrono>
 #include <cstdint>

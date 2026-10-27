@@ -1,12 +1,13 @@
 # host — layer 5
 
-`Rhp::host<Cfg>`: a program that accepts remote Lua. The template is a thin shell over an engine compiled once (`host.cpp`). Target `Rhp::host`; depends on `config`, `session`, `script`, `event` and `release`. Usage: [host and client guide](../../../Docs/guide/host-and-client.md).
+`Rhp::host<Cfg>`: a program that accepts remote Lua. The template is a thin shell over an engine compiled once (`host.cpp`, `engine_network.cpp`, `engine_identities.cpp`, `engine_requests.cpp`). Target `Rhp::host`; depends on `config`, `session`, `script`, `event` and `release`. Usage: [host and client guide](../../../Docs/guide/host-and-client.md).
 
 | Header | What |
 |---|---|
-| `host.hpp` | `Rhp::host<Cfg>`: `install<Lib>()`, `pump()`, `on<E>()` / `on_any()`, `on_script_event()`, `on_blob()`, `serve(release::manager&)`, `set_enabled()` / `enabled()`, `port()`, `gateway_port()`, `advertise()`, `discovery_status()`, `sessions()`, `identities()` |
+| `host.hpp` | `Rhp::host<Cfg>`: `install<Lib>()`, `pump()`, `on<E>()` / `on_any()`, `on_script_event()`, `on_blob()`, `serve(release::manager&)`, `set_enabled()` / `enabled()`, `port()`, `gateway_port()`, `advertise()`, `discovery_status()`, `sessions()`, `identities()`, `logger()` / `clock()` (the config's logger and clock instances) |
 | `detail/engine.hpp` | `host_options` (idempotency cache, inbox capacity, `tls`, `gateway`, `http_require_binding`, `handler_errors`, `remote_events_per_pump`, `ack_delay_ms`), `blob_view` / `blob_fn`, the type-erased `setup` and the engine's free functions |
 | `detail/releases.hpp` | the bridge `serve` uses: answers the release ops with a `release::manager` (`releases.cpp`) |
+| `host.cpp`, `engine_network.cpp`, `engine_identities.cpp`, `engine_requests.cpp`, `detail/engine_impl.hpp` (private, not installed) | the engine: construction, setup calls, goodbye and `pump()`; its network thread (sessions, resume, cancels, the gateway's sink); identities, events and subscriptions on the pump thread; requests and their ops |
 | `gateway.cpp`, `detail/gateway.hpp` (private, not installed) | the HTTP listener: routing, per-key logical sessions, the replay guard; the engine implements its `gateway_sink` |
 
 ```cpp
@@ -34,7 +35,7 @@ while (running) { host.pump(); game::update(); }
 - **Tools:** `tunables` / `tune`, `profile` and `debug` act on the caller's own identity sandbox. When the profiling session ends the profiler stops; when the last debugging session of an identity ends its breakpoints go and paused scripts run on. Debugger actions that change what a script does are audited.
 - **Reverse mode:** with a dial endpoint the host dials a listening client and redials (capped exponential backoff, full jitter, `limits.backoff_min_ms` / `backoff_max_ms`) whenever that fails or the session ends; a lost link is redialed to resume the same session. A dialing host opens with a ping.
 - **TLS:** non-loopback peers get TLS 1.3 (`config<>::tls<>`), `require_tls` everyone; `host_options::tls` holds the certificate (default: ephemeral self-signed). Events say `tls`.
-- **Resume:** a lost link keeps the session for `limits.resume_ms`; the client's new connection takes it over (`session_resumed`), nothing is reverted or run twice. Shutting down sends every session a goodbye with a reason first.
+- **Resume:** a lost link keeps the session for `limits.resume_ms`; the client's new connection takes it over (`session_resumed`), nothing is reverted or run twice. Shutting down sends every session a goodbye with a reason first, and the gateway answers the HTTP requests in flight.
 - **Kill switch:** `set_enabled(false)` closes new connections (reported as `auth_failed`) and answers every request `kDisabled`.
 - **HTTP:** `host_options::gateway` opens a separate TCP / HTTPS listener ([networking guide](../../../Docs/guide/networking.md)). Per-request proofs authenticate the same identities (optionally bound to the TLS channel; `http_require_binding` insists) and every authenticated answer carries an `X-RHP-Proof`; each key gets one logical session that ends after `limits.gateway_idle_ms` with nothing in flight, measured on the host's clock. Connections share the native unauthenticated-handshake budget until their proof checks out. Audit records carry each request's own caller.
 - **Discovery:** `advertise(options)` publishes through `Cfg::discovery_t`; `include_libs` separately publishes library names. Later provider errors: `discovery_status()`.

@@ -5,7 +5,7 @@ What a host reports. Namespace `Rhp::event`. Target `Rhp::event`; depends on `co
 | Header | What |
 |---|---|
 | `events.hpp` | the host events `session_opened` (with `tls`), `session_closed`, `auth_failed`, `script_executed`, `blob_received`, `identity_reverted`, `session_resumed`, `handler_failed`, `release_changed`; `any` (a variant of all of them), the `host_event` concept, `kind_of<E>`, `to_json`; `script_event` (an `rhp.publish`, not in `any`) |
-| `hub.hpp` | `hub` (a host's handlers: `add`, `wants`, `publish`), `script_hub` (`host.on_script_event` handlers by name or `*`), `subscription` (= `Rhp::subscription`, RAII, move-only), `subscribe<E>` / `subscribe_any` |
+| `hub.hpp` | `hub` (a host's handlers: `add`, `wants`, `publish`), `script_hub` (`host.on_script_event` handlers by name or `*`), `subscription` (= `Rhp::subscription`, RAII, move-only), `subscribe<E>` / `subscribe_any` / `subscribe_script` |
 
 ```cpp
 auto scripts = host.on<Rhp::event::script_executed>([](const Rhp::event::script_executed& e) {

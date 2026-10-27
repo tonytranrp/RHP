@@ -37,7 +37,7 @@ namespace Rhp {
 //   Rhp::host<> host{Rhp::endpoint::listen("127.0.0.1", 7777),
 //                    Rhp::security::keyring{{"dev", *Rhp::security::key::from_env("RHP_KEY_DEV"), Rhp::role::kAdmin}},
 //                    *Rhp::security::trusted_signers::from_file("rhp_signers.pub")};
-//   host.install<game_lib>();
+//   (void)host.install<game_lib>();
 //   auto audit = host.on_any(Rhp::audit::file_sink{"rhp_audit.log"});
 //   while (running) { host.pump(); game::update(); }
 //
