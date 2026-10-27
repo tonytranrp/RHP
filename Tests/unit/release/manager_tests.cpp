@@ -977,3 +977,18 @@ TEST_CASE("store keys are checked", "[release][store]") {
     CHECK(store.read("missing").error().code == errc::kNotFound);
     CHECK(store.remove("missing"));
 }
+
+TEST_CASE("an empty any_store reports errors instead of crashing", "[release][store]") {
+    const Rhp::release::any_store empty;
+    CHECK_FALSE(empty);
+    const std::vector<std::byte> bytes{std::byte{1}};
+    CHECK(empty.read("state").error().code == errc::kInvalidArgument);
+    CHECK(empty.write("state", bytes).error().code == errc::kInvalidArgument);
+    CHECK(empty.remove("state").error().code == errc::kInvalidArgument);
+    CHECK(empty.keys().error().code == errc::kInvalidArgument);
+
+    fixture f;
+    Rhp::release::manager m{trust_of({{&f.dev, {"*"}}}), f.options(), empty};
+    CHECK(m.restore().error().code == errc::kInvalidArgument);
+    CHECK(m.apply(f.speed_release(1, 2)).error().code == errc::kInvalidArgument);
+}

@@ -13,6 +13,7 @@
 #include <utility>
 #include <vector>
 
+#include <rhp/core/error.hpp>
 #include <rhp/core/result.hpp>
 
 namespace Rhp::release {
@@ -36,7 +37,8 @@ concept storage = requires(S& s, std::string_view key, std::span<const std::byte
     { s.keys() } -> std::same_as<result<std::vector<std::string>>>;
 };
 
-// A storage held behind one interface (the manager compiles once). Owns what it was given.
+// A storage held behind one interface (the manager compiles once). Owns what it was given. An empty
+// one (default-constructed) holds none: every call reports kInvalidArgument.
 class any_store {
 public:
     any_store() = default;
@@ -46,12 +48,34 @@ public:
     any_store(S s) : self_(std::make_shared<model<S>>(std::move(s))) {} // implicit: anything that is a storage converts
 
     [[nodiscard]] explicit operator bool() const noexcept { return self_ != nullptr; }
-    [[nodiscard]] result<std::vector<std::byte>> read(std::string_view key) const { return self_->read(key); }
-    [[nodiscard]] result<void> write(std::string_view key, std::span<const std::byte> bytes) const { return self_->write(key, bytes); }
-    [[nodiscard]] result<void> remove(std::string_view key) const { return self_->remove(key); }
-    [[nodiscard]] result<std::vector<std::string>> keys() const { return self_->keys(); }
+    [[nodiscard]] result<std::vector<std::byte>> read(std::string_view key) const {
+        if (!self_) {
+            return no_store();
+        }
+        return self_->read(key);
+    }
+    [[nodiscard]] result<void> write(std::string_view key, std::span<const std::byte> bytes) const {
+        if (!self_) {
+            return no_store();
+        }
+        return self_->write(key, bytes);
+    }
+    [[nodiscard]] result<void> remove(std::string_view key) const {
+        if (!self_) {
+            return no_store();
+        }
+        return self_->remove(key);
+    }
+    [[nodiscard]] result<std::vector<std::string>> keys() const {
+        if (!self_) {
+            return no_store();
+        }
+        return self_->keys();
+    }
 
 private:
+    [[nodiscard]] static std::unexpected<error> no_store() { return fail(errc::kInvalidArgument, "this any_store holds no storage", "release.store"); }
+
     struct concept_t {
         virtual ~concept_t() = default;
         virtual result<std::vector<std::byte>> read(std::string_view key) = 0;
