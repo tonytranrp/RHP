@@ -1,10 +1,10 @@
 # session — layer 4
 
-One authenticated, reliable conversation over a link, and TLS over any link. Namespace `Rhp::session`. Target `Rhp::session`; depends on `net`, `security`, `tls`, `exec` and `wire` (nothing is compiled with `RHP_ENABLE=OFF`). Hosts and clients use it; applications don't need to.
+One authenticated, reliable conversation over a link, and TLS over any link. Namespace `Rhp::session`. Target `Rhp::session`; depends on `net`, `security`, `tls` and `wire` (nothing is compiled with `RHP_ENABLE=OFF`). Hosts and clients use it; applications don't need to.
 
 | Header | What |
 |---|---|
-| `session.hpp` | `session` (host or client side: `start`, `send`, `close`, `resume`, `ready`, `usable`, `encrypted`), `handler` (`on_ready`, `on_message`, `on_closed`; `on_detached`, `on_resumed`, `resume_target` for resume), `options`, `state` (`kHandshaking`, `kReady`, `kDetached`, `kClosed`) |
+| `session.hpp` | `session` (host or client side: `start`, `send`, `close`, `resume`; `id`, `current`, `ready`, `usable`, `identity`, `granted`, `peer`, `peer_platform`, `encrypted`, `handed_over`, `stats`), `handler` (`on_ready`, `on_message`, `on_closed`; `on_detached`, `on_resumed`, `resume_target` for resume), `options`, `state` (`kHandshaking`, `kReady`, `kDetached`, `kClosed`) |
 | `secure_link.hpp` | `tls_client` / `tls_server` (TLS over any `net::link`; the server sniffs the first byte: `0x16` is TLS), `channel_policy` (which connections of an endpoint get TLS: `make`, `transport_endpoint`, `wrap`, `tls`) |
 
 ## What a session does
@@ -23,7 +23,7 @@ resume      (options.resumable) a dead link detaches the session for limits.resu
             calls resume(new_link) → sealed kResume with a proof over the new link's channel binding;
             the other side's new connection hands its link to the session (resume_target) → sealed
             kWelcome, bound the same way; both resend what wasn't acked. A failed attempt (no answer
-            within 2 s, garbage, a refusal) only loses that link: the dialing side tries another
+            within min(handshake_timeout_ms, 2 s), 2 s when that is 0; garbage; a refusal) only loses that link: the dialing side tries another
 errors      a fatal problem goes to the peer as an unsequenced kError (sealed once keys exist), then close
 ```
 

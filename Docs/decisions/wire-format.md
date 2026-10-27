@@ -28,3 +28,7 @@
 **Stage 5 (as built):** `kProtocolRevision` 3. `kResume {session, proof}` (handshake op 5, sealed, the sender's next control counter in `seq`, its cumulative ack in `ack`; `proof` = the sender's frame MAC over `"rhp/resume"` ‖ the new connection's channel binding) opens a new connection for a detached session; the answer is a sealed `kWelcome {session, proof}` (`"rhp/resumed"`); both sides then resend everything after the other's ack. Frames on encrypted links set `kCrcOmitted` and carry no CRC; such a frame on a plaintext link ends the session. A host that dials (reverse mode) opens with an unsealed ping (seq 0), which handshakes ignore.
 
 **Stage 7 (as built):** `kProtocolRevision` 4. `kSubscribe` (33) / `kUnsubscribe` (34) carry `subscribe_request {name}` (observe; answered nil); `kEvent` (52) is a sequenced reply with envelope `req` 0 and `event_message {name, module, args, dropped}`. Because the revision check is strict, revision-3 peers are refused at hello instead of meeting an unknown op mid-session.
+
+**Stage 10:** `kProtocolRevision` 5 (releases and revocation lists): see [stage10-releases.md](stage10-releases.md).
+
+**Stage 11:** `kProtocolRevision` 6 (tunables, the profiler and the debugger): see [stage11-tools.md](stage11-tools.md).

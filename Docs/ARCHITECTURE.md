@@ -591,7 +591,7 @@ sequenceDiagram
 |---|---|
 | `magic`, `protocol_rev` | reject garbage; `protocol_rev` is a plain integer agreed in `hello` |
 | `flags` | `kMac` (1), `kAckRequested` (2), `kMore` (4, reserved and unused), `kCrcOmitted` (8) |
-| `op` | 16 bits: handshake 1–5 `hello, challenge, response, welcome, resume` · requests 16–34 `exec, load, call, reload, rollback, unload, revert, revert_to, checkpoint, revert_all, cancel, list, status, describe, pin, unpin, blob, subscribe, unsubscribe` · replies 48–52 `output, emit, result, error, event` · control 64–67 `ping, pong, ack, nack` (see X5 and [reference](guide/reference.md#wire-protocol)) |
+| `op` | 16 bits: handshake 1–5 `hello, challenge, response, welcome, resume` · requests 16–43 `exec, load, call, reload, rollback, unload, revert, revert_to, checkpoint, revert_all, cancel, list, status, describe, pin, unpin, blob, subscribe, unsubscribe, release_apply, release_confirm, release_deactivate, release_status, revoke, tunables, tune, profile, debug` · replies 48–52 `output, emit, result, error, event` · control 64–67 `ping, pong, ack, nack` (see X5 and [reference](guide/reference.md#wire-protocol)) |
 | `seq` / `ack` | per-session monotonic + cumulative ack; control frames carry a per-direction counter in `seq` |
 | `length` | ≤ `max_frame` (4 MiB; 16 KiB before the handshake), checked **before** allocating; a blob is sent as a series of `kBlob` requests (chunks of `client_options::blob_chunk`, 1 MiB) |
 | `crc32c` | catches corruption TCP's checksum misses; dropped under TLS (AEAD covers it) — as built, flag `kCrcOmitted`, accepted only on encrypted links (AA6) |
@@ -603,13 +603,15 @@ The header is fixed binary; only the payload is MessagePack (maps 1:1 onto Lua v
 
 ```mermaid
 flowchart TB
-    A["frame"] --> B{"magic / revision OK?"}
-    B -- no --> X1["drop · close after N strikes"]
+    A["frame"] --> B{"magic OK?"}
+    B -- no --> X1["skip to the next magic · close at once before the handshake, on the 3rd strike after it"]
     B -- yes --> C{"length ≤ max_frame?"}
     C -- no --> X2["close (DoS guard)"]
     C -- yes --> D{"crc32c OK?"}
-    D -- no --> X3["nack(seq) → resend"]
-    D -- yes --> E{"MAC OK? (if present)"}
+    D -- no --> X3["nack(seq) → resend · close during the handshake"]
+    D -- yes --> R{"revision OK?"}
+    R -- no --> X5["close (revision mismatch)"]
+    R -- yes --> E{"MAC OK? (if present)"}
     E -- no --> X4["error(auth) · close"]
     E -- yes --> F{"idem key seen?"}
     F -- yes --> G["replay cached response (no re-execution)"]
