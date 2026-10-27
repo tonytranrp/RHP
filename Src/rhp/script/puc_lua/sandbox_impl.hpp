@@ -561,6 +561,15 @@ private:
 
     void open_libraries();
     void open_stage7_libraries(); // the task metatable (tasks.cpp)
+    // The library tables every module of the identity shares (string, table, math, utf8, coroutine,
+    // os, rhp, rhp.buffer) and the string metatable, which a script can change in place:
+    // snapshot_builtins copies them (shallow, with their metatables) when the sandbox is made,
+    // restore_builtins (revert_all) puts the copies back. They stay plain tables: nothing on the hot
+    // path. keep_builtin makes field `key` of the library table at `table` part of its copy (a change
+    // RHP made afterwards, such as enable_testing's fake os.time).
+    void snapshot_builtins();
+    void restore_builtins();
+    void keep_builtin(lua_State* L, int table, const char* key);
     // Coverage (testing.cpp): a line event, and a chunk just compiled (its function on top of the stack).
     void coverage_line(lua_State* L, lua_Debug* ar) noexcept;
     void coverage_compiled(lua_State* L, std::string_view chunk) noexcept;

@@ -399,6 +399,7 @@ sandbox_impl::sandbox_impl(sandbox_options options)
         scratch.scratch = true;
         scratch.live.env_ref = new_environment();
         modules_.emplace(scratch_, std::move(scratch));
+        snapshot_builtins();
     });
     if (!opened) {
         lua_close(state_);
@@ -580,6 +581,121 @@ void sandbox_impl::open_libraries() {
     }
     lua_call(L, 0, 1);
     loader_ref_ = luaL_ref(L, LUA_REGISTRYINDEX);
+}
+
+// ---- the shared library tables -------------------------------------------------------------------
+
+void sandbox_impl::snapshot_builtins() {
+    lua_State* L = state_;
+    lua_createtable(L, 9, 0);
+    const int snapshot = lua_gettop(L);
+    lua_Integer n = 0;
+    const auto add = [&] { // the table on top (popped): {table, copy, metatable or false}
+        const int lib = lua_gettop(L);
+        if (lua_istable(L, lib)) {
+            lua_createtable(L, 3, 0);
+            lua_pushvalue(L, lib);
+            lua_rawseti(L, -2, 1);
+            lua_newtable(L);
+            lua_pushnil(L);
+            while (lua_next(L, lib) != 0) {
+                lua_pushvalue(L, -2);
+                lua_insert(L, -2);
+                lua_rawset(L, -4);
+            }
+            lua_rawseti(L, -2, 2);
+            if (lua_getmetatable(L, lib) == 0) {
+                lua_pushboolean(L, 0);
+            }
+            lua_rawseti(L, -2, 3);
+            lua_rawseti(L, snapshot, ++n);
+        }
+        lua_settop(L, lib - 1);
+    };
+    for (const char* name : {"string", "table", "math", "utf8", "coroutine", "os", "rhp"}) {
+        lua_getglobal(L, name);
+        add();
+    }
+    lua_getglobal(L, "rhp");
+    lua_getfield(L, -1, "buffer");
+    lua_remove(L, -2);
+    add();
+    lua_pushliteral(L, "");
+    if (lua_getmetatable(L, -1) == 0) {
+        lua_pushnil(L);
+    }
+    lua_remove(L, -2);
+    add();
+    lua_setfield(L, LUA_REGISTRYINDEX, kBuiltinsKey);
+}
+
+void sandbox_impl::restore_builtins() {
+    (void)protect(state_, [this] {
+        lua_State* L = state_;
+        lua_getfield(L, LUA_REGISTRYINDEX, kBuiltinsKey);
+        const int snapshot = lua_gettop(L);
+        for (lua_Integer i = 1; lua_rawgeti(L, snapshot, i) == LUA_TTABLE; ++i) {
+            lua_rawgeti(L, -1, 1);
+            const int lib = lua_gettop(L);
+            lua_rawgeti(L, lib - 1, 2);
+            const int copy = lua_gettop(L);
+            // Added and changed fields: the copy's value (nil for an added one). Changing or clearing a
+            // field that exists is allowed while traversing.
+            lua_pushnil(L);
+            while (lua_next(L, lib) != 0) {
+                lua_pushvalue(L, -2);
+                lua_rawget(L, copy);
+                if (lua_rawequal(L, -1, -2) == 0) {
+                    lua_pushvalue(L, -3);
+                    lua_insert(L, -2);
+                    lua_rawset(L, lib);
+                    lua_pop(L, 1);
+                } else {
+                    lua_pop(L, 2);
+                }
+            }
+            // Removed fields.
+            lua_pushnil(L);
+            while (lua_next(L, copy) != 0) {
+                lua_pushvalue(L, -2);
+                if (lua_rawget(L, lib) == LUA_TNIL) {
+                    lua_pop(L, 1);
+                    lua_pushvalue(L, -2);
+                    lua_insert(L, -2);
+                    lua_rawset(L, lib);
+                } else {
+                    lua_pop(L, 2);
+                }
+            }
+            if (lua_rawgeti(L, lib - 1, 3) != LUA_TTABLE) {
+                lua_pop(L, 1);
+                lua_pushnil(L);
+            }
+            lua_setmetatable(L, lib);
+            lua_settop(L, snapshot);
+        }
+        lua_settop(L, snapshot - 1);
+    });
+}
+
+void sandbox_impl::keep_builtin(lua_State* L, int table, const char* key) {
+    table = lua_absindex(L, table);
+    lua_getfield(L, LUA_REGISTRYINDEX, kBuiltinsKey);
+    for (lua_Integer i = 1; lua_rawgeti(L, -1, i) == LUA_TTABLE; ++i) {
+        lua_rawgeti(L, -1, 1);
+        const bool same = lua_rawequal(L, -1, table) != 0;
+        lua_pop(L, 1);
+        if (same) {
+            lua_rawgeti(L, -1, 2);
+            lua_pushstring(L, key);
+            lua_pushvalue(L, -1);
+            lua_rawget(L, table);
+            lua_rawset(L, -3);
+            lua_pop(L, 1);
+        }
+        lua_pop(L, 1);
+    }
+    lua_pop(L, 2);
 }
 
 // A module's _ENV: its own globals, reading through to the shared base (stdlib + libs + rhp).

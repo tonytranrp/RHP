@@ -900,6 +900,8 @@ result<void> sandbox_impl::enable_testing(testing_options options) {
             lua_setfield(L, -2, "time");
             lua_pushcfunction(L, &fake_os_clock);
             lua_setfield(L, -2, "clock");
+            keep_builtin(L, -1, "time"); // revert_all keeps the fakes
+            keep_builtin(L, -1, "clock");
             lua_pop(L, 1);
         }
     });

@@ -14,6 +14,7 @@ inline constexpr const char* kTaskKey = "rhp.task";                      // meta
 inline constexpr const char* kSpanKey = "rhp.span";                      // metatable of typed views: host spans, slices, buffer views (views.cpp)
 inline constexpr const char* kBufferKey = "rhp.buffer";                  // metatable of byte buffers and their slices (buffer.cpp)
 inline constexpr const char* kHandleTagsKey = "rhp.handle_tags";         // handle type tag -> its metatable's name (stack.cpp)
+inline constexpr const char* kBuiltinsKey = "rhp.builtins";              // the shared library tables as made: {table, copy, metatable or false} each (sandbox.cpp)
 
 // Fields of handle metatables (stack.cpp; the test bridge reads them).
 inline constexpr const char* kTypeTagField = "__rhp_type";    // the C++ type (a light userdata tag)
