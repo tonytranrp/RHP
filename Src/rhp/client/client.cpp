@@ -29,6 +29,7 @@
 #include <rhp/net/io_context.hpp>
 #include <rhp/net/link.hpp>
 #include <rhp/platform/os.hpp>
+#include <rhp/session/admission.hpp>
 #include <rhp/session/backoff.hpp>
 #include <rhp/session/secure_link.hpp>
 #include <rhp/session/session.hpp>
@@ -99,6 +100,7 @@ public:
         *alive_ = false;
         timers_.clear();
         redial_timer_.cancel();
+        candidates_.clear();
         others_.clear();
         session_.reset();
         listener_.reset();
@@ -387,6 +389,9 @@ public:
             }
             const auto close_now = [this] {
                 listener_.reset();
+                for (const candidate& c : candidates_) {
+                    c.s->close(make_error(errc::kCancelled, "the client closed", "client"));
+                }
                 if (session_ != nullptr) {
                     session_->close(make_error(errc::kCancelled, "the client closed", "client"));
                 } else {
@@ -673,48 +678,66 @@ private:
         }
     }
 
-    // Reverse mode. With no session the connection becomes it; with one, it may be that session's
-    // host coming back (a resume) or, once that session is detached, a new session of a restarted
-    // host: it waits as a candidate (a few at most) until its first frame tells.
+    // Reverse mode: every connection is a candidate until it authenticates (or hands its link to the
+    // session it resumes), and candidates handshake side by side: the first to authenticate becomes
+    // the session. admission_ bounds how many wait, from one source and in silence.
     void accept(std::unique_ptr<net::link> link) {
         bool refuse = false;
         {
             const std::scoped_lock lock{mutex_};
             refuse = closed_ || closing_;
         }
-        if (refuse || (session_ != nullptr && others_.size() >= kMaxCandidates)) {
+        if (refuse) {
+            park(std::move(link));
+            return;
+        }
+        const std::uint64_t id = ++last_candidate_;
+        auto ticket = admission_.admit(link, [this, id](const error& why) { drop_candidate(id, why); });
+        if (!ticket) {
             park(std::move(link));
             return;
         }
         auto wrapped = policy_.wrap(std::move(link));
         if (!wrapped) {
+            admission_.release(*ticket);
             return; // refused (plaintext where TLS is required): the link is gone
         }
         auto s = std::make_unique<session::session>(io_, std::move(*wrapped), setup_.begin_handshake(), static_cast<session::handler&>(*this), options_);
         session::session& started = *s;
-        if (session_ == nullptr) {
-            session_ = std::move(s);
-        } else {
-            others_.push_back(std::move(s));
-        }
+        candidates_.push_back(candidate{id, *ticket, std::move(s)});
         started.start();
+    }
+
+    // The admission gave up on a candidate (no room, or it sent nothing in time).
+    void drop_candidate(std::uint64_t id, const error& why) {
+        const auto it = std::ranges::find(candidates_, id, &candidate::id);
+        if (it != candidates_.end()) {
+            it->ticket = 0; // released already
+            it->s->close(why);
+        }
     }
 
     void on_ready(session::session& s) override {
         if (&s != session_.get()) {
-            // Reverse mode: a candidate finished a full handshake. While the current session is
-            // alive the host already has one: refuse. Once it is detached, the host restarted (its
-            // old session can't come back): the new one takes over.
+            // Reverse mode: a candidate authenticated. While the current session is alive the host
+            // already has one: refuse. Once it is detached, the host restarted (its old session
+            // can't come back): the new one takes over. Either way the candidates still
+            // handshaking are closed.
+            const auto it = std::ranges::find(candidates_, &s, [](const candidate& c) { return c.s.get(); });
+            if (it == candidates_.end()) {
+                return;
+            }
+            admission_.release(it->ticket);
+            std::unique_ptr<session::session> fresh = std::move(it->s);
+            candidates_.erase(it);
             if (session_ != nullptr && session_->current() != session::state::kDetached) {
-                s.close(make_error(errc::kForbidden, "this client already serves a host", "client"));
+                fresh->close(make_error(errc::kForbidden, "this client already serves a host", "client"));
+                others_.push_back(std::move(fresh));
                 return;
             }
-            const auto it = std::ranges::find_if(others_, [&](const auto& o) { return o.get() == &s; });
-            if (it == others_.end()) {
-                return;
+            for (const candidate& c : candidates_) {
+                c.s->close(make_error(errc::kCancelled, "another connection authenticated first", "client"));
             }
-            std::unique_ptr<session::session> fresh = std::move(*it);
-            others_.erase(it);
             if (session_ != nullptr) {
                 fail_pending(make_error(errc::kTransport, "the host started a new session", "client"));
                 session_->close(make_error(errc::kCancelled, "replaced by the host's new session", "client"));
@@ -803,8 +826,13 @@ private:
 
     void on_closed(session::session& s, const error& why) override {
         if (&s != session_.get()) {
-            // A reverse-mode candidate (handed over to a resume, refused, or failed) or a replaced
-            // session. Destroying it inside on_closed is allowed.
+            // A reverse-mode candidate (handed over to a resume, refused, or failed), or a session
+            // refused or replaced. Destroying it inside on_closed is allowed.
+            if (const auto it = std::ranges::find(candidates_, &s, [](const candidate& c) { return c.s.get(); }); it != candidates_.end()) {
+                admission_.release(it->ticket);
+                candidates_.erase(it);
+                return;
+            }
             std::erase_if(others_, [&](const auto& o) { return o.get() == &s; });
             return;
         }
@@ -816,9 +844,8 @@ private:
             was_ready = ready_;
         }
         if (reverse_ && !closing) {
-            // The host may dial again: keep listening. Calls in flight fail only if this session
-            // was ready — a connection that never authenticated (a stray client, a port scan) had
-            // none, and the calls queued for the next host stay queued.
+            // The host may dial again: keep listening. Calls in flight fail with this session (a
+            // connection that never authenticated was only ever a candidate, and failed none).
             {
                 const std::scoped_lock lock{mutex_};
                 ready_ = false;
@@ -930,8 +957,16 @@ private:
     std::deque<std::unique_ptr<net::link>> parked_; // extra hosts turned away (reverse mode)
     std::vector<queued_request> queued_;            // sent once the session is ready
     std::map<std::uint64_t, std::unique_ptr<net::io_context::timer>> timers_;
-    static constexpr std::size_t kMaxCandidates = 4;
-    std::vector<std::unique_ptr<session::session>> others_; // reverse mode: candidates and replaced sessions
+    // Reverse mode: connections that haven't authenticated yet, each with its admission_ slot.
+    struct candidate {
+        std::uint64_t id = 0;
+        session::admission::ticket ticket = 0;
+        std::unique_ptr<session::session> s;
+    };
+    std::vector<candidate> candidates_;
+    std::uint64_t last_candidate_ = 0;
+    session::admission admission_{io_, setup_.limits};
+    std::vector<std::unique_ptr<session::session>> others_; // reverse mode: sessions refused or replaced, closing
     session::channel_policy policy_;
     std::optional<error> policy_error_;
     net::io_context::timer redial_timer_{io_};
