@@ -2,7 +2,6 @@
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
-#include <cstring>
 #include <format>
 #include <span>
 #include <utility>
@@ -52,15 +51,20 @@ frame_header read_header(std::span<const std::byte, kHeaderSize> in) noexcept {
     return h;
 }
 
+result<void> check_payload(op code, std::size_t size, std::uint32_t max_payload) {
+    if (size > max_payload) {
+        return fail(errc::kLimitExceeded, std::format("{} payload of {} bytes exceeds the {}-byte frame limit", code, size, max_payload), "wire.frame");
+    }
+    return {};
+}
+
 result<void> encode_frame(frame_header header, utils::bytes_view payload, utils::byte_buffer& out, const frame_sealer* sealer,
                           std::uint32_t max_payload) {
-    if (payload.size() > max_payload) {
-        return fail(errc::kLimitExceeded, std::format("{} payload of {} bytes exceeds the {}-byte frame limit", header.code, payload.size(), max_payload),
-                    "wire.frame");
+    if (auto ok = check_payload(header.code, payload.size(), max_payload); !ok) {
+        return ok;
     }
     header.length = static_cast<std::uint32_t>(payload.size());
-    const auto mac_bit = static_cast<std::uint8_t>(frame_flag::kMac);
-    header.flags = sealer != nullptr ? static_cast<std::uint8_t>(header.flags | mac_bit) : static_cast<std::uint8_t>(header.flags & ~mac_bit);
+    header.flags = sealer != nullptr ? header.flags | frame_flag::kMac : static_cast<std::uint8_t>(header.flags & ~static_cast<std::uint8_t>(frame_flag::kMac));
 
     const std::size_t start = out.size();
     out.reserve(start + kHeaderSize + payload.size() + kCrcSize + (sealer != nullptr ? kMacSize : 0)); // one allocation at most

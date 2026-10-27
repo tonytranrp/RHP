@@ -5,7 +5,7 @@ What travels between a host and a client. Namespace `Rhp::wire`. Target `Rhp::wi
 | Header | What |
 |---|---|
 | `ops.hpp` | `op` (16-bit frame op), `kProtocolRevision` (6), `frame_flag` (`kMac`, `kAckRequested`, `kCrcOmitted`; `kMore` reserved), op classes (`is_handshake`, `is_request`, `is_reply`, `is_sequenced`, `is_known`), `required_role(op)`, `to_string(op)` |
-| `frame.hpp` | the 28-byte `frame_header`, `encode_frame`, the incremental `frame_decoder` (`decode_status`, `frame_view`), `frame_sealer` (the MAC interface the authenticator implements) |
+| `frame.hpp` | the 28-byte `frame_header`, `encode_frame` (and its size check, `check_payload`), the incremental `frame_decoder` (`decode_status`, `frame_view`), `frame_sealer` (the MAC interface the authenticator implements) |
 | `codec.hpp` | the `codec` concept (`Rhp::value` ⇄ bytes), `decode_limits` (`max_depth` 100, `max_elements` 2^20), `codec_ops` / `codec_ops_for<C>` (the type-erased form the session uses) |
 | `codec/msgpack.hpp` | `msgpack`: RHP's own MessagePack codec for `Rhp::value` (the default `config<>::codec`) |
 | `messages.hpp` | payload schemas with `Rhp::convert` specializations: handshake (`hello`, `challenge`, `response`, `welcome`, `resume`), `envelope` with `envelope_value` / `take_envelope`, every request body, and the replies (`revert_summary`, `module_status`, `emit_message`, `event_message`, the release, tunable, profile and debug messages) |

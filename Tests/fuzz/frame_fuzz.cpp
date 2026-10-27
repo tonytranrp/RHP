@@ -30,7 +30,7 @@ std::string frame(Rhp::wire::op code, std::uint64_t seq, const Rhp::value& body,
     Rhp::utils::byte_buffer out;
     (void)Rhp::wire::encode_frame(h, payload.view(), out, nullptr, kMax);
     if (mac) { // a MAC trailer the decoder only has to carry
-        out.mutable_view()[5] = static_cast<std::byte>(static_cast<std::uint8_t>(out.view()[5]) | static_cast<std::uint8_t>(Rhp::wire::frame_flag::kMac));
+        out.mutable_view()[5] = static_cast<std::byte>(static_cast<std::uint8_t>(out.view()[5]) | Rhp::wire::frame_flag::kMac);
         out.append(std::string(32, '\x5a'));
     }
     return {reinterpret_cast<const char*>(out.view().data()), out.size()};

@@ -57,6 +57,10 @@ protected:
 void write_header(std::span<std::byte, kHeaderSize> out, const frame_header& header) noexcept;
 [[nodiscard]] frame_header read_header(std::span<const std::byte, kHeaderSize> in) noexcept;
 
+// kLimitExceeded ("<op> payload of N bytes exceeds the M-byte frame limit", where "wire.frame") when
+// a payload of `size` bytes doesn't fit `max_payload`.
+[[nodiscard]] result<void> check_payload(op code, std::size_t size, std::uint32_t max_payload);
+
 // Appends one whole frame to `out`. `header.length` is set from the payload; kMac is set when a
 // sealer is given and cleared otherwise. Fails with kLimitExceeded if the payload exceeds max_payload.
 result<void> encode_frame(frame_header header, utils::bytes_view payload, utils::byte_buffer& out, const frame_sealer* sealer,

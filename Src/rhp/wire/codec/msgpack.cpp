@@ -2,7 +2,6 @@
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
-#include <cstring>
 #include <format>
 #include <limits>
 #include <string>
@@ -250,7 +249,7 @@ private:
         return v;
     }
 
-    template <std::unsigned_integral T, class F>
+    template <std::unsigned_integral T, std::invocable<std::size_t> F>
     result<value> sized(F&& then) {
         auto n = be<T>();
         if (!n) {

@@ -26,7 +26,7 @@ enum class op : std::uint16_t {
     kHello = 1, // client: protocol revision, platform, authenticator hello
     kChallenge, // host: protocol revision, platform, authenticator challenge
     kResponse,  // client: authenticator response
-    kWelcome,   // host: session id, identity, role, heartbeat; also the answer to a kResume
+    kWelcome,   // host: session id, identity, role, heartbeat, platform; also the answer to a kResume
     kResume,    // the dialing side, on a new connection: continue session N (sealed, control counter)
 
     kExec = 16,
@@ -186,6 +186,11 @@ enum class frame_flag : std::uint8_t {
 
 [[nodiscard]] constexpr std::uint8_t operator|(frame_flag a, frame_flag b) noexcept {
     return static_cast<std::uint8_t>(static_cast<std::uint8_t>(a) | static_cast<std::uint8_t>(b));
+}
+
+// `flags` with `f` set.
+[[nodiscard]] constexpr std::uint8_t operator|(std::uint8_t flags, frame_flag f) noexcept {
+    return static_cast<std::uint8_t>(flags | static_cast<std::uint8_t>(f));
 }
 
 [[nodiscard]] constexpr bool has(std::uint8_t flags, frame_flag f) noexcept {
