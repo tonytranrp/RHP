@@ -138,6 +138,12 @@ const Rhp::release::channel_status* status_of(const std::vector<Rhp::release::ch
     return nullptr;
 }
 
+using event_kind = Rhp::release::release_event::kind;
+
+constexpr std::uint64_t kNow = 1'760'000'000;                                 // fake_clocks::wall, in Unix seconds
+constexpr std::uint64_t kJump = std::uint64_t{1} << 32;                       // the default max_seq_jump
+constexpr std::uint64_t kMaxSeq = (std::numeric_limits<std::int64_t>::max)(); // the largest seq a manifest or list holds
+
 } // namespace
 
 TEST_CASE("release manager runs an applied release and swaps in the next one", "[release][manager]") {
@@ -841,6 +847,220 @@ TEST_CASE("seq may not jump past max_seq_jump", "[release][manager]") {
     REQUIRE(m.apply(f.speed_release(1, 2)));
     CHECK(m.apply(f.speed_release(20, 3)).error().code == errc::kOutOfRange);
     REQUIRE(m.apply(f.speed_release(11, 3)));
+}
+
+TEST_CASE("a channel's first release counts its seq cap from the host's clock", "[release][manager]") {
+    fixture f;
+    auto m = f.make();
+    std::vector<Rhp::release::release_event> events;
+    const auto sub = m.on_event([&](const Rhp::release::release_event& e) { events.push_back(e); });
+    const auto huge = m.apply(f.speed_release(kMaxSeq, 2));
+    REQUIRE_FALSE(huge.has_value());
+    CHECK(huge.error().code == errc::kOutOfRange);
+    CHECK(huge.error().message.find("this host's clock") != std::string::npos);
+    CHECK(m.apply(f.speed_release(kNow + kJump + 1, 2)).error().code == errc::kOutOfRange);
+    CHECK(m.status().empty()); // nothing refused is kept
+    REQUIRE(events.size() == 2);
+    CHECK(events[0].what == event_kind::kRefused);
+    CHECK(events[0].err->code == errc::kOutOfRange);
+    REQUIRE(m.apply(f.speed_release(kNow + kJump, 2)));
+    CHECK(fx::g_speed == 2);
+}
+
+TEST_CASE("a revocation list can't fast-forward the revocation seq", "[release][manager]") {
+    fixture f;
+    auto m = f.make();
+    REQUIRE(m.apply(f.speed_release(1, 5)));
+    std::vector<Rhp::release::release_event> events;
+    const auto sub = m.on_event([&](const Rhp::release::release_event& e) { events.push_back(e); });
+    Rhp::release::revocation_list lockout; // one stolen key locking out every later list and release
+    lockout.seq = kMaxSeq;
+    lockout.floors = {{"game.balance", kMaxSeq}};
+    const auto refused = m.revoke(revocations(lockout, {&f.dev}));
+    REQUIRE_FALSE(refused.has_value());
+    CHECK(refused.error().code == errc::kOutOfRange);
+    CHECK(refused.error().message.find("this host's clock") != std::string::npos);
+    CHECK(m.revocation_seq() == 0); // nothing of it applies
+    CHECK(status_of(m.status(), "game.balance")->floor == 1);
+    CHECK(fx::g_speed == 5);
+    REQUIRE(events.size() == 1);
+    CHECK(events[0].what == event_kind::kRefused);
+    CHECK(events[0].seq == kMaxSeq);
+    CHECK(events[0].err->code == errc::kOutOfRange);
+    // A host's first list counts from its clock, every later one from the last list.
+    Rhp::release::revocation_list first;
+    first.seq = kNow + kJump + 1;
+    CHECK(m.revoke(revocations(first, {&f.dev})).error().code == errc::kOutOfRange);
+    first.seq = kNow + kJump;
+    REQUIRE(m.revoke(revocations(first, {&f.dev})));
+    Rhp::release::revocation_list next;
+    next.seq = first.seq + kJump + 1;
+    const auto too_far = m.revoke(revocations(next, {&f.dev}));
+    CHECK(too_far.error().code == errc::kOutOfRange);
+    CHECK(too_far.error().message.find("the highest seq this host has seen") != std::string::npos);
+    next.seq = first.seq + kJump;
+    REQUIRE(m.revoke(revocations(next, {&f.dev})));
+    CHECK(m.revocation_seq() == next.seq);
+}
+
+TEST_CASE("a release carrying a revocation list past the seq cap is refused", "[release][manager]") {
+    fixture f;
+    auto m = f.make();
+    std::vector<Rhp::release::release_event> events;
+    const auto sub = m.on_event([&](const Rhp::release::release_event& e) { events.push_back(e); });
+    Rhp::release::revocation_list list;
+    list.seq = kMaxSeq;
+    auto r = Rhp::release::make_release(manifest_for("game.balance", 1, {{"tuning", "game.speed = 5"}}), {"game.speed = 5"});
+    REQUIRE(r.has_value());
+    r->revocations = revocations(list, {&f.dev});
+    REQUIRE(Rhp::release::sign(*r, f.dev.key()));
+    CHECK(m.apply(*Rhp::release::encode_release(*r)).error().code == errc::kOutOfRange);
+    CHECK(m.revocation_seq() == 0);
+    CHECK(m.status().empty());
+    CHECK(fx::g_speed == 1);
+    REQUIRE(events.size() == 1); // the release's refusal (not a second one for its list)
+    CHECK(events[0].channel == "game.balance");
+}
+
+TEST_CASE("the floors a revocation list raises are capped", "[release][manager]") {
+    fixture f;
+    auto m = f.make();
+    const auto running = m.apply(f.speed_release(5, 3)); // a counter seq
+    REQUIRE(running);
+    Rhp::release::revocation_list list;
+    list.seq = 1;
+    list.releases = {running->id};
+    list.floors = {{"game.balance", 5 + kJump + 1}};
+    const auto refused = m.revoke(revocations(list, {&f.dev}));
+    CHECK(refused.error().code == errc::kOutOfRange);
+    CHECK(refused.error().where == "release 'game.balance'");
+    CHECK(m.revocation_seq() == 0); // refused whole: the release it names still runs
+    CHECK(fx::g_speed == 3);
+    CHECK(status_of(m.status(), "game.balance")->floor == 5);
+    // A channel this host never saw counts from its clock.
+    list.floors = {{"game.balance", 5 + kJump}, {"ui.menu", kNow + kJump + 1}};
+    CHECK(m.revoke(revocations(list, {&f.dev})).error().code == errc::kOutOfRange);
+    CHECK(status_of(m.status(), "ui.menu") == nullptr);
+    list.floors = {{"game.balance", 5 + kJump}, {"ui.menu", kNow + kJump}};
+    REQUIRE(m.revoke(revocations(list, {&f.dev})));
+    CHECK(fx::g_speed == 1);
+    CHECK(status_of(m.status(), "game.balance")->floor == 5 + kJump);
+    CHECK(status_of(m.status(), "ui.menu")->floor == kNow + kJump);
+    // A floor at or below what its channel has seen moves nothing: repeating one is fine.
+    Rhp::release::revocation_list again;
+    again.seq = 2;
+    again.floors = {{"game.balance", 7}, {"ui.menu", kNow + kJump}};
+    REQUIRE(m.revoke(revocations(again, {&f.dev})));
+    // Releases go on from the raised floor, within the cap.
+    CHECK(m.apply(f.speed_release(5 + (2 * kJump) + 1, 4)).error().code == errc::kOutOfRange);
+    REQUIRE(m.apply(f.speed_release(5 + (2 * kJump), 4)));
+    CHECK(fx::g_speed == 4);
+}
+
+TEST_CASE("counter and Unix-time seqs pass the seq caps", "[release][manager]") {
+    fixture f;
+    auto m = f.make();
+    // Counters: releases 1 2 3, a list 1 with small floors (one for a channel never seen).
+    REQUIRE(m.apply(f.speed_release(1, 2, "game.counter")));
+    REQUIRE(m.apply(f.speed_release(2, 3, "game.counter")));
+    Rhp::release::revocation_list list;
+    list.seq = 1;
+    list.floors = {{"game.counter", 1}, {"ui.counter", 4}};
+    REQUIRE(m.revoke(revocations(list, {&f.dev})));
+    REQUIRE(m.apply(f.speed_release(3, 4, "game.counter")));
+    REQUIRE(m.apply(f.speed_release(5, 5, "ui.counter")));
+    // Unix seconds (rhp-cli's --seq auto): a first release, the next one, a list after a counter list.
+    REQUIRE(m.apply(f.speed_release(kNow, 6, "game.clock")));
+    REQUIRE(m.apply(f.speed_release(kNow + 60, 7, "game.clock")));
+    list.seq = kNow + 120;
+    list.floors = {{"game.clock", kNow + 30}};
+    REQUIRE(m.revoke(revocations(list, {&f.dev})));
+    CHECK(m.revocation_seq() == kNow + 120);
+    // A channel that counted switches to Unix time.
+    REQUIRE(m.apply(f.speed_release(kNow + 180, 8, "game.counter")));
+    CHECK(fx::g_speed == 8);
+}
+
+TEST_CASE("a clock at 1970 still passes Unix-time seqs", "[release][manager]") {
+    fixture f;
+    f.clocks->wall = std::chrono::system_clock::time_point{}; // a dead clock battery
+    auto m = f.make();
+    REQUIRE(m.apply(f.speed_release(kNow, 2))); // 0 + the default jump is past every Unix time before 2106
+    Rhp::release::revocation_list list;
+    list.seq = kNow;
+    list.floors = {{"ui.menu", kNow}};
+    REQUIRE(m.revoke(revocations(list, {&f.dev})));
+    CHECK(fx::g_speed == 2);
+}
+
+TEST_CASE("a wrong clock only holds a first seq back", "[release][manager]") {
+    fixture f;
+    f.clocks->wall = std::chrono::system_clock::time_point{};
+    auto o = f.options();
+    o.max_seq_jump = 3600;
+    auto m = f.make(std::move(o));
+    CHECK(m.apply(f.speed_release(kNow, 2)).error().code == errc::kOutOfRange);
+    CHECK(m.status().empty());
+    REQUIRE(m.apply(f.speed_release(1, 3, "game.counter"))); // counters don't mind
+    f.clocks->wall = fake_clocks{}.wall;                     // the clock is set (kNow)
+    REQUIRE(m.apply(f.speed_release(kNow, 4)));
+    CHECK(fx::g_speed == 4);
+}
+
+TEST_CASE("a restored host counts its seq caps from what it saw before", "[release][manager]") {
+    fixture f;
+    {
+        auto m = f.make();
+        REQUIRE(m.apply(f.speed_release(kNow, 4)));
+        Rhp::release::revocation_list list;
+        list.seq = 7;
+        list.floors = {{"ui.menu", 9}};
+        REQUIRE(m.revoke(revocations(list, {&f.dev})));
+    }
+    auto m = f.make();
+    const auto report = m.restore();
+    REQUIRE(report.has_value());
+    CHECK(report->failed.empty());
+    CHECK(report->restored == std::vector<std::string>{"game.balance"});
+    CHECK(fx::g_speed == 4);
+    CHECK(m.revocation_seq() == 7);
+    CHECK(status_of(m.status(), "ui.menu")->floor == 9);
+    Rhp::release::revocation_list next;
+    next.seq = 7 + kJump + 1;
+    CHECK(m.revoke(revocations(next, {&f.dev})).error().code == errc::kOutOfRange);
+    next.seq = 7 + kJump;
+    next.floors = {{"ui.menu", 9 + kJump}};
+    REQUIRE(m.revoke(revocations(next, {&f.dev})));
+    CHECK(m.apply(f.speed_release(kNow + kJump + 1, 5)).error().code == errc::kOutOfRange);
+    REQUIRE(m.apply(f.speed_release(kNow + kJump, 5)));
+    CHECK(fx::g_speed == 5);
+}
+
+TEST_CASE("stored state past the seq caps still restores as it is", "[release][manager]") {
+    fixture f;
+    {
+        auto o = f.options();
+        o.max_seq_jump = kMaxSeq; // as uncapped as an older build
+        auto m = f.make(std::move(o));
+        REQUIRE(m.apply(f.speed_release(kMaxSeq - 10, 4)));
+        Rhp::release::revocation_list list;
+        list.seq = kMaxSeq - 1;
+        list.floors = {{"ui.menu", kMaxSeq - 1}};
+        REQUIRE(m.revoke(revocations(list, {&f.dev})));
+    }
+    auto m = f.make(); // the default cap
+    const auto report = m.restore();
+    REQUIRE(report.has_value());
+    CHECK(report->failed.empty());
+    CHECK(fx::g_speed == 4); // nothing lowered, nothing refused
+    CHECK(m.revocation_seq() == kMaxSeq - 1);
+    CHECK(status_of(m.status(), "game.balance")->floor == kMaxSeq - 10);
+    CHECK(status_of(m.status(), "ui.menu")->floor == kMaxSeq - 1);
+    Rhp::release::revocation_list next; // later moves count from there
+    next.seq = kMaxSeq;
+    REQUIRE(m.revoke(revocations(next, {&f.dev})));
+    REQUIRE(m.apply(f.speed_release(kMaxSeq - 9, 6)));
+    CHECK(fx::g_speed == 6);
 }
 
 TEST_CASE("a role change swaps in a fresh sandbox and rolls back across it", "[release][manager]") {

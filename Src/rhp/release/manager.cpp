@@ -248,7 +248,7 @@ public:
         release& r = *decoded;
         const std::string channel = r.body.channel;
         if (!r.revocations.empty()) {
-            if (auto rev = take_revocations(r.revocations); !rev && rev.error().code != errc::kSuperseded) {
+            if (auto rev = take_revocations(r.revocations, false); !rev && rev.error().code != errc::kSuperseded) {
                 return refuse(channel, std::move(rev).error());
             }
         }
@@ -270,8 +270,8 @@ public:
         if (seq <= floor) {
             return refuse(channel, refused(errc::kSuperseded, std::format("seq {} is not above the channel's floor {}", seq, floor), channel));
         }
-        if (floor != 0 && seq - floor > options_.max_seq_jump) {
-            return refuse(channel, refused(errc::kOutOfRange, std::format("seq {} jumps more than {} past {}", seq, options_.max_seq_jump, floor), channel));
+        if (auto moved = check_move(seq, floor, std::format("seq {}", seq), channel_where(channel)); !moved) {
+            return refuse(channel, std::move(moved).error());
         }
         // Keep the envelope first: the state never names a release the store doesn't hold.
         auto bytes = encode_release(checked->r);
@@ -388,7 +388,7 @@ public:
         if (auto ready = ensure_restored(); !ready) {
             return std::unexpected{std::move(ready).error()};
         }
-        auto changed = take_revocations(envelope);
+        auto changed = take_revocations(envelope, true);
         if (changed) {
             collect_garbage();
         }
@@ -572,6 +572,34 @@ private:
             }
         }
         return checked_release{std::move(r), std::move(*signers)};
+    }
+
+    // A seq moves at most max_seq_jump past `seen`, the highest one this host has seen for it, or past
+    // its clock (Unix seconds) when it has seen none ("Seq caps" in manager.hpp). Further is refused,
+    // never cut down.
+    [[nodiscard]] result<void> check_move(std::uint64_t seq, std::uint64_t seen, std::string_view what, std::string where) const {
+        const std::uint64_t from = seen != 0 ? seen : unix_seconds(wall_now());
+        if (seq <= from || seq - from <= options_.max_seq_jump) {
+            return {};
+        }
+        const std::string past = seen != 0 ? std::format("{}, the highest seq this host has seen for it", seen)
+                                           : std::format("this host's clock ({} in Unix seconds): nothing came before it", from);
+        return fail(errc::kOutOfRange, std::format("{} is more than max_seq_jump ({}) past {}", what, options_.max_seq_jump, past), std::move(where));
+    }
+
+    // A list's own seq and every floor it raises: all within the caps, or nothing of it applies.
+    [[nodiscard]] result<void> check_moves(const revocation_list& list) const {
+        if (auto moved = check_move(list.seq, revoked_.seq, std::format("revocation list {}", list.seq), "release.revocations"); !moved) {
+            return moved;
+        }
+        for (const seq_floor& f : list.floors) {
+            const auto it = channels_.find(f.channel);
+            const std::uint64_t seen = it != channels_.end() ? it->second.state.floor : 0;
+            if (auto moved = check_move(f.seq, seen, std::format("revocation list {}'s floor {}", list.seq, f.seq), channel_where(f.channel)); !moved) {
+                return moved;
+            }
+        }
+        return {};
     }
 
     // ---- swapping ------------------------------------------------------------------------------------
@@ -950,7 +978,9 @@ private:
 
     // ---- revocations ---------------------------------------------------------------------------------
 
-    result<std::size_t> take_revocations(std::span<const std::byte> envelope) {
+    // `report`: a signed list refused for moving a seq too far is a kRefused event (a release that
+    // carries one reports its own refusal instead).
+    result<std::size_t> take_revocations(std::span<const std::byte> envelope, bool report) {
         auto list = decode_revocations(envelope);
         if (!list) {
             return std::unexpected{std::move(list).error()};
@@ -964,6 +994,12 @@ private:
         auto signers = keys_.verify(*list, excluded);
         if (!signers) {
             return std::unexpected{std::move(signers).error()};
+        }
+        if (auto moved = check_moves(list->body); !moved) {
+            if (report) {
+                emit(release_event{release_event::kind::kRefused, {}, std::nullopt, std::nullopt, list->body.seq, {}, moved.error()});
+            }
+            return std::unexpected{std::move(moved).error()};
         }
         // In effect at once, even if it can't be kept (a revocation only withdraws trust); each list is
         // kept under its own key (restore merges them all), and one that can't be is tried again.

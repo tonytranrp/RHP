@@ -62,7 +62,7 @@ struct manager_options {
     bool expire_running = true;                                                    // a running release past not_after is deactivated
     std::uint32_t max_boot_attempts = 2;                                           // restarts a candidate may run through unconfirmed before it is quarantined (above 1000: never)
     std::chrono::milliseconds health_window{60'000};                               // kHealth: confirmed after this long without a failure
-    std::uint64_t max_seq_jump = std::uint64_t{1} << 32;                           // seq may grow by at most this much at once
+    std::uint64_t max_seq_jump = std::uint64_t{1} << 32;                           // how far a seq may move at once (see "Seq caps" below)
     Rhp::limits limits{};                                                          // the channels' sandboxes (wall_ms 10 s when 0)
     std::function<std::chrono::system_clock::time_point()> wall_clock{};           // for validity windows; empty: system_clock::now
     script::clock_fn clock{};                                                      // script time and health windows; empty: steady_clock::now
@@ -146,7 +146,7 @@ struct release_event {
         kApplied,     // a release started running (active or candidate)
         kConfirmed,   // a candidate became active
         kRolledBack,  // a candidate or an active release stopped; `fallback` runs instead (or nothing)
-        kRefused,     // apply() refused a release (`err`)
+        kRefused,     // apply() refused a release, or revoke() a signed list past the seq cap (`err`)
         kRevocations, // a revocation list was applied
     };
     kind what = kind::kApplied;
@@ -181,6 +181,19 @@ class manager_impl;
 // whatever later lists say. The store's state is checksummed against torn and corrupted writes, not
 // against someone who can write the store (they can lower floors; only signed releases ever run).
 //
+// Seq caps (manager_options::max_seq_jump): a release's seq may be at most max_seq_jump past its
+// channel's floor, a revocation list's past the last list's, and a floor a list raises past the
+// highest seq its channel has seen. Where nothing was seen yet (a channel's first release or floor, a
+// host's first list) they count from this host's clock in Unix seconds, what rhp-cli's `--seq auto`
+// writes: counters (1, 2, 3) and Unix-time seqs pass, and one stolen key can't push a seq near 2^63
+// and lock out every later release or list. A move past the cap is refused (kOutOfRange; a list then
+// changes nothing), never cut down, and nothing refused is remembered: a wrong clock only holds a
+// first seq back until it is right (with the default 2^32 even a clock at 1970 passes every Unix-time
+// seq before 2106). Seqs that are neither counters nor Unix seconds (milliseconds, a date with the
+// time) need a larger max_seq_jump. restore() takes what the store holds as it is, even past the caps
+// (an older build may have accepted it): lowering it would undo revocations, refusing it would leave
+// the store unusable.
+//
 // A change (apply, confirm, deactivate) needs the last state saved: while a save keeps failing they
 // fail too (pump() retries the save), so what runs never drifts from what a restart brings back.
 // A revocation list takes effect even when it can't be saved.
@@ -209,7 +222,7 @@ public:
     result<restore_report> restore();
 
     // Checks and runs a release envelope. A release with the seq of the running one and the same
-    // id is `already`; otherwise seq must be above the channel's floor.
+    // id is `already`; otherwise seq must be above the channel's floor and within the seq cap.
     result<apply_result> apply(std::span<const std::byte> envelope, confirm_mode mode = confirm_mode::kNow);
 
     // The running candidate becomes active; returns its id. With `expected`, kSuperseded unless that
@@ -223,7 +236,8 @@ public:
 
     // Applies a signed revocation list newer than any applied before, signed by keys no list revoked:
     // revoked releases, releases at or below a revoked floor and releases signed only by revoked keys
-    // stop (and are never fallen back to), floors rise. Returns how many channels changed.
+    // stop (and are never fallen back to), floors rise. Returns how many channels changed. A list whose
+    // seq or floors pass the seq cap is refused whole (kOutOfRange, and a kRefused event).
     result<std::size_t> revoke(std::span<const std::byte> envelope);
 
     [[nodiscard]] std::vector<channel_status> status() const;
