@@ -5,7 +5,8 @@ One authenticated, reliable conversation over a link, and TLS over any link. Nam
 | Header | What |
 |---|---|
 | `session.hpp` | `session` (host or client side: `start`, `send`, `close`, `resume`; `id`, `current`, `ready`, `usable`, `identity`, `granted`, `peer`, `peer_platform`, `encrypted`, `handed_over`, `stats`), `handler` (`on_ready`, `on_message`, `on_closed`; `on_detached`, `on_resumed`, `resume_target` for resume), `options`, `state` (`kHandshaking`, `kReady`, `kDetached`, `kClosed`) |
-| `secure_link.hpp` | `tls_client` / `tls_server` (TLS over any `net::link`; the server sniffs the first byte: `0x16` is TLS), `channel_policy` (which connections of an endpoint get TLS: `make`, `transport_endpoint`, `wrap`, `tls`) |
+| `secure_link.hpp` | `tls_client` / `tls_server` (TLS over any `net::link`; the server sniffs the first byte: `0x16` is TLS), `channel_policy` (which connections of an endpoint get TLS: `make`, `transport_endpoint`, `wrap` (a link, or a dial's outcome), `tls`) |
+| `backoff.hpp` | `backoff_delay` (capped exponential backoff with full jitter for redials; hosts and clients) and `random_seed` (64 bits from the OS random source) |
 
 ## What a session does
 

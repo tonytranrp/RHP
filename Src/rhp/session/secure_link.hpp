@@ -36,6 +36,8 @@ public:
     [[nodiscard]] const net::endpoint& transport_endpoint() const noexcept { return transport_ep_; }
     // A dialed or accepted link, wrapped as the endpoint wants (or as it is).
     [[nodiscard]] result<std::unique_ptr<net::link>> wrap(std::unique_ptr<net::link> link) const;
+    // A dial's outcome: its link wrapped, or the dial's error as it is.
+    [[nodiscard]] result<std::unique_ptr<net::link>> wrap(result<std::unique_ptr<net::link>> dialed) const;
     // Dialing: every connection is TLS. Listening: TLS is available.
     [[nodiscard]] bool tls() const noexcept { return context_ != nullptr; }
     [[nodiscard]] std::string_view backend() const noexcept { return backend_; }

@@ -277,6 +277,13 @@ result<std::unique_ptr<net::link>> channel_policy::wrap(std::unique_ptr<net::lin
     return tls_server(std::move(link), context_, plaintext_ok);
 }
 
+result<std::unique_ptr<net::link>> channel_policy::wrap(result<std::unique_ptr<net::link>> dialed) const {
+    if (!dialed) {
+        return dialed;
+    }
+    return wrap(std::move(*dialed));
+}
+
 std::unique_ptr<net::link> tls_client(std::unique_ptr<net::link> inner, std::unique_ptr<security::tls::engine> engine) {
     return std::make_unique<secure_link>(std::move(inner), std::move(engine));
 }

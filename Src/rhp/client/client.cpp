@@ -28,7 +28,7 @@
 #include <rhp/net/io_context.hpp>
 #include <rhp/net/link.hpp>
 #include <rhp/platform/os.hpp>
-#include <rhp/platform/random.hpp>
+#include <rhp/session/backoff.hpp>
 #include <rhp/session/secure_link.hpp>
 #include <rhp/session/session.hpp>
 #include <rhp/utils/scope_guard.hpp>
@@ -53,12 +53,8 @@ thread_local const void* t_network_engine = nullptr;
 // A fresh idempotency key: 63 random bits (wire integers are signed 64-bit), never 0.
 [[nodiscard]] std::uint64_t random_key() {
     constexpr std::uint64_t kMask = 0x7fff'ffff'ffff'ffffu;
-    if (auto bytes = platform::random_array<8>()) {
-        std::uint64_t k = 0;
-        for (const std::byte b : *bytes) {
-            k = (k << 8) | std::to_integer<std::uint64_t>(b);
-        }
-        k &= kMask;
+    if (const auto seed = session::random_seed()) {
+        const std::uint64_t k = *seed & kMask;
         return k != 0 ? k : 1;
     }
     return (static_cast<std::uint64_t>(clock::now().time_since_epoch().count()) & kMask) | 1u;
@@ -91,12 +87,8 @@ public:
         } else {
             policy_error_ = std::move(policy).error();
         }
-        if (auto seed = platform::random_array<8>()) {
-            std::uint64_t k = 0;
-            for (const std::byte b : *seed) {
-                k = (k << 8) | std::to_integer<std::uint64_t>(b);
-            }
-            rng_.seed(k);
+        if (const auto seed = session::random_seed()) {
+            rng_.seed(*seed);
         }
     }
 
@@ -570,17 +562,11 @@ private:
             mark_closed(*policy_error_);
             return;
         }
-        setup_.transport.dial(io_, policy_.transport_endpoint(), [this, alive = std::weak_ptr<bool>{alive_}](result<std::unique_ptr<net::link>> link) {
+        setup_.transport.dial(io_, policy_.transport_endpoint(), [this, alive = std::weak_ptr<bool>{alive_}](result<std::unique_ptr<net::link>> dialed) {
             if (gone(alive)) {
                 return; // the engine was destroyed while dialing (shared reactor): the link is dropped
             }
-            if (link) {
-                if (auto wrapped = policy_.wrap(std::move(*link)); wrapped) {
-                    link = std::move(*wrapped);
-                } else {
-                    link = std::unexpected{std::move(wrapped).error()};
-                }
-            }
+            auto link = policy_.wrap(std::move(dialed));
             if (!link) {
                 mark_closed(std::move(link).error());
                 return;
@@ -605,28 +591,19 @@ private:
         redial();
     }
 
-    // Capped exponential backoff with full jitter (the first try comes quickly).
+    // Capped exponential backoff with full jitter (session::backoff_delay; the first try comes quickly).
     void redial() {
-        const std::uint32_t lo = setup_.limits.backoff_min_ms == 0 ? 1 : setup_.limits.backoff_min_ms;
-        const std::uint32_t hi = setup_.limits.backoff_max_ms < lo ? lo : setup_.limits.backoff_max_ms;
-        const std::uint64_t ceiling = attempts_ == 0 ? 50 : std::min<std::uint64_t>(hi, static_cast<std::uint64_t>(lo) << std::min<std::uint32_t>(attempts_, 20));
+        const auto delay = session::backoff_delay(setup_.limits, attempts_, rng_, true);
         ++attempts_;
-        std::uniform_int_distribution<std::uint64_t> pick{1, ceiling};
-        redial_timer_.start(std::chrono::milliseconds{pick(rng_)}, [this] {
+        redial_timer_.start(delay, [this] {
             if (session_ == nullptr || session_->current() != session::state::kDetached) {
                 return;
             }
-            setup_.transport.dial(io_, policy_.transport_endpoint(), [this, alive = std::weak_ptr<bool>{alive_}](result<std::unique_ptr<net::link>> link) {
+            setup_.transport.dial(io_, policy_.transport_endpoint(), [this, alive = std::weak_ptr<bool>{alive_}](result<std::unique_ptr<net::link>> dialed) {
                 if (gone(alive) || session_ == nullptr || session_->current() != session::state::kDetached) {
                     return; // closed meanwhile: the link is dropped
                 }
-                if (link) {
-                    if (auto wrapped = policy_.wrap(std::move(*link)); wrapped) {
-                        link = std::move(*wrapped);
-                    } else {
-                        link = std::unexpected{std::move(wrapped).error()};
-                    }
-                }
+                auto link = policy_.wrap(std::move(dialed));
                 if (!link) {
                     redial();
                     return;

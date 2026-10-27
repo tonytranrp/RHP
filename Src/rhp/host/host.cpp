@@ -43,6 +43,7 @@
 #include <rhp/script/ledger.hpp>
 #include <rhp/script/sandbox.hpp>
 #include <rhp/security/hash.hpp>
+#include <rhp/session/backoff.hpp>
 #include <rhp/session/secure_link.hpp>
 #include <rhp/session/session.hpp>
 #include <rhp/utils/fixed_string.hpp>
@@ -319,12 +320,8 @@ public:
         session_options_.ack_delay_ms = setup_.options.ack_delay_ms;
         session_options_.platform = std::string{platform::kOsName};
         session_options_.resumable = setup_.limits.resume_ms != 0;
-        if (auto seed = platform::random_array<8>()) {
-            std::uint64_t k = 0;
-            for (const std::byte b : *seed) {
-                k = (k << 8) | std::to_integer<std::uint64_t>(b);
-            }
-            rng_.seed(k);
+        if (const auto seed = session::random_seed()) {
+            rng_.seed(*seed);
         }
         auto policy = session::channel_policy::make(setup_.ep, setup_.transport.network, setup_.tls, setup_.options.tls);
         if (!policy) {
@@ -871,14 +868,8 @@ private:
 
     // Dials the client: a new session, or (resume_id set) a new link for that detached session.
     void dial_out(session_id resume_id = {}) {
-        setup_.transport.dial(io_, policy_.transport_endpoint(), [this, resume_id](result<std::unique_ptr<net::link>> link) {
-            if (link) {
-                if (auto wrapped = policy_.wrap(std::move(*link)); wrapped) {
-                    link = std::move(*wrapped);
-                } else {
-                    link = std::unexpected{std::move(wrapped).error()};
-                }
-            }
+        setup_.transport.dial(io_, policy_.transport_endpoint(), [this, resume_id](result<std::unique_ptr<net::link>> dialed) {
+            auto link = policy_.wrap(std::move(dialed));
             if (resume_id.value() != 0) {
                 const auto it = sessions_.find(resume_id);
                 if (it == sessions_.end() || it->second.s->current() != session::state::kDetached) {
@@ -906,14 +897,11 @@ private:
         });
     }
 
-    // Capped exponential backoff with full jitter: a random delay in [0, min(max, min · 2^n)].
+    // Capped exponential backoff with full jitter (session::backoff_delay).
     void redial(session_id resume_id = {}) {
-        const std::uint32_t lo = setup_.limits.backoff_min_ms == 0 ? 1 : setup_.limits.backoff_min_ms;
-        const std::uint32_t hi = setup_.limits.backoff_max_ms < lo ? lo : setup_.limits.backoff_max_ms;
-        const std::uint64_t ceiling = std::min<std::uint64_t>(hi, static_cast<std::uint64_t>(lo) << std::min<std::uint32_t>(attempts_, 20));
+        const auto delay = session::backoff_delay(setup_.limits, attempts_, rng_, false);
         ++attempts_;
-        std::uniform_int_distribution<std::uint64_t> pick{1, ceiling};
-        redial_timer_.start(std::chrono::milliseconds{pick(rng_)}, [this, resume_id] { dial_out(resume_id); });
+        redial_timer_.start(delay, [this, resume_id] { dial_out(resume_id); });
     }
 
     // ---- network thread: resume -------------------------------------------------------------------
