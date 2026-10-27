@@ -5,7 +5,6 @@
 #include <cstdint>
 #include <string>
 #include <string_view>
-#include <type_traits>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -78,11 +77,6 @@ public:
         requires std::convertible_to<const S&, std::string_view>
     [[nodiscard]] const value* find(const S& key) const noexcept {
         return find_string(std::string_view{key});
-    }
-
-    template <class Visitor>
-    decltype(auto) visit(Visitor&& visitor) const {
-        return std::visit(std::forward<Visitor>(visitor), data_);
     }
 
     [[nodiscard]] bool operator==(const value&) const = default;

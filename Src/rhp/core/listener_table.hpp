@@ -26,7 +26,7 @@ namespace Rhp::core {
 // started again. A callback may remove itself (or another) while it runs; it then finishes its current
 // call. So don't remove a callback from a thread holding a lock that callback takes while another
 // thread dispatches it: remove() would wait for a call that waits for the lock.
-template <class Key, class Fn>
+template <std::movable Key, std::move_constructible Fn>
 class listener_table {
 public:
     // Adds a callback; returns its id (never 0).

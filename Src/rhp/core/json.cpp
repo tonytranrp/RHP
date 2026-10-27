@@ -296,7 +296,7 @@ void write(std::string& out, const Rhp::value& v, int indent, int depth) {
     } else if (const auto* b = v.get_if<bool>()) {
         out += *b ? "true" : "false";
     } else if (const auto* i = v.get_if<std::int64_t>()) {
-        out += std::format("{}", *i);
+        std::format_to(std::back_inserter(out), "{}", *i);
     } else if (const auto* d = v.get_if<double>()) {
         if (!std::isfinite(*d)) {
             out += "null";
@@ -312,7 +312,7 @@ void write(std::string& out, const Rhp::value& v, int indent, int depth) {
     } else if (const auto* bytes = v.get_if<Rhp::value::bytes>()) {
         out += '[';
         for (std::size_t k = 0; k < bytes->size(); ++k) {
-            out += std::format("{}{}", k == 0 ? "" : ",", std::to_integer<unsigned>((*bytes)[k]));
+            std::format_to(std::back_inserter(out), "{}{}", k == 0 ? "" : ",", std::to_integer<unsigned>((*bytes)[k]));
         }
         out += ']';
     } else if (const auto* a = v.get_if<Rhp::value::array>()) {

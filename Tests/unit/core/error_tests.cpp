@@ -1,3 +1,4 @@
+#include <cstdint>
 #include <format>
 #include <string>
 
@@ -14,6 +15,17 @@ TEST_CASE("errc has a name for every value", "[core][error]") {
     for (std::uint16_t i = 0; i <= static_cast<std::uint16_t>(Rhp::kLastErrc); ++i) {
         REQUIRE(Rhp::to_string(static_cast<errc>(i)) != "unknown");
     }
+}
+
+TEST_CASE("parse_errc reads what to_string writes", "[core][error]") {
+    for (std::uint16_t i = 0; i <= static_cast<std::uint16_t>(Rhp::kLastErrc); ++i) {
+        const auto code = static_cast<errc>(i);
+        REQUIRE(Rhp::parse_errc(Rhp::to_string(code)) == code);
+    }
+    STATIC_REQUIRE(Rhp::parse_errc("bad_signature") == errc::kBadSignature);
+    CHECK_FALSE(Rhp::parse_errc("unknown"));
+    CHECK_FALSE(Rhp::parse_errc(""));
+    CHECK_FALSE(Rhp::parse_errc("Forbidden"));
 }
 
 TEST_CASE("error formats code, where and message", "[core][error]") {

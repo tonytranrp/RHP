@@ -45,11 +45,8 @@ std::optional<errc> parse_code(std::string_view text) {
         if (close == std::string_view::npos) {
             return std::nullopt;
         }
-        const std::string_view name = text.substr(open + 1, close - open - 1);
-        for (auto code = static_cast<std::uint16_t>(errc::kOk); code <= static_cast<std::uint16_t>(kLastErrc); ++code) {
-            if (to_string(static_cast<errc>(code)) == name) {
-                return static_cast<errc>(code);
-            }
+        if (const std::optional<errc> code = parse_errc(text.substr(open + 1, close - open - 1))) {
+            return code;
         }
     }
     return std::nullopt;

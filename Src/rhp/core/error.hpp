@@ -2,8 +2,10 @@
 
 #include <cstdint>
 #include <format>
+#include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 
 namespace Rhp {
 
@@ -77,6 +79,16 @@ inline constexpr errc kLastErrc = errc::kOutOfScope;
     case errc::kOutOfScope: return "out_of_scope";
     }
     return "unknown";
+}
+
+// "not_found", "bad_signature", ... (what to_string writes); nullopt for anything else.
+[[nodiscard]] constexpr std::optional<errc> parse_errc(std::string_view text) noexcept {
+    for (auto c = static_cast<std::uint16_t>(errc::kOk); c <= static_cast<std::uint16_t>(kLastErrc); ++c) {
+        if (to_string(static_cast<errc>(c)) == text) {
+            return static_cast<errc>(c);
+        }
+    }
+    return std::nullopt;
 }
 
 // The one error type every RHP API reports. Plain data: copyable, comparable, wire-friendly.

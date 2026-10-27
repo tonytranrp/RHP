@@ -315,13 +315,7 @@ struct convert<error> {
         error err;
         err.code = errc::kRuntime;
         if (const auto* code = v.find("code"); code != nullptr && code->is_string()) {
-            const std::string& name = *code->get_if<std::string>();
-            for (auto c = static_cast<std::uint16_t>(errc::kOk); c <= static_cast<std::uint16_t>(kLastErrc); ++c) {
-                if (to_string(static_cast<errc>(c)) == name) {
-                    err.code = static_cast<errc>(c);
-                    break;
-                }
-            }
+            err.code = parse_errc(*code->get_if<std::string>()).value_or(errc::kRuntime);
         }
         const auto text = [&v](std::string_view key) -> std::string {
             const auto* s = v.find(key);
