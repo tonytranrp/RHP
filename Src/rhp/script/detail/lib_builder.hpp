@@ -152,7 +152,7 @@ void push_arg(stack& s, const T& v) {
 }
 
 // Pushes a binding's result; returns the number of Lua results. Rhp::result errors are raised.
-// `label` is a string or a binding_label (read only when an error needs it).
+// `label` is a string, a binding_label or a static_label (read only when an error needs it).
 template <utils::type_list_like Handles, class R, class Label>
 int push_return(stack& s, const Label& label, R& r) {
     if constexpr (is_tuple_v<R>) {

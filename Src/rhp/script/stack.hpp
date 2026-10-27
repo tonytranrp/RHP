@@ -70,8 +70,10 @@ union arg_slot {
 // translation units never needs lua.h.
 //
 // Indices follow Lua: positive from the bottom (1 = first argument), negative from the top.
-// Readers (to_*) never raise Lua errors; they return nullopt / an Rhp::error instead. Pushers may
-// raise a Lua memory error, which unwinds as a C++ exception through RAII-safe frames.
+// Readers (to_*) report a value of the wrong type with nullopt / an Rhp::error, never a Lua error;
+// the scalar ones never raise at all, but to_value needs Lua stack space (luaL_checkstack) and
+// to_span may copy a table into a new userdata, so those two can raise a Lua memory or stack error.
+// Pushers may raise a Lua memory error. Lua errors unwind as C++ exceptions through RAII-safe frames.
 class stack {
 public:
     explicit stack(lua_State* state) noexcept : state_(state) {}
@@ -109,7 +111,7 @@ public:
     // Pushes t[key] (raw access, no metamethods).
     void raw_get_field(int table, std::string_view key) const;
 
-    // ---- read (never raises) ---------------------------------------------------------------
+    // ---- read (a wrong type is never a Lua error; only to_value can raise one) ----------------
     [[nodiscard]] std::optional<bool> to_bool(int index) const noexcept;               // booleans only
     [[nodiscard]] std::optional<std::int64_t> to_integer(int index) const noexcept;    // integers and integral floats
     [[nodiscard]] std::optional<double> to_number(int index) const noexcept;           // numbers only

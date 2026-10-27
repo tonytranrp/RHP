@@ -5,6 +5,10 @@
 **Why**
 - Every registration must go through the undo ledger so it can be reverted; off-the-shelf binders register straight into global tables.
 - Predictable compile times (~1 kLOC, instantiated per binding, not per usertype graph).
+  As built (Stage 12, with handles, methods and properties, views, asynchronous bindings and
+  tunables): about 2.4 kLOC of headers instantiated per binding (`lib.hpp` ~850,
+  `detail/lib_traits.hpp` ~480, `detail/lib_builder.hpp` ~1.1k), plus the out-of-line wall
+  (`stack.hpp`, `puc_lua/stack.cpp`); still per binding, not per usertype graph.
 
 **Alternatives**
 - sol2 — no commits since Mar 2025; unreleased fixes for GCC 15; no Lua 5.5 support.

@@ -25,8 +25,8 @@ namespace Rhp::script {
 
 // ---- binding tags ------------------------------------------------------------------------------
 
-// The binding changes host state and G takes it back. G is invocable with the binding's result
-// (or, for void bindings, with its arguments). Needs role::kPatch.
+// The binding changes host state and G takes it back. G gets the binding's result (Rhp::result<>
+// and Rhp::async<> peeled) when it can take it, else the binding's arguments. Needs role::kPatch.
 template <auto G>
 struct undo {
     static constexpr auto function = G;
