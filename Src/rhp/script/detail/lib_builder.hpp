@@ -65,6 +65,11 @@ void push_handle(stack& s, const typename Entry::type& h) {
     std::construct_at(static_cast<H*>(memory), h);
 }
 
+// A handle (or a handle argument a view was made with) whose is_alive says no.
+[[nodiscard]] inline error stale_handle(std::string_view name) {
+    return make_error(errc::kStaleHandle, std::format("{} is no longer valid", name));
+}
+
 template <class Entry>
 result<typename Entry::type> pull_handle(stack& s, int index) {
     using H = typename Entry::type;
@@ -73,7 +78,7 @@ result<typename Entry::type> pull_handle(stack& s, int index) {
         return fail(errc::kTypeMismatch, std::format("expected {}, got {}", Entry::name, s.type_name(index)));
     }
     if (!std::invoke(Entry::is_alive, *h)) {
-        return fail(errc::kStaleHandle, std::format("{} is no longer valid", Entry::name));
+        return std::unexpected{stale_handle(Entry::name)};
     }
     return *h;
 }
@@ -433,31 +438,8 @@ int call_plain(stack& s, Label label, [[maybe_unused]] std::index_sequence<Is...
 
 // ---- bindings returning views (view_result, returns_view_v: lib_traits.hpp) ---------------------------
 
-// The memory a view binding's result points at.
-template <class R>
-result<region> view_region(R&& r) {
-    using U = std::remove_cvref_t<R>;
-    if constexpr (is_result_v<U>) {
-        if (!r) {
-            return std::unexpected{r.error()};
-        }
-        return view_region(*r);
-    } else if constexpr (is_span_v<U>) {
-        using E = std::remove_const_t<typename U::element_type>;
-        return region{reinterpret_cast<std::byte*>(const_cast<E*>(r.data())), r.size_bytes()};
-    } else if constexpr (std::is_pointer_v<U>) {
-        if (r == nullptr) {
-            return fail(errc::kStaleHandle, "the object is gone (its binding returned null)");
-        }
-        using T = std::remove_cv_t<std::remove_pointer_t<U>>;
-        return region{reinterpret_cast<std::byte*>(const_cast<T*>(r)), sizeof(T)};
-    } else {
-        static_assert(std::is_lvalue_reference_v<R>, "a struct view comes from a pointer or a reference");
-        return region{reinterpret_cast<std::byte*>(const_cast<std::remove_cv_t<U>*>(std::addressof(r))), sizeof(U)};
-    }
-}
-
-// view_region without the error: false when there is no memory.
+// The memory a view binding's result points at: false when there is none (a null pointer, or a
+// Rhp::result<> error).
 template <class R>
 bool view_find(R&& r, region& out) noexcept {
     using U = std::remove_cvref_t<R>;
@@ -472,8 +454,26 @@ bool view_find(R&& r, region& out) noexcept {
         out = region{reinterpret_cast<std::byte*>(const_cast<T*>(r)), sizeof(T)};
         return r != nullptr;
     } else {
+        static_assert(std::is_lvalue_reference_v<R>, "a struct view comes from a pointer or a reference");
         out = region{reinterpret_cast<std::byte*>(const_cast<std::remove_cv_t<U>*>(std::addressof(r))), sizeof(U)};
         return true;
+    }
+}
+
+// view_find saying why there is no memory: the binding's error, or kStaleHandle for a null pointer.
+template <class R>
+result<region> view_region(R&& r) {
+    if constexpr (is_result_v<std::remove_cvref_t<R>>) {
+        if (!r) {
+            return std::unexpected{r.error()};
+        }
+        return view_region(*r);
+    } else {
+        region out;
+        if (!view_find(std::forward<R>(r), out)) {
+            return fail(errc::kStaleHandle, "the object is gone (its binding returned null)");
+        }
+        return out;
     }
 }
 
@@ -498,12 +498,12 @@ void check_alive(const T& v, std::optional<error>& out) {
     if constexpr (is_handle_v<Handles, T>) {
         using H = find_handle_t<Handles, T>;
         if (!std::invoke(H::is_alive, v)) {
-            out = make_error(errc::kStaleHandle, std::format("{} is no longer valid", H::name));
+            out = stale_handle(H::name);
         }
     } else if constexpr (arg_traits<Handles, T>::optional_handle) {
         using H = find_handle_t<Handles, typename T::value_type>;
         if (v && !std::invoke(H::is_alive, *v)) {
-            out = make_error(errc::kStaleHandle, std::format("{} is no longer valid", H::name));
+            out = stale_handle(H::name);
         }
     }
 }
