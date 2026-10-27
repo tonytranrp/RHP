@@ -701,7 +701,9 @@ int sandbox_impl::new_environment() {
 // ---- allocator and hook ----------------------------------------------------------------------------
 
 std::uint32_t sandbox_impl::check_interval() const noexcept {
-    return options_.limits.cancel_check_instructions != 0 ? options_.limits.cancel_check_instructions : kDefaultCheckInterval;
+    const std::uint32_t interval = options_.limits.cancel_check_instructions != 0 ? options_.limits.cancel_check_instructions : kDefaultCheckInterval;
+    // Lua takes the hook count as an int: a larger one would turn negative, which switches the hook off.
+    return std::min(interval, static_cast<std::uint32_t>((std::numeric_limits<int>::max)()));
 }
 
 bool sandbox_impl::hook_everywhere() const noexcept {

@@ -1,4 +1,6 @@
 #include <chrono>
+#include <cstdint>
+#include <limits>
 #include <stop_token>
 #include <string_view>
 #include <thread>
@@ -9,6 +11,7 @@
 #include <rhp/core/error.hpp>
 #include <rhp/core/limits.hpp>
 #include <rhp/core/result.hpp>
+#include <rhp/core/role.hpp>
 #include <rhp/script/sandbox.hpp>
 #include <rhp/utils/units.hpp>
 
@@ -155,4 +158,17 @@ TEST_CASE("cancel stops recursion that never loops", "[script][limits]") {
     const auto r = exec_cancelled(box, "local function f(n) if n == 0 then return 1 end return f(n - 1) + f(n - 1) end return f(60)");
     REQUIRE_FALSE(r.has_value());
     CHECK(r.error().code == errc::kCancelled);
+}
+
+TEST_CASE("a check interval larger than Lua's hook count holds still arms the hook", "[script][limits]") {
+    Rhp::limits limits;
+    limits.instructions = 1'000'000'000;             // arms the hook on every run
+    limits.cancel_check_instructions = 0x8000'0000u; // more than an int, which is what Lua takes
+    sandbox_options options;
+    options.limits = limits;
+    options.caller_role = Rhp::role::kAdmin; // debug.gethook
+    options.output = [](std::string_view) {};
+    sandbox box{std::move(options)};
+    // The request's coroutine counts with the largest count Lua takes (a negative one switched it off).
+    CHECK(box.exec<std::int64_t>("return select(3, debug.gethook())") == std::int64_t{(std::numeric_limits<int>::max)()});
 }
