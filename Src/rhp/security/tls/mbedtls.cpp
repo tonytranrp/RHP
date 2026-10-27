@@ -92,9 +92,12 @@ struct shared_config {
     shared_config& operator=(const shared_config&) = delete;
 };
 
-// mbedtls_x509_crt_parse wants PEM with its terminating NUL counted.
+// mbedtls_x509_crt_parse wants PEM with its terminating NUL counted. One allocation of the final
+// size, so a private key leaves no reallocated copy behind for wiped_pem to miss.
 [[nodiscard]] std::vector<unsigned char> pem_bytes(std::string_view pem) {
-    std::vector<unsigned char> out(pem.begin(), pem.end());
+    std::vector<unsigned char> out;
+    out.reserve(pem.size() + 1);
+    out.assign(pem.begin(), pem.end());
     out.push_back(0);
     return out;
 }

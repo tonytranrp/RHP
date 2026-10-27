@@ -64,11 +64,23 @@ struct text_line {
     }
 }
 
+// The whole file in one allocation of its size when the size can be read, so a key file's text
+// leaves no reallocated copies behind (the caller wipes the one it gets).
 [[nodiscard]] inline std::optional<std::string> read_file(const std::string& path) {
-    std::ifstream in{path, std::ios::binary};
+    std::ifstream in{path, std::ios::binary | std::ios::ate};
     if (!in) {
         return std::nullopt;
     }
+    if (const auto size = in.tellg(); size >= 0 && in.seekg(0)) {
+        std::string text(static_cast<std::size_t>(size), '\0');
+        if (in.read(text.data(), static_cast<std::streamsize>(size)) || in.eof()) {
+            text.resize(static_cast<std::size_t>(in.gcount()));
+            return text;
+        }
+        return std::nullopt;
+    }
+    in.clear();
+    in.seekg(0);
     return std::string{std::istreambuf_iterator<char>{in}, std::istreambuf_iterator<char>{}};
 }
 
