@@ -8,6 +8,7 @@ rhp_add_test_suite(rhp_utils_tests
         utils/spsc_ring_tests.cpp
         utils/type_list_tests.cpp
         utils/units_tests.cpp
+        utils/utf8_tests.cpp
     LINKS
         Rhp::utils
 )

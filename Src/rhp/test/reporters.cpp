@@ -16,6 +16,7 @@
 #include <rhp/core/json.hpp>
 #include <rhp/core/value.hpp>
 #include <rhp/test/reporter.hpp>
+#include <rhp/utils/utf8.hpp>
 
 namespace Rhp::test {
 
@@ -721,26 +722,12 @@ std::string xml_escape(std::string_view text) {
             ++i;
             continue;
         }
-        // A UTF-8 sequence: copied when valid, else U+FFFD.
-        std::size_t len = c >= 0xF0 && c <= 0xF4   ? 4
-                          : c >= 0xE0 && c <= 0xEF ? 3
-                          : c >= 0xC2 && c <= 0xDF ? 2
-                                                   : 0; // 0x80-0xC1 and 0xF5-0xFF never lead a sequence
-        bool valid = len != 0 && i + len <= text.size();
-        for (std::size_t k = 1; valid && k < len; ++k) {
-            valid = (static_cast<unsigned char>(text[i + k]) & 0xC0) == 0x80;
-        }
-        if (valid && len == 3) {
-            const auto c1 = static_cast<unsigned char>(text[i + 1]);
-            valid = !(c == 0xE0 && c1 < 0xA0) && !(c == 0xED && c1 >= 0xA0); // overlong, surrogates
-            // U+FFFE and U+FFFF aren't XML characters.
-            valid = valid && !(c == 0xEF && c1 == 0xBF && (static_cast<unsigned char>(text[i + 2]) == 0xBE || static_cast<unsigned char>(text[i + 2]) == 0xBF));
-        }
-        if (valid && len == 4) {
-            const auto c1 = static_cast<unsigned char>(text[i + 1]);
-            valid = !(c == 0xF0 && c1 < 0x90) && !(c == 0xF4 && c1 >= 0x90);
-        }
-        if (valid) {
+        // A UTF-8 sequence: copied when well-formed, else U+FFFD.
+        const std::size_t len = utils::utf8_sequence_length(text, i);
+        // U+FFFE and U+FFFF aren't XML characters.
+        const bool not_xml = len == 3 && c == 0xEF && static_cast<unsigned char>(text[i + 1]) == 0xBF &&
+                             (static_cast<unsigned char>(text[i + 2]) == 0xBE || static_cast<unsigned char>(text[i + 2]) == 0xBF);
+        if (len != 0 && !not_xml) {
             out.append(text.substr(i, len));
             i += len;
         } else {

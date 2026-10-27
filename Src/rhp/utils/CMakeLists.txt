@@ -10,6 +10,7 @@ rhp_add_module(utils
         spsc_ring.hpp
         type_list.hpp
         units.hpp
+        utf8.hpp
     SOURCES
         crc32c.cpp
 )

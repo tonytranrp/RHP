@@ -13,6 +13,7 @@ Generic building blocks with **zero** RHP, OS, Lua or network knowledge. Namespa
 | `spsc_ring.hpp` | `spsc_ring<T>`: bounded single-producer / single-consumer queue (`try_push` / `try_emplace` / `try_pop`), capacity rounded up to a power of two |
 | `base64.hpp` | `base64_encode`, strict `base64_decode` (no whitespace, padding only at the end) |
 | `byte_buffer.hpp` | `byte_buffer`: growable bytes on an injectable `std::pmr::memory_resource`; `bytes_view`, `as_bytes`, little-endian `store_le` / `load_le`, `append_le` / `read_le` |
+| `utf8.hpp` | `utf8_sequence_length(text, at)`: the length of the well-formed UTF-8 sequence at `at`, 0 for none (strict: no overlongs, surrogates or code points above U+10FFFF) |
 | `crc32c.hpp` | `crc32c(data, crc)` (CRC-32C, the frame check on non-TLS links), `crc32c_portable` (the tables only, for tests), `crc32c_hasher` (incremental) |
 
 ```cpp
