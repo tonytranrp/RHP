@@ -92,8 +92,13 @@ int run_sign(const sign_options& o) {
         std::println(stderr, "{}", signature.error());
         return 1;
     }
-    const auto* sig = signature->find("sig");
-    std::println("{} {}", s->key.name, Rhp::security::base64_encode(*sig->get_if<Rhp::value::bytes>()));
+    const Rhp::value* sig = signature->find("sig");
+    const auto* bytes = sig != nullptr ? sig->get_if<Rhp::value::bytes>() : nullptr;
+    if (bytes == nullptr) {
+        std::println(stderr, "the signature has no sig bytes");
+        return 1;
+    }
+    std::println("{} {}", s->key.name, Rhp::security::base64_encode(*bytes));
     return 0;
 }
 
