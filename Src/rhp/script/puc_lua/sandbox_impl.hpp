@@ -484,8 +484,9 @@ public:
 
     // The Lua-side builtins (sandbox.cpp, schedule.cpp, script_events.cpp, tasks.cpp): push their
     // result or raise.
-    std::uint64_t add_timer(lua_State* L, double ms, int fn_index, bool repeating, const handler_opts& opts, std::string label);
-    std::uint64_t add_frames(lua_State* L, std::uint64_t every, int fn_index, const handler_opts& opts);
+    // `where`: the builtin (rhp.after, rhp.every_frames, ...), for errors.
+    std::uint64_t add_timer(lua_State* L, std::string_view where, double ms, int fn_index, bool repeating, const handler_opts& opts, std::string label);
+    std::uint64_t add_frames(lua_State* L, std::string_view where, std::uint64_t every, int fn_index, const handler_opts& opts);
     // add_timer's and add_frames' common part: `entry` with the function at `fn_index`, as the running code's.
     std::uint64_t add_schedule(lua_State* L, std::string_view where, int fn_index, schedule_entry entry, std::string label);
     std::uint64_t subscribe(lua_State* L, std::string_view event, int fn_index, bool once, const handler_opts& opts);

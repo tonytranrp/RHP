@@ -168,14 +168,23 @@ std::string_view sandbox_impl::task_status(const task_record& t) const noexcept 
 }
 
 void sandbox_impl::push_task_handle(lua_State* L, task_record& t) {
-    // Counted before allocating: a collection the allocation runs may not release the record.
+    // Counted before allocating: a collection the allocation runs may not release the record. A
+    // handle that can't be made (the allocation raises) counts as collected at once: drain() takes
+    // the count back. (rhp.spawn and rhp.tasks never yield, so the guard always runs.)
     ++t.handles;
     const std::uint64_t key = t.key;
     const std::uint64_t seq = t.seq;
+    bool made = false;
+    const utils::scope_guard uncount{[this, key, &made]() noexcept {
+        if (!made) {
+            handle_released(key);
+        }
+    }};
     auto* h = static_cast<task_handle*>(lua_newuserdatauv(L, sizeof(task_handle), 0));
     h->key = key;
     h->seq = seq;
-    luaL_setmetatable(L, kTaskKey);
+    luaL_setmetatable(L, kTaskKey); // from here its __gc releases it
+    made = true;
 }
 
 void sandbox_impl::spawn(lua_State* L) {

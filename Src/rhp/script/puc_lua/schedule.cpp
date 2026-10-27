@@ -57,7 +57,7 @@ int lua_rhp_timer(lua_State* L) {
     check_function(L, 2, "rhp.timer");
     const bool repeating = lua_toboolean(L, 3) != 0;
     auto& impl = impl_of(L);
-    lua_pushinteger(L, static_cast<lua_Integer>(impl.add_timer(L, ms, 2, repeating, handler_opts{}, repeating ? "rhp.timer (repeating)" : "rhp.timer")));
+    lua_pushinteger(L, static_cast<lua_Integer>(impl.add_timer(L, "rhp.timer", ms, 2, repeating, handler_opts{}, repeating ? "rhp.timer (repeating)" : "rhp.timer")));
     return 1;
 }
 
@@ -78,7 +78,7 @@ int lua_rhp_after(lua_State* L) {
     check_function(L, 2, "rhp.after");
     auto& impl = impl_of(L);
     const handler_opts opts = impl.read_opts(L, 3, "rhp.after", sandbox_impl::kOptOnError);
-    lua_pushinteger(L, static_cast<lua_Integer>(impl.add_timer(L, ms, 2, false, opts, timer_label("rhp.after", ms))));
+    lua_pushinteger(L, static_cast<lua_Integer>(impl.add_timer(L, "rhp.after", ms, 2, false, opts, timer_label("rhp.after", ms))));
     return 1;
 }
 
@@ -88,7 +88,7 @@ int lua_rhp_every(lua_State* L) {
     check_function(L, 2, "rhp.every");
     auto& impl = impl_of(L);
     const handler_opts opts = impl.read_opts(L, 3, "rhp.every", sandbox_impl::kOptTimes | sandbox_impl::kOptOnError);
-    lua_pushinteger(L, static_cast<lua_Integer>(impl.add_timer(L, ms, 2, true, opts, timer_label("rhp.every", ms))));
+    lua_pushinteger(L, static_cast<lua_Integer>(impl.add_timer(L, "rhp.every", ms, 2, true, opts, timer_label("rhp.every", ms))));
     return 1;
 }
 
@@ -97,7 +97,7 @@ int lua_rhp_every_frame(lua_State* L) {
     check_function(L, 1, "rhp.every_frame");
     auto& impl = impl_of(L);
     const handler_opts opts = impl.read_opts(L, 2, "rhp.every_frame", sandbox_impl::kOptTimes | sandbox_impl::kOptOnError);
-    lua_pushinteger(L, static_cast<lua_Integer>(impl.add_frames(L, 1, 1, opts)));
+    lua_pushinteger(L, static_cast<lua_Integer>(impl.add_frames(L, "rhp.every_frame", 1, 1, opts)));
     return 1;
 }
 
@@ -107,7 +107,7 @@ int lua_rhp_every_frames(lua_State* L) {
     check_function(L, 2, "rhp.every_frames");
     auto& impl = impl_of(L);
     const handler_opts opts = impl.read_opts(L, 3, "rhp.every_frames", sandbox_impl::kOptTimes | sandbox_impl::kOptOnError);
-    lua_pushinteger(L, static_cast<lua_Integer>(impl.add_frames(L, n, 2, opts)));
+    lua_pushinteger(L, static_cast<lua_Integer>(impl.add_frames(L, "rhp.every_frames", n, 2, opts)));
     return 1;
 }
 
@@ -202,7 +202,7 @@ void sandbox_impl::refuse_while_closing(lua_State* L, std::string_view where) co
     }
 }
 
-std::uint64_t sandbox_impl::add_timer(lua_State* L, double ms, int fn_index, bool repeating, const handler_opts& opts, std::string label) {
+std::uint64_t sandbox_impl::add_timer(lua_State* L, std::string_view where, double ms, int fn_index, bool repeating, const handler_opts& opts, std::string label) {
     schedule_entry entry;
     entry.kind = schedule_kind::kTimer;
     entry.repeating = repeating;
@@ -210,10 +210,10 @@ std::uint64_t sandbox_impl::add_timer(lua_State* L, double ms, int fn_index, boo
     entry.due = script_now() + entry.interval;
     entry.times = repeating ? opts.times : std::optional<std::uint32_t>{1};
     entry.policy = opts.on_error.value_or(options_.handler_errors);
-    return add_schedule(L, "rhp.timer", fn_index, std::move(entry), std::move(label));
+    return add_schedule(L, where, fn_index, std::move(entry), std::move(label));
 }
 
-std::uint64_t sandbox_impl::add_frames(lua_State* L, std::uint64_t every, int fn_index, const handler_opts& opts) {
+std::uint64_t sandbox_impl::add_frames(lua_State* L, std::string_view where, std::uint64_t every, int fn_index, const handler_opts& opts) {
     schedule_entry entry;
     entry.kind = schedule_kind::kFrames;
     entry.repeating = true;
@@ -221,7 +221,7 @@ std::uint64_t sandbox_impl::add_frames(lua_State* L, std::uint64_t every, int fn
     entry.next_frame = frame_ + every;
     entry.times = opts.times;
     entry.policy = opts.on_error.value_or(options_.handler_errors);
-    return add_schedule(L, "rhp.every_frame", fn_index, std::move(entry),
+    return add_schedule(L, where, fn_index, std::move(entry),
                         every == 1 ? std::string{"rhp.every_frame"} : std::format("rhp.every_frames {}", every));
 }
 
