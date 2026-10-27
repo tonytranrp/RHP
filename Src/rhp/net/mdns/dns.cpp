@@ -111,6 +111,129 @@ void record(utils::byte_buffer& out, std::string_view owner, rr_type type, std::
     out.append(data.view());
 }
 
+// SRV data: priority, weight, port, target. The canonical data is rebuilt uncompressed.
+void read_srv(reader& r, dns_record& entry) {
+    const auto priority = r.take(2);
+    const auto weight = r.take(2);
+    entry.port = static_cast<std::uint16_t>(r.take(2));
+    entry.target = r.name();
+    utils::byte_buffer canonical;
+    put(canonical, priority, 2);
+    put(canonical, weight, 2);
+    put(canonical, entry.port, 2);
+    name(canonical, entry.target);
+    entry.unique_data.assign(reinterpret_cast<const char*>(canonical.view().data()), canonical.size());
+}
+
+// TXT data up to `end`: length-prefixed "key=value" strings (others are skipped), at most 64.
+void read_txt(reader& r, dns_record& entry, std::size_t end) {
+    while (r.good && r.at < end) {
+        const auto n = r.take(1);
+        if (n > end - r.at || entry.txt.size() >= 64) {
+            r.good = false;
+            break;
+        }
+        const std::string_view text{reinterpret_cast<const char*>(r.input.data() + r.at), static_cast<std::size_t>(n)};
+        const auto equal = text.find('=');
+        if (equal != std::string_view::npos) {
+            entry.txt.emplace_back(text.substr(0, equal), text.substr(equal + 1));
+        }
+        r.at += static_cast<std::size_t>(n);
+    }
+}
+
+// An A or AAAA record's address bytes.
+void read_address(reader& r, std::span<unsigned char> address) {
+    for (auto& b : address) {
+        b = static_cast<unsigned char>(r.take(1));
+    }
+}
+
+// The `bytes` bytes of a class IN record's data at r.at (the caller checks they don't run past it).
+// Types this codec doesn't understand are left unread.
+void read_rdata(reader& r, dns_record& entry, std::size_t bytes) {
+    const auto begin = r.at;
+    const bool v4 = entry.is(rr_type::kA) && bytes == 4;
+    const bool v6 = entry.is(rr_type::kAaaa) && bytes == 16;
+    if (entry.is(rr_type::kPtr)) {
+        entry.target = r.name();
+    } else if (entry.is(rr_type::kSrv)) {
+        read_srv(r, entry);
+    } else if (entry.is(rr_type::kTxt)) {
+        read_txt(r, entry, begin + bytes);
+    } else if (v4) {
+        asio::ip::address_v4::bytes_type address{};
+        read_address(r, address);
+        entry.address = asio::ip::address_v4{address}.to_string();
+    } else if (v6) {
+        asio::ip::address_v6::bytes_type address{};
+        read_address(r, address);
+        entry.address = asio::ip::address_v6{address}.to_string();
+    }
+    if (entry.is(rr_type::kTxt) || v4 || v6) {
+        entry.unique_data.assign(reinterpret_cast<const char*>(r.input.data() + begin), bytes);
+    }
+}
+
+// Nonempty labels of at most 63 bytes, at most 200 bytes in all, no NUL.
+[[nodiscard]] bool valid_host_name(std::string_view host) noexcept {
+    bool valid = !host.empty() && host.size() <= 200 && host.find('\0') == std::string_view::npos;
+    auto rest = host;
+    while (valid && !rest.empty()) {
+        const auto dot = rest.find('.');
+        const auto label = rest.substr(0, dot);
+        valid = !label.empty() && label.size() <= 63;
+        if (dot == std::string_view::npos) {
+            break;
+        }
+        rest.remove_prefix(dot + 1);
+        valid = valid && !rest.empty();
+    }
+    return valid;
+}
+
+// One record a service publishes: its owner name, type and data.
+struct service_entry {
+    std::string_view owner;
+    rr_type type;
+    utils::byte_buffer data;
+};
+
+// PTR (left out of a probe: its questions come first), SRV, TXT and A or AAAA. The owners point
+// into `type`, `instance` and `service`.
+[[nodiscard]] std::vector<service_entry> service_entries(const service_record& service, const std::string& type, const std::string& instance,
+                                                         const txt_fields& txt, const asio::ip::address& address, bool probe) {
+    std::vector<service_entry> records;
+    records.reserve(4);
+    if (!probe) {
+        utils::byte_buffer ptr;
+        name(ptr, instance);
+        records.push_back({type, rr_type::kPtr, std::move(ptr)});
+    }
+    utils::byte_buffer srv;
+    put(srv, 0, 4);
+    put(srv, service.port, 2);
+    name(srv, service.host);
+    records.push_back({instance, rr_type::kSrv, std::move(srv)});
+    utils::byte_buffer text;
+    for (const auto& [key, value] : txt) {
+        const auto field = key + "=" + value;
+        put(text, field.size(), 1);
+        text.append(field);
+    }
+    records.push_back({instance, rr_type::kTxt, std::move(text)});
+    utils::byte_buffer ip;
+    if (address.is_v4()) {
+        const auto bytes = address.to_v4().to_bytes();
+        ip.append(std::as_bytes(std::span{bytes}));
+    } else {
+        const auto bytes = address.to_v6().to_bytes();
+        ip.append(std::as_bytes(std::span{bytes}));
+    }
+    records.push_back({service.host, address.is_v4() ? rr_type::kA : rr_type::kAaaa, std::move(ip)});
+    return records;
+}
+
 } // namespace
 
 result<dns_message> read_dns(utils::bytes_view packet) {
@@ -145,52 +268,11 @@ result<dns_message> read_dns(utils::bytes_view packet) {
             break;
         }
         const auto end = r.at + bytes;
-        const auto begin = r.at;
-        if (klass == kClassIn && entry.is(rr_type::kPtr)) {
-            entry.target = r.name();
-        } else if (klass == kClassIn && entry.is(rr_type::kSrv)) {
-            const auto priority = r.take(2);
-            const auto weight = r.take(2);
-            entry.port = static_cast<std::uint16_t>(r.take(2));
-            entry.target = r.name();
-            utils::byte_buffer canonical;
-            put(canonical, priority, 2);
-            put(canonical, weight, 2);
-            put(canonical, entry.port, 2);
-            name(canonical, entry.target);
-            entry.unique_data.assign(reinterpret_cast<const char*>(canonical.view().data()), canonical.size());
-        } else if (klass == kClassIn && entry.is(rr_type::kTxt)) {
-            while (r.good && r.at < end) {
-                const auto n = r.take(1);
-                if (n > end - r.at || entry.txt.size() >= 64) {
-                    r.good = false;
-                    break;
-                }
-                const std::string_view text{reinterpret_cast<const char*>(packet.data() + r.at), static_cast<std::size_t>(n)};
-                const auto equal = text.find('=');
-                if (equal != std::string_view::npos) {
-                    entry.txt.emplace_back(text.substr(0, equal), text.substr(equal + 1));
-                }
-                r.at += static_cast<std::size_t>(n);
-            }
-        } else if (klass == kClassIn && entry.is(rr_type::kA) && bytes == 4) {
-            asio::ip::address_v4::bytes_type address{};
-            for (auto& b : address) {
-                b = static_cast<unsigned char>(r.take(1));
-            }
-            entry.address = asio::ip::address_v4{address}.to_string();
-        } else if (klass == kClassIn && entry.is(rr_type::kAaaa) && bytes == 16) {
-            asio::ip::address_v6::bytes_type address{};
-            for (auto& b : address) {
-                b = static_cast<unsigned char>(r.take(1));
-            }
-            entry.address = asio::ip::address_v6{address}.to_string();
+        if (klass == kClassIn) {
+            read_rdata(r, entry, bytes);
         }
         if (r.at > end) {
             r.good = false;
-        }
-        if (klass == kClassIn && (entry.is(rr_type::kTxt) || (entry.is(rr_type::kA) && bytes == 4) || (entry.is(rr_type::kAaaa) && bytes == 16))) {
-            entry.unique_data.assign(reinterpret_cast<const char*>(packet.data() + begin), bytes);
         }
         r.at = end;
         if (klass == kClassIn) {
@@ -222,60 +304,15 @@ result<utils::byte_buffer> dns_service_packet(const service_record& service, std
     }
     std::error_code ec;
     const auto address = asio::ip::make_address(service.address, ec);
-    bool valid_host = !service.host.empty() && service.host.size() <= 200 && service.host.find('\0') == std::string::npos;
-    auto rest = std::string_view{service.host};
-    while (valid_host && !rest.empty()) {
-        const auto dot = rest.find('.');
-        const auto label = rest.substr(0, dot);
-        valid_host = !label.empty() && label.size() <= 63;
-        if (dot == std::string_view::npos) {
-            break;
-        }
-        rest.remove_prefix(dot + 1);
-        valid_host = valid_host && !rest.empty();
-    }
-    if (ec || !valid_host) {
+    if (ec || !valid_host_name(service.host)) {
         return fail(errc::kInvalidArgument, "DNS-SD needs a literal address and local hostname", "net.mdns");
     }
     const auto type = service_domain(service.transport);
     const auto instance = instance_domain(service);
-    // Every record's owner, type and data; the probe leaves out the PTR (its questions come first).
-    struct entry {
-        std::string_view owner;
-        rr_type type;
-        utils::byte_buffer data;
-    };
-    std::vector<entry> records;
-    records.reserve(4);
-    if (!probe) {
-        utils::byte_buffer ptr;
-        name(ptr, instance);
-        records.push_back({type, rr_type::kPtr, std::move(ptr)});
-    }
-    utils::byte_buffer srv;
-    put(srv, 0, 4);
-    put(srv, service.port, 2);
-    name(srv, service.host);
-    records.push_back({instance, rr_type::kSrv, std::move(srv)});
-    utils::byte_buffer text;
-    for (const auto& [key, value] : *txt) {
-        const auto field = key + "=" + value;
-        put(text, field.size(), 1);
-        text.append(field);
-    }
-    records.push_back({instance, rr_type::kTxt, std::move(text)});
-    utils::byte_buffer ip;
-    if (address.is_v4()) {
-        const auto bytes = address.to_v4().to_bytes();
-        ip.append(std::as_bytes(std::span{bytes}));
-    } else {
-        const auto bytes = address.to_v6().to_bytes();
-        ip.append(std::as_bytes(std::span{bytes}));
-    }
-    records.push_back({service.host, address.is_v4() ? rr_type::kA : rr_type::kAaaa, std::move(ip)});
+    const auto records = service_entries(service, type, instance, *txt, address, probe);
 
     // Without questions every record is an answer (announcements, probes' authority section).
-    const auto answers = [&](const entry& e) {
+    const auto answers = [&](const service_entry& e) {
         return asked.empty() || std::ranges::any_of(asked, [&](const auto& q) {
                    return q.first == e.owner && (q.second == code(e.type) || q.second == code(rr_type::kAny));
                });
