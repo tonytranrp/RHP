@@ -11,6 +11,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <random>
 #include <regex>
