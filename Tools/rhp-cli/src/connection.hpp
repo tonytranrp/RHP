@@ -63,6 +63,10 @@ struct connected {
 
 [[nodiscard]] std::optional<connected> open_connection(const connection_options& o, replxx::Replxx* rx, bool to_stderr = false);
 
+// identity_file::load, its warnings printed first ("warning: ..."); nullopt after printing the
+// error. Through `out` when given, else to stderr.
+[[nodiscard]] std::optional<Rhp::security::identity_file> load_identity(const std::string& path, terminal* out = nullptr);
+
 // An identity that signs scripts and release files.
 struct signer {
     Rhp::security::identity_file id;

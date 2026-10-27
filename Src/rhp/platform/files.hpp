@@ -19,6 +19,18 @@ namespace Rhp::platform {
 // on POSIX). A crash between the two can leave a "*.tmp" file behind.
 [[nodiscard]] result<void> replace_file(const std::filesystem::path& path, std::span<const std::byte> bytes);
 
+// replace_file for secrets (keys and the files holding them): the file is its owner's alone on
+// every OS. The temporary is created that way before any byte goes in (POSIX: O_EXCL, mode 0600;
+// Windows: an explicit DACL that grants the process token's user full access and nobody else, with
+// the folder's inherited permissions blocked), and the rename keeps it, so an existing file loses
+// wider permissions too.
+[[nodiscard]] result<void> write_private_file(const std::filesystem::path& path, std::span<const std::byte> bytes);
+
+// Whether users other than the file's owner may read `path`. POSIX: the group or other read bit;
+// Windows: no DACL, or an allow ACE granting read to anyone but the owner, this process's user,
+// SYSTEM and the Administrators group. False when it can't tell (no such file).
+[[nodiscard]] bool readable_by_others(const std::filesystem::path& path) noexcept;
+
 // Creates `path` (and its parents) if missing; on POSIX every directory it creates is its owner's only.
 [[nodiscard]] result<void> make_private_directory(const std::filesystem::path& path);
 

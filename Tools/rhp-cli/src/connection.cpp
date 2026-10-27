@@ -63,13 +63,26 @@ void add_connection_options(CLI::App& cmd, connection_options& o, bool positiona
     cmd.add_option("--timeout", o.timeout_ms, "ms to wait for the session (default 10000, 600000 with --listen)");
 }
 
+namespace {
+
+void print_warnings(const Rhp::security::identity_file& id, terminal* out) {
+    for (const std::string& warning : id.warnings) {
+        if (out != nullptr) {
+            (*out)(style::kError, "warning: " + warning);
+        } else {
+            std::println(stderr, "warning: {}", warning);
+        }
+    }
+}
+
+} // namespace
+
 std::optional<connected> open_connection(const connection_options& o, replxx::Replxx* rx, bool to_stderr) {
     // Colors only where the terminal shows them (a classic Windows console needs them turned on).
     const bool color = !to_stderr && Rhp::platform::stdout_is_terminal() && Rhp::platform::environment_variable("NO_COLOR").empty() && Rhp::platform::enable_ansi_colors();
     auto out = std::make_unique<terminal>(rx, color, to_stderr);
-    auto id = Rhp::security::identity_file::load(o.identity);
+    auto id = load_identity(o.identity, out.get());
     if (!id) {
-        (*out)(style::kError, std::format("{}", id.error()));
         return std::nullopt;
     }
     auto ep = parse_endpoint(o.address, o.listen, o.insecure_lan);
@@ -120,10 +133,23 @@ std::optional<connected> open_connection(const connection_options& o, replxx::Re
     return connected{std::move(c), std::move(out)};
 }
 
-std::optional<signer> load_signer(const std::string& path) {
+std::optional<Rhp::security::identity_file> load_identity(const std::string& path, terminal* out) {
     auto id = Rhp::security::identity_file::load(path);
     if (!id) {
-        std::println(stderr, "{}", id.error());
+        if (out != nullptr) {
+            (*out)(style::kError, std::format("{}", id.error()));
+        } else {
+            std::println(stderr, "{}", id.error());
+        }
+        return std::nullopt;
+    }
+    print_warnings(*id, out);
+    return std::move(*id);
+}
+
+std::optional<signer> load_signer(const std::string& path) {
+    auto id = load_identity(path);
+    if (!id) {
         return std::nullopt;
     }
     auto key = id->signer_key();

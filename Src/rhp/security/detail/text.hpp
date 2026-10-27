@@ -2,12 +2,17 @@
 
 #include <cctype>
 #include <cstddef>
+#include <filesystem>
+#include <format>
 #include <fstream>
 #include <iterator>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
+
+#include <rhp/platform/files.hpp>
+#include <rhp/platform/os.hpp>
 
 namespace Rhp::security::detail {
 
@@ -66,7 +71,7 @@ struct text_line {
 
 // The whole file in one allocation of its size when the size can be read, so a key file's text
 // leaves no reallocated copies behind (the caller wipes the one it gets).
-[[nodiscard]] inline std::optional<std::string> read_file(const std::string& path) {
+[[nodiscard]] inline std::optional<std::string> read_file(const std::filesystem::path& path) {
     std::ifstream in{path, std::ios::binary | std::ios::ate};
     if (!in) {
         return std::nullopt;
@@ -82,6 +87,16 @@ struct text_line {
     in.clear();
     in.seekg(0);
     return std::string{std::istreambuf_iterator<char>{in}, std::istreambuf_iterator<char>{}};
+}
+
+// The warning for a key file other users can read (identity files), if it is one.
+[[nodiscard]] inline std::optional<std::string> exposure_warning(const std::filesystem::path& path) {
+    if (!platform::readable_by_others(path)) {
+        return std::nullopt;
+    }
+    constexpr std::string_view kFix = platform::kOs == platform::os_kind::kWindows ? "restrict it to your account" : "chmod 600 it";
+    const std::u8string name = path.u8string(); // string() throws on Windows for names outside the code page
+    return std::format("{} can be read by other users of this machine: {}", std::string_view{reinterpret_cast<const char*>(name.data()), name.size()}, kFix);
 }
 
 } // namespace Rhp::security::detail

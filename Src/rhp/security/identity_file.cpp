@@ -1,17 +1,16 @@
 #include <array>
 #include <cstddef>
-#include <filesystem>
 #include <format>
-#include <fstream>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
-#include <system_error>
 #include <utility>
 
 #include <rhp/core/error.hpp>
 #include <rhp/core/result.hpp>
 #include <rhp/core/role.hpp>
+#include <rhp/platform/files.hpp>
 #include <rhp/security/detail/text.hpp>
 #include <rhp/security/ed25519.hpp>
 #include <rhp/security/identity_file.hpp>
@@ -77,6 +76,9 @@ result<identity_file> identity_file::load(const std::string& path) {
     }
     auto id = parse(*text);
     secure_wipe(text->data(), text->size());
+    if (auto warning = id ? detail::exposure_warning(path) : std::nullopt) {
+        id->warnings.push_back(std::move(*warning));
+    }
     return id;
 }
 
@@ -139,28 +141,11 @@ std::string identity_file::to_text() const {
 }
 
 result<void> identity_file::save(const std::string& path) const {
-    {
-        // Create it empty and owner-only (0600 on POSIX) before any secret goes in; an existing
-        // file loses wider permissions too.
-        const std::ofstream create{path, std::ios::binary | std::ios::trunc};
-        if (!create) {
-            return fail(errc::kInvalidArgument, std::format("can't write identity file {}", path), "security.identity_file");
-        }
-    }
-    std::error_code ec;
-    std::filesystem::permissions(path, std::filesystem::perms::owner_read | std::filesystem::perms::owner_write, std::filesystem::perm_options::replace, ec);
-    if (ec) {
-        return fail(errc::kInvalidArgument, std::format("can't make identity file {} private: {}", path, ec.message()), "security.identity_file");
-    }
-    std::ofstream out{path, std::ios::binary | std::ios::trunc};
-    if (!out) {
-        return fail(errc::kInvalidArgument, std::format("can't write identity file {}", path), "security.identity_file");
-    }
     std::string text = to_text();
-    out << text;
+    auto saved = platform::write_private_file(path, std::as_bytes(std::span{text}));
     secure_wipe(text.data(), text.size());
-    if (!out.flush()) {
-        return fail(errc::kInvalidArgument, std::format("can't write identity file {}", path), "security.identity_file");
+    if (!saved) {
+        return fail(errc::kInvalidArgument, std::format("can't write identity file {}: {}", path, saved.error().message), "security.identity_file");
     }
     return {};
 }

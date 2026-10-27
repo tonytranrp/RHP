@@ -19,6 +19,7 @@
 #include <rhp/core/result.hpp>
 #include <rhp/platform/files.hpp>
 #include <rhp/platform/random.hpp>
+#include <rhp/utils/scope_guard.hpp>
 
 #if defined(RHP_PLATFORM_WINDOWS)
 #ifndef WIN32_LEAN_AND_MEAN
@@ -31,6 +32,9 @@
 #include <io.h>
 #include <process.h>
 #include <windows.h>
+// After windows.h:
+#include <aclapi.h>
+#include <sddl.h>
 #else
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -65,9 +69,67 @@ unsigned long process_id() noexcept {
 #endif
 }
 
-// A new file only its owner can read, opened for writing; nullptr when it can't be made (or exists).
-std::FILE* create_private(const std::filesystem::path& path) noexcept {
 #if defined(RHP_PLATFORM_WINDOWS)
+// The process token's user (a TOKEN_USER in a buffer of its size); empty when it can't be read.
+std::vector<std::byte> token_user() {
+    HANDLE token = nullptr;
+    if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token) == 0) {
+        return {};
+    }
+    DWORD size = 0;
+    (void)GetTokenInformation(token, TokenUser, nullptr, 0, &size);
+    std::vector<std::byte> user(size);
+    if (size == 0 || GetTokenInformation(token, TokenUser, user.data(), size, &size) == 0) {
+        user.clear();
+    }
+    CloseHandle(token);
+    return user; // moved, never copied: the TOKEN_USER points into its own buffer
+}
+
+PSID sid_of(std::vector<std::byte>& user) noexcept {
+    return user.empty() ? nullptr : reinterpret_cast<TOKEN_USER*>(user.data())->User.Sid;
+}
+
+// A new file only this process's user can open (a protected DACL with one ACE: no inherited ones).
+std::FILE* create_owner_only(const std::filesystem::path& path) {
+    auto user = token_user();
+    LPWSTR sid_text = nullptr;
+    if (user.empty() || ConvertSidToStringSidW(sid_of(user), &sid_text) == 0) {
+        return nullptr;
+    }
+    const std::wstring sddl = std::wstring{L"D:P(A;;FA;;;"} + sid_text + L")";
+    LocalFree(sid_text);
+    PSECURITY_DESCRIPTOR descriptor = nullptr;
+    if (ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.c_str(), SDDL_REVISION_1, &descriptor, nullptr) == 0) {
+        return nullptr;
+    }
+    SECURITY_ATTRIBUTES access{sizeof(SECURITY_ATTRIBUTES), descriptor, FALSE};
+    const HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, &access, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+    LocalFree(descriptor);
+    if (file == INVALID_HANDLE_VALUE) {
+        return nullptr;
+    }
+    const int fd = _open_osfhandle(reinterpret_cast<std::intptr_t>(file), _O_WRONLY | _O_BINARY);
+    if (fd < 0) {
+        CloseHandle(file);
+        return nullptr;
+    }
+    std::FILE* f = _fdopen(fd, "wb");
+    if (f == nullptr) {
+        (void)_close(fd); // closes the handle too
+    }
+    return f;
+}
+#endif
+
+// A new file opened for writing; nullptr when it can't be made (or exists). Only its owner can read
+// it on POSIX; on Windows `owner_only` gives it a DACL for this process's user alone, else it takes
+// the folder's permissions.
+std::FILE* create_private(const std::filesystem::path& path, [[maybe_unused]] bool owner_only) {
+#if defined(RHP_PLATFORM_WINDOWS)
+    if (owner_only) {
+        return create_owner_only(path);
+    }
     std::FILE* f = nullptr;
     if (_wfopen_s(&f, path.c_str(), L"wbx") != 0) {
         return nullptr;
@@ -129,7 +191,10 @@ result<std::vector<std::byte>> read_file(const std::filesystem::path& path) {
     return out;
 }
 
-result<void> replace_file(const std::filesystem::path& path, std::span<const std::byte> bytes) {
+namespace {
+
+// replace_file and write_private_file: a new temporary next to `path` (create_private), renamed over it.
+result<void> write_through_temporary(const std::filesystem::path& path, std::span<const std::byte> bytes, bool owner_only) {
     // Named for this process, a random tag and the write: two writers of one folder (or a process that
     // got the pid of one that crashed mid-write) never share a temporary file.
     static std::atomic<std::uint64_t> writes{0};
@@ -140,7 +205,7 @@ result<void> replace_file(const std::filesystem::path& path, std::span<const std
         (void)random_bytes(std::as_writable_bytes(std::span{&tag, 1}));
         temp = path;
         temp += std::format(".{}.{:08x}.{}.tmp", process_id(), tag, writes.fetch_add(1, std::memory_order_relaxed));
-        f = create_private(temp);
+        f = create_private(temp, owner_only);
     }
     if (f == nullptr) {
         return file_error(errc::kRuntime, temp, "can't create");
@@ -159,6 +224,59 @@ result<void> replace_file(const std::filesystem::path& path, std::span<const std
     }
     sync_directory(path.parent_path().empty() ? std::filesystem::path{"."} : path.parent_path());
     return {};
+}
+
+} // namespace
+
+result<void> replace_file(const std::filesystem::path& path, std::span<const std::byte> bytes) {
+    return write_through_temporary(path, bytes, false);
+}
+
+result<void> write_private_file(const std::filesystem::path& path, std::span<const std::byte> bytes) {
+    return write_through_temporary(path, bytes, true);
+}
+
+bool readable_by_others(const std::filesystem::path& path) noexcept {
+#if defined(RHP_PLATFORM_WINDOWS)
+    PSID owner = nullptr;
+    PACL dacl = nullptr;
+    PSECURITY_DESCRIPTOR descriptor = nullptr;
+    if (GetNamedSecurityInfoW(path.c_str(), SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, &owner, nullptr, &dacl, nullptr, &descriptor) != ERROR_SUCCESS) {
+        return false;
+    }
+    const utils::scope_guard free_descriptor{[descriptor]() noexcept { LocalFree(descriptor); }};
+    if (dacl == nullptr) {
+        return true; // no DACL: everyone may do anything
+    }
+    std::vector<std::byte> user;
+    try {
+        user = token_user();
+    } catch (...) { // out of memory: judge without this process's user
+    }
+    const auto mine = [&](PSID sid) {
+        return EqualSid(sid, owner) != 0 || (!user.empty() && EqualSid(sid, sid_of(user)) != 0) || IsWellKnownSid(sid, WinCreatorOwnerRightsSid) != 0 ||
+               IsWellKnownSid(sid, WinLocalSystemSid) != 0 || IsWellKnownSid(sid, WinBuiltinAdministratorsSid) != 0;
+    };
+    for (DWORD i = 0; i < dacl->AceCount; ++i) {
+        void* ace = nullptr;
+        if (GetAce(dacl, i, &ace) == 0) {
+            continue;
+        }
+        const auto* header = static_cast<const ACE_HEADER*>(ace);
+        if (header->AceType != ACCESS_ALLOWED_ACE_TYPE || (header->AceFlags & INHERIT_ONLY_ACE) != 0) {
+            continue;
+        }
+        auto* allowed = static_cast<ACCESS_ALLOWED_ACE*>(ace);
+        if ((allowed->Mask & (FILE_READ_DATA | GENERIC_READ | GENERIC_ALL)) != 0 && !mine(&allowed->SidStart)) {
+            return true;
+        }
+    }
+    return false;
+#else
+    std::error_code ec;
+    const auto perms = std::filesystem::status(path, ec).permissions();
+    return !ec && (perms & (std::filesystem::perms::group_read | std::filesystem::perms::others_read)) != std::filesystem::perms::none;
+#endif
 }
 
 result<void> make_private_directory(const std::filesystem::path& path) {

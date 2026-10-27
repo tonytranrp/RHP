@@ -8,7 +8,7 @@ The REPL and scripting client for RHP hosts. Every script it sends is signed wit
 rhp-cli keygen dev
 ```
 
-Writes `dev.rhpid` (name, PSK, signing key; owner-only on POSIX: keep it private) and prints the two lines the host needs after a label (`add to the host's keyring file:   dev admin <psk>`, `add to the host's signers file:   dev <public key>`): copy the part after the colon. `--role observe|patch|admin` (default `admin`) sets the keyring line's role; `-o/--out` names the file; `--force` replaces an existing one.
+Writes `dev.rhpid` (name, PSK, signing key) atomically and owner-only on every OS (mode 0600 on POSIX, a DACL for your account alone on Windows): keep it private. It prints the two lines the host needs after a label (`add to the host's keyring file:   dev admin <psk>`, `add to the host's signers file:   dev <public key>`): copy the part after the colon. `--role observe|patch|admin` (default `admin`) sets the keyring line's role; `-o/--out` names the file; `--force` replaces an existing one. Loading an identity file that other users can read prints a `warning:` line (never an error).
 
 | Subcommand | Example |
 |---|---|
@@ -128,7 +128,7 @@ rhp-cli test -s scripts tests/combat_spec.lua --reporter junit:report.xml
 | `src/release_files.hpp/.cpp` | building, signing and describing `.rhprel` / `.rhprev` files; rollout stage parsing |
 | `src/json.hpp` | rhp-cli's names for `Rhp::json` |
 | `src/commands.hpp` | `rhp_cli::command` and every family's `add_<name>`: each subcommand adds itself with an options struct of its own and the function that runs it |
-| `src/connection.hpp/.cpp` | the terminal, the connection options network subcommands share, `open_connection`, `load_signer` |
+| `src/connection.hpp/.cpp` | the terminal, the connection options network subcommands share, `open_connection`, `load_identity` (prints its warnings), `load_signer` |
 | `src/keys.cpp` | `keygen`, `pubkey`, `sign` |
 | `src/fleet.cpp` | `discover`, `fleet`, `rollout` |
 | `src/releases.cpp` | `release ...`, `revoke ...` |
