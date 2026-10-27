@@ -129,7 +129,7 @@ bool rhp_lua_plain_jumps() noexcept {
 // clang-format on
 
 #if LUA_VERSION_RELEASE_NUM != 50501
-#error "Lua was updated: check onelua.c's include list, luaG_traceexec against rhp_lua_traceexec and the lvm.c patch in cmake/RhpLua.cmake"
+#error "Lua was updated: check onelua.c's include list, luaG_traceexec against rhp_lua_traceexec and the patches in cmake/RhpLua.cmake"
 #endif
 
 // While any hook mask is set (the exact count hook of the meter and the profiler, line events), the VM
@@ -221,7 +221,48 @@ int rhp_lua_hook_at_safepoints(lua_State* L) {
 #include "rhp_lvm.c" // lvm.c with the safe-point charges (cmake/RhpLua.cmake)
 #undef luaG_traceexec
 #include "lapi.c"
+// clang-format on
 
+// Steps. Pattern matching and plain find run in C, where no hook fires: a pattern that backtracks
+// (string.find(s, ("a*"):rep(10) .. "b")) or a plain find with many near misses could run for
+// minutes. The patched lstrlib.c (cmake/RhpLua.cmake) counts that work in steps (a match call, a
+// character an expansion or %b scans, RHP_LUA_BYTES_PER_STEP bytes a back-reference or a find
+// candidate compares) and every RHP_LUA_STEPS hands them to the state's step function
+// (rhp_lua_set_step_function), on a thread that has a hook (one RHP checks) outside hooks and
+// finalizers. It is called directly, not through lua_call (no call hook, no C stack level), with the
+// step count on top of the stack, and may raise. Otherwise (a state without one, a thread without a
+// hook) the countdown just restarts: a step costs a decrement and a branch.
+#define RHP_LUA_STEPS 4096
+#define RHP_LUA_BYTES_PER_STEP 32
+
+static const char rhp_lua_step_key = 's'; // its address: the registry key of the step function
+
+void rhp_lua_set_step_function(lua_State* L, lua_CFunction f) {
+    lua_pushcfunction(L, f);
+    lua_rawsetp(L, LUA_REGISTRYINDEX, &rhp_lua_step_key);
+}
+
+static ptrdiff_t rhp_lua_steps_due(lua_State* L, ptrdiff_t left) {
+    if (L->hook != NULL && L->allowhook) {
+        const int top = lua_gettop(L);
+        if (lua_rawgetp(L, LUA_REGISTRYINDEX, &rhp_lua_step_key) == LUA_TFUNCTION) {
+            const lua_CFunction f = lua_tocfunction(L, -1);
+            lua_pushinteger(L, (lua_Integer)(RHP_LUA_STEPS - left));
+            f(L);
+        }
+        lua_settop(L, top);
+    }
+    return RHP_LUA_STEPS;
+}
+
+#define rhp_lua_step(L, left, n)                           \
+    {                                                      \
+        if (l_unlikely(((left) -= (ptrdiff_t)(n)) <= 0)) { \
+            (left) = rhp_lua_steps_due((L), (left));       \
+        }                                                  \
+    }
+
+// clang-format off
 #include "lauxlib.c"
 
 #include "lbaselib.c"
@@ -231,7 +272,7 @@ int rhp_lua_hook_at_safepoints(lua_State* L) {
 #include "lmathlib.c"
 #include "loadlib.c"
 #include "loslib.c"
-#include "lstrlib.c"
+#include "rhp_lstrlib.c" // lstrlib.c with the step counting (cmake/RhpLua.cmake)
 #include "ltablib.c"
 #include "lutf8lib.c"
 #include "linit.c"

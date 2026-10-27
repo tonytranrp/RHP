@@ -8,38 +8,75 @@ if(NOT DEFINED lua_SOURCE_DIR)
     message(FATAL_ERROR "RHP: include RhpLua after CPMAddPackage(NAME lua ...)")
 endif()
 
-# Safe-point counting (cmake/lua/lua_cxx.cpp): lvm.c is copied into the build tree with a charge added
-# at its loop back-edges (OP_JMP backwards, OP_FORLOOP, OP_TFORLOOP) and at Lua function entry, so a
-# count hook RHP sets with internals::set_safepoint_hook costs nothing in straight-line code. Each
-# replacement must match upstream exactly once: a Lua update that moves one fails here, not at run time.
-file(READ "${lua_SOURCE_DIR}/lvm.c" _rhp_lvm)
-string(REPLACE "\r\n" "\n" _rhp_lvm "${_rhp_lvm}") # a Windows checkout may have CRLF
-function(_rhp_lvm_patch from to)
-    string(FIND "${_rhp_lvm}" "${from}" _first)
-    string(FIND "${_rhp_lvm}" "${from}" _last REVERSE)
-    if(_first EQUAL -1 OR NOT _first EQUAL _last)
-        message(FATAL_ERROR "RHP: lvm.c changed upstream; update the safe-point patch in cmake/RhpLua.cmake (looking for: ${from})")
-    endif()
-    string(REPLACE "${from}" "${to}" _patched "${_rhp_lvm}")
-    set(_rhp_lvm "${_patched}" PARENT_SCOPE)
+# Patched upstream sources (cmake/lua/lua_cxx.cpp includes them): each is copied into the build tree as
+# rhp_<file> with its replacements. Each replacement must match upstream exactly once: a Lua update
+# that moves one fails here, not at run time.
+function(_rhp_lua_read file) # upstream <file> into the variable <file>
+    file(READ "${lua_SOURCE_DIR}/${file}" _text)
+    string(REPLACE "\r\n" "\n" _text "${_text}") # a Windows checkout may have CRLF
+    set(${file} "${_text}" PARENT_SCOPE)
 endfunction()
-_rhp_lvm_patch("#define dojump(ci,i,e)\t{ pc += GETARG_sJ(i) + e; updatetrap(ci); }"
-               "#define dojump(ci,i,e)\t{ int rhp_jump = GETARG_sJ(i) + e; pc += rhp_jump; updatetrap(ci); if (rhp_jump < 0) rhp_lua_charge(-rhp_jump); }")
-_rhp_lvm_patch("        updatetrap(ci);  /* allows a signal to break the loop */\n"
-               "        updatetrap(ci);  /* allows a signal to break the loop */\n        rhp_lua_charge(GETARG_Bx(i));\n")
-_rhp_lvm_patch("        if (!ttisnil(s2v(ra + 3)))  /* continue loop? */\n          pc -= GETARG_Bx(i);  /* jump back */\n"
-               "        if (!ttisnil(s2v(ra + 3))) {  /* continue loop? */\n          pc -= GETARG_Bx(i);  /* jump back */\n          rhp_lua_charge(GETARG_Bx(i));\n        }\n")
-_rhp_lvm_patch(" startfunc:\n  trap = L->hookmask;\n"
-               " startfunc:\n  trap = L->hookmask;\n  rhp_lua_charge(1);\n")
-set(_rhp_lvm_out "${CMAKE_CURRENT_BINARY_DIR}/rhp_lua/rhp_lvm.c")
-set(_rhp_lvm_old "")
-if(EXISTS "${_rhp_lvm_out}")
-    file(READ "${_rhp_lvm_out}" _rhp_lvm_old)
-endif()
-if(NOT _rhp_lvm_old STREQUAL _rhp_lvm) # rewrite only on change: the Lua TU rebuilds otherwise
-    file(WRITE "${_rhp_lvm_out}" "${_rhp_lvm}")
-endif()
-set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${lua_SOURCE_DIR}/lvm.c" "${CMAKE_CURRENT_LIST_FILE}")
+function(_rhp_lua_patch file from to)
+    string(FIND "${${file}}" "${from}" _first)
+    string(FIND "${${file}}" "${from}" _last REVERSE)
+    if(_first EQUAL -1 OR NOT _first EQUAL _last)
+        message(FATAL_ERROR "RHP: ${file} changed upstream; update its patch in cmake/RhpLua.cmake (looking for: ${from})")
+    endif()
+    string(REPLACE "${from}" "${to}" _patched "${${file}}")
+    set(${file} "${_patched}" PARENT_SCOPE)
+endfunction()
+function(_rhp_lua_write file)
+    set(_out "${CMAKE_CURRENT_BINARY_DIR}/rhp_lua/rhp_${file}")
+    set(_old "")
+    if(EXISTS "${_out}")
+        file(READ "${_out}" _old)
+    endif()
+    if(NOT _old STREQUAL "${${file}}") # rewrite only on change: the Lua TU rebuilds otherwise
+        file(WRITE "${_out}" "${${file}}")
+    endif()
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${lua_SOURCE_DIR}/${file}")
+endfunction()
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_LIST_FILE}")
+
+# Safe-point counting: a charge at lvm.c's loop back-edges (OP_JMP backwards, OP_FORLOOP, OP_TFORLOOP)
+# and at Lua function entry, so a count hook RHP sets with internals::set_safepoint_hook costs nothing
+# in straight-line code.
+_rhp_lua_read(lvm.c)
+_rhp_lua_patch(lvm.c "#define dojump(ci,i,e)\t{ pc += GETARG_sJ(i) + e; updatetrap(ci); }"
+                     "#define dojump(ci,i,e)\t{ int rhp_jump = GETARG_sJ(i) + e; pc += rhp_jump; updatetrap(ci); if (rhp_jump < 0) rhp_lua_charge(-rhp_jump); }")
+_rhp_lua_patch(lvm.c "        updatetrap(ci);  /* allows a signal to break the loop */\n"
+                     "        updatetrap(ci);  /* allows a signal to break the loop */\n        rhp_lua_charge(GETARG_Bx(i));\n")
+_rhp_lua_patch(lvm.c "        if (!ttisnil(s2v(ra + 3)))  /* continue loop? */\n          pc -= GETARG_Bx(i);  /* jump back */\n"
+                     "        if (!ttisnil(s2v(ra + 3))) {  /* continue loop? */\n          pc -= GETARG_Bx(i);  /* jump back */\n          rhp_lua_charge(GETARG_Bx(i));\n        }\n")
+_rhp_lua_patch(lvm.c " startfunc:\n  trap = L->hookmask;\n"
+                     " startfunc:\n  trap = L->hookmask;\n  rhp_lua_charge(1);\n")
+_rhp_lua_write(lvm.c)
+
+# Steps in C: pattern matching (each match call, each character an expansion or %b scans, the bytes a
+# back-reference compares) and plain find (the bytes each candidate compares) count down a step budget
+# that calls the state's step function when it runs out (rhp_lua_step).
+_rhp_lua_read(lstrlib.c)
+_rhp_lua_patch(lstrlib.c "  int matchdepth;  /* control for recursive depth (to avoid C stack overflow) */\n"
+                         "  int matchdepth;  /* control for recursive depth (to avoid C stack overflow) */\n  ptrdiff_t rhp_steps;  /* RHP: steps left until the next charge */\n")
+_rhp_lua_patch(lstrlib.c "  ms->p_end = p + lp;\n}\n"
+                         "  ms->p_end = p + lp;\n  ms->rhp_steps = RHP_LUA_STEPS;\n}\n")
+_rhp_lua_patch(lstrlib.c "  if (l_unlikely(ms->matchdepth-- == 0))\n"
+                         "  rhp_lua_step(ms->L, ms->rhp_steps, 1);\n  if (l_unlikely(ms->matchdepth-- == 0))\n")
+_rhp_lua_patch(lstrlib.c "  while (singlematch(ms, s + i, p, ep))\n    i++;\n"
+                         "  while (singlematch(ms, s + i, p, ep))\n    i++;\n  rhp_lua_step(ms->L, ms->rhp_steps, i);\n")
+_rhp_lua_patch(lstrlib.c "    while (++s < ms->src_end) {\n"
+                         "    while (++s < ms->src_end) {\n      rhp_lua_step(ms->L, ms->rhp_steps, 1);\n")
+_rhp_lua_patch(lstrlib.c "  len = cast_sizet(ms->capture[l].len);\n"
+                         "  len = cast_sizet(ms->capture[l].len);\n  rhp_lua_step(ms->L, ms->rhp_steps, len / RHP_LUA_BYTES_PER_STEP);\n")
+_rhp_lua_patch(lstrlib.c "static const char *lmemfind (const char *s1, size_t l1,\n"
+                         "static const char *lmemfind (lua_State *L, const char *s1, size_t l1,\n")
+_rhp_lua_patch(lstrlib.c "    const char *init;  /* to search for a '*s2' inside 's1' */\n"
+                         "    const char *init;  /* to search for a '*s2' inside 's1' */\n    ptrdiff_t rhp_steps = RHP_LUA_STEPS;\n")
+_rhp_lua_patch(lstrlib.c "      if (memcmp(init, s2+1, l2) == 0)\n"
+                         "      rhp_lua_step(L, rhp_steps, 1 + l2 / RHP_LUA_BYTES_PER_STEP);\n      if (memcmp(init, s2+1, l2) == 0)\n")
+_rhp_lua_patch(lstrlib.c "lmemfind(s + init, ls - init, p, lp)"
+                         "lmemfind(L, s + init, ls - init, p, lp)")
+_rhp_lua_write(lstrlib.c)
 
 add_library(rhp_lua STATIC "${PROJECT_SOURCE_DIR}/cmake/lua/lua_cxx.cpp")
 target_include_directories(rhp_lua PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/rhp_lua")

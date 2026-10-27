@@ -225,12 +225,24 @@ void sandbox_impl::count_hook(lua_State* L, lua_Debug* ar) {
             return; // armed for the profiler only, or a thread whose hook was out of date
         }
     }
-    self.check_cancels();
-    const auto& limits = self.options_.limits;
-    const bool timed = limits.wall_ms != 0 || self.slice_deadline_.has_value();
+    const steady::time_point now = self.check_limits(L, elapsed);
+    // End of the time slice: yield the request's own thread (never a coroutine it created, never
+    // across a C call); it continues at the next pump().
+    if (self.slice_deadline_ && now >= *self.slice_deadline_) {
+        const active_run& top = self.running_.back();
+        if (top.thread == L && top.request != nullptr && lua_isyieldable(L) != 0) {
+            (void)lua_yield(L, 0);
+        }
+    }
+}
+
+steady::time_point sandbox_impl::check_limits(lua_State* L, std::uint64_t elapsed) {
+    check_cancels();
+    const auto& limits = options_.limits;
+    const bool timed = limits.wall_ms != 0 || slice_deadline_.has_value();
     const steady::time_point now = timed ? steady::now() : steady::time_point{};
     sticky_stop stop = sticky_stop::kNone;
-    for (active_run& run : self.running_) {
+    for (active_run& run : running_) {
         if (run.budget == nullptr) {
             continue;
         }
@@ -249,19 +261,27 @@ void sandbox_impl::count_hook(lua_State* L, lua_Debug* ar) {
     if (stop != sticky_stop::kNone) {
         // From now on fire on every instruction (this thread and the main one), so a script that keeps
         // re-entering pcall can't swallow the stop between two widely spaced hook ticks.
-        self.hook_dirty_ = true;
+        hook_dirty_ = true;
         lua_sethook(L, &sandbox_impl::count_hook, LUA_MASKCOUNT, 1);
-        lua_sethook(self.state_, &sandbox_impl::count_hook, LUA_MASKCOUNT, 1);
-        stack{L}.raise(self.sticky_error(stop));
+        lua_sethook(state_, &sandbox_impl::count_hook, LUA_MASKCOUNT, 1);
+        stack{L}.raise(sticky_error(stop));
     }
-    // End of the time slice: yield the request's own thread (never a coroutine it created, never
-    // across a C call); it continues at the next pump().
-    if (self.slice_deadline_ && now >= *self.slice_deadline_) {
-        const active_run& top = self.running_.back();
-        if (top.thread == L && top.request != nullptr && lua_isyieldable(L) != 0) {
-            (void)lua_yield(L, 0);
-        }
+    return now;
+}
+
+// ---- steps in C ----------------------------------------------------------------------------------
+
+// Pattern matching and plain find run in C, where no hook fires: the patched lstrlib.c charges their
+// steps here every few thousand (internals::set_step_function). A count event without the profiler
+// and the time slice (a C function can't yield): the steps count as instructions for every run's
+// budget, cancels and the wall limit are checked, and a stop raises (sticky) as in count_hook.
+int sandbox_impl::charge_steps(lua_State* L) {
+    auto& self = impl_of(L);
+    const auto steps = static_cast<std::uint64_t>(lua_tointeger(L, -1));
+    if (!self.running_.empty() && (self.hook_dirty_ || self.checked_now())) {
+        (void)self.check_limits(L, steps);
     }
+    return 0;
 }
 
 error sandbox_impl::sticky_error(sticky_stop stop) const {

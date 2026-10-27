@@ -542,6 +542,9 @@ public:
     // The hook: count events (limits, cancels, time slices, profiler samples) and, while the debugger
     // needs them, line events.
     static void count_hook(lua_State* L, lua_Debug* ar);
+    // The step function of work Lua does in C (internals::set_step_function): the steps on top of L's
+    // stack are charged like instructions; raises when the run stops.
+    static int charge_steps(lua_State* L);
 
 private:
     struct active_scope;
@@ -626,6 +629,11 @@ private:
     void enter_checked() noexcept;
     void leave_checked() noexcept;
     void check_cancels() noexcept;
+    // Charges `elapsed` instructions to the budget of every run on the stack, checks cancels and the
+    // wall limit, and raises the innermost run's stop. A stop is sticky: from then on the hook fires on
+    // every instruction (L and the main thread), so pcall can't swallow it. Returns the time it read
+    // (the epoch when no limit or slice needs it).
+    steady::time_point check_limits(lua_State* L, std::uint64_t elapsed);
     // Consumes a pending cancel(request) for `id`; a request with one is ended instead of resumed.
     [[nodiscard]] bool take_cancel(request_id id);
     [[nodiscard]] int new_environment();

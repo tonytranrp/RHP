@@ -14,9 +14,11 @@
 struct lua_State;
 struct lua_Debug;
 
-// cmake/lua/lua_cxx.cpp (the Lua translation unit): a count hook checked at safe points.
+// cmake/lua/lua_cxx.cpp (the Lua translation unit): a count hook checked at safe points, the step
+// function of work done in C.
 void rhp_lua_sethook_safepoints(lua_State* L, void (*hook)(lua_State*, lua_Debug*), int count);
 int rhp_lua_hook_at_safepoints(lua_State* L);
+void rhp_lua_set_step_function(lua_State* L, int (*f)(lua_State*));
 
 namespace Rhp::script::detail::internals {
 
@@ -28,6 +30,11 @@ void set_safepoint_hook(lua_State* L, void (*hook)(lua_State*, lua_Debug*), int 
 
 // Whether L's count hook is one set_safepoint_hook set (its count is then lua_gethookcount).
 [[nodiscard]] bool hook_at_safepoints(lua_State* L) noexcept;
+
+// Pattern matching and plain find run in C, where no hook fires; they count their work in steps and,
+// every few thousand, on a thread that has a hook, call `f` directly (not through lua_call) with the
+// step count on top of the stack. `f` may raise to stop the run. Kept in L's registry (may raise).
+void set_step_function(lua_State* L, int (*f)(lua_State*));
 
 // Instructions L ran since its count hook last fired (or was set), and restarts the countdown so they
 // aren't reported twice. 0 while L's hook doesn't count.

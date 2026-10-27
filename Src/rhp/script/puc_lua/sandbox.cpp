@@ -525,6 +525,9 @@ void sandbox_impl::open_libraries() {
     open_buffer_library(L); // rhp.buffer, and the span and buffer types (buffer.cpp)
     lua_setglobal(L, "rhp");
 
+    // Pattern matching and plain find run in C: they charge their steps to the run (hook.cpp).
+    internals::set_step_function(L, &sandbox_impl::charge_steps);
+
     // The token behind `original` in patch handlers.
     const std::string original_key{kOriginalTokenKey};
     luaL_newmetatable(L, original_key.c_str());
