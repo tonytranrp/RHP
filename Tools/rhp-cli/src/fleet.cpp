@@ -145,10 +145,13 @@ struct rollout_options {
 };
 
 int run_rollout(const rollout_options& o) {
-    auto id = Rhp::security::identity_file::load(o.identity);
+    auto id = load_identity(o.identity);
+    if (!id) {
+        return 1;
+    }
     auto bytes = read_binary_file(o.file);
-    if (!id || !bytes) {
-        std::println(stderr, "{}", !id ? std::format("{}", id.error()) : std::format("can't read {}", o.file));
+    if (!bytes) {
+        std::println(stderr, "can't read {}", o.file);
         return 1;
     }
     auto signer = id->signer_key();

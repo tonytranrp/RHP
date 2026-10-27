@@ -2,7 +2,7 @@
 # backends branch inside their own .cpp files too.
 set(rhp_platform_libs "")
 if(RHP_PLATFORM STREQUAL "WINDOWS")
-    list(APPEND rhp_platform_libs bcrypt)
+    list(APPEND rhp_platform_libs bcrypt advapi32)
 endif()
 
 rhp_add_module(platform

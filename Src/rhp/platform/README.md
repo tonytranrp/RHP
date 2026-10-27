@@ -1,12 +1,12 @@
 # platform — layer 2
 
-Operating-system facts and services behind portable C++ APIs. Namespace `Rhp::platform`. Target `Rhp::platform`; depends on `core` (privately on `bcrypt` on Windows).
+Operating-system facts and services behind portable C++ APIs. Namespace `Rhp::platform`. Target `Rhp::platform`; depends on `core` (privately on `bcrypt` and `advapi32` on Windows).
 
 | Header | What |
 |---|---|
 | `os.hpp` | `os_kind`, `kOs` / `kOsName`: the target OS from `RHP_PLATFORM_*` (sent in the handshake and in discovery records) |
 | `random.hpp` | `random_bytes(span)` / `random_array<N>()`: OS cryptographic randomness (nonces, keys, idempotency keys) |
-| `files.hpp` | `read_file`; `replace_file` (atomic: write a temporary next to it, flush, rename); `make_private_directory` (owner-only on POSIX); `stdout_is_terminal`, `stdin_is_terminal`, `enable_ansi_colors`, `binary_stdio` |
+| `files.hpp` | `read_file`; `replace_file` (atomic: write a temporary next to it, flush, rename); `write_private_file` (the same, owner-only on every OS: keys and other secrets); `readable_by_others`; `make_private_directory` (owner-only on POSIX); `stdout_is_terminal`, `stdin_is_terminal`, `enable_ansi_colors`, `binary_stdio` |
 | `process.hpp` | `run_process(program, args)`: start a program that shares this process's standard streams and wait for its exit status (`rhp-cli test --exe`); `environment_variable(name)` |
 
 ```cpp
@@ -22,3 +22,5 @@ auto saved = Rhp::platform::replace_file("state.bin", *bytes); // old file or ne
 - Randomness: `BCryptGenRandom` (Windows), `getrandom` (Linux), `arc4random_buf` (Apple, Android: bionic has it at every supported API level).
 - Processes: `CreateProcessW` with arguments quoted for `CommandLineToArgvW` (Windows); `fork` + `execvp` (Linux, macOS, Android: `posix_spawn` needs Android API 28, the presets target 26). iOS apps can't start processes: `run_process` reports `kDisabled` there.
 - `replace_file` can leave a `*.tmp` file behind after a crash between write and rename; the temporary is owner-readable only on POSIX and takes the folder's permissions on Windows. The release `directory_store` relies on it and on `make_private_directory`.
+- Secrets go through `write_private_file`: POSIX creates the temporary `O_EXCL` with mode 0600; Windows creates it with an explicit, protected DACL (one ACE: the process token's user, full access; nothing inherited from the folder). The rename keeps that, so no reader ever sees the file wider. `std::filesystem::permissions` can't do this on Windows (it only toggles the read-only attribute).
+- `readable_by_others` reads the group and other read bits (POSIX) or the DACL (Windows: no DACL, or an allow ACE with read access for anyone but the owner, the process's user, SYSTEM and Administrators). Loading an identity file warns with it.

@@ -3,6 +3,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include <rhp/core/result.hpp>
 #include <rhp/core/role.hpp>
@@ -26,6 +27,9 @@ struct identity_file {
     key psk;
     std::optional<ed25519_secret_key> signing;
     std::string signer; // empty = name
+    // What load noticed that isn't fatal: a file other users can read. Callers show them (rhp-cli
+    // prints "warning: ..."); to_text leaves them out.
+    std::vector<std::string> warnings;
 
     [[nodiscard]] static result<identity_file> parse(std::string_view text);
     [[nodiscard]] static result<identity_file> load(const std::string& path);
@@ -33,7 +37,8 @@ struct identity_file {
     [[nodiscard]] static result<identity_file> generate(std::string name);
 
     [[nodiscard]] std::string to_text() const;
-    // Writes to_text() to `path` (replacing it), readable and writable by its owner only.
+    // Writes to_text() to `path` (replacing it atomically), its owner's alone on every OS
+    // (platform::write_private_file).
     result<void> save(const std::string& path) const;
 
     // What Rhp::client takes.

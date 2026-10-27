@@ -60,9 +60,12 @@ struct pubkey_options {
 
 int run_pubkey(const pubkey_options& o) {
     const auto granted = Rhp::parse_role(o.role);
-    auto id = Rhp::security::identity_file::load(o.identity);
-    if (!id || !granted) {
-        std::println(stderr, "{}", id ? std::string{"unknown role"} : std::format("{}", id.error()));
+    if (!granted) {
+        std::println(stderr, "unknown role '{}' (observe, patch or admin)", o.role);
+        return 2;
+    }
+    auto id = load_identity(o.identity);
+    if (!id) {
         return 1;
     }
     std::println("{}", id->keyring_line(*granted));
