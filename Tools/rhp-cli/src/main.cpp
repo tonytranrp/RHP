@@ -30,12 +30,6 @@
 #include <utility>
 #include <vector>
 
-#if defined(_WIN32)
-#include <io.h>
-#else
-#include <unistd.h>
-#endif
-
 #include "dap.hpp"
 #include "release_files.hpp"
 #include "shell.hpp"
@@ -63,42 +57,9 @@ extern "C" void on_interrupt(int) {
     std::signal(SIGINT, on_interrupt);
 }
 
-[[nodiscard]] bool stdout_is_terminal() {
-#if defined(_WIN32)
-    return _isatty(_fileno(stdout)) != 0;
-#else
-    return isatty(fileno(stdout)) != 0;
-#endif
-}
-
-[[nodiscard]] bool stdin_is_terminal() {
-#if defined(_WIN32)
-    return _isatty(_fileno(stdin)) != 0;
-#else
-    return isatty(fileno(stdin)) != 0;
-#endif
-}
-
-// An environment variable's value ("" when unset).
-[[nodiscard]] std::string env(const char* name) {
-#if defined(_MSC_VER)
-    char* value = nullptr;
-    std::size_t length = 0;
-    if (_dupenv_s(&value, &length, name) != 0 || value == nullptr) {
-        return {};
-    }
-    std::string out{value};
-    std::free(value);
-    return out;
-#else
-    const char* value = std::getenv(name);
-    return value != nullptr ? std::string{value} : std::string{};
-#endif
-}
-
 [[nodiscard]] std::string home_dir() {
     for (const char* var : {"HOME", "USERPROFILE"}) {
-        if (std::string value = env(var); !value.empty()) {
+        if (std::string value = Rhp::platform::environment_variable(var); !value.empty()) {
             return value;
         }
     }
@@ -179,7 +140,7 @@ struct connected {
 };
 
 [[nodiscard]] std::optional<connected> open(const connection_options& o, replxx::Replxx* rx, bool to_stderr = false) {
-    auto out = std::make_unique<terminal>(rx, !to_stderr && stdout_is_terminal() && env("NO_COLOR").empty(), to_stderr);
+    auto out = std::make_unique<terminal>(rx, !to_stderr && Rhp::platform::stdout_is_terminal() && Rhp::platform::environment_variable("NO_COLOR").empty(), to_stderr);
     auto id = Rhp::security::identity_file::load(o.identity);
     if (!id) {
         (*out)(rhp_cli::style::kError, std::format("{}", id.error()));
@@ -238,7 +199,7 @@ struct connected {
 }
 
 int repl(const connection_options& o) {
-    const bool interactive = stdin_is_terminal();
+    const bool interactive = Rhp::platform::stdin_is_terminal();
     replxx::Replxx rx;
     auto conn = open(o, interactive ? &rx : nullptr);
     if (!conn) {
@@ -521,7 +482,7 @@ int test_command(std::vector<std::string> args) {
     std::optional<Rhp::value> api;
     if (!conn.address.empty()) {
         if (conn.identity.empty()) {
-            conn.identity = env("RHP_IDENTITY");
+            conn.identity = Rhp::platform::environment_variable("RHP_IDENTITY");
         }
         if (conn.identity.empty()) {
             std::println(stderr, "rhp-cli test: --api-from needs --api-identity FILE (or RHP_IDENTITY)");
