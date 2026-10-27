@@ -1,6 +1,5 @@
 #include <algorithm>
 #include <cstddef>
-#include <cstring>
 #include <format>
 #include <span>
 #include <string>
@@ -117,11 +116,7 @@ result<void> trust::set_threshold(std::size_t n) {
 
 result<std::vector<std::string>> trust::verify(std::string_view domain, std::span<const std::byte> body, std::span<const signature> sigs,
                                                std::string_view channel, std::span<const security::ed25519_public_key> revoked) const {
-    std::vector<std::byte> message(domain.size() + body.size());
-    std::memcpy(message.data(), domain.data(), domain.size());
-    if (!body.empty()) {
-        std::memcpy(message.data() + domain.size(), body.data(), body.size());
-    }
+    const std::vector<std::byte> message = detail::signed_message(domain, body);
     std::vector<std::string> signers;
     std::vector<const security::ed25519_public_key*> used;
     std::string why; // every reason a signature didn't count, "; "-separated

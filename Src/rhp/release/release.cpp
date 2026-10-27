@@ -1,7 +1,6 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
-#include <cstring>
 #include <format>
 #include <span>
 #include <string>
@@ -28,23 +27,13 @@ error integrity(std::string message) {
     return make_error(errc::kIntegrity, std::move(message), "release");
 }
 
-// domain || body: what a signature covers.
-std::vector<std::byte> signed_message(std::string_view domain, std::span<const std::byte> body) {
-    std::vector<std::byte> out(domain.size() + body.size());
-    std::memcpy(out.data(), domain.data(), domain.size());
-    if (!body.empty()) {
-        std::memcpy(out.data() + domain.size(), body.data(), body.size());
-    }
-    return out;
-}
-
 result<void> add_signature(std::vector<signature>& to, std::string_view domain, std::span<const std::byte> body, const security::signing_key& key) {
     if (key.name.empty() || key.secret.empty()) {
         return fail(errc::kInvalidArgument, "a signing key needs a name and a private key", "release.sign");
     }
     signature s;
     s.signer = key.name;
-    s.bytes = key.secret.sign(signed_message(domain, body));
+    s.bytes = key.secret.sign(detail::signed_message(domain, body));
     if (const auto it = std::ranges::find(to, key.name, &signature::signer); it != to.end()) {
         *it = std::move(s);
     } else {

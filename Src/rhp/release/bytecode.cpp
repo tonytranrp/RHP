@@ -30,10 +30,6 @@ std::span<const std::byte> key_bytes(const security::key& key) {
 
 } // namespace
 
-std::string compiled_store_key(const release_id& id) {
-    return std::format("bytecode/{}", to_hex(id));
-}
-
 security::digest256 compiled_build() {
     const std::string_view build = script::bytecode_build();
     return build.empty() ? security::digest256{} : security::blake2b_256(build);

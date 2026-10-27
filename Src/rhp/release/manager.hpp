@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <initializer_list>
 #include <memory>
 #include <optional>
 #include <span>
@@ -42,7 +43,15 @@ enum class confirm_mode : std::uint8_t {
     return "unknown";
 }
 
-[[nodiscard]] std::optional<confirm_mode> parse_confirm_mode(std::string_view text) noexcept;
+// "now" / "health" / "manual" (what to_string writes); nullopt for anything else.
+[[nodiscard]] constexpr std::optional<confirm_mode> parse_confirm_mode(std::string_view text) noexcept {
+    for (const confirm_mode m : {confirm_mode::kNow, confirm_mode::kHealth, confirm_mode::kManual}) {
+        if (to_string(m) == text) {
+            return m;
+        }
+    }
+    return std::nullopt;
+}
 
 struct manager_options {
     std::string app;                                                               // compared with manifest::app

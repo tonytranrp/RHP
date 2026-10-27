@@ -26,10 +26,6 @@ error disabled(std::string_view where) {
 
 } // namespace
 
-std::string compiled_store_key(const release_id& id) {
-    return "bytecode/" + to_hex(id);
-}
-
 security::digest256 compiled_build() {
     return {};
 }
@@ -80,15 +76,6 @@ result<std::vector<std::byte>> encode_revocations(const signed_revocations&) {
 
 result<signed_revocations> decode_revocations(std::span<const std::byte>) {
     return std::unexpected{disabled("release.revocations")};
-}
-
-std::optional<confirm_mode> parse_confirm_mode(std::string_view text) noexcept {
-    for (const confirm_mode m : {confirm_mode::kNow, confirm_mode::kHealth, confirm_mode::kManual}) {
-        if (to_string(m) == text) {
-            return m;
-        }
-    }
-    return std::nullopt;
 }
 
 namespace detail {

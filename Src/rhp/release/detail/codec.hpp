@@ -1,7 +1,8 @@
 #pragma once
 
 // Private to Src/rhp/release: strict MessagePack reading shared by the manifest, envelope,
-// revocation and state codecs.
+// revocation and state codecs, the store's key prefixes and what a signature covers. Everything
+// here is implemented in manifest.cpp, which every configuration builds.
 
 #include <cstddef>
 #include <cstdint>
@@ -16,6 +17,13 @@
 #include <rhp/security/hash.hpp>
 
 namespace Rhp::release::detail {
+
+// Store keys: "releases/<hex id>" holds an envelope, "bytecode/<hex id>" its compiled-chunk cache entry.
+inline constexpr std::string_view kReleasesPrefix = "releases/";
+inline constexpr std::string_view kBytecodePrefix = "bytecode/";
+
+// domain || body: what a release or revocation list signature covers.
+[[nodiscard]] std::vector<std::byte> signed_message(std::string_view domain, std::span<const std::byte> body);
 
 [[nodiscard]] error bad_body(std::string message);
 

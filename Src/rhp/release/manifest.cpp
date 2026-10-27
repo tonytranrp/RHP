@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <format>
 #include <limits>
 #include <span>
@@ -12,6 +13,7 @@
 #include <rhp/core/error.hpp>
 #include <rhp/core/result.hpp>
 #include <rhp/core/value.hpp>
+#include <rhp/release/bytecode.hpp>
 #include <rhp/release/detail/codec.hpp>
 #include <rhp/release/manifest.hpp>
 #include <rhp/security/hash.hpp>
@@ -24,6 +26,15 @@ namespace detail {
 
 error bad_body(std::string message) {
     return make_error(errc::kProtocol, std::move(message), "release.manifest");
+}
+
+std::vector<std::byte> signed_message(std::string_view domain, std::span<const std::byte> body) {
+    std::vector<std::byte> out(domain.size() + body.size());
+    std::memcpy(out.data(), domain.data(), domain.size());
+    if (!body.empty()) {
+        std::memcpy(out.data() + domain.size(), body.data(), body.size());
+    }
+    return out;
 }
 
 std::vector<std::string> canonical_set(std::vector<std::string> items) {
@@ -359,6 +370,10 @@ result<release_id> id_from_hex(std::string_view hex) {
 
 std::string short_id(const release_id& id) {
     return to_hex(id).substr(0, 8);
+}
+
+std::string compiled_store_key(const release_id& id) {
+    return std::string{detail::kBytecodePrefix} + to_hex(id);
 }
 
 } // namespace Rhp::release

@@ -32,15 +32,6 @@
 
 namespace Rhp::release {
 
-std::optional<confirm_mode> parse_confirm_mode(std::string_view text) noexcept {
-    for (const confirm_mode m : {confirm_mode::kNow, confirm_mode::kHealth, confirm_mode::kManual}) {
-        if (to_string(m) == text) {
-            return m;
-        }
-    }
-    return std::nullopt;
-}
-
 namespace detail {
 
 namespace {
@@ -54,7 +45,7 @@ constexpr std::uint32_t kDefaultWallMs = 10'000;
 constexpr std::size_t kQuarantineKept = 16; // newest quarantined ids a channel remembers
 
 std::string release_key(const release_id& id) {
-    return std::format("releases/{}", to_hex(id));
+    return std::string{kReleasesPrefix} + to_hex(id);
 }
 
 std::string revocations_key(std::uint64_t seq) {
@@ -1468,8 +1459,8 @@ private:
             return;
         }
         for (const std::string& key : *keys) {
-            const bool envelope = key.starts_with("releases/");
-            if (!envelope && !key.starts_with("bytecode/")) {
+            const bool envelope = key.starts_with(kReleasesPrefix);
+            if (!envelope && !key.starts_with(kBytecodePrefix)) {
                 continue;
             }
             const bool used = std::ranges::any_of(channels_, [&](const auto& entry) {
