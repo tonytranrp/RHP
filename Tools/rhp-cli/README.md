@@ -123,10 +123,16 @@ rhp-cli test -s scripts tests/combat_spec.lua --reporter junit:report.xml
 | File | What |
 |---|---|
 | `src/text.hpp/.cpp` | endpoints, the Lua-completeness heuristic, value formatting, words and literals, names from stubs |
-| `src/shell.hpp`, `src/shell.cpp` | `rhp_cli::shell<Cfg>`: the command language over one client (tests run it in-process over loopback); `shell.cpp` holds the one instantiation |
+| `src/shell.hpp` | `rhp_cli::shell<Cfg>`: the command language over one client (tests run it in-process over loopback; rhp-cli instantiates it in `main.cpp`) |
 | `src/dap.hpp` | `rhp_cli::dap_server<Cfg>`: the Debug Adapter Protocol server (`rhp-cli dap`) |
 | `src/release_files.hpp/.cpp` | building, signing and describing `.rhprel` / `.rhprev` files; rollout stage parsing |
 | `src/json.hpp` | rhp-cli's names for `Rhp::json` |
-| `src/main.cpp` | CLI11 subcommands, the replxx REPL, Ctrl+C |
+| `src/commands.hpp` | `rhp_cli::command` and every family's `add_<name>`: each subcommand adds itself with an options struct of its own and the function that runs it |
+| `src/connection.hpp/.cpp` | the terminal, the connection options network subcommands share, `open_connection`, `load_signer` |
+| `src/keys.cpp` | `keygen`, `pubkey`, `sign` |
+| `src/fleet.cpp` | `discover`, `fleet`, `rollout` |
+| `src/releases.cpp` | `release ...`, `revoke ...` |
+| `src/test_command.cpp` | `test` |
+| `src/main.cpp` | the replxx REPL (`connect`), the subcommands that run through the shell (`run`, `exec`, `stubs`, `blob`, `events`, `watch`, `tune`, `profile`, `dap`), Ctrl+C, and running the subcommand parsed |
 
-`rhp_cli_core` (everything but `main.cpp`) is a static library so `Tests/tools/rhp_cli_tests.cpp` can drive the shell in-process.
+`rhp_cli_core` (the text helpers, the release files and the header-only shell and DAP server) is a static library so `Tests/tools/rhp_cli_tests.cpp` can drive the shell in-process.

@@ -257,14 +257,15 @@ memory when every test executable linked at once.
   file-local helpers collide keep their own translation unit (`SKIP_UNITY_BUILD_INCLUSION`); the script
   and integration test suites stay file by file (their fixture namespaces share names).
 - Fewer standard headers in public headers where the API allows (`<iosfwd>` in `test/cli.hpp`); the
-  host event tables are explicitly instantiated once (`event/hub.cpp`); rhp-cli's shell compiles in its
-  own file; Catch2 with `CATCH_CONFIG_FAST_COMPILE`; MSVC `/Zc:inline /Gw`, Clang
+  host event tables are explicitly instantiated once (`event/hub.cpp`); rhp-cli's shell is instantiated
+  in one of its translation units (`main.cpp`); Catch2 with `CATCH_CONFIG_FAST_COMPILE`; MSVC `/Zc:inline /Gw`, Clang
   `-ffunction-sections -fdata-sections`; clang-cl gets the interpreter's computed-goto dispatch.
 
 *Not done:* `lld-link` (about 40% faster links, but not part of a default Visual Studio install:
-`-DCMAKE_LINKER_TYPE=LLD` with CMake 3.29+ where it is); making rhp-cli's `extern template` of its
-shell effective (every member is defined in the class, so the explicit instantiation saves nothing;
-moving about 900 lines out of the class would save about 1 s of the critical path); LTO by default (measured under 5% on script work, 10-35% on binding calls, variable and property reads
+`-DCMAKE_LINKER_TYPE=LLD` with CMake 3.29+ where it is); an explicit instantiation of rhp-cli's shell
+in a file of its own (every member is defined in the class, so an `extern template` saves nothing: the
+`shell.cpp` that tried was removed; moving about 900 lines out of the class would save about 1 s of the
+critical path); LTO by default (measured under 5% on script work, 10-35% on binding calls, variable and property reads
 and handle methods, and it ties a static library's objects to one toolchain version: `RHP_LTO` turns it
 on); Asio separate compilation (the eight Asio files save about 2 s together, and
 an extra file compiles Asio's implementation); `/DEBUG:FASTLINK` (slower here); removing

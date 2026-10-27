@@ -969,8 +969,7 @@ Ctrl+C cancels a running script.)");
     std::jthread watcher_;
 };
 
-// rhp-cli's own configuration: its shell is compiled once, in shell.cpp (rhp_cli_core).
+// rhp-cli's own configuration (its shell is instantiated in main.cpp).
 using cli_cfg = Rhp::config<>::logger<Rhp::core::null_logger>;
-extern template class shell<cli_cfg>;
 
 } // namespace rhp_cli
