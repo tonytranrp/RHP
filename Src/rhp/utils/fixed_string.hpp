@@ -61,6 +61,10 @@ fixed_string(const char (&)[N]) -> fixed_string<N - 1>;
     return !segment_start;
 }
 
+// is_dotted_name as a constraint on a fixed_string template argument (a compiler names it when it fails).
+template <fixed_string Name>
+concept dotted_name = is_dotted_name(Name.view());
+
 // Names for Lua-visible identifiers inside a lib: "spawn", "gravity", "dump_state".
 [[nodiscard]] constexpr bool is_identifier(std::string_view name) noexcept {
     if (name.empty()) {
@@ -73,5 +77,9 @@ fixed_string(const char (&)[N]) -> fixed_string<N - 1>;
     }
     return std::ranges::all_of(name, [&](char c) { return is_alpha(c) || is_digit(c); });
 }
+
+// is_identifier as a constraint on a fixed_string template argument.
+template <fixed_string Name>
+concept identifier_name = is_identifier(Name.view());
 
 } // namespace Rhp::utils

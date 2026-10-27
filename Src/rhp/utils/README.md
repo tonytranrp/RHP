@@ -4,7 +4,7 @@ Generic building blocks with **zero** RHP, OS, Lua or network knowledge. Namespa
 
 | Header | What |
 |---|---|
-| `fixed_string.hpp` | `fixed_string<N>`: a string as a template argument (`Rhp::lib<"game">`); `is_dotted_name`, `is_identifier` (used in `requires` clauses, so a bad name fails where it is written) |
+| `fixed_string.hpp` | `fixed_string<N>`: a string as a template argument (`Rhp::lib<"game">`); `is_dotted_name`, `is_identifier` and the concepts `dotted_name<N>`, `identifier_name<N>` (used in `requires` clauses, so a bad name fails where it is written, and compilers name the check) |
 | `type_list.hpp` | `type_list<Ts...>`, the `type_list_like` concept and `size_v`, `at_t`, `contains_v`, `index_of_v`, `is_unique_v`, `push_back_t`, `push_front_t`, `concat_t`, `transform_t`, `filter_t`, `for_each_type` |
 | `function_traits.hpp` | return type, argument list, arity, `noexcept` and class of any callable: `return_type_t`, `args_t`, `arity_v`; the `has_function_traits` concept |
 | `scope_guard.hpp` | `scope_guard`: runs a callable on scope exit unless `release()`d |

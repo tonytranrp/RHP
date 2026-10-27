@@ -33,6 +33,9 @@ template <class T>
 concept event_arg = std::same_as<T, std::remove_cvref_t<T>> && (convertible<T> || handle_value<T>) &&
                     std::copy_constructible<event_capture_t<T>>;
 
+template <class... Args>
+concept event_arg_types = (event_arg<Args> && ...);
+
 // A handle type is pushed as the handle userdata of whichever lib in the receiving sandbox declared
 // it; if none did, as its Rhp::convert form, else nil.
 template <class T>
@@ -63,8 +66,8 @@ void push_event_arg(stack& s, const T& v) {
 // firing thread, queued to the next pump() of every other subscribed sandbox. Each handler runs as
 // its own script request (it may rhp.wait). While nothing is subscribed, fire() is one acquire load.
 // One event type per name; the event registers itself the first time the program fires it.
-template <utils::fixed_string Name, script::detail::event_arg... Args>
-    requires(utils::is_dotted_name(Name.view()))
+template <utils::fixed_string Name, class... Args>
+    requires utils::dotted_name<Name> && script::detail::event_arg_types<Args...>
 class lua_event {
 public:
     static constexpr std::string_view name = Name.view();

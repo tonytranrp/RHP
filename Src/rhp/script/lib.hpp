@@ -517,10 +517,9 @@ consteval bool lib_name_free(std::string_view name) {
     return Entry::kind == entry_kind::kMethod || Entry::kind == entry_kind::kProperty || Entry::kind == entry_kind::kField || Entry::name != name;
 }
 
-template <class... Entries>
-consteval bool name_free(std::string_view name) {
-    return (lib_name_free<Entries>(name) && ...);
-}
+// No entry of the lib is named N yet.
+template <utils::fixed_string N, class... Entries>
+concept name_free = (lib_name_free<Entries>(N.view()) && ...);
 
 // ---- methods and properties on handles ---------------------------------------------------------
 
@@ -587,11 +586,9 @@ consteval bool member_clash(std::string_view name) {
     }
 }
 
-// No method or property of the same handle has this name yet (in this lib; install checks the tree).
-template <class Self, class... Entries>
-consteval bool member_free(std::string_view name) {
-    return (!member_clash<Entries, Self>(name) && ...);
-}
+// No method or property of the same handle is named N yet (in this lib; install checks the tree).
+template <utils::fixed_string N, class Self, class... Entries>
+concept member_free = (!member_clash<Entries, Self>(N.view()) && ...);
 
 // ---- struct views ------------------------------------------------------------------------------------
 
@@ -690,11 +687,9 @@ consteval bool field_clash(std::string_view name) {
     }
 }
 
-// No field of the same view type has this name yet (in this lib; install checks the tree).
-template <class Owner, class... Entries>
-consteval bool field_free(std::string_view name) {
-    return (!field_clash<Entries, Owner>(name) && ...);
-}
+// No field of the same view type is named N yet (in this lib; install checks the tree).
+template <utils::fixed_string N, class Owner, class... Entries>
+concept field_free = (!field_clash<Entries, Owner>(N.view()) && ...);
 
 } // namespace detail
 
@@ -727,42 +722,42 @@ consteval bool field_free(std::string_view name) {
 // Whether every parameter/return type crosses the Lua boundary is checked at
 // sandbox::install<L>() (handles may be declared after the functions that use them).
 template <utils::fixed_string Name, class... Entries>
-    requires(utils::is_identifier(Name.view()))
+    requires utils::identifier_name<Name>
 struct lib {
     static constexpr utils::fixed_string fixed_name = Name;
     static constexpr std::string_view name = fixed_name.view();
     using entries = utils::type_list<Entries...>;
 
     template <utils::fixed_string N, auto F, detail::fn_tag... Tags>
-        requires(utils::is_identifier(N.view()) && detail::name_free<Entries...>(N.view())) && detail::bindable_function<F> &&
+        requires utils::identifier_name<N> && detail::name_free<N, Entries...> && detail::bindable_function<F> &&
                     detail::valid_fn_tags<F, Tags...> && detail::async_binding_ok<F> && detail::span_binding_ok<F, Tags...>
     using fn = lib<Name, Entries..., detail::fn_entry<N, F, Tags...>>;
 
     // A variable scripts read and (kPatch) write, journaled. Tags make it a described tunable:
     // Rhp::range<Min, Max> (enforced), Rhp::step<S>, Rhp::unit<"m/s">, Rhp::doc<"...">.
     template <utils::fixed_string N, auto Ptr, detail::var_tag... Tags>
-        requires(utils::is_identifier(N.view()) && detail::name_free<Entries...>(N.view())) && detail::writable_variable<Ptr> &&
+        requires utils::identifier_name<N> && detail::name_free<N, Entries...> && detail::writable_variable<Ptr> &&
                     detail::valid_var_tags<std::remove_pointer_t<decltype(Ptr)>, Tags...>
     using var = lib<Name, Entries..., detail::var_entry<N, Ptr, Tags...>>;
 
     // A read-only variable; takes Rhp::unit<> and Rhp::doc<>.
     template <utils::fixed_string N, auto Ptr, detail::ro_tag... Tags>
-        requires(utils::is_identifier(N.view()) && detail::name_free<Entries...>(N.view())) && detail::object_pointer<Ptr> &&
+        requires utils::identifier_name<N> && detail::name_free<N, Entries...> && detail::object_pointer<Ptr> &&
                     detail::valid_ro_tags<Tags...>
     using ro = lib<Name, Entries..., detail::ro_entry<N, Ptr, Tags...>>;
 
     template <utils::fixed_string N, class H, auto IsAlive>
-        requires(utils::is_identifier(N.view()) && detail::name_free<Entries...>(N.view())) && detail::handle_value<H> &&
+        requires utils::identifier_name<N> && detail::name_free<N, Entries...> && detail::handle_value<H> &&
                     std::predicate<decltype(IsAlive), const H&>
     using handle = lib<Name, Entries..., detail::handle_entry<N, H, IsAlive>>;
 
     template <class Sub>
-        requires(detail::name_free<Entries...>(Sub::name))
+        requires detail::name_free<Sub::fixed_name, Entries...>
     using sub = lib<Name, Entries..., detail::sub_entry<Sub>>;
 
     // A function called on a handle (e:move(1, 2), label "entity:move"). Takes the fn tags.
     template <utils::fixed_string N, auto F, detail::fn_tag... Tags>
-        requires(utils::is_identifier(N.view()) && detail::member_free<detail::self_t<F>, Entries...>(N.view())) &&
+        requires utils::identifier_name<N> && detail::member_free<N, detail::self_t<F>, Entries...> &&
                     detail::method_function<F> && detail::valid_fn_tags<F, Tags...> && detail::async_binding_ok<F> &&
                     detail::span_binding_ok<F, Tags...>
     using method = lib<Name, Entries..., detail::method_entry<N, F, Tags...>>;
@@ -770,7 +765,7 @@ struct lib {
     // A read-only value of a handle (e.hp, label "entity.hp"): F(handle) -> value. Only
     // requires_role<> applies.
     template <utils::fixed_string N, auto F, detail::fn_tag... Tags>
-        requires(utils::is_identifier(N.view()) && detail::member_free<detail::self_t<F>, Entries...>(N.view())) &&
+        requires utils::identifier_name<N> && detail::member_free<N, detail::self_t<F>, Entries...> &&
                     detail::property_function<F, Tags...> && detail::span_binding_ok<F, Tags...>
     using property = lib<Name, Entries..., detail::property_entry<N, F, Tags...>>;
 
@@ -778,7 +773,7 @@ struct lib {
     // const) gives a view of the object, its ::field<>s read and written through it. T is a
     // standard-layout class; the name is its Lua type name, unique like a handle's.
     template <utils::fixed_string N, class T>
-        requires(utils::is_identifier(N.view()) && detail::name_free<Entries...>(N.view())) && detail::view_struct<T>
+        requires utils::identifier_name<N> && detail::name_free<N, Entries...> && detail::view_struct<T>
     using view = lib<Name, Entries..., detail::view_entry<N, T>>;
 
     // A field of a view type (the class of &T::member): t.name reads it, t.name = v writes it (kPatch,
@@ -786,13 +781,13 @@ struct lib {
     // span view: t.m[3] = 1); or a struct of another declared view type (a nested view). Number
     // fields take the variable tags (Rhp::range<> enforced on writes), the others unit<> and doc<>.
     template <utils::fixed_string N, auto Member, detail::var_tag... Tags>
-        requires detail::field_member<Member> && (utils::is_identifier(N.view()) && detail::field_free<detail::member_owner_t<Member>, Entries...>(N.view())) &&
+        requires detail::field_member<Member> && utils::identifier_name<N> && detail::field_free<N, detail::member_owner_t<Member>, Entries...> &&
                      detail::valid_field_tags<Member, Tags...>
     using field = lib<Name, Entries..., detail::field_entry<N, Member, false, Tags...>>;
 
     // A field scripts only read.
     template <utils::fixed_string N, auto Member, detail::ro_tag... Tags>
-        requires detail::field_member<Member> && (utils::is_identifier(N.view()) && detail::field_free<detail::member_owner_t<Member>, Entries...>(N.view())) &&
+        requires detail::field_member<Member> && utils::identifier_name<N> && detail::field_free<N, detail::member_owner_t<Member>, Entries...> &&
                      detail::valid_ro_tags<Tags...>
     using ro_field = lib<Name, Entries..., detail::field_entry<N, Member, true, Tags...>>;
 };

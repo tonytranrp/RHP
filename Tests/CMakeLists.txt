@@ -20,12 +20,22 @@ function(rhp_add_test_suite name)
     catch_discover_tests(${name} TEST_PREFIX "${name}." DISCOVERY_MODE PRE_TEST TEST_SPEC "[multicast]" PROPERTIES RESOURCE_LOCK multicast LABELS multicast)
 endfunction()
 
-# rhp_add_compile_fail(<name> SOURCE <file> LINKS <targets...>)
+# rhp_add_compile_fail(<name> SOURCE <file> LINKS <targets...> (CONSTRAINT <concept> | EXPECT <regex>))
 # The source must compile as-is AND must fail to compile with RHP_COMPILE_FAIL defined, so the
 # test proves the guarded snippet is what breaks the build (not an unrelated error). Both are built
 # by their tests, not by the default build (the 34 _ok objects were 13% of a clean build's work).
+# The failing build must also say why: CONSTRAINT names the concept that must be unsatisfied (MSVC:
+# "the concept 'ns::name<...>' evaluated to false"; clang: "'T' does not satisfy 'name'" or
+# "'ns::name<...>' evaluated to false"), EXPECT is a regular expression for any other diagnostic.
 function(rhp_add_compile_fail name)
-    cmake_parse_arguments(PARSE_ARGV 1 arg "" "SOURCE" "LINKS")
+    cmake_parse_arguments(PARSE_ARGV 1 arg "" "SOURCE;CONSTRAINT;EXPECT" "LINKS")
+    if(arg_CONSTRAINT)
+        set(expect "does not satisfy '${arg_CONSTRAINT}'|[:']${arg_CONSTRAINT}<[^\n]*evaluated to false")
+    elseif(arg_EXPECT)
+        set(expect "${arg_EXPECT}")
+    else()
+        message(FATAL_ERROR "rhp_add_compile_fail(${name}): give the CONSTRAINT or the EXPECTed diagnostic")
+    endif()
 
     add_library(${name}_ok OBJECT EXCLUDE_FROM_ALL ${arg_SOURCE})
     target_link_libraries(${name}_ok PRIVATE ${arg_LINKS})
@@ -39,7 +49,8 @@ function(rhp_add_compile_fail name)
     set_property(GLOBAL APPEND PROPERTY RHP_COMPILE_FAIL_OK ${name}_ok)
     add_test(NAME compile_fail.${name}
         COMMAND ${CMAKE_COMMAND} --build "${CMAKE_BINARY_DIR}" --target ${name}_fail --config $<CONFIG>)
-    set_tests_properties(compile_fail.${name} PROPERTIES WILL_FAIL TRUE LABELS compile_fail FIXTURES_REQUIRED rhp_compile_fail_ok)
+    # PASS_REGULAR_EXPRESSION ignores the exit code: only a build that failed prints the diagnostic.
+    set_tests_properties(compile_fail.${name} PROPERTIES PASS_REGULAR_EXPRESSION "${expect}" LABELS compile_fail FIXTURES_REQUIRED rhp_compile_fail_ok)
 endfunction()
 
 add_subdirectory(unit)

@@ -61,7 +61,7 @@ struct point_call<Point, R(Args...)> {
 // be reverted in any order. The point registers itself process-wide before main the first time the
 // program contains a call to it. One point type per id.
 template <utils::fixed_string Id, auto Default>
-    requires(utils::is_dotted_name(Id.view())) && script::detail::patch_default<decltype(Default)>
+    requires utils::dotted_name<Id> && script::detail::patch_default<decltype(Default)>
 class patch_point : public script::detail::point_call<patch_point<Id, Default>, script::detail::signature_of_t<decltype(Default)>> {
 public:
     using signature = script::detail::signature_of_t<decltype(Default)>;

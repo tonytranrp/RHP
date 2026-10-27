@@ -747,7 +747,7 @@ RHP/
 │   ├── integration/   host_client · stage4 · stage5 · stage6 · stage6_fleet · stage7 · stage9 · stage10 · stage11
 │   ├── tools/         rhp-cli in-process + as a process against headless_server
 │   ├── package/       a consumer project built against the installed package (find_package / subdirectory)
-│   ├── compile_fail/  bad concepts, duplicate names — ctest WILL_FAIL
+│   ├── compile_fail/  bad concepts, duplicate names — the build must fail naming the concept
 │   ├── fuzz/          frame · envelope · msgpack · sandbox_escape · network (replay drivers / libFuzzer)
 │   └── support/       header-only test helpers (`rhp_test/…`)
 ├── Examples/
