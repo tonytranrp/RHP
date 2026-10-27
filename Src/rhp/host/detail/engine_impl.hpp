@@ -199,6 +199,8 @@ public:
     [[nodiscard]] std::size_t ready_sessions() const noexcept { return ready_sessions_.load(std::memory_order_acquire); }
     [[nodiscard]] std::size_t identity_count() const noexcept { return identity_count_.load(std::memory_order_acquire); }
 
+    // The kill switch (any thread): the flag at once, the network's part (closing every session,
+    // stopping or restarting reverse dials) posted to the network thread.
     void set_enabled(bool on) noexcept;
 
     [[nodiscard]] bool is_enabled() const noexcept { return enabled_.load(std::memory_order_acquire); }
@@ -386,6 +388,11 @@ private:
 
     // The admission gave up on an unauthenticated session (no room, or it sent nothing in time).
     void drop_unauthenticated(session_id id, const error& why);
+
+    // The kill switch's network side, in the order set_enabled was called. Off: every session
+    // (native, HTTP, detached, handshaking) closes with kDisabled, so identities revert as on
+    // disconnect, and reverse mode stops dialing. On again: reverse mode dials.
+    void apply_enabled(bool on);
 
     // ---- network thread: reverse mode -------------------------------------------------------------------
 
@@ -705,8 +712,10 @@ private:
     net::io_context::timer enforce_timer_{io_};
     bool enforce_armed_ = false; // network thread
     std::atomic<std::size_t> ready_sessions_{0};
+    bool serving_ = true; // the kill switch as apply_enabled last left it
     // Reverse mode: the one outgoing session, and when to dial again.
     bool reverse_ = false;
+    bool dialing_ = false; // a dial is under way
     session_id outgoing_;
     std::uint32_t attempts_ = 0;
     std::mt19937_64 rng_{0x52'48'50'00u};

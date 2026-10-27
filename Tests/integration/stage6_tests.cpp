@@ -726,6 +726,28 @@ TEST_CASE("stage6: a host shutting down answers the HTTP requests in flight", "[
     }
 }
 
+TEST_CASE("stage6: a disabled host answers the HTTP requests in flight and ends their identities", "[integration][stage6][http][kill]") {
+    using namespace stage6_fixtures;
+    keys key;
+    Rhp::host_options options;
+    options.gateway = Rhp::endpoint::listen("127.0.0.1", 0);
+    running_host<cfg> server{key, Rhp::endpoint::listen("127.0.0.1", 0), options};
+    const auto port = server.host.gateway_port();
+    REQUIRE(port);
+    http_client waiting{*port, key, {.body = "stage6.bump(5); rhp.sleep(60000); return 1"}};
+    REQUIRE(rhp_test::poll_until({}, [&] { return counter.load() == 5; }, std::chrono::seconds{3}));
+    server.host.set_enabled(false);
+    const auto answer = waiting.finish();
+    CHECK(answer.status == 503);
+    CHECK(answer.verified);
+    const auto err = Rhp::from_value<Rhp::error>(answer.body);
+    REQUIRE(err);
+    CHECK(err->code == Rhp::errc::kDisabled);
+    CHECK(rhp_test::poll_until({}, [&] { return counter.load() == 0; }, std::chrono::seconds{3})); // its identity reverted
+    server.host.set_enabled(true);
+    CHECK(http(*port, key, {.method = "GET", .target = "/describe", .sign = false}).status == 200);
+}
+
 TEST_CASE("stage6: authenticated HTTP requests release the handshake budget", "[integration][stage6][http]") {
     using namespace stage6_fixtures;
     using small_cfg = cfg::limits<Rhp::limits{.pending_handshakes = 1}>;

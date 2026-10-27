@@ -10,6 +10,7 @@
 #include <utility>
 #include <vector>
 
+#include "../unit/release/release_support.hpp"
 #include <catch2/catch_test_macros.hpp>
 #include <rhp_test/eventually.hpp>
 #include <rhp_test/net_support.hpp>
@@ -29,6 +30,7 @@
 #include <rhp/net/link.hpp>
 #include <rhp/net/loopback/loopback.hpp>
 #include <rhp/net/tcp/tcp.hpp>
+#include <rhp/release/manager.hpp>
 #include <rhp/script/lib.hpp>
 #include <rhp/security/ed25519.hpp>
 #include <rhp/security/key.hpp>
@@ -40,13 +42,25 @@ using Rhp::errc;
 
 namespace stage13_net_fixtures {
 
-std::atomic<int> g_ticks{0};
+std::atomic<int> g_ticks{0};         // timers
+std::atomic<int> g_tasks{0};         // rhp.spawn tasks
+std::atomic<int> g_release_ticks{0}; // a release channel's timer
+int g_level = 0;                     // set by a patch session (reverted with it)
+int g_pinned = 0;                    // set by a pinned module (kept)
 
 int tick() {
     return ++g_ticks;
 }
 
-using s13_lib = Rhp::lib<"s13n">::fn<"tick", &tick>;
+int task() {
+    return ++g_tasks;
+}
+
+int release_tick() {
+    return ++g_release_ticks;
+}
+
+using s13_lib = Rhp::lib<"s13n">::fn<"tick", &tick>::fn<"task", &task>::fn<"release_tick", &release_tick>::var<"level", &g_level>::var<"pinned", &g_pinned>;
 
 using loop_cfg = Rhp::config<>::transport<Rhp::net::loopback>::logger<Rhp::core::null_logger>;
 using tcp_cfg = Rhp::config<>::logger<Rhp::core::null_logger>;
@@ -412,6 +426,179 @@ TEST_CASE("stage13: a CA-checked dial checks the host name unless it is an IP ad
 }
 
 #endif
+
+// ---- the kill switch ---------------------------------------------------------------------------------
+
+namespace stage13_net_fixtures {
+
+// A host pumped by its own thread, serving `releases` (when given) from its first pump.
+class serving_host {
+public:
+    serving_host(const Rhp::endpoint& at, const keys& k, Rhp::release::manager* releases = nullptr) : host_(at, k.ring(), k.trusted()) {
+        REQUIRE(host_.install<s13_lib>());
+        if (releases != nullptr) {
+            REQUIRE(host_.serve(*releases));
+        }
+        pump_ = std::jthread{[this](std::stop_token stop) {
+            while (!stop.stop_requested()) {
+                host_.pump();
+                std::this_thread::sleep_for(1ms);
+            }
+        }};
+    }
+
+    ~serving_host() {
+        pump_.request_stop();
+        pump_.join();
+    }
+
+    serving_host(const serving_host&) = delete;
+    serving_host& operator=(const serving_host&) = delete;
+
+    Rhp::host<loop_cfg>* operator->() { return &host_; }
+
+private:
+    Rhp::host<loop_cfg> host_;
+    std::jthread pump_;
+};
+
+// Whether `counter` stands still for a while (what ran just before the switch flipped has settled).
+[[nodiscard]] bool stands_still(const std::atomic<int>& counter) {
+    std::this_thread::sleep_for(50ms);
+    const int before = counter.load();
+    std::this_thread::sleep_for(200ms);
+    return counter.load() == before;
+}
+
+} // namespace stage13_net_fixtures
+
+TEST_CASE("stage13: set_enabled(false) closes every session and reverts identities except pinned modules", "[stage13][kill]") {
+    g_level = 0;
+    g_pinned = 0;
+    keys k;
+    const auto at = Rhp::endpoint::listen("s13.kill_sessions", 1);
+    serving_host host{at, k};
+    seen_events<Rhp::event::session_closed> closed;
+    auto sub = host->on<Rhp::event::session_closed>(closed.handler());
+    Rhp::client<loop_cfg> patcher{at.reversed(), k.as("patch"), k.dev()};
+    REQUIRE(patcher.exec("s13n.level = 5"));
+    {
+        Rhp::client<loop_cfg> admin{at.reversed(), k.as("admin"), k.dev()};
+        const auto mod = admin.load("tests.s13.kept", "s13n.pinned = 7 return {}");
+        REQUIRE(mod);
+        REQUIRE(admin.pin(*mod));
+        REQUIRE(eventually([&] { return host->sessions() == 2; }));
+
+        host->set_enabled(false);
+        CHECK(eventually([&] { return host->sessions() == 0; }));
+        CHECK(eventually([&] { return !admin.connected() && !patcher.connected(); }));
+        CHECK(admin.exec("return 1").error().code == errc::kDisabled);
+        CHECK(eventually([&] { return closed.size() == 2; }));
+        for (const auto& e : closed.snapshot()) {
+            CHECK(e.reason.code == errc::kDisabled);
+        }
+        // The patch identity is reverted and gone; the admin one stays for its pinned module.
+        CHECK(eventually([&] { return host->identities() == 1; }));
+    }
+    CHECK(patcher.exec("return 1").error().code == errc::kDisabled);
+    Rhp::client_options quick;
+    quick.connect_timeout = 1s;
+    Rhp::client<loop_cfg> refused{at.reversed(), k.as("patch"), k.dev(), quick};
+    CHECK_FALSE(refused.connect());
+
+    host->set_enabled(true);
+    Rhp::client<loop_cfg> back{at.reversed(), k.as("admin"), k.dev()};
+    CHECK(back.exec<int>("return s13n.level") == 0);
+    CHECK(back.exec<int>("return s13n.pinned") == 7);
+    REQUIRE(back.revert_all());
+    CHECK(back.exec<int>("return s13n.pinned") == 0);
+}
+
+TEST_CASE("stage13: a disabled host runs no handlers tasks or release channels", "[stage13][kill]") {
+    const release_test::signer dev{"dev"};
+    Rhp::release::manager_options options;
+    options.app = "s13game";
+    options.health_window = 20ms;
+    Rhp::release::manager releases{release_test::trust_of({{&dev, {"game.*"}}}), options};
+    REQUIRE(releases.install<s13_lib>());
+    REQUIRE(releases.restore());
+    const std::vector<release_test::module_source> ticker{{"ticker", "rhp.every(5, function() s13n.release_tick() end)"}};
+    auto manifest = release_test::manifest_for("game.ticker", 1, ticker);
+    manifest.app = "s13game";
+    REQUIRE(releases.apply(release_test::envelope(manifest, ticker, {&dev})));
+
+    keys k;
+    const auto at = Rhp::endpoint::listen("s13.kill_scripts", 1);
+    serving_host host{at, k, &releases};
+    {
+        Rhp::client<loop_cfg> admin{at.reversed(), k.as("admin"), k.dev()};
+        const auto mod = admin.load("tests.s13.busy", "rhp.every(5, function() s13n.tick() end) "
+                                                      "rhp.spawn(function() while true do s13n.task() rhp.next_frame() end end) return {}");
+        REQUIRE(mod);
+        REQUIRE(admin.pin(*mod));
+    }
+    const int ticks = g_ticks.load();
+    const int tasks = g_tasks.load();
+    const int release_ticks = g_release_ticks.load();
+    REQUIRE(eventually([&] { return g_ticks > ticks + 3 && g_tasks > tasks + 3 && g_release_ticks > release_ticks + 3; }));
+
+    host->set_enabled(false);
+    CHECK(stands_still(g_ticks));
+    CHECK(stands_still(g_tasks));
+    CHECK(stands_still(g_release_ticks));
+
+    host->set_enabled(true);
+    const int resumed_ticks = g_ticks.load();
+    const int resumed_tasks = g_tasks.load();
+    const int resumed_release = g_release_ticks.load();
+    CHECK(eventually([&] { return g_ticks > resumed_ticks + 3 && g_tasks > resumed_tasks + 3 && g_release_ticks > resumed_release + 3; }));
+    Rhp::client<loop_cfg> admin{at.reversed(), k.as("admin"), k.dev()};
+    REQUIRE(admin.revert_all());
+}
+
+TEST_CASE("stage13: a disabled reverse-mode host stops dialing until it is enabled", "[stage13][kill][reverse]") {
+    constexpr Rhp::limits kFastRedial{.backoff_min_ms = 5, .backoff_max_ms = 40};
+    using redial_cfg = loop_cfg::limits<kFastRedial>;
+    keys k;
+    // Something to dial that never authenticates: each connection the host makes shows up here.
+    Rhp::net::io_context io;
+    std::vector<std::unique_ptr<Rhp::net::link>> accepted;
+    std::vector<std::unique_ptr<rhp_test::recorder>> seen;
+    auto listening = Rhp::net::loopback::listen(io, Rhp::endpoint::listen("s13.kill_dial", 1), [&](std::unique_ptr<Rhp::net::link> l) {
+        seen.push_back(std::make_unique<rhp_test::recorder>());
+        l->start(*seen.back());
+        accepted.push_back(std::move(l));
+    });
+    REQUIRE(listening);
+    pumped_host<redial_cfg> host{Rhp::endpoint::dial("s13.kill_dial", 1), k.ring(), k.trusted()};
+    REQUIRE(rhp_test::poll_until({&io}, [&] { return accepted.size() == 1; }));
+
+    host->set_enabled(false);
+    REQUIRE(rhp_test::poll_until({&io}, [&] { return seen[0]->closed; })); // its session is closed
+    rhp_test::poll_for({&io}, 400ms);                                      // backoff is 5-40 ms: it would have dialed by now
+    CHECK(accepted.size() == 1);
+
+    host->set_enabled(true);
+    CHECK(rhp_test::poll_until({&io}, [&] { return accepted.size() == 2; }));
+}
+
+TEST_CASE("stage13: a listening client gets its host back after the kill switch", "[stage13][kill][reverse]") {
+    constexpr Rhp::limits kFastRedial{.backoff_min_ms = 5, .backoff_max_ms = 40};
+    using redial_cfg = loop_cfg::limits<kFastRedial>;
+    keys k;
+    const auto at = Rhp::endpoint::listen("s13.kill_reverse", 1);
+    Rhp::client_options brief;
+    brief.connect_timeout = 300ms;
+    Rhp::client<redial_cfg> c{at, k.as("patch"), k.dev(), brief};
+    REQUIRE(c.port());
+    pumped_host<redial_cfg> host{at.reversed(), k.ring(), k.trusted()};
+    REQUIRE(c.exec<int>("return 1") == 1);
+    host->set_enabled(false);
+    REQUIRE(eventually([&] { return !c.connected(); }));
+    CHECK_FALSE(c.exec("return 2")); // nobody dials in while the host is off
+    host->set_enabled(true);
+    CHECK(eventually([&] { return c.exec<int>("return 3") == 3; }));
+}
 
 TEST_CASE("stage13: a listening client drops a connection that sends nothing", "[stage13][reverse][admission]") {
     using quick_cfg = tcp_cfg::limits<Rhp::limits{.handshake_timeout_ms = 60'000, .first_byte_ms = 150}>;

@@ -184,13 +184,39 @@ void engine::start_session(session_id id, std::unique_ptr<net::link> link, bool 
     s.start();
 }
 
+void engine::apply_enabled(bool on) {
+    if (stopping_ || on == serving_) {
+        return;
+    }
+    serving_ = on;
+    if (on) {
+        if (reverse_ && !outgoing_ && !dialing_) {
+            redial_timer_.cancel();
+            attempts_ = 0;
+            dial_out();
+        }
+        return;
+    }
+    redial_timer_.cancel();
+    const error why = make_error(errc::kDisabled, "the host was disabled", "host");
+    for (auto& [id, rec] : sessions_) {
+        rec.s->close(why); // on_closed follows (posted): identities revert as on any disconnect
+    }
+    if (gateway_) {
+        gateway_->close_all(why);
+    }
+}
+
 void engine::dial_out(session_id resume_id) {
+    if (resume_id.value() == 0) {
+        dialing_ = true;
+    }
     setup_.transport.dial(io_, policy_.transport_endpoint(), [this, resume_id](result<std::unique_ptr<net::link>> dialed) {
         auto link = policy_.wrap(std::move(dialed));
         if (resume_id.value() != 0) {
             const auto it = sessions_.find(resume_id);
             if (it == sessions_.end() || it->second.s->current() != session::state::kDetached) {
-                return; // resumed or gone meanwhile; a link we got is dropped
+                return; // resumed or gone meanwhile (a disabled host closed it); a link we got is dropped
             }
             if (!link) {
                 log(log_level::kDebug, "dialing {} to resume session {} failed: {}", setup_.ep, resume_id, link.error());
@@ -200,13 +226,15 @@ void engine::dial_out(session_id resume_id) {
             it->second.s->resume(std::move(*link));
             return;
         }
-        if (!link) {
-            log(log_level::kDebug, "dialing {} failed: {}", setup_.ep, link.error());
-            redial();
+        dialing_ = false;
+        if (stopping_ || !is_enabled()) {
+            if (link) {
+                park(std::move(*link)); // set_enabled(true) dials again
+            }
             return;
         }
-        if (!is_enabled()) {
-            park(std::move(*link));
+        if (!link) {
+            log(log_level::kDebug, "dialing {} failed: {}", setup_.ep, link.error());
             redial();
             return;
         }
@@ -223,7 +251,7 @@ void engine::redial(session_id resume_id) {
 
 void engine::on_detached(session::session& s, const error& why) {
     log(log_level::kInfo, "session {} ({}) lost its link ({}); it may resume within {} ms", s.id(), s.identity(), why, setup_.limits.resume_ms);
-    if (reverse_ && s.id() == outgoing_ && !stopping_) {
+    if (reverse_ && s.id() == outgoing_ && !stopping_ && is_enabled()) {
         attempts_ = 0;
         redial(s.id());
     }
@@ -356,7 +384,7 @@ void engine::on_closed(session::session& s, const error& why) {
     open_sessions_.store(sessions_.size(), std::memory_order_release);
     if (reverse_ && id == outgoing_) {
         outgoing_ = {};
-        if (!stopping_) {
+        if (!stopping_ && is_enabled()) {
             redial();
         }
     }

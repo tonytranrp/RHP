@@ -83,7 +83,13 @@ result<std::uint16_t> engine::gateway_port() const {
 void engine::set_enabled(bool on) noexcept {
     enabled_.store(on, std::memory_order_release);
     try {
-        log_text(log_level::kWarn, on ? "host enabled" : "host disabled: new connections are closed, requests answered kDisabled");
+        // The flag already holds for pump() and new connections; the network closes the sessions
+        // (or dials again) when the post runs, in the order the calls were made.
+        io_.post([this, on] { apply_enabled(on); });
+    } catch (...) { // out of memory: requests are still refused, and new connections closed
+    }
+    try {
+        log_text(log_level::kWarn, on ? "host enabled" : "host disabled: sessions closed, new connections refused, no scripts run until enabled");
     } catch (...) { // the user's logger threw (or its lock failed): the switch flipped all the same
     }
 }
@@ -249,13 +255,18 @@ void engine::pump() {
     while (auto item = inbox_.try_pop()) {
         batch.push_back(std::move(*item));
     }
-    process(batch);
+    process(batch); // while disabled, requests are answered kDisabled and closed sessions revert
     deliver_program_events();
-    for (auto& [name, id] : identities_) {
-        id.box->pump();
+    // The kill switch: no handlers, tasks or release channels run while the host is disabled (they
+    // wait, as they are, until it is enabled again).
+    const bool enabled = is_enabled();
+    if (enabled) {
+        for (auto& [name, id] : identities_) {
+            id.box->pump();
+        }
     }
     std::erase_if(async_leftovers_, [](script::async_leftovers& left) { return left.pump() == 0; });
-    if (releases_.pump) {
+    if (enabled && releases_.pump) {
         releases_.pump();
     }
     flush_outbox();

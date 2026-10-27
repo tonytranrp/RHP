@@ -662,13 +662,14 @@ TEST_CASE("stage4: set_enabled(false) refuses requests and connections until re-
     REQUIRE(c.exec("return 1"));
     host->set_enabled(false);
     CHECK_FALSE(host->enabled());
-    CHECK(c.exec("return 1").error().code == errc::kDisabled);
+    CHECK(c.exec("return 1").error().code == errc::kDisabled); // the session is closed (Stage 13: a hard switch)
     Rhp::client_options quick;
     quick.connect_timeout = 2s;
     Rhp::client<loop_cfg> late{host.dial_at(at), k.as("patch"), k.dev(), quick};
     CHECK_FALSE(late.connect());
     host->set_enabled(true);
-    CHECK(c.exec<int>("return 2") == 2);
+    Rhp::client<loop_cfg> again{host.dial_at(at), k.as("patch"), k.dev()};
+    CHECK(again.exec<int>("return 2") == 2);
 }
 
 // ---- review regressions --------------------------------------------------------------------------------------

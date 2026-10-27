@@ -72,7 +72,11 @@ public:
     [[nodiscard]] std::uint16_t port() const noexcept;
     // The pump's reply for an HTTP session (other ops, such as print, are not forwarded).
     void reply(session_id session, wire::op code, std::uint64_t req, const value& body);
+    // Stops listening, then close_all.
     void stop();
+    // Answers every request in flight with `why`, ends every logical session (close_http) and drops
+    // every connection; the listener stays.
+    void close_all(const error& why);
 
 private:
     struct impl;
