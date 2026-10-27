@@ -73,40 +73,47 @@ struct doc {
 
 namespace detail {
 
-// 1 range, 2 step, 3 unit, 4 doc, 0 anything else.
+enum class var_tag_kind : std::uint8_t {
+    kNone, // not a variable tag
+    kRange,
+    kStep,
+    kUnit,
+    kDoc
+};
+
 template <class T>
-inline constexpr int var_tag_kind_v = 0;
+inline constexpr var_tag_kind var_tag_kind_v = var_tag_kind::kNone;
 
 template <auto A, auto B>
-inline constexpr int var_tag_kind_v<range<A, B>> = 1;
+inline constexpr var_tag_kind var_tag_kind_v<range<A, B>> = var_tag_kind::kRange;
 
 template <auto S>
-inline constexpr int var_tag_kind_v<step<S>> = 2;
+inline constexpr var_tag_kind var_tag_kind_v<step<S>> = var_tag_kind::kStep;
 
 template <utils::fixed_string T>
-inline constexpr int var_tag_kind_v<unit<T>> = 3;
+inline constexpr var_tag_kind var_tag_kind_v<unit<T>> = var_tag_kind::kUnit;
 
 template <utils::fixed_string T>
-inline constexpr int var_tag_kind_v<doc<T>> = 4;
+inline constexpr var_tag_kind var_tag_kind_v<doc<T>> = var_tag_kind::kDoc;
 
 template <class T>
-concept var_tag = var_tag_kind_v<T> != 0;
+concept var_tag = var_tag_kind_v<T> != var_tag_kind::kNone;
 
 template <class T>
-concept ro_tag = var_tag_kind_v<T> == 3 || var_tag_kind_v<T> == 4;
+concept ro_tag = var_tag_kind_v<T> == var_tag_kind::kUnit || var_tag_kind_v<T> == var_tag_kind::kDoc;
 
 // The tag of kind K among Tags (void when none).
-template <int K, class... Tags>
+template <var_tag_kind K, class... Tags>
 struct var_tag_find {
     using type = void;
 };
 
-template <int K, class T, class... Rest>
+template <var_tag_kind K, class T, class... Rest>
 struct var_tag_find<K, T, Rest...> {
     using type = std::conditional_t<var_tag_kind_v<T> == K, T, typename var_tag_find<K, Rest...>::type>;
 };
 
-template <int K, class... Tags>
+template <var_tag_kind K, class... Tags>
 inline constexpr std::size_t var_tag_count_v = (std::size_t{0} + ... + (var_tag_kind_v<Tags> == K ? 1u : 0u));
 
 template <class T>
@@ -157,20 +164,20 @@ consteval bool step_fits() {
 
 // At most one tag of each kind; range and step only on numbers, with bounds that fit and min <= max.
 template <class T, class... Tags>
-concept valid_var_tags = (var_tag_count_v<1, Tags...> <= 1) && (var_tag_count_v<2, Tags...> <= 1) && (var_tag_count_v<3, Tags...> <= 1) &&
-                         (var_tag_count_v<4, Tags...> <= 1) && range_fits<T, typename var_tag_find<1, Tags...>::type>() &&
-                         step_fits<T, typename var_tag_find<2, Tags...>::type>();
+concept valid_var_tags = (var_tag_count_v<var_tag_kind::kRange, Tags...> <= 1) && (var_tag_count_v<var_tag_kind::kStep, Tags...> <= 1) && (var_tag_count_v<var_tag_kind::kUnit, Tags...> <= 1) &&
+                         (var_tag_count_v<var_tag_kind::kDoc, Tags...> <= 1) && range_fits<T, typename var_tag_find<var_tag_kind::kRange, Tags...>::type>() &&
+                         step_fits<T, typename var_tag_find<var_tag_kind::kStep, Tags...>::type>();
 
 template <class... Tags>
-concept valid_ro_tags = (var_tag_count_v<3, Tags...> <= 1) && (var_tag_count_v<4, Tags...> <= 1);
+concept valid_ro_tags = (var_tag_count_v<var_tag_kind::kUnit, Tags...> <= 1) && (var_tag_count_v<var_tag_kind::kDoc, Tags...> <= 1);
 
 // The metadata a variable's tags carry, as tools see it.
 template <class T, class... Tags>
 struct var_meta {
-    using range_tag = typename var_tag_find<1, Tags...>::type;
-    using step_tag = typename var_tag_find<2, Tags...>::type;
-    using unit_tag = typename var_tag_find<3, Tags...>::type;
-    using doc_tag = typename var_tag_find<4, Tags...>::type;
+    using range_tag = typename var_tag_find<var_tag_kind::kRange, Tags...>::type;
+    using step_tag = typename var_tag_find<var_tag_kind::kStep, Tags...>::type;
+    using unit_tag = typename var_tag_find<var_tag_kind::kUnit, Tags...>::type;
+    using doc_tag = typename var_tag_find<var_tag_kind::kDoc, Tags...>::type;
     static constexpr bool has_range = !std::is_void_v<range_tag>;
     static constexpr bool has_step = !std::is_void_v<step_tag>;
 
@@ -626,26 +633,41 @@ inline constexpr bool is_std_array_v = false;
 template <class E, std::size_t N>
 inline constexpr bool is_std_array_v<std::array<E, N>> = true;
 
-// What a field is to a view: 1 a value (number, bool, enum), 2 an array of span elements (read as a
-// span view), 3 a struct (a nested view; its type must be a declared ::view), 0 unsupported.
+// What a field is to a view (views.hpp): a value (number, bool, enum), an array (read as a span
+// view) or a struct (a nested view; its type must be a declared ::view). field_type_ok says whether
+// views take it.
 template <class M>
-consteval int field_shape_of() {
+consteval field_shape field_shape_of() {
+    using U = std::remove_cv_t<M>;
+    if constexpr (std::is_bounded_array_v<U> || is_std_array_v<U>) {
+        return field_shape::kArray;
+    } else if constexpr (std::is_class_v<U>) {
+        return field_shape::kObject;
+    } else {
+        return field_shape::kValue;
+    }
+}
+
+// A field type views take: a number (a floating point one of 4 or 8 bytes, any of at most 8), a bool
+// or an enum; a one-dimensional array of span elements; a struct of standard layout.
+template <class M>
+consteval bool field_type_ok() {
     using U = std::remove_cv_t<M>;
     if constexpr (std::is_arithmetic_v<U> || std::is_enum_v<U>) {
-        return (std::is_floating_point_v<U> && sizeof(U) != 4 && sizeof(U) != 8) || sizeof(U) > 8 ? 0 : 1;
+        return (!std::is_floating_point_v<U> || sizeof(U) == 4 || sizeof(U) == 8) && sizeof(U) <= 8;
     } else if constexpr (std::is_bounded_array_v<U>) {
-        return std::rank_v<U> == 1 && span_element<std::remove_cv_t<std::remove_extent_t<U>>> ? 2 : 0;
+        return std::rank_v<U> == 1 && span_element<std::remove_cv_t<std::remove_extent_t<U>>>;
     } else if constexpr (is_std_array_v<U>) {
-        return span_element<std::remove_cv_t<typename U::value_type>> ? 2 : 0;
+        return span_element<std::remove_cv_t<typename U::value_type>>;
     } else if constexpr (std::is_class_v<U>) {
-        return view_struct<U> ? 3 : 0;
+        return view_struct<U>;
     } else {
-        return 0;
+        return false;
     }
 }
 
 template <auto Member>
-concept field_member = member_object<Member> && view_struct<member_owner_t<Member>> && (field_shape_of<member_value_t<Member>>() != 0);
+concept field_member = member_object<Member> && view_struct<member_owner_t<Member>> && field_type_ok<member_value_t<Member>>();
 
 template <utils::fixed_string Name, auto Member, bool ReadOnly, class... Tags>
 struct field_entry {
@@ -655,7 +677,7 @@ struct field_entry {
     static constexpr auto member = Member;
     using owner_type = member_owner_t<Member>;
     using value_type = std::remove_cv_t<member_value_t<Member>>;
-    static constexpr int shape = field_shape_of<member_value_t<Member>>();
+    static constexpr field_shape shape = field_shape_of<member_value_t<Member>>();
     // A const member is read-only whatever the entry says.
     static constexpr bool writable = !ReadOnly && !std::is_const_v<member_value_t<Member>>;
     using meta = var_meta<value_type, Tags...>;
@@ -665,10 +687,10 @@ struct field_entry {
 template <auto Member, class... Tags>
 consteval bool field_tags_ok() {
     using M = std::remove_cv_t<member_value_t<Member>>;
-    if constexpr (field_shape_of<M>() == 1 && !std::is_enum_v<M>) {
+    if constexpr (field_shape_of<M>() == field_shape::kValue && !std::is_enum_v<M>) {
         return valid_var_tags<M, Tags...>;
     } else {
-        return valid_ro_tags<Tags...> && var_tag_count_v<1, Tags...> + var_tag_count_v<2, Tags...> == 0;
+        return valid_ro_tags<Tags...> && var_tag_count_v<var_tag_kind::kRange, Tags...> + var_tag_count_v<var_tag_kind::kStep, Tags...> == 0;
     }
 }
 

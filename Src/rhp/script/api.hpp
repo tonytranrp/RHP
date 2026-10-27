@@ -140,7 +140,7 @@ value view(role caller, utils::type_list<Fs...>) {
             object o;
             o.set("name", value{std::string{F::name}})
                 .set("type", value{stubs::detail::field_type<Handles, F>()})
-                .set("writable", value{F::shape == 1 && F::writable && allows(caller, role::kPatch)});
+                .set("writable", value{F::shape == script::detail::field_shape::kValue && F::writable && allows(caller, role::kPatch)});
             describe_tags<typename F::meta>(o);
             fields.push_back(o.done());
         }

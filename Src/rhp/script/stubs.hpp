@@ -177,9 +177,9 @@ template <class Meta>
 template <utils::type_list_like Handles, class F>
 [[nodiscard]] std::string field_type() {
     using M = typename F::value_type;
-    if constexpr (F::shape == 2) {
+    if constexpr (F::shape == script::detail::field_shape::kArray) {
         return span_type_name<typename script::detail::array_traits<M>::element>();
-    } else if constexpr (F::shape == 3) {
+    } else if constexpr (F::shape == script::detail::field_shape::kObject) {
         return type_name<Handles, M>();
     } else if constexpr (std::is_enum_v<M>) {
         return "integer";
@@ -195,7 +195,7 @@ void append_view_class(std::string& out, role caller, utils::type_list<Fs...>) {
     out += std::format("---@class {}\n", V::name);
     const auto field = [&]<class F>(std::type_identity<F>) {
         if constexpr (std::is_same_v<typename F::owner_type, typename V::type>) {
-            const bool writable = F::shape == 1 && F::writable && allows(caller, role::kPatch);
+            const bool writable = F::shape == script::detail::field_shape::kValue && F::writable && allows(caller, role::kPatch);
             out += std::format("---@field {} {}{}{}\n", F::name, field_type<Handles, F>(), writable ? "" : " read-only", described<typename F::meta>());
         }
     };

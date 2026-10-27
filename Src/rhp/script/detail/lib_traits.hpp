@@ -119,18 +119,26 @@ using find_view_t = typename find_typed<Handles, std::remove_cvref_t<T>, entry_k
 template <class Handles, class T>
 inline constexpr bool is_view_v = !std::is_void_v<find_view_t<Handles, T>>;
 
-// A parameter a struct view stands in for: the view's type by value, by const reference or as a
-// const pointer (nil: nullptr). 0 none, 1 by value, 2 const reference, 3 const pointer.
+// How a parameter takes a struct view's object: by value (a copy), by const reference, as a const
+// pointer (nil: nullptr), or not at all (the parameter isn't a declared view type).
+enum class view_param : std::uint8_t {
+    kNone,
+    kValue,
+    kConstRef,
+    kConstPointer
+};
+
 template <class Handles, class T>
-consteval int view_param_kind() {
+consteval view_param view_param_kind() {
     if constexpr (std::is_lvalue_reference_v<T>) {
         using U = std::remove_reference_t<T>;
-        return std::is_const_v<U> && is_view_v<Handles, U> ? 2 : 0;
+        return std::is_const_v<U> && is_view_v<Handles, U> ? view_param::kConstRef : view_param::kNone;
     } else if constexpr (std::is_pointer_v<std::remove_cv_t<T>>) {
         using U = std::remove_pointer_t<std::remove_cv_t<T>>;
-        return std::is_const_v<U> && is_view_v<Handles, U> ? 3 : 0;
+        return std::is_const_v<U> && is_view_v<Handles, U> ? view_param::kConstPointer : view_param::kNone;
     } else {
-        return !std::is_reference_v<T> && is_view_v<Handles, T> && std::is_copy_constructible_v<std::remove_cv_t<T>> ? 1 : 0;
+        return !std::is_reference_v<T> && is_view_v<Handles, T> && std::is_copy_constructible_v<std::remove_cv_t<T>> ? view_param::kValue
+                                                                                                                     : view_param::kNone;
     }
 }
 
@@ -149,9 +157,9 @@ struct arg_traits {
     }();
     // std::span<E> / std::span<const E>: a typed view, a buffer or (read-only) a table (span_type_ok).
     static constexpr bool span = is_span_v<U>;
-    static constexpr int view = view_param_kind<Handles, T>();
+    static constexpr view_param view = view_param_kind<Handles, T>();
     static constexpr bool by_value_or_const_ref = !std::is_reference_v<T> || std::is_const_v<std::remove_reference_t<T>>;
-    static constexpr bool pull_ok = by_value_or_const_ref && (handle || optional_handle || span || view != 0 || pullable<U>);
+    static constexpr bool pull_ok = by_value_or_const_ref && (handle || optional_handle || span || view != view_param::kNone || pullable<U>);
     static constexpr bool push_ok = handle || optional_handle || pushable<U>;
 };
 
@@ -357,7 +365,7 @@ inline constexpr bool owning_view_params_v = false;
 
 template <class... Args, class Handles>
 inline constexpr bool owning_view_params_v<utils::type_list<Args...>, Handles> =
-    ((!is_span_v<std::remove_cvref_t<Args>> && view_param_kind<Handles, Args>() == 0) && ...);
+    ((!is_span_v<std::remove_cvref_t<Args>> && view_param_kind<Handles, Args>() == view_param::kNone) && ...);
 
 template <class Entry, class Handles>
 consteval bool view_binding_ok() {
@@ -392,7 +400,7 @@ consteval bool entry_ok() {
     } else if constexpr (kind == entry_kind::kRo) {
         return arg_traits<Handles, typename Entry::value_type>::push_ok;
     } else if constexpr (kind == entry_kind::kField) {
-        return is_view_v<Handles, typename Entry::owner_type> && (Entry::shape != 3 || is_view_v<Handles, typename Entry::value_type>);
+        return is_view_v<Handles, typename Entry::owner_type> && (Entry::shape != field_shape::kObject || is_view_v<Handles, typename Entry::value_type>);
     } else {
         return true; // a handle or a view type
     }

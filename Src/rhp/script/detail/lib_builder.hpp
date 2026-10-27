@@ -83,7 +83,7 @@ result<typename Entry::type> pull_handle(stack& s, int index) {
 // How a pulled argument is held for the call: a struct view's object by const reference stays a
 // reference (no copy); everything else is held by value.
 template <class Handles, class T>
-using pulled_t = std::conditional_t<view_param_kind<Handles, T>() == 2, std::reference_wrapper<const std::remove_cvref_t<T>>, std::remove_cvref_t<T>>;
+using pulled_t = std::conditional_t<view_param_kind<Handles, T>() == view_param::kConstRef, std::reference_wrapper<const std::remove_cvref_t<T>>, std::remove_cvref_t<T>>;
 
 template <class Handles, class T>
 result<pulled_t<Handles, T>> pull_arg(stack& s, int index) {
@@ -98,17 +98,17 @@ result<pulled_t<Handles, T>> pull_arg(stack& s, int index) {
             return std::unexpected{std::move(got).error()};
         }
         return U{static_cast<E*>(got->data), got->count};
-    } else if constexpr (constexpr int view = view_param_kind<Handles, T>(); view != 0) {
-        using V = std::conditional_t<view == 3, std::remove_const_t<std::remove_pointer_t<U>>, std::remove_const_t<U>>;
+    } else if constexpr (constexpr view_param view = view_param_kind<Handles, T>(); view != view_param::kNone) {
+        using V = std::conditional_t<view == view_param::kConstPointer, std::remove_const_t<std::remove_pointer_t<U>>, std::remove_const_t<U>>;
         using Entry = find_view_t<Handles, V>;
-        auto object = s.to_object(index, view_key_v<Entry>.view(), Entry::name, view == 3);
+        auto object = s.to_object(index, view_key_v<Entry>.view(), Entry::name, view == view_param::kConstPointer);
         if (!object) {
             return std::unexpected{std::move(object).error()};
         }
         const V* p = static_cast<const V*>(*object);
-        if constexpr (view == 1) {
+        if constexpr (view == view_param::kValue) {
             return V{*p};
-        } else if constexpr (view == 2) {
+        } else if constexpr (view == view_param::kConstRef) {
             return std::cref(*p);
         } else {
             return p;
@@ -987,15 +987,13 @@ consteval field_desc make_field() {
     d.name = F::name;
     d.writable = F::writable;
     d.address = &field_address<F::member>;
-    if constexpr (F::shape == 2) {
-        d.shape = field_shape::kArray;
+    d.shape = F::shape;
+    if constexpr (F::shape == field_shape::kArray) {
         d.elem = elem_kind_of<typename array_traits<M>::element>();
         d.count = array_traits<M>::count;
-    } else if constexpr (F::shape == 3) {
-        d.shape = field_shape::kObject;
+    } else if constexpr (F::shape == field_shape::kObject) {
         d.nested = &view_type_of<find_view_t<Handles, M>>::get;
     } else {
-        d.shape = field_shape::kValue;
         d.elem = elem_kind_of<M>();
         if constexpr (F::meta::has_range) {
             d.ranged = true;
