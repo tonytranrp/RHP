@@ -47,7 +47,3 @@ rhp_add_module(test
         Rhp::platform
         Rhp::core
 )
-
-# RHP_UNITY_BUILD: these keep their own translation unit (file-local helpers named like ones in the
-# sources batched with them).
-set_source_files_properties(runner.cpp PROPERTIES SKIP_UNITY_BUILD_INCLUSION ON)

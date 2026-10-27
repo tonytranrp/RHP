@@ -19,7 +19,11 @@
 
 namespace Rhp::test::detail {
 
+namespace {
+
 namespace fs = std::filesystem;
+
+} // namespace
 
 fs::path corpus_dir(const fs::path& root, const std::string& test_file, const std::string& name) {
     std::string safe;
