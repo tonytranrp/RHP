@@ -31,7 +31,7 @@ result<ed25519_public_key> ed25519_public_key::from_bytes(std::span<const std::b
 }
 
 result<ed25519_public_key> ed25519_public_key::from_base64(std::string_view text) {
-    auto bytes = base64_decode(detail::trim(text));
+    auto bytes = base64_decode(text);
     if (!bytes) {
         return std::unexpected{std::move(bytes).error()};
     }
@@ -61,7 +61,7 @@ result<ed25519_secret_key> ed25519_secret_key::from_bytes(std::span<const std::b
 }
 
 result<ed25519_secret_key> ed25519_secret_key::from_base64(std::string_view text) {
-    auto bytes = base64_decode(detail::trim(text));
+    auto bytes = base64_decode(text);
     if (!bytes) {
         return std::unexpected{std::move(bytes).error()};
     }

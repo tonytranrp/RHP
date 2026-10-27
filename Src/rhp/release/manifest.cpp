@@ -14,6 +14,7 @@
 #include <rhp/core/value.hpp>
 #include <rhp/release/detail/codec.hpp>
 #include <rhp/release/manifest.hpp>
+#include <rhp/security/hash.hpp>
 #include <rhp/utils/byte_buffer.hpp>
 #include <rhp/wire/codec/msgpack.hpp>
 
@@ -337,14 +338,7 @@ result<manifest> decode_manifest(std::span<const std::byte> body) {
 }
 
 std::string to_hex(const release_id& id) {
-    std::string out;
-    out.reserve(id.size() * 2);
-    for (const std::byte b : id) {
-        const auto n = std::to_integer<unsigned>(b);
-        out += kDigits[n >> 4];
-        out += kDigits[n & 15u];
-    }
-    return out;
+    return security::to_hex(id);
 }
 
 result<release_id> id_from_hex(std::string_view hex) {

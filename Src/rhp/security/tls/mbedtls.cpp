@@ -98,8 +98,8 @@ struct shared_config {
     return out;
 }
 
-// An ephemeral self-signed P-256 certificate ("CN=rhp host"), valid for ten years.
-[[nodiscard]] result<void> make_ephemeral_certificate(shared_config& c) {
+// A fresh P-256 key pair in c.own_key.
+[[nodiscard]] result<void> make_key(shared_config& c) {
     psa_key_attributes_t attributes = PSA_KEY_ATTRIBUTES_INIT;
     psa_set_key_type(&attributes, PSA_KEY_TYPE_ECC_KEY_PAIR(PSA_ECC_FAMILY_SECP_R1));
     psa_set_key_bits(&attributes, 256);
@@ -116,7 +116,11 @@ struct shared_config {
     if (copied != 0) {
         return failure(errc::kTransport, "can't use the new key", copied);
     }
+    return {};
+}
 
+// A self-signed certificate for c.own_key ("CN=rhp host", random serial) in c.own_cert.
+[[nodiscard]] result<void> write_self_signed(shared_config& c) {
     auto serial = platform::random_array<8>();
     if (!serial) {
         return std::unexpected{std::move(serial).error()};
@@ -153,6 +157,14 @@ struct shared_config {
     return {};
 }
 
+// An ephemeral self-signed P-256 certificate ("CN=rhp host"), valid from 2025-01-01 to 2045-01-01.
+[[nodiscard]] result<void> make_ephemeral_certificate(shared_config& c) {
+    if (auto key = make_key(c); !key) {
+        return key;
+    }
+    return write_self_signed(c);
+}
+
 [[nodiscard]] result<void> load_certificate(shared_config& c, const settings& s) {
     const auto cert = pem_bytes(s.cert_pem);
     if (const int ret = mbedtls_x509_crt_parse(&c.own_cert, cert.data(), cert.size()); ret != 0) {
@@ -168,12 +180,39 @@ struct shared_config {
     return {};
 }
 
+// The client checks the host's certificate against ca_pem, or nothing when it is empty.
+[[nodiscard]] result<void> configure_client(shared_config& c, const settings& s) {
+    if (s.ca_pem.empty()) {
+        mbedtls_ssl_conf_authmode(&c.conf, MBEDTLS_SSL_VERIFY_NONE);
+        return {};
+    }
+    const auto ca = pem_bytes(s.ca_pem);
+    if (const int ret = mbedtls_x509_crt_parse(&c.ca, ca.data(), ca.size()); ret != 0) {
+        return failure(errc::kInvalidArgument, "ca_pem holds no usable certificate", ret);
+    }
+    mbedtls_ssl_conf_ca_chain(&c.conf, &c.ca, nullptr);
+    mbedtls_ssl_conf_authmode(&c.conf, MBEDTLS_SSL_VERIFY_REQUIRED);
+    return {};
+}
+
+// The server presents cert_pem / key_pem, or an ephemeral self-signed certificate.
+[[nodiscard]] result<void> configure_server(shared_config& c, const settings& s) {
+    auto cert = s.cert_pem.empty() ? make_ephemeral_certificate(c) : load_certificate(c, s);
+    if (!cert) {
+        return cert;
+    }
+    if (const int ret = mbedtls_ssl_conf_own_cert(&c.conf, &c.own_cert, &c.own_key); ret != 0) {
+        return failure(errc::kTransport, "can't use the certificate", ret);
+    }
+    return {};
+}
+
 [[nodiscard]] result<std::shared_ptr<shared_config>> make_config(const settings& s, bool client) {
     auto c = std::make_shared<shared_config>();
     c->client = client;
     c->server_name = s.server_name;
     c->ca_pem_empty = s.ca_pem.empty();
-    int ret = mbedtls_ssl_config_defaults(&c->conf, client ? MBEDTLS_SSL_IS_CLIENT : MBEDTLS_SSL_IS_SERVER, MBEDTLS_SSL_TRANSPORT_STREAM, MBEDTLS_SSL_PRESET_DEFAULT);
+    const int ret = mbedtls_ssl_config_defaults(&c->conf, client ? MBEDTLS_SSL_IS_CLIENT : MBEDTLS_SSL_IS_SERVER, MBEDTLS_SSL_TRANSPORT_STREAM, MBEDTLS_SSL_PRESET_DEFAULT);
     if (ret != 0) {
         return failure(errc::kTransport, "can't set up TLS", ret);
     }
@@ -187,25 +226,9 @@ struct shared_config {
     }
 #endif
 #endif
-    if (client) {
-        if (s.ca_pem.empty()) {
-            mbedtls_ssl_conf_authmode(&c->conf, MBEDTLS_SSL_VERIFY_NONE);
-        } else {
-            const auto ca = pem_bytes(s.ca_pem);
-            if (ret = mbedtls_x509_crt_parse(&c->ca, ca.data(), ca.size()); ret != 0) {
-                return failure(errc::kInvalidArgument, "ca_pem holds no usable certificate", ret);
-            }
-            mbedtls_ssl_conf_ca_chain(&c->conf, &c->ca, nullptr);
-            mbedtls_ssl_conf_authmode(&c->conf, MBEDTLS_SSL_VERIFY_REQUIRED);
-        }
-    } else {
-        auto cert = s.cert_pem.empty() ? make_ephemeral_certificate(*c) : load_certificate(*c, s);
-        if (!cert) {
-            return std::unexpected{std::move(cert).error()};
-        }
-        if (ret = mbedtls_ssl_conf_own_cert(&c->conf, &c->own_cert, &c->own_key); ret != 0) {
-            return failure(errc::kTransport, "can't use the certificate", ret);
-        }
+    auto configured = client ? configure_client(*c, s) : configure_server(*c, s);
+    if (!configured) {
+        return std::unexpected{std::move(configured).error()};
     }
     return c;
 }
@@ -382,8 +405,8 @@ public:
     explicit mbedtls_context(std::shared_ptr<shared_config> config) : config_(std::move(config)) {}
 
     result<std::unique_ptr<engine>> make_engine() override {
-        auto e = std::make_unique<mbedtls_engine>(config_);
         const std::scoped_lock lock{lib_mutex()};
+        auto e = std::make_unique<mbedtls_engine>(config_); // mbedtls_ssl_init, then setup: both under the lock
         if (auto ok = e->setup(); !ok) {
             return std::unexpected{std::move(ok).error()};
         }

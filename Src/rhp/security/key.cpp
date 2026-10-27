@@ -1,11 +1,7 @@
 #include <array>
-#include <cctype>
 #include <cstddef>
-#include <cstdint>
 #include <cstdlib>
 #include <format>
-#include <fstream>
-#include <iterator>
 #include <span>
 #include <string>
 #include <string_view>
@@ -15,24 +11,12 @@
 #include <rhp/core/error.hpp>
 #include <rhp/core/result.hpp>
 #include <rhp/platform/random.hpp>
+#include <rhp/security/detail/text.hpp>
+#include <rhp/security/hash.hpp>
 #include <rhp/security/key.hpp>
 #include <rhp/utils/base64.hpp>
 
 namespace Rhp::security {
-
-namespace {
-
-[[nodiscard]] std::string_view trim(std::string_view text) noexcept {
-    while (!text.empty() && std::isspace(static_cast<unsigned char>(text.front())) != 0) {
-        text.remove_prefix(1);
-    }
-    while (!text.empty() && std::isspace(static_cast<unsigned char>(text.back())) != 0) {
-        text.remove_suffix(1);
-    }
-    return text;
-}
-
-} // namespace
 
 void secure_wipe(void* data, std::size_t size) noexcept {
     // Volatile stores can't be optimized away as dead.
@@ -47,7 +31,7 @@ std::string base64_encode(std::span<const std::byte> bytes) {
 }
 
 result<std::vector<std::byte>> base64_decode(std::string_view text) {
-    text = trim(text);
+    text = detail::trim(text);
     if (text.size() % 4 != 0) {
         return fail(errc::kInvalidArgument, "base64 text length is not a multiple of 4", "security.base64");
     }
@@ -56,6 +40,19 @@ result<std::vector<std::byte>> base64_decode(std::string_view text) {
         return fail(errc::kInvalidArgument, "invalid base64 character", "security.base64");
     }
     return std::move(*bytes);
+}
+
+// Declared in hash.hpp; here because it needs no cryptography (it builds with RHP_ENABLE=OFF).
+std::string to_hex(std::span<const std::byte> bytes) {
+    constexpr std::string_view kDigits = "0123456789abcdef";
+    std::string out;
+    out.reserve(bytes.size() * 2);
+    for (const std::byte b : bytes) {
+        const auto n = std::to_integer<unsigned>(b);
+        out += kDigits[n >> 4];
+        out += kDigits[n & 15u];
+    }
+    return out;
 }
 
 // ---- key -----------------------------------------------------------------------------------------
@@ -135,13 +132,12 @@ result<key> key::from_env(std::string_view variable) {
 }
 
 result<key> key::from_file(const std::string& path) {
-    std::ifstream in{path, std::ios::binary};
-    if (!in) {
+    auto text = detail::read_file(path);
+    if (!text) {
         return fail(errc::kNotFound, std::format("can't read key file {}", path), "security.key");
     }
-    std::string text{std::istreambuf_iterator<char>{in}, std::istreambuf_iterator<char>{}};
-    auto k = from_base64(text);
-    secure_wipe(text.data(), text.size());
+    auto k = from_base64(*text);
+    secure_wipe(text->data(), text->size());
     return k;
 }
 

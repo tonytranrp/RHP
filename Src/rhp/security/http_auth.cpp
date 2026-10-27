@@ -1,17 +1,23 @@
 #include <algorithm>
 #include <array>
 #include <charconv>
+#include <cstdint>
 #include <format>
+#include <span>
 
 #include <monocypher.h>
 
 #include <rhp/platform/random.hpp>
+#include <rhp/security/detail/bytes.hpp>
+#include <rhp/security/hash.hpp>
 #include <rhp/security/http_auth.hpp>
 #include <rhp/security/psk_keyring.hpp>
 #include <rhp/utils/base64.hpp>
 #include <rhp/utils/byte_buffer.hpp>
 
 namespace Rhp::security {
+
+using detail::u8;
 
 namespace {
 
@@ -27,7 +33,7 @@ using mac = std::array<std::byte, kMacBytes>;
 class transcript_mac {
 public:
     transcript_mac(std::span<const std::byte> secret, std::string_view domain) noexcept {
-        crypto_blake2b_keyed_init(&ctx_, kMacBytes, reinterpret_cast<const std::uint8_t*>(secret.data()), secret.size());
+        crypto_blake2b_keyed_init(&ctx_, kMacBytes, u8(secret.data()), secret.size());
         bytes(utils::as_bytes(domain));
     }
     transcript_mac(const transcript_mac&) = delete;
@@ -47,11 +53,11 @@ public:
 
     [[nodiscard]] mac finish() noexcept {
         mac out{};
-        crypto_blake2b_final(&ctx_, reinterpret_cast<std::uint8_t*>(out.data()));
+        crypto_blake2b_final(&ctx_, u8(out.data()));
         return out;
     }
 
-    void bytes(std::span<const std::byte> data) noexcept { crypto_blake2b_update(&ctx_, reinterpret_cast<const std::uint8_t*>(data.data()), data.size()); }
+    void bytes(std::span<const std::byte> data) noexcept { crypto_blake2b_update(&ctx_, u8(data.data()), data.size()); }
 
 private:
     crypto_blake2b_ctx ctx_{};
@@ -168,7 +174,7 @@ result<http_grant> verify_http_authorization(const keyring& keys, const http_pro
     }
     const auto* found = keys.find(name);
     const auto expected = request_mac(found != nullptr ? found->secret.bytes() : decoy_secret(), name, seconds, nonce_text, request);
-    const bool matches = crypto_verify32(reinterpret_cast<const std::uint8_t*>(expected.data()), reinterpret_cast<const std::uint8_t*>(supplied->data())) == 0;
+    const bool matches = digests_equal(expected, std::span<const std::byte, kMacBytes>{supplied->data(), kMacBytes});
     if (!matches || found == nullptr) {
         return refused();
     }
@@ -196,7 +202,7 @@ result<void> verify_http_answer(const psk_identity& identity, std::string_view a
         return refused();
     }
     const auto expected = answer_mac(answer_key(identity.secret.bytes(), *request), answer);
-    if (crypto_verify32(reinterpret_cast<const std::uint8_t*>(expected.data()), reinterpret_cast<const std::uint8_t*>(supplied->data())) != 0) {
+    if (!digests_equal(expected, std::span<const std::byte, kMacBytes>{supplied->data(), kMacBytes})) {
         return refused();
     }
     return {};

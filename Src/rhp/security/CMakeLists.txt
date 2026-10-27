@@ -14,6 +14,7 @@ endif()
 rhp_add_module(security
     HEADERS
         authenticator.hpp
+        detail/bytes.hpp
         detail/text.hpp
         ed25519.hpp
         hash.hpp
@@ -31,7 +32,3 @@ rhp_add_module(security
     PRIVATE_DEPS
         ${rhp_security_private_deps}
 )
-
-# RHP_UNITY_BUILD: these keep their own translation unit (file-local helpers named like ones in the
-# sources batched with them).
-set_source_files_properties(ed25519.cpp PROPERTIES SKIP_UNITY_BUILD_INCLUSION ON)

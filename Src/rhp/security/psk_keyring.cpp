@@ -2,7 +2,6 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <format>
 #include <memory>
 #include <optional>
 #include <span>
@@ -18,6 +17,8 @@
 #include <rhp/core/value.hpp>
 #include <rhp/platform/random.hpp>
 #include <rhp/security/authenticator.hpp>
+#include <rhp/security/detail/bytes.hpp>
+#include <rhp/security/hash.hpp>
 #include <rhp/security/key.hpp>
 #include <rhp/security/psk_keyring.hpp>
 #include <rhp/utils/byte_buffer.hpp>
@@ -25,47 +26,29 @@
 
 namespace Rhp::security {
 
+using detail::u8;
+
 namespace {
 
 constexpr std::size_t kNonceSize = 32;
 constexpr std::size_t kMacSize = 32;
 
 using nonce = std::array<std::byte, kNonceSize>;
-using digest = std::array<std::byte, kMacSize>;
 
-[[nodiscard]] const std::uint8_t* u8(const std::byte* p) noexcept {
-    return reinterpret_cast<const std::uint8_t*>(p);
-}
-
-[[nodiscard]] std::uint8_t* u8(std::byte* p) noexcept {
-    return reinterpret_cast<std::uint8_t*>(p);
-}
-
-// Keyed BLAKE2b-256 of `label` ‖ `transcript`.
-[[nodiscard]] digest keyed_hash(std::span<const std::byte> secret, std::string_view label, std::span<const std::byte> transcript) noexcept {
-    crypto_blake2b_ctx ctx;
-    crypto_blake2b_keyed_init(&ctx, kMacSize, u8(secret.data()), secret.size());
-    crypto_blake2b_update(&ctx, reinterpret_cast<const std::uint8_t*>(label.data()), label.size());
-    crypto_blake2b_update(&ctx, u8(transcript.data()), transcript.size());
-    digest out{};
-    crypto_blake2b_final(&ctx, u8(out.data()));
-    return out;
-}
-
-[[nodiscard]] bool same(std::span<const std::byte, kMacSize> a, std::span<const std::byte, kMacSize> b) noexcept {
-    return crypto_verify32(u8(a.data()), u8(b.data())) == 0;
-}
+// Every MAC below is keyed_blake2b_256(psk, label, T): the PSK (a `key`, 16..64 bytes) is used whole.
+static_assert(key::kMaxSize <= 64 && sizeof(digest256) == kMacSize && wire::kMacSize == kMacSize);
 
 // T = len(name) ‖ name ‖ Nc ‖ Nh [‖ channel binding]: binds both nonces, the key name and (under
 // TLS) the TLS connection into every proof and key.
-[[nodiscard]] std::vector<std::byte> transcript(std::string_view name, const nonce& client, const nonce& host, std::span<const std::byte> binding) {
+[[nodiscard]] utils::byte_buffer transcript(std::string_view name, const nonce& client, const nonce& host, std::span<const std::byte> binding) {
     utils::byte_buffer t;
+    t.reserve(sizeof(std::uint32_t) + name.size() + client.size() + host.size() + binding.size());
     t.append_le(static_cast<std::uint32_t>(name.size()));
     t.append(name);
     t.append(client);
     t.append(host);
     t.append(binding);
-    return {t.view().begin(), t.view().end()};
+    return t;
 }
 
 // The per-direction frame MAC: keyed BLAKE2b-256 over header + payload.
@@ -76,7 +59,7 @@ using digest = std::array<std::byte, kMacSize>;
 // fewer (a frame of a call is 2-3 blocks). Input that doesn't start with the magic is hashed in full.
 class blake2b_sealer final : public wire::frame_sealer {
 public:
-    explicit blake2b_sealer(const digest& k) noexcept : key_(k) {
+    explicit blake2b_sealer(const digest256& k) noexcept : key_(k) {
         crypto_blake2b_keyed_init(&primed_, wire::kMacSize, u8(key_.data()), key_.size());
         crypto_blake2b_update(&primed_, u8(wire::kMagic.data()), wire::kMagic.size());
     }
@@ -102,17 +85,17 @@ public:
 
     [[nodiscard]] bool verify(utils::bytes_view sealed, std::span<const std::byte, wire::kMacSize> mac) const noexcept override {
         const wire::mac_bytes expected = seal(sealed);
-        return same(expected, mac);
+        return digests_equal(expected, mac);
     }
 
 private:
-    digest key_;
+    digest256 key_;
     crypto_blake2b_ctx primed_{}; // keyed, the magic absorbed
 };
 
-[[nodiscard]] auth_grant make_grant(std::span<const std::byte> secret, const std::vector<std::byte>& t, bool host_side) {
-    digest c2h = keyed_hash(secret, "rhp/c2h", t);
-    digest h2c = keyed_hash(secret, "rhp/h2c", t);
+[[nodiscard]] auth_grant make_grant(std::span<const std::byte> secret, std::span<const std::byte> t, bool host_side) {
+    digest256 c2h = keyed_blake2b_256(secret, "rhp/c2h", t);
+    digest256 h2c = keyed_blake2b_256(secret, "rhp/h2c", t);
     auth_grant grant;
     grant.outgoing = std::make_unique<blake2b_sealer>(host_side ? h2c : c2h);
     grant.incoming = std::make_unique<blake2b_sealer>(host_side ? c2h : h2c);
@@ -176,7 +159,7 @@ public:
         }
         transcript_ = transcript(name_, *client_nonce, *host_nonce, binding_);
         stage_ = stage::kChallenged;
-        const digest proof = keyed_hash(secret(), "rhp/host", transcript_);
+        const digest256 proof = keyed_blake2b_256(secret(), "rhp/host", transcript_.view());
         value::map out;
         out.emplace_back("nonce", bytes_value(*host_nonce));
         out.emplace_back("proof", bytes_value(proof));
@@ -192,11 +175,11 @@ public:
         if (!proof || entry_ == nullptr) {
             return auth_failed();
         }
-        const digest expected = keyed_hash(secret(), "rhp/client", transcript_);
-        if (!same(expected, *proof)) {
+        const digest256 expected = keyed_blake2b_256(secret(), "rhp/client", transcript_.view());
+        if (!digests_equal(expected, *proof)) {
             return auth_failed();
         }
-        auth_grant grant = make_grant(secret(), transcript_, true);
+        auth_grant grant = make_grant(secret(), transcript_.view(), true);
         grant.identity = entry_->name;
         grant.granted = entry_->granted;
         return grant;
@@ -217,7 +200,7 @@ private:
     const keyring_entry* entry_ = nullptr;
     std::vector<std::byte> fake_secret_;
     std::string name_;
-    std::vector<std::byte> transcript_;
+    utils::byte_buffer transcript_;
     std::vector<std::byte> binding_;
     stage stage_ = stage::kHello;
 };
@@ -249,12 +232,12 @@ public:
             return fail(errc::kProtocol, "malformed psk challenge", "psk handshake");
         }
         transcript_ = transcript(name_, client_nonce_, *host_nonce, binding_);
-        const digest expected = keyed_hash(secret_.bytes(), "rhp/host", transcript_);
-        if (!same(expected, *proof)) {
+        const digest256 expected = keyed_blake2b_256(secret_.bytes(), "rhp/host", transcript_.view());
+        if (!digests_equal(expected, *proof)) {
             // The host doesn't know this key (or it is someone else): don't prove ours to it.
             return auth_failed();
         }
-        const digest mine = keyed_hash(secret_.bytes(), "rhp/client", transcript_);
+        const digest256 mine = keyed_blake2b_256(secret_.bytes(), "rhp/client", transcript_.view());
         value::map out;
         out.emplace_back("proof", bytes_value(mine));
         return value{std::move(out)};
@@ -264,7 +247,7 @@ public:
         if (transcript_.empty()) {
             return fail(errc::kProtocol, "psk handshake not finished", "psk handshake");
         }
-        auth_grant grant = make_grant(secret_.bytes(), transcript_, false);
+        auth_grant grant = make_grant(secret_.bytes(), transcript_.view(), false);
         grant.identity = name_;
         return grant;
     }
@@ -273,7 +256,7 @@ private:
     std::string name_;
     key secret_;
     nonce client_nonce_{};
-    std::vector<std::byte> transcript_;
+    utils::byte_buffer transcript_;
     std::vector<std::byte> binding_;
 };
 

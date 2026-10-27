@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <array>
 #include <cstddef>
-#include <cstdint>
 #include <cstring>
 #include <format>
 #include <mutex>
@@ -20,21 +19,16 @@
 #include <rhp/core/error.hpp>
 #include <rhp/core/result.hpp>
 #include <rhp/core/value.hpp>
+#include <rhp/security/detail/bytes.hpp>
 #include <rhp/security/ed25519.hpp>
 #include <rhp/security/hash.hpp>
 #include <rhp/security/signer.hpp>
 
 namespace Rhp::security {
 
+using detail::u8;
+
 namespace {
-
-[[nodiscard]] const std::uint8_t* u8(const std::byte* p) noexcept {
-    return reinterpret_cast<const std::uint8_t*>(p);
-}
-
-[[nodiscard]] std::uint8_t* u8(std::byte* p) noexcept {
-    return reinterpret_cast<std::uint8_t*>(p);
-}
 
 // kScriptSignatureDomain || source.
 [[nodiscard]] std::vector<std::byte> script_message(std::string_view source) {
@@ -48,6 +42,42 @@ namespace {
 
 [[nodiscard]] error bad_signature(std::string message) {
     return make_error(errc::kBadSignature, std::move(message), "security.signature");
+}
+
+[[nodiscard]] error signature_mismatch(std::string_view signer) {
+    return bad_signature(std::format("the signature by '{}' doesn't match the script", signer));
+}
+
+// The signer's name and the signature bytes of a signature value ({signer = name, sig = bytes}).
+struct signature_fields {
+    const std::string* signer = nullptr;
+    const value::bytes* sig = nullptr;
+};
+
+[[nodiscard]] result<signature_fields> read_signature(const value& signature) {
+    if (signature.is_nil()) {
+        return std::unexpected{bad_signature("the script is not signed")};
+    }
+    const auto* m = signature.get_if<value::map>();
+    if (m == nullptr) {
+        return std::unexpected{bad_signature("malformed signature")};
+    }
+    signature_fields out;
+    for (const auto& [k, v] : *m) {
+        const auto* field = k.get_if<std::string>();
+        if (field == nullptr) {
+            continue;
+        }
+        if (*field == "signer") {
+            out.signer = v.get_if<std::string>();
+        } else if (*field == "sig") {
+            out.sig = v.get_if<value::bytes>();
+        }
+    }
+    if (out.signer == nullptr || out.sig == nullptr) {
+        return std::unexpected{bad_signature("malformed signature")};
+    }
+    return out;
 }
 
 // Monocypher's 64-byte secret key: seed || public key. Wiped when it goes.
@@ -182,35 +212,18 @@ result<value> signing_key::sign(std::string_view source) const {
 }
 
 result<std::string> trusted_signers::verify(std::string_view source, const value& signature) const {
-    if (signature.is_nil()) {
-        return std::unexpected{bad_signature("the script is not signed")};
+    const auto fields = read_signature(signature);
+    if (!fields) {
+        return std::unexpected{fields.error()};
     }
-    const auto* m = signature.get_if<value::map>();
-    if (m == nullptr) {
-        return std::unexpected{bad_signature("malformed signature")};
-    }
-    const std::string* signer_name = nullptr;
-    const value::bytes* sig = nullptr;
-    for (const auto& [k, v] : *m) {
-        const auto* field = k.get_if<std::string>();
-        if (field == nullptr) {
-            continue;
-        }
-        if (*field == "signer") {
-            signer_name = v.get_if<std::string>();
-        } else if (*field == "sig") {
-            sig = v.get_if<value::bytes>();
-        }
-    }
-    if (signer_name == nullptr || sig == nullptr) {
-        return std::unexpected{bad_signature("malformed signature")};
-    }
+    const std::string* signer_name = fields->signer;
+    const value::bytes* sig = fields->sig;
     const ed25519_public_key* key = find(*signer_name);
     if (key == nullptr) {
         return std::unexpected{bad_signature(std::format("signer '{}' is not trusted by this host", *signer_name))};
     }
     if (sig->size() != ed25519_secret_key::kSignatureSize) {
-        return std::unexpected{bad_signature(std::format("the signature by '{}' doesn't match the script", *signer_name))};
+        return std::unexpected{signature_mismatch(*signer_name)};
     }
     const digest256 digest = blake2b_256(source);
     std::array<std::byte, ed25519_public_key::kSize> pub{};
@@ -219,7 +232,7 @@ result<std::string> trusted_signers::verify(std::string_view source, const value
         return *signer_name;
     }
     if (!ed25519_check(*key, *sig, script_message(source))) {
-        return std::unexpected{bad_signature(std::format("the signature by '{}' doesn't match the script", *signer_name))};
+        return std::unexpected{signature_mismatch(*signer_name)};
     }
     recent_scripts().verified_now(pub, std::span<const std::byte, ed25519_secret_key::kSignatureSize>{sig->data(), ed25519_secret_key::kSignatureSize}, digest);
     return *signer_name;

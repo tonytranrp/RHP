@@ -129,10 +129,8 @@ using bio_ptr = std::unique_ptr<BIO, bio_free>;
     X509_STORE* store = SSL_CTX_get_cert_store(ctx);
     bio_ptr certs = memory_bio(s.ca_pem);
     int added = 0;
-    while (X509* ca = certs != nullptr ? PEM_read_bio_X509(certs.get(), nullptr, nullptr, nullptr) : nullptr) {
-        const int ok = X509_STORE_add_cert(store, ca);
-        X509_free(ca);
-        if (ok != 1) {
+    while (const x509_ptr ca{certs != nullptr ? PEM_read_bio_X509(certs.get(), nullptr, nullptr, nullptr) : nullptr}) {
+        if (X509_STORE_add_cert(store, ca.get()) != 1) { // the store takes its own reference
             return failure(errc::kInvalidArgument, "ca_pem has a bad certificate");
         }
         ++added;
@@ -273,15 +271,13 @@ public:
 
     result<std::unique_ptr<engine>> make_engine() override {
         ssl_ptr ssl{SSL_new(ctx_.get())};
-        BIO* in = BIO_new(BIO_s_mem());
-        BIO* out = BIO_new(BIO_s_mem());
+        bio_ptr in{BIO_new(BIO_s_mem())};
+        bio_ptr out{BIO_new(BIO_s_mem())};
         if (ssl == nullptr || in == nullptr || out == nullptr) {
-            BIO_free(in);
-            BIO_free(out);
             return failure(errc::kTransport, "can't start a TLS connection");
         }
-        BIO_set_mem_eof_return(in, -1); // an empty input is "want more", not EOF
-        SSL_set_bio(ssl.get(), in, out);
+        BIO_set_mem_eof_return(in.get(), -1);                // an empty input is "want more", not EOF
+        SSL_set_bio(ssl.get(), in.release(), out.release()); // the SSL owns both from here
         if (client_) {
             SSL_set_connect_state(ssl.get());
             if (!server_name_.empty()) {

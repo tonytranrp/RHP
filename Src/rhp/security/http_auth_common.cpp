@@ -17,12 +17,12 @@ result<value> read_http_signature(std::string_view header) {
     if (header.empty()) {
         return value{};
     }
-    const auto bytes = utils::base64_decode(header);
-    auto signature = bytes ? wire::msgpack::decode(*bytes) : result<value>{fail(errc::kBadSignature, "X-RHP-Signature is not base64", "security.http")};
-    if (!signature) {
-        return fail(errc::kBadSignature, "X-RHP-Signature is not a MessagePack signature value", "security.http");
+    if (const auto bytes = utils::base64_decode(header)) {
+        if (auto signature = wire::msgpack::decode(*bytes)) {
+            return signature;
+        }
     }
-    return signature;
+    return fail(errc::kBadSignature, "X-RHP-Signature is not a MessagePack signature value", "security.http");
 }
 
 result<void> http_replay_guard::admit(const http_grant& grant, std::chrono::system_clock::time_point now) {

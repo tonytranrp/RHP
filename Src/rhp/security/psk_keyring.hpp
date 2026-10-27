@@ -3,12 +3,9 @@
 #include <chrono>
 #include <memory>
 #include <string>
-#include <string_view>
 #include <utility>
-#include <vector>
 
 #include <rhp/core/result.hpp>
-#include <rhp/core/role.hpp>
 #include <rhp/security/authenticator.hpp>
 #include <rhp/security/http_auth.hpp>
 #include <rhp/security/key.hpp>
@@ -43,7 +40,6 @@ public:
     psk_keyring(keyring keys) : keys_(std::make_shared<const keyring>(std::move(keys))) {}
 
     [[nodiscard]] std::unique_ptr<host_handshake> begin() const;
-    [[nodiscard]] const keyring& keys() const noexcept { return *keys_; }
     // Per-request HTTP proofs against the same keys (Rhp::security::http_authenticator).
     [[nodiscard]] result<http_grant> verify_http(const http_proof& request, std::chrono::system_clock::time_point now) const {
         return verify_http_authorization(*keys_, request, now);
