@@ -10,10 +10,15 @@ set(rhp_script_sources
 set(rhp_script_private_deps "")
 if(RHP_ENABLE)
     list(APPEND rhp_script_sources
+        puc_lua/alloc.cpp
         puc_lua/async.cpp
         puc_lua/buffer.cpp
+        puc_lua/hook.cpp
         puc_lua/lib_proxy.cpp
+        puc_lua/modules.cpp
+        puc_lua/requests.cpp
         puc_lua/sandbox.cpp
+        puc_lua/sandbox_api.cpp
         puc_lua/small_alloc.cpp
         puc_lua/schedule.cpp
         puc_lua/script_events.cpp

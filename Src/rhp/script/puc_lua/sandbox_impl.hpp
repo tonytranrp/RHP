@@ -47,6 +47,12 @@ using steady = std::chrono::steady_clock;
 
 inline constexpr int kNoRef = -2; // LUA_NOREF
 
+// Finished requests whose map node, record and coroutine wait for reuse: enough for a frame's worth
+// of handler calls without holding on to a burst.
+inline constexpr std::size_t kSpareRequests = 64;
+// sandbox::call's interned function names (call_keys_).
+inline constexpr std::size_t kCallKeys = 32;
+
 class sandbox_impl;
 
 // The sandbox that owns a Lua state (any of its threads).
@@ -73,6 +79,9 @@ result<void> protect(lua_State* L, F&& fn) {
         },
         &h);
 }
+
+// lua_dump's writer into the std::string `out` points to (modules.cpp).
+int dump_writer(lua_State* L, const void* p, std::size_t size, void* out);
 
 // Arguments of the rhp builtins: each raises (naming `where`) when the argument doesn't fit.
 double checked_ms(lua_State* L, int index, std::string_view where);        // milliseconds >= 0
@@ -868,5 +877,121 @@ private:
     std::vector<std::pair<std::string, std::function<int(stack&)>>> inbox_;
     std::atomic<std::uint64_t> dropped_events_{0};
 };
+
+// ---- run scopes (sandbox.cpp, requests.cpp, modules.cpp, tools.cpp) ------------------------------
+
+// One entry on the run stack: makes `owner` the running code and accounts its time to `budget`.
+// The outermost scope clears a cancel() that arrived while nothing ran, and resets the hook after a
+// stop switched it to every instruction.
+struct sandbox_impl::active_scope {
+    sandbox_impl& self;
+    effect_owner previous;
+    run_budget* previous_budget;
+
+    active_scope(sandbox_impl& s, run_budget* budget, lua_State* thread, request_record* request, const effect_owner& owner)
+        : self(s), previous(s.current_), previous_budget(s.budget_) {
+        if (self.running_.empty()) {
+            self.cancel_running_.store(false, std::memory_order_release);
+        }
+        const bool checked = request != nullptr && checked_kind(request->kind);
+        if (self.metering_ && self.running_.empty()) {
+            self.meter_run_started_ = steady::now();
+        }
+        self.running_.push_back(active_run{budget, thread, request, self.timed_ ? steady::now() : steady::time_point{}, checked});
+        if (budget != nullptr) {
+            self.budget_ = budget;
+        }
+        self.current_ = owner;
+        if (checked) {
+            self.enter_checked();
+        }
+    }
+
+    active_scope(const active_scope&) = delete;
+    active_scope& operator=(const active_scope&) = delete;
+
+    ~active_scope() {
+        const active_run& top = self.running_.back();
+        if (top.budget != nullptr && self.timed_) {
+            top.budget->active += steady::now() - top.started;
+        }
+        const bool checked = top.checked;
+        self.running_.pop_back();
+        self.budget_ = previous_budget;
+        self.current_ = previous;
+        if (self.metering_ && self.running_.empty()) {
+            self.credit_hook_progress(self.state_);
+            self.meter_active_ += steady::now() - self.meter_run_started_;
+        }
+        if (checked) {
+            self.leave_checked();
+        }
+        if (self.running_.empty() && self.hook_dirty_) {
+            self.hook_dirty_ = false;
+            self.rearm_all(); // every coroutine, in case the profiler or the debugger changed the hook meanwhile
+        }
+    }
+};
+
+// limits.slice_us of wall time for everything started from here (an operation, pump(), an event).
+struct sandbox_impl::slice_scope {
+    sandbox_impl& self;
+    bool owns;
+
+    explicit slice_scope(sandbox_impl& s)
+        : self(s), owns(s.options_.limits.slice_us != 0 && !s.slice_deadline_ && s.running_.empty()) {
+        if (owns) {
+            self.slice_deadline_ = steady::now() + std::chrono::microseconds{self.options_.limits.slice_us};
+        }
+    }
+
+    slice_scope(const slice_scope&) = delete;
+    slice_scope& operator=(const slice_scope&) = delete;
+
+    ~slice_scope() {
+        if (owns) {
+            self.slice_deadline_.reset();
+        }
+    }
+};
+
+// An operation (exec, load, call, reload, unload, revert_all): while it runs, the main thread checks
+// for cancel() too (on_save / on_restore / on_unload, and patch handlers its code hits), like its
+// request coroutine does. Outside operations the main thread runs handlers, unchecked by default.
+struct sandbox_impl::operation_scope {
+    sandbox_impl& self;
+
+    explicit operation_scope(sandbox_impl& s) : self(s) { self.enter_checked(); }
+
+    operation_scope(const operation_scope&) = delete;
+    operation_scope& operator=(const operation_scope&) = delete;
+
+    ~operation_scope() { self.leave_checked(); }
+};
+
+template <class Pred>
+void sandbox_impl::abandon_requests(Pred pred, std::string_view why) {
+    std::vector<request_id> doomed;
+    for (const auto& [id, req] : requests_) {
+        if (!req->running && pred(*req)) {
+            doomed.push_back(id);
+        }
+    }
+    for (const request_id id : doomed) {
+        auto node = requests_.extract(id);
+        if (node.empty()) {
+            continue;
+        }
+        request_record& req = *node.mapped();
+        req.listed = false;
+        const result<value_list> outcome = fail(errc::kCancelled, std::string{why}, where_of(req));
+        close_thread(req, true);
+        request_ended(req, &outcome, true);
+        if (req.suspended_once) {
+            finished_.emplace_back(id, outcome);
+        }
+        recycle(std::move(node));
+    }
+}
 
 } // namespace Rhp::script::detail

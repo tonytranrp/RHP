@@ -2,13 +2,19 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <format>
+#include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 #include <lauxlib.h>
 #include <lua.h>
 
+#include <rhp/core/error.hpp>
+#include <rhp/core/result.hpp>
 #include <rhp/core/role.hpp>
+#include <rhp/core/value.hpp>
 #include <rhp/script/puc_lua/builtins.hpp>
 #include <rhp/script/puc_lua/sandbox_impl.hpp>
 #include <rhp/script/tunables.hpp>
@@ -88,6 +94,63 @@ int lua_rhp_tunables(lua_State* L) {
         lua_rawseti(L, -2, ++n);
     }
     return 1;
+}
+
+// ---- sandbox::tunables / tune ----------------------------------------------------------------------
+
+result<std::vector<tunable_info>> sandbox_impl::tunables(std::string_view prefix) {
+    std::vector<tunable_info> out;
+    for (const tunable_info& t : tunables_) {
+        if (path_matches(t.path, prefix)) {
+            out.push_back(t);
+            out.back().writable = t.writable && allows(options_.caller_role, role::kPatch);
+        }
+    }
+    if (out.empty() && !prefix.empty()) {
+        return fail(errc::kNotFound, std::format("no variable is or starts with '{}'", prefix), "tunables");
+    }
+    auto read = protect(state_, [&] {
+        lua_State* L = state_;
+        for (tunable_info& t : out) {
+            push_lib_path(L, t.path);
+            auto v = stack{L}.to_value(-1);
+            t.current = v ? std::move(*v) : value{}; // a value with no wire form (a handle): nil
+            lua_pop(L, 1);
+        }
+    });
+    if (!read) {
+        return std::unexpected{std::move(read).error()};
+    }
+    return out;
+}
+
+result<void> sandbox_impl::tune(std::string_view path, const value& v) {
+    const auto known = std::ranges::find(tunables_, path, &tunable_info::path);
+    if (known == tunables_.end()) {
+        return fail(errc::kNotFound, std::format("no variable '{}'", path), "tune");
+    }
+    if (!known->writable) {
+        return fail(errc::kForbidden, "read-only", std::string{path});
+    }
+    const operation_scope operation{*this};
+    drain();
+    result<void> out{};
+    auto glue = protect(state_, [&] {
+        lua_State* L = state_;
+        const slice_scope slice{*this};
+        lua_pushcfunction(L, &lua_tune_thunk);
+        stack{L}.push_string(path);
+        stack{L}.push_value(v);
+        request_record& req = start_request(request_kind::kExec, effect_owner{scratch_}, "tune", 2, true);
+        if (auto done = step(req, 2); done && !*done) {
+            out = std::unexpected{std::move(*done).error()};
+        }
+    });
+    if (!glue) {
+        out = std::unexpected{std::move(glue).error()};
+    }
+    drain();
+    return out;
 }
 
 } // namespace Rhp::script::detail
