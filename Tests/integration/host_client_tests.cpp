@@ -456,7 +456,7 @@ TEST_CASE("host: listen failures are reported by port()", "[integration][host]")
     CHECK(first.install<test_lib>().error().code == errc::kAlreadyLoaded);
 }
 
-TEST_CASE("host+client: a result larger than a frame is an error, not a dead session", "[integration][limits]") {
+TEST_CASE("host+client: a result larger than a frame is an error and not a dead session", "[integration][limits]") {
     using small_cfg = Rhp::config<>::transport<Rhp::net::loopback>::logger<Rhp::core::null_logger>::limits<Rhp::limits{.max_frame = 16 * 1024}>;
     keys k;
     const auto at = Rhp::endpoint::listen("itest.big", 1);

@@ -174,7 +174,7 @@ TEST_CASE("release manager refuses an old seq and accepts the same release again
     CHECK(fx::g_speed == 5);
 }
 
-TEST_CASE("release manager refuses releases out of scope, expired, too privileged or missing libs", "[release][manager]") {
+TEST_CASE("release manager refuses releases out of scope or expired or too privileged or missing libs", "[release][manager]") {
     fixture f;
     auto m = f.make();
     {

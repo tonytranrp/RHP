@@ -87,7 +87,7 @@ TEST_CASE("key: from a file and from the environment", "[security][key]") {
     CHECK(key::from_env("RHP_TESTS_SURELY_UNSET_VARIABLE").error().code == errc::kNotFound);
 }
 
-TEST_CASE("keyring: names are unique, keys required", "[security][keyring]") {
+TEST_CASE("keyring: names are unique and keys required", "[security][keyring]") {
     Rhp::security::keyring ring;
     auto k = key::generate();
     REQUIRE(k);

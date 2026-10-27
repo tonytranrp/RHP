@@ -162,7 +162,7 @@ TEST_CASE("release bytecode: applying compiles once and stores one entry", "[rel
     CHECK(f.entries() == 1);
 }
 
-TEST_CASE("release bytecode: no key, nothing cached and nothing read", "[release][bytecode]") {
+TEST_CASE("release bytecode: no key means nothing cached and nothing read", "[release][bytecode]") {
     fixture f;
     const auto id = f.applied(std::nullopt);
     CHECK(f.entries() == 0);

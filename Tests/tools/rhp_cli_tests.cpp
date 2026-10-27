@@ -796,7 +796,7 @@ TEST_CASE("stage6: the CLI discovers separate hosts and broadcasts a signed scri
     CHECK(results.find(second_name + ": {42}") != std::string::npos);
 }
 
-TEST_CASE("rhp-cli: releases are built, applied, kept across a restart and revoked", "[cli][process][releases]") {
+TEST_CASE("rhp-cli: releases are built and applied then kept across a restart and revoked", "[cli][process][releases]") {
     scratch_dir dir;
     const auto id = dir.path / "dev.rhpid";
     REQUIRE(run(std::format("{} keygen dev --out {} > {}", kCli, q(id), q(dir.path / "keygen.txt"))) == 0);

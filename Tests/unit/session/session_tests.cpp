@@ -214,7 +214,7 @@ TEST_CASE("session: only sequenced ops go through send; only when ready", "[sess
     CHECK(d.client->send(op::kPing, value{}).error().code == errc::kInvalidArgument);
 }
 
-TEST_CASE("session: a corrupt frame is nacked, resent and delivered exactly once", "[session]") {
+TEST_CASE("session: a corrupt frame is nacked and resent and delivered exactly once", "[session]") {
     // The client's 3rd sequenced write (after hello and response: writes 0 and 1) loses a bit.
     int sequenced_seen = 0;
     auto corrupt_second_request = [&sequenced_seen](Rhp::utils::byte_buffer& b, int) {
@@ -240,7 +240,7 @@ TEST_CASE("session: a corrupt frame is nacked, resent and delivered exactly once
     CHECK_FALSE(d.host_events.closed);
 }
 
-TEST_CASE("session: a forged frame (CRC fixed up, MAC wrong) ends the session", "[session]") {
+TEST_CASE("session: a forged frame (CRC fixed up but MAC wrong) ends the session", "[session]") {
     int sequenced_seen = 0;
     auto forge = [&sequenced_seen](Rhp::utils::byte_buffer& b, int) {
         const auto h = header_of(b);

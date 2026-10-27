@@ -36,7 +36,7 @@ Rhp::result<std::unique_ptr<net_link>> dial(io_context& io, const endpoint& ep) 
 
 } // namespace
 
-TEST_CASE("tcp: listen on port 0, dial, talk, close", "[net][tcp]") {
+TEST_CASE("tcp: listen on port 0 then dial and talk and close", "[net][tcp]") {
     io_context io;
     std::unique_ptr<net_link> accepted;
     auto listener = tcp::listen(io, endpoint::listen("127.0.0.1", 0), [&](std::unique_ptr<net_link> a) { accepted = std::move(a); });

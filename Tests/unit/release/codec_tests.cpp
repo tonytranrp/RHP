@@ -177,7 +177,7 @@ TEST_CASE("signing again by the same signer replaces the signature", "[release][
     CHECK(r.signatures.size() == 1);
 }
 
-TEST_CASE("trust checks signers, channels, thresholds and revoked keys", "[release][trust]") {
+TEST_CASE("trust checks signers and channels and thresholds and revoked keys", "[release][trust]") {
     const signer dev{"dev"};
     const signer ops{"ops"};
     const signer stranger{"stranger"};

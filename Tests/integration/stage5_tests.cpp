@@ -429,7 +429,7 @@ TEST_CASE("stage5: a loopback host takes TLS and plaintext; the host can bring i
     CHECK_FALSE(distrusting.connect());
 }
 
-TEST_CASE("stage5: TLS over a custom transport, through cuts, still exactly once", "[stage5][tls][resume]") {
+TEST_CASE("stage5: TLS over a custom transport through cuts is still exactly once", "[stage5][tls][resume]") {
     keys k;
     g_runs = 0;
     const auto at = Rhp::endpoint::listen("s5.tls_cut", 1, Rhp::net::require_tls);

@@ -50,7 +50,7 @@ outcome handshake(const psk_keyring& host, const psk_identity& client) {
 
 } // namespace
 
-TEST_CASE("psk: the right key gets the identity, role and matching frame keys", "[security][psk]") {
+TEST_CASE("psk: the right key gets the identity and role and matching frame keys", "[security][psk]") {
     fixture f;
     auto r = handshake(f.host, psk_identity{"qa", f.qa});
     REQUIRE(r.host);

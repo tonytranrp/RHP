@@ -11,7 +11,7 @@
 using Rhp::errc;
 using namespace Rhp::security;
 
-TEST_CASE("disabled signing: keys load, signing and checking report kDisabled", "[security][disabled]") {
+TEST_CASE("disabled signing: keys load while signing and checking report kDisabled", "[security][disabled]") {
     auto secret = ed25519_secret_key::generate();
     REQUIRE(secret);
     auto again = ed25519_secret_key::from_base64(secret->to_base64());
