@@ -33,6 +33,14 @@ option(RHP_LTO "Link-time optimization (IPO) for RHP's targets in Release / RelW
 option(RHP_UNITY_BUILD "Compile RHP's libraries, tests and tools as unity files (clean builds)" OFF)
 set(RHP_SANITIZE "" CACHE STRING "Sanitizers to enable: 'address;undefined', 'address' (MSVC) or 'thread'")
 
+# Tools/ (rhp-cli) are clients of the live engine: built, fetched (CLI11, replxx), installed and tested
+# only when it is on. Every place that asks reads this one variable.
+if(RHP_BUILD_TOOLS AND RHP_ENABLE)
+    set(RHP_TOOLS_ENABLED ON)
+else()
+    set(RHP_TOOLS_ENABLED OFF)
+endif()
+
 # The stage this tree implements, recorded in the installed package (rhp_STAGE). RHP has no
 # release numbers; the wire protocol has its own revision (wire/ops.hpp).
 set(RHP_STAGE "stage-12")

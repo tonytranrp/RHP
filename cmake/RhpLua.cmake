@@ -81,8 +81,4 @@ endif()
 # API misuse asserts in Debug: a broken trampoline aborts loudly instead of corrupting the VM.
 target_compile_definitions(rhp_lua PUBLIC $<$<CONFIG:Debug>:LUA_USE_APICHECK>)
 
-if(MSVC)
-    target_compile_options(rhp_lua PRIVATE /utf-8 /W0 /Zc:inline /Gw)
-else()
-    target_compile_options(rhp_lua PRIVATE -w -ffunction-sections -fdata-sections)
-endif()
+rhp_third_party_flags(rhp_lua UTF8 SECTIONS)

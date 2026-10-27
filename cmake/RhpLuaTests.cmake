@@ -37,7 +37,7 @@ function(rhp_add_lua_tests name)
     # The target's name, not its file: add_test then runs it through CMAKE_CROSSCOMPILING_EMULATOR
     # (the iOS simulator's simctl_run.sh) like any other test executable. Paths given are absolute.
     set(command "${arg_TARGET}")
-    if(arg_TARGET STREQUAL "rhp-cli" OR arg_TARGET STREQUAL "Rhp::rhp-cli")
+    if(arg_TARGET STREQUAL "rhp-cli")
         list(APPEND command test)
     endif()
     set(common --no-color --root "${arg_ROOT}")

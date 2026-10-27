@@ -21,3 +21,27 @@ function(rhp_set_warnings target)
         endif()
     endif()
 endfunction()
+
+# rhp_third_party_flags(<target> [UTF8] [SECTIONS]): a third-party target RHP builds from upstream
+# sources (Lua, Monocypher, replxx), which aren't clean under rhp_set_warnings: its warnings off (/W0,
+# -w), plus, when asked, MSVC's /utf-8 (UTF8) and the free code generation flags (SECTIONS: /Zc:inline
+# /Gw; -ffunction-sections -fdata-sections).
+function(rhp_third_party_flags target)
+    cmake_parse_arguments(PARSE_ARGV 1 arg "UTF8;SECTIONS" "" "")
+    if(MSVC)
+        set(flags "")
+        if(arg_UTF8)
+            list(APPEND flags /utf-8)
+        endif()
+        list(APPEND flags /W0)
+        if(arg_SECTIONS)
+            list(APPEND flags /Zc:inline /Gw)
+        endif()
+    else()
+        set(flags -w)
+        if(arg_SECTIONS)
+            list(APPEND flags -ffunction-sections -fdata-sections)
+        endif()
+    endif()
+    target_compile_options(${target} PRIVATE ${flags})
+endfunction()

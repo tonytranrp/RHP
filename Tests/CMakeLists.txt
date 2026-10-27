@@ -59,7 +59,7 @@ if(RHP_ENABLE)
     add_subdirectory(integration)
     add_subdirectory(fuzz)
 endif()
-if(RHP_ENABLE AND RHP_BUILD_TOOLS)
+if(RHP_TOOLS_ENABLED)
     add_subdirectory(tools)
 endif()
 # rhp_bench compares RHP with raw Lua (Rhp::lua): live builds only.

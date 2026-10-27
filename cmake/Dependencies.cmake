@@ -123,7 +123,7 @@ if(RHP_ENABLE)
 endif()
 
 # rhp-cli (Tools/): line editing and argument parsing. Desktop tools only, never linked into RHP.
-if(RHP_BUILD_TOOLS AND RHP_ENABLE)
+if(RHP_TOOLS_ENABLED)
     CPMAddPackage(
         NAME CLI11
         GITHUB_REPOSITORY CLIUtils/CLI11

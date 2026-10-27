@@ -47,6 +47,6 @@ if(RHP_BUILD_EXAMPLES)
     add_subdirectory(Examples)
 endif()
 
-if(RHP_BUILD_TOOLS AND RHP_ENABLE)
+if(RHP_TOOLS_ENABLED)
     add_subdirectory(Tools)
 endif()

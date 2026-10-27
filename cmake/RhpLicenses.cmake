@@ -44,7 +44,7 @@ if(RHP_ENABLE)
     endif()
 endif()
 
-if(RHP_BUILD_TOOLS AND RHP_ENABLE)
+if(RHP_TOOLS_ENABLED)
     install(FILES "${CLI11_SOURCE_DIR}/LICENSE" DESTINATION "${rhp_license_dir}" RENAME cli11.txt COMPONENT tools)
     install(FILES "${replxx_SOURCE_DIR}/LICENSE.md" DESTINATION "${rhp_license_dir}" RENAME replxx.md COMPONENT tools)
 endif()
