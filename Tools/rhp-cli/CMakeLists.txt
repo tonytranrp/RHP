@@ -11,7 +11,15 @@ target_compile_features(rhp_cli_core PUBLIC cxx_std_23)
 rhp_set_warnings(rhp_cli_core)
 set_target_properties(rhp_cli_core PROPERTIES FOLDER "tools")
 
-add_executable(rhp-cli src/main.cpp)
+add_executable(rhp-cli
+    src/main.cpp
+    src/commands.hpp
+    src/connection.cpp
+    src/connection.hpp
+    src/keys.cpp
+    src/releases.cpp
+    src/test_command.cpp
+)
 target_link_libraries(rhp-cli PRIVATE rhp_cli_core Rhp::cli11 Rhp::replxx)
 rhp_set_warnings(rhp-cli)
 rhp_use_shared_pch(rhp-cli apps)

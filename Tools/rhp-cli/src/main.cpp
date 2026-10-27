@@ -30,6 +30,8 @@
 #include <utility>
 #include <vector>
 
+#include "commands.hpp"
+#include "connection.hpp"
 #include "dap.hpp"
 #include "release_files.hpp"
 #include "shell.hpp"
@@ -47,6 +49,9 @@ namespace {
 
 using rhp_cli::cli_cfg;
 using cli_shell = rhp_cli::shell<cli_cfg>;
+using rhp_cli::add_connection_options;
+using rhp_cli::connection_options;
+using rhp_cli::open_connection;
 
 std::atomic<bool> g_interrupted{false};
 
@@ -66,134 +71,6 @@ extern "C" void on_interrupt(int) {
     return ".";
 }
 
-// Writes shell output: colored through replxx in the REPL, plain lines otherwise. Thread-safe.
-class terminal {
-public:
-    // `to_stderr`: every line goes to stderr (stdout carries a protocol: rhp-cli dap).
-    explicit terminal(replxx::Replxx* rx, bool color, bool to_stderr = false) : rx_(rx), color_(color), to_stderr_(to_stderr) {}
-
-    void operator()(rhp_cli::style s, std::string_view text) {
-        const char* open = "";
-        const char* close = "";
-        if (color_) {
-            switch (s) {
-            case rhp_cli::style::kPlain: break;
-            case rhp_cli::style::kOutput: open = "\x1b[36m"; break;
-            case rhp_cli::style::kInfo: open = "\x1b[2m"; break;
-            case rhp_cli::style::kError: open = "\x1b[31m"; break;
-            }
-            close = *open != '\0' ? "\x1b[0m" : "";
-        }
-        const std::string line = std::format("{}{}{}\n", open, text, close);
-        const std::scoped_lock lock{mutex_};
-        if (rx_ != nullptr) {
-            rx_->write(line.data(), static_cast<int>(line.size()));
-        } else if (s == rhp_cli::style::kError || to_stderr_) {
-            std::fputs(line.c_str(), stderr);
-        } else {
-            std::fputs(line.c_str(), stdout);
-            std::fflush(stdout);
-        }
-    }
-
-private:
-    replxx::Replxx* rx_;
-    bool color_;
-    bool to_stderr_;
-    std::mutex mutex_;
-};
-
-struct connection_options {
-    std::string address;
-    std::string identity;
-    bool insecure_lan = false;
-    bool listen = false;
-    bool tls = false;
-    std::string ca;
-    std::string server_name;
-    std::string cert;
-    std::string key;
-    int timeout_ms = 0; // 0: 10 s when dialing, 10 min when listening
-};
-
-void add_connection_options(CLI::App& cmd, connection_options& o, bool positional_address) {
-    if (positional_address) {
-        cmd.add_option("address", o.address, "host:port of the host (or where to listen with --listen)")->required();
-    } else {
-        cmd.add_option("-c,--connect", o.address, "host:port of the host (or where to listen with --listen)")->required();
-    }
-    cmd.add_option("-i,--identity", o.identity, "identity file (rhp-cli keygen)")->required()->envname("RHP_IDENTITY");
-    cmd.add_flag("--insecure-lan", o.insecure_lan, "plaintext to a non-loopback address (no TLS)");
-    cmd.add_flag("--tls", o.tls, "TLS even on loopback (non-loopback addresses always use it)");
-    cmd.add_option("--ca", o.ca, "check the host's certificate against this CA (PEM); default: not checked, the handshake is bound to the TLS channel");
-    cmd.add_option("--server-name", o.server_name, "the name the host's certificate must carry (with --ca)");
-    cmd.add_option("--cert", o.cert, "with --listen: this side's certificate chain (PEM); default: ephemeral self-signed");
-    cmd.add_option("--key", o.key, "with --listen: the certificate's private key (PEM)");
-    cmd.add_flag("--listen", o.listen, "reverse mode: listen at the address and wait for the host to dial in");
-    cmd.add_option("--timeout", o.timeout_ms, "ms to wait for the session (default 10000, 600000 with --listen)");
-}
-
-// The connection a network command works over.
-struct connected {
-    std::unique_ptr<Rhp::client<cli_cfg>> client;
-    std::unique_ptr<terminal> out;
-};
-
-[[nodiscard]] std::optional<connected> open(const connection_options& o, replxx::Replxx* rx, bool to_stderr = false) {
-    auto out = std::make_unique<terminal>(rx, !to_stderr && Rhp::platform::stdout_is_terminal() && Rhp::platform::environment_variable("NO_COLOR").empty(), to_stderr);
-    auto id = Rhp::security::identity_file::load(o.identity);
-    if (!id) {
-        (*out)(rhp_cli::style::kError, std::format("{}", id.error()));
-        return std::nullopt;
-    }
-    auto ep = rhp_cli::parse_endpoint(o.address, o.listen, o.insecure_lan);
-    if (!ep) {
-        (*out)(rhp_cli::style::kError, ep.error().message);
-        return std::nullopt;
-    }
-    if (o.tls) {
-        ep->tls = Rhp::net::tls_mode::kRequire;
-    }
-    Rhp::client_options options;
-    options.connect_timeout = std::chrono::milliseconds{o.timeout_ms > 0 ? o.timeout_ms : (o.listen ? 600'000 : 10'000)};
-    for (const auto& [path, field] : {std::pair{&o.ca, &options.tls.ca_pem}, std::pair{&o.cert, &options.tls.cert_pem}, std::pair{&o.key, &options.tls.key_pem}}) {
-        if (path->empty()) {
-            continue;
-        }
-        std::ifstream in{*path, std::ios::binary};
-        if (!in) {
-            (*out)(rhp_cli::style::kError, std::format("can't read {}", *path));
-            return std::nullopt;
-        }
-        *field = std::string{std::istreambuf_iterator<char>{in}, {}};
-    }
-    options.tls.server_name = o.server_name;
-    terminal* sink = out.get();
-    options.on_output = [sink](std::uint64_t, std::string_view line) { (*sink)(rhp_cli::style::kOutput, line); };
-    options.on_emit = [sink](std::uint64_t, Rhp::module_id, const Rhp::value& v) { (*sink)(rhp_cli::style::kOutput, "emit " + rhp_cli::format_value(v)); };
-    auto signer = id->signer_key();
-    auto c = signer ? std::make_unique<Rhp::client<cli_cfg>>(*ep, id->credential(), std::move(*signer), options)
-                    : std::make_unique<Rhp::client<cli_cfg>>(*ep, id->credential(), options);
-    if (!signer) {
-        (*out)(rhp_cli::style::kInfo, "this identity has no signing_key: only observe hosts will run its scripts");
-    }
-    if (o.listen) {
-        auto port = c->port();
-        if (!port) {
-            (*out)(rhp_cli::style::kError, std::format("{}", port.error()));
-            return std::nullopt;
-        }
-        (*out)(rhp_cli::style::kInfo, std::format("listening on {}:{}; waiting for the host to dial in...", ep->host, *port));
-    }
-    if (auto ok = c->connect(); !ok) {
-        (*out)(rhp_cli::style::kError, std::format("{}", ok.error()));
-        return std::nullopt;
-    }
-    const auto who = c->info();
-    (*out)(rhp_cli::style::kInfo, std::format("connected as {} ({}) to a {} host{}", who.identity, who.granted, who.host_platform, who.tls ? " over TLS" : ""));
-    return connected{std::move(c), std::move(out)};
-}
-
 [[nodiscard]] bool interrupted() {
     return g_interrupted.exchange(false);
 }
@@ -201,7 +78,7 @@ struct connected {
 int repl(const connection_options& o) {
     const bool interactive = Rhp::platform::stdin_is_terminal();
     replxx::Replxx rx;
-    auto conn = open(o, interactive ? &rx : nullptr);
+    auto conn = open_connection(o, interactive ? &rx : nullptr);
     if (!conn) {
         return 1;
     }
@@ -264,265 +141,6 @@ int repl(const connection_options& o) {
     }
     rx.history_save(history.string());
     return 0;
-}
-
-int keygen(const std::string& name, const std::string& out_path, const std::string& role_text, bool force) {
-    const auto granted = Rhp::parse_role(role_text);
-    if (!granted) {
-        std::println(stderr, "unknown role '{}' (observe, patch or admin)", role_text);
-        return 2;
-    }
-    const std::string path = out_path.empty() ? name + ".rhpid" : out_path;
-    std::error_code ec;
-    if (!force && std::filesystem::exists(path, ec)) {
-        std::println(stderr, "{} exists (use --force to replace it)", path);
-        return 1;
-    }
-    auto id = Rhp::security::identity_file::generate(name);
-    if (!id) {
-        std::println(stderr, "{}", id.error());
-        return 1;
-    }
-    if (auto saved = id->save(path); !saved) {
-        std::println(stderr, "{}", saved.error());
-        return 1;
-    }
-    std::println("wrote {} (keep it private)", path);
-    std::println("add to the host's keyring file:   {}", id->keyring_line(*granted));
-    std::println("add to the host's signers file:   {}", *id->signers_line());
-    return 0;
-}
-
-int pubkey(const std::string& identity, const std::string& role_text) {
-    const auto granted = Rhp::parse_role(role_text);
-    auto id = Rhp::security::identity_file::load(identity);
-    if (!id || !granted) {
-        std::println(stderr, "{}", id ? std::string{"unknown role"} : std::format("{}", id.error()));
-        return 1;
-    }
-    std::println("{}", id->keyring_line(*granted));
-    if (auto line = id->signers_line()) {
-        std::println("{}", *line);
-    }
-    return 0;
-}
-
-int sign(const std::string& file, const std::string& identity) {
-    auto id = Rhp::security::identity_file::load(identity);
-    if (!id) {
-        std::println(stderr, "{}", id.error());
-        return 1;
-    }
-    auto key = id->signer_key();
-    if (!key) {
-        std::println(stderr, "{} has no signing_key", identity);
-        return 1;
-    }
-    const auto source = rhp_cli::read_text_file(file);
-    if (!source) {
-        std::println(stderr, "can't read {}", file);
-        return 1;
-    }
-    auto signature = key->sign(*source);
-    if (!signature) {
-        std::println(stderr, "{}", signature.error());
-        return 1;
-    }
-    const auto* sig = signature->find("sig");
-    std::println("{} {}", key->name, Rhp::security::base64_encode(*sig->get_if<Rhp::value::bytes>()));
-    return 0;
-}
-
-// Adds the identity's signature to a release or revocation file (in place).
-template <class Doc, class Decode, class Encode>
-int sign_file(const std::string& path, const std::string& identity, Decode decode, Encode encode) {
-    auto id = Rhp::security::identity_file::load(identity);
-    auto bytes = rhp_cli::read_binary_file(path);
-    if (!id || !bytes) {
-        std::println(stderr, "{}", !id ? std::format("{}", id.error()) : std::format("can't read {}", path));
-        return 1;
-    }
-    auto key = id->signer_key();
-    if (!key) {
-        std::println(stderr, "{} has no signing_key", identity);
-        return 1;
-    }
-    auto doc = decode(*bytes);
-    if (!doc) {
-        std::println(stderr, "{}", doc.error());
-        return 1;
-    }
-    if (auto signed_ok = Rhp::release::sign(*doc, *key); !signed_ok) {
-        std::println(stderr, "{}", signed_ok.error());
-        return 1;
-    }
-    auto out = encode(*doc);
-    if (!out || !rhp_cli::write_binary_file(path, *out)) {
-        std::println(stderr, "can't write {}", path);
-        return 1;
-    }
-    std::println("{}: signed by {} ({} signatures)", path, key->name, doc->signatures.size());
-    return 0;
-}
-
-int release_build(const rhp_cli::release_spec& spec, const std::vector<std::string>& identities, const std::string& out_path) {
-    auto r = rhp_cli::build_release(spec, std::chrono::system_clock::now());
-    if (!r) {
-        std::println(stderr, "{}", r.error());
-        return 1;
-    }
-    for (const std::string& identity : identities) {
-        auto id = Rhp::security::identity_file::load(identity);
-        auto key = id ? id->signer_key() : std::nullopt;
-        if (!key) {
-            std::println(stderr, "{}: no signing key", identity);
-            return 1;
-        }
-        if (auto ok = Rhp::release::sign(*r, *key); !ok) {
-            std::println(stderr, "{}", ok.error());
-            return 1;
-        }
-    }
-    auto bytes = Rhp::release::encode_release(*r);
-    const std::string path = out_path.empty() ? std::format("{}.{}.rhprel", r->body.channel, r->body.seq) : out_path;
-    if (!bytes || !rhp_cli::write_binary_file(path, *bytes)) {
-        std::println(stderr, "can't write {}", path);
-        return 1;
-    }
-    std::print("{}", rhp_cli::describe(*r));
-    std::println("wrote {}", path);
-    return 0;
-}
-
-int revoke_build(const rhp_cli::revocation_spec& spec, const std::vector<std::string>& identities, const std::string& out_path) {
-    auto r = rhp_cli::build_revocations(spec, std::chrono::system_clock::now());
-    if (!r) {
-        std::println(stderr, "{}", r.error());
-        return 1;
-    }
-    for (const std::string& identity : identities) {
-        auto id = Rhp::security::identity_file::load(identity);
-        auto key = id ? id->signer_key() : std::nullopt;
-        if (!key) {
-            std::println(stderr, "{}: no signing key", identity);
-            return 1;
-        }
-        if (auto ok = Rhp::release::sign(*r, *key); !ok) {
-            std::println(stderr, "{}", ok.error());
-            return 1;
-        }
-    }
-    auto bytes = Rhp::release::encode_revocations(*r);
-    const std::string path = out_path.empty() ? std::format("revocations.{}.rhprev", r->body.seq) : out_path;
-    if (!bytes || !rhp_cli::write_binary_file(path, *bytes)) {
-        std::println(stderr, "can't write {}", path);
-        return 1;
-    }
-    std::print("{}", rhp_cli::describe(*r));
-    std::println("wrote {}", path);
-    return 0;
-}
-
-// rhp-cli test [--exe PROGRAM] [--api-from HOST:PORT -i ID [--tls ...]] <test runner arguments>
-//   --exe PROGRAM   run the program's own test executable (Rhp::test::main, its real libs) with the
-//                   remaining arguments; its exit status is rhp-cli's
-//   --api-from      fetch the API description of a running host (rhp.api()) and fake its libs
-//   otherwise       run the tests here with the `rhp` API only, or the fakes of --api FILE.json
-int test_command(std::vector<std::string> args) {
-    std::string exe;
-    connection_options conn;
-    std::vector<std::string> rest;
-    const auto take = [&](std::size_t& i, std::string& into) {
-        if (i + 1 >= args.size()) {
-            std::println(stderr, "rhp-cli test: {} expects a value", args[i]);
-            return false;
-        }
-        into = args[++i];
-        return true;
-    };
-    // rhp-cli's own options are named so they can't be mistaken for the runner's (--filter --tls).
-    for (std::size_t i = 0; i < args.size(); ++i) {
-        const std::string& a = args[i];
-        bool ok = true;
-        if (a == "--exe") {
-            ok = take(i, exe);
-        } else if (a == "--api-from") {
-            ok = take(i, conn.address);
-        } else if (a == "--api-identity") {
-            ok = take(i, conn.identity);
-        } else if (a == "--api-ca") {
-            ok = take(i, conn.ca);
-        } else if (a == "--api-server-name") {
-            ok = take(i, conn.server_name);
-        } else if (a == "--api-tls") {
-            conn.tls = true;
-        } else if (a == "--api-insecure-lan") {
-            conn.insecure_lan = true;
-        } else {
-            rest.push_back(a);
-        }
-        if (!ok) {
-            return 2;
-        }
-    }
-    if (std::ranges::find(rest, "--help") != rest.end() || std::ranges::find(rest, "-h") != rest.end()) {
-        std::print("rhp-cli test also takes:\n"
-                   "      --exe PROGRAM          run a program's own test executable (its real libs) with the other arguments\n"
-                   "      --api-from HOST:PORT   fake the libs of a running host, with --api-identity FILE (or RHP_IDENTITY),\n"
-                   "                             --api-tls, --api-ca FILE, --api-server-name NAME, --api-insecure-lan\n\n");
-    }
-    if (!exe.empty()) {
-        auto status = Rhp::platform::run_process(exe, rest);
-        if (!status) {
-            std::println(stderr, "rhp-cli test: {}", status.error());
-            return 2;
-        }
-        return *status;
-    }
-    std::optional<Rhp::value> api;
-    if (!conn.address.empty()) {
-        if (conn.identity.empty()) {
-            conn.identity = Rhp::platform::environment_variable("RHP_IDENTITY");
-        }
-        if (conn.identity.empty()) {
-            std::println(stderr, "rhp-cli test: --api-from needs --api-identity FILE (or RHP_IDENTITY)");
-            return 2;
-        }
-        auto c = open(conn, nullptr, true);
-        if (!c) {
-            return 2;
-        }
-        auto described = c->client->exec("return rhp.api()", "rhp-cli test");
-        if (!described || described->empty()) {
-            std::println(stderr, "rhp-cli test: the host didn't describe its API: {}", described ? std::string{"no value"} : std::format("{}", described.error()));
-            return 2;
-        }
-        api = std::move(described->front());
-    }
-    std::vector<std::string_view> views{rest.begin(), rest.end()};
-    return Rhp::test::run_cli(views, {}, "rhp-cli test", std::cout, std::cerr, api ? &*api : nullptr);
-}
-
-int inspect(const std::string& path) {
-    auto bytes = rhp_cli::read_binary_file(path);
-    if (!bytes) {
-        std::println(stderr, "can't read {}", path);
-        return 1;
-    }
-    auto release = Rhp::release::decode_release(*bytes);
-    if (release) {
-        std::print("{}", rhp_cli::describe(*release));
-        return 0;
-    }
-    auto revocations = Rhp::release::decode_revocations(*bytes);
-    if (revocations) {
-        std::print("{}", rhp_cli::describe(*revocations));
-        return 0;
-    }
-    // The error of the kind of document the file says it is.
-    const bool says_revocations = rhp_cli::document_tag(*bytes) == "revocations-envelope";
-    std::println(stderr, "{}: {}", path, says_revocations ? revocations.error() : release.error());
-    return 1;
 }
 
 } // namespace
@@ -720,37 +338,33 @@ int main(int argc, char** argv) {
         return app.exit(e) == 0 ? 0 : 2;
     }
     if (test_cmd->parsed()) {
-        return test_command(test_cmd->remaining());
+        return rhp_cli::test_command(test_cmd->remaining());
     }
     std::signal(SIGINT, on_interrupt);
 
     if (keygen_cmd->parsed()) {
-        return keygen(name, out_path, role_text, force);
+        return rhp_cli::keygen(name, out_path, role_text, force);
     }
     if (pubkey_cmd->parsed()) {
-        return pubkey(identity, role_text);
+        return rhp_cli::pubkey(identity, role_text);
     }
     if (sign_cmd->parsed()) {
-        return sign(file, identity);
+        return rhp_cli::sign(file, identity);
     }
     if (rbuild_cmd->parsed()) {
-        return release_build(spec, sign_with, out_path);
+        return rhp_cli::release_build(spec, sign_with, out_path);
     }
     if (rsign_cmd->parsed()) {
-        return sign_file<Rhp::release::release>(
-            file, identity, [](const std::vector<std::byte>& b) { return Rhp::release::decode_release(b); },
-            [](const Rhp::release::release& r) { return Rhp::release::encode_release(r); });
+        return rhp_cli::release_sign(file, identity);
     }
     if (rinspect_cmd->parsed()) {
-        return inspect(file);
+        return rhp_cli::inspect(file);
     }
     if (vbuild_cmd->parsed()) {
-        return revoke_build(revocations, sign_with, out_path);
+        return rhp_cli::revoke_build(revocations, sign_with, out_path);
     }
     if (vsign_cmd->parsed()) {
-        return sign_file<Rhp::release::signed_revocations>(
-            file, identity, [](const std::vector<std::byte>& b) { return Rhp::release::decode_revocations(b); },
-            [](const Rhp::release::signed_revocations& r) { return Rhp::release::encode_revocations(r); });
+        return rhp_cli::revoke_sign(file, identity);
     }
     discovery.duration = std::chrono::milliseconds{discover_ms};
     discovery.protocol_revision = Rhp::wire::kProtocolRevision;
@@ -896,7 +510,7 @@ int main(int argc, char** argv) {
 
     if (dap_cmd->parsed()) {
         Rhp::platform::binary_stdio(); // byte-counted messages: no newline translation
-        auto dc = open(conn, nullptr, true);
+        auto dc = open_connection(conn, nullptr, true);
         if (!dc) {
             return 1;
         }
@@ -909,7 +523,7 @@ int main(int argc, char** argv) {
         return server.run([] { return rhp_cli::read_dap_message(stdin); });
     }
 
-    auto c = open(conn, nullptr);
+    auto c = open_connection(conn, nullptr);
     if (!c) {
         return 1;
     }
