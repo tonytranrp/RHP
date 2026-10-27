@@ -901,7 +901,6 @@ int call_view(stack& s, Label label, std::index_sequence<Is...>) {
 
     host_view_init init = view_init_of<Handles, Entry>();
     init.source_size = sizeof(source);
-    init.source_align = alignof(source);
     init.label = std::string_view{label};
     if constexpr (view_result<Handles, typename Entry::traits::return_type>::shape == view_shape::kObject) {
         using V = find_view_t<Handles, typename view_result<Handles, typename Entry::traits::return_type>::object>;

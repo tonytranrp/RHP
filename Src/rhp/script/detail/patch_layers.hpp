@@ -109,14 +109,6 @@ public:
 
     constexpr explicit point_state(fallback_fn fallback) noexcept : fallback_(fallback) {}
 
-    // The hot path: one acquire load and a predictable branch while nothing is patched.
-    R call(Args... args) {
-        if (!patched_.load(std::memory_order_acquire)) [[likely]] {
-            return fallback_(std::forward<Args>(args)...);
-        }
-        return call_below(nullptr, std::forward<Args>(args)...);
-    }
-
     // Invokes the next runnable layer below `above` (nullptr = from the top), else the default.
     R call_below(const layer* above, Args... args) {
         if (layer* next = select_below(above)) {

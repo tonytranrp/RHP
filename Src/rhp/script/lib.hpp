@@ -402,14 +402,6 @@ inline constexpr bool span_params_ok_v = false;
 template <class... Args>
 inline constexpr bool span_params_ok_v<utils::type_list<Args...>> = (span_type_ok<Args>() && ...);
 
-// A binding's result as a view: a span (a typed view), or a pointer or reference (a struct view
-// when its type is a declared ::view; known at install). Rhp::result<> is peeled.
-template <class R>
-struct view_candidate : std::bool_constant<is_span_v<std::remove_cv_t<R>> || std::is_pointer_v<std::remove_cv_t<R>> || std::is_lvalue_reference_v<R>> {};
-
-template <class T>
-struct view_candidate<std::expected<T, error>> : view_candidate<T> {};
-
 // Every span a binding takes or returns has a span element; a binding returning a span is called
 // again on every access of its view, so it has nothing to undo and never waits.
 template <auto F, class... Tags>
@@ -730,25 +722,25 @@ struct lib {
 
     template <utils::fixed_string N, auto F, detail::fn_tag... Tags>
         requires utils::identifier_name<N> && detail::name_free<N, Entries...> && detail::bindable_function<F> &&
-                    detail::valid_fn_tags<F, Tags...> && detail::async_binding_ok<F> && detail::span_binding_ok<F, Tags...>
+                     detail::valid_fn_tags<F, Tags...> && detail::async_binding_ok<F> && detail::span_binding_ok<F, Tags...>
     using fn = lib<Name, Entries..., detail::fn_entry<N, F, Tags...>>;
 
     // A variable scripts read and (kPatch) write, journaled. Tags make it a described tunable:
     // Rhp::range<Min, Max> (enforced), Rhp::step<S>, Rhp::unit<"m/s">, Rhp::doc<"...">.
     template <utils::fixed_string N, auto Ptr, detail::var_tag... Tags>
         requires utils::identifier_name<N> && detail::name_free<N, Entries...> && detail::writable_variable<Ptr> &&
-                    detail::valid_var_tags<std::remove_pointer_t<decltype(Ptr)>, Tags...>
+                     detail::valid_var_tags<std::remove_pointer_t<decltype(Ptr)>, Tags...>
     using var = lib<Name, Entries..., detail::var_entry<N, Ptr, Tags...>>;
 
     // A read-only variable; takes Rhp::unit<> and Rhp::doc<>.
     template <utils::fixed_string N, auto Ptr, detail::ro_tag... Tags>
         requires utils::identifier_name<N> && detail::name_free<N, Entries...> && detail::object_pointer<Ptr> &&
-                    detail::valid_ro_tags<Tags...>
+                     detail::valid_ro_tags<Tags...>
     using ro = lib<Name, Entries..., detail::ro_entry<N, Ptr, Tags...>>;
 
     template <utils::fixed_string N, class H, auto IsAlive>
         requires utils::identifier_name<N> && detail::name_free<N, Entries...> && detail::handle_value<H> &&
-                    std::predicate<decltype(IsAlive), const H&>
+                     std::predicate<decltype(IsAlive), const H&>
     using handle = lib<Name, Entries..., detail::handle_entry<N, H, IsAlive>>;
 
     template <class Sub>
@@ -758,15 +750,15 @@ struct lib {
     // A function called on a handle (e:move(1, 2), label "entity:move"). Takes the fn tags.
     template <utils::fixed_string N, auto F, detail::fn_tag... Tags>
         requires utils::identifier_name<N> && detail::member_free<N, detail::self_t<F>, Entries...> &&
-                    detail::method_function<F> && detail::valid_fn_tags<F, Tags...> && detail::async_binding_ok<F> &&
-                    detail::span_binding_ok<F, Tags...>
+                     detail::method_function<F> && detail::valid_fn_tags<F, Tags...> && detail::async_binding_ok<F> &&
+                     detail::span_binding_ok<F, Tags...>
     using method = lib<Name, Entries..., detail::method_entry<N, F, Tags...>>;
 
     // A read-only value of a handle (e.hp, label "entity.hp"): F(handle) -> value. Only
     // requires_role<> applies.
     template <utils::fixed_string N, auto F, detail::fn_tag... Tags>
         requires utils::identifier_name<N> && detail::member_free<N, detail::self_t<F>, Entries...> &&
-                    detail::property_function<F, Tags...> && detail::span_binding_ok<F, Tags...>
+                     detail::property_function<F, Tags...> && detail::span_binding_ok<F, Tags...>
     using property = lib<Name, Entries..., detail::property_entry<N, F, Tags...>>;
 
     // A struct type scripts read and write in place (views.hpp): a binding returning T* / T& (or

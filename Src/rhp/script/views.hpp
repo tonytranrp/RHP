@@ -211,8 +211,7 @@ struct host_view_init {
     view_shape shape = view_shape::kSpan;
     elem_kind elem = elem_kind::kU8; // kSpan
     bool writable = false;
-    std::size_t source_size = 0;          // bytes for the view_source made in place
-    std::size_t source_align = 0;         // its alignment (at most alignof(std::max_align_t))
+    std::size_t source_size = 0;          // bytes for the view_source made in place (8-byte aligned: call_view checks it needs no more)
     std::string_view label{};             // "game.samples": errors and journal entries
     const view_type_info* type = nullptr; // kObject
 };

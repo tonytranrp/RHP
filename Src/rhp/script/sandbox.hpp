@@ -242,10 +242,6 @@ struct sandbox_options {
     gc_mode gc = gc_mode::kIncremental;
 };
 
-namespace detail {
-class sandbox_impl;
-} // namespace detail
-
 // One identity's script runtime: one lua_State, one _ENV per module, one undo ledger.
 //
 // Single-threaded: use it from one thread (the pump thread). The only exceptions are cancel(),
