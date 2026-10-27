@@ -62,7 +62,8 @@ endif()
 if(RHP_ENABLE AND RHP_BUILD_TOOLS)
     add_subdirectory(tools)
 endif()
-if(RHP_BUILD_BENCH)
+# rhp_bench compares RHP with raw Lua (Rhp::lua): live builds only.
+if(RHP_BUILD_BENCH AND RHP_ENABLE)
     add_subdirectory(bench)
 endif()
 

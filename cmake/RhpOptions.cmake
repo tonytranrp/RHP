@@ -4,7 +4,7 @@ option(RHP_ENABLE "Build the live RHP host. OFF compiles hosts to inert stubs an
 option(RHP_BUILD_TESTS "Build Tests/" ${RHP_IS_TOP_LEVEL})
 option(RHP_BUILD_EXAMPLES "Build Examples/" ${RHP_IS_TOP_LEVEL})
 option(RHP_BUILD_TOOLS "Build Tools/ (rhp-cli)" ${RHP_IS_TOP_LEVEL})
-option(RHP_BUILD_BENCH "Build Tests/bench (rhp_bench, Catch2 benchmarks; needs RHP_BUILD_TESTS)" OFF)
+option(RHP_BUILD_BENCH "Build Tests/bench (rhp_bench, Catch2 benchmarks; needs RHP_BUILD_TESTS and RHP_ENABLE)" OFF)
 option(RHP_INSTALL "Generate install rules and the rhp CMake package (find_package(rhp))" ${RHP_IS_TOP_LEVEL})
 # A project that adds RHP as a subdirectory keeps building when a newer compiler adds a warning.
 option(RHP_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" ${RHP_IS_TOP_LEVEL})
