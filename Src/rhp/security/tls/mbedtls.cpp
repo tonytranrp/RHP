@@ -137,7 +137,10 @@ struct wiped_pem {
     if (!serial) {
         return std::unexpected{std::move(serial).error()};
     }
-    (*serial)[0] &= std::byte{0x7f}; // positive
+    // set_serial_raw writes the bytes as they are (a 0x00 in front only when the top bit is set), so
+    // the first byte must make a minimal, positive DER INTEGER: top bit clear (positive) and not
+    // zero (a leading 0x00 before a byte under 0x80 is padding DER forbids; OpenSSL refuses it).
+    (*serial)[0] = ((*serial)[0] & std::byte{0x7f}) | std::byte{0x40};
 
     mbedtls_x509write_cert crt;
     mbedtls_x509write_crt_init(&crt);
