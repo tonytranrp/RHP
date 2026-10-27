@@ -237,11 +237,12 @@ struct watch_options {
 };
 
 int run_watch(const watch_options& o) {
-    return with_shell(o.conn, [&](cli_shell& sh, rhp_cli::connected&) {
+    return with_shell(o.conn, [&](cli_shell& sh, rhp_cli::connected& c) {
         if (!sh.watch(o.folder)) {
             return 1;
         }
-        while (!g_interrupted.load()) {
+        // Until Ctrl+C, or the session ends (like events: a closed session reloads nothing more).
+        while (!g_interrupted.load() && !c.client->info().closed) {
             std::this_thread::sleep_for(std::chrono::milliseconds{100});
         }
         sh.unwatch();
