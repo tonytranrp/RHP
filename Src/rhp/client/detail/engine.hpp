@@ -11,6 +11,7 @@
 #include <string_view>
 
 #include <rhp/client/detail/requests.hpp>
+#include <rhp/core/error.hpp>
 #include <rhp/core/ids.hpp>
 #include <rhp/core/limits.hpp>
 #include <rhp/core/result.hpp>
@@ -84,6 +85,11 @@ struct setup {
     // run_io for it, and destroys the engine on the thread running the reactor or once it stopped.
     net::io_context* shared_io = nullptr;
 };
+
+// What an RHP_ENABLE=0 client or fleet reports from every call (`where`: the call).
+[[nodiscard]] inline std::unexpected<error> compiled_out(std::string_view where) {
+    return fail(errc::kDisabled, "RHP is compiled out (RHP_ENABLE=0)", std::string{where});
+}
 
 class engine;
 

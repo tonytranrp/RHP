@@ -120,7 +120,7 @@ public:
 #if RHP_ENABLE
         return Cfg::errors_t::finish(host_detail::install(*engine_, L::name, &host_detail::install_into<L>));
 #else
-        return Cfg::errors_t::finish(result<void>{fail(errc::kDisabled, "RHP is compiled out (RHP_ENABLE=0)", std::string{L::name})});
+        return Cfg::errors_t::finish(result<void>{host_detail::compiled_out(L::name)});
 #endif
     }
 
@@ -135,7 +135,7 @@ public:
 #else
         (void)fn;
         (void)need;
-        return Cfg::errors_t::finish(result<void>{fail(errc::kDisabled, "RHP is compiled out (RHP_ENABLE=0)", std::string{sink})});
+        return Cfg::errors_t::finish(result<void>{host_detail::compiled_out(sink)});
 #endif
     }
 
@@ -148,7 +148,7 @@ public:
         return Cfg::errors_t::finish(host_detail::serve_releases(*engine_, host_detail::bridge(releases)));
 #else
         (void)releases;
-        return Cfg::errors_t::finish(result<void>{fail(errc::kDisabled, "RHP is compiled out (RHP_ENABLE=0)", "host.serve")});
+        return Cfg::errors_t::finish(result<void>{host_detail::compiled_out("host.serve")});
 #endif
     }
 
@@ -203,13 +203,9 @@ public:
     // why it isn't listening (address in use, a non-loopback address without insecure_lan, ...).
     [[nodiscard]] return_t<std::uint16_t> port() const {
 #if RHP_ENABLE
-        auto ok = host_detail::listening(*engine_);
-        if (!ok) {
-            return Cfg::errors_t::finish(result<std::uint16_t>{std::unexpected{std::move(ok).error()}});
-        }
-        return Cfg::errors_t::finish(result<std::uint16_t>{host_detail::port(*engine_)});
+        return Cfg::errors_t::finish(host_detail::port(*engine_));
 #else
-        return Cfg::errors_t::finish(result<std::uint16_t>{fail(errc::kDisabled, "RHP is compiled out (RHP_ENABLE=0)", "host")});
+        return Cfg::errors_t::finish(result<std::uint16_t>{host_detail::compiled_out("host")});
 #endif
     }
 
@@ -219,7 +215,7 @@ public:
 #if RHP_ENABLE
         return Cfg::errors_t::finish(host_detail::gateway_port(*engine_));
 #else
-        return Cfg::errors_t::finish(result<std::uint16_t>{fail(errc::kDisabled, "RHP is compiled out (RHP_ENABLE=0)", "host.gateway")});
+        return Cfg::errors_t::finish(result<std::uint16_t>{host_detail::compiled_out("host.gateway")});
 #endif
     }
 
@@ -232,7 +228,7 @@ public:
         return Cfg::errors_t::finish(host_detail::advertise(*engine_, std::move(options)));
 #else
         (void)options;
-        return Cfg::errors_t::finish(result<void>{fail(errc::kDisabled, "RHP is compiled out (RHP_ENABLE=0)", "host.discovery")});
+        return Cfg::errors_t::finish(result<void>{host_detail::compiled_out("host.discovery")});
 #endif
     }
 
@@ -242,7 +238,7 @@ public:
 #if RHP_ENABLE
         return Cfg::errors_t::finish(host_detail::discovery_status(*engine_));
 #else
-        return Cfg::errors_t::finish(result<void>{fail(errc::kDisabled, "RHP is compiled out (RHP_ENABLE=0)", "host.discovery")});
+        return Cfg::errors_t::finish(result<void>{host_detail::compiled_out("host.discovery")});
 #endif
     }
 

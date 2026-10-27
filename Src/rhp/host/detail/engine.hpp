@@ -11,11 +11,12 @@
 #include <string>
 #include <string_view>
 
+#include <rhp/core/error.hpp>
 #include <rhp/core/limits.hpp>
 #include <rhp/core/log.hpp>
 #include <rhp/core/result.hpp>
-#include <rhp/core/subscription.hpp>
 #include <rhp/core/role.hpp>
+#include <rhp/core/subscription.hpp>
 #include <rhp/core/value.hpp>
 #include <rhp/event/hub.hpp>
 #include <rhp/net/discovery.hpp>
@@ -120,10 +121,15 @@ struct engine_deleter {
 
 using engine_ptr = std::unique_ptr<engine, engine_deleter>;
 
-// Starts listening (or, in reverse mode, dialing); errors are kept and reported by listening().
+// What an RHP_ENABLE=0 host reports from every result-bearing call (`where`: the call).
+[[nodiscard]] inline std::unexpected<error> compiled_out(std::string_view where) {
+    return fail(errc::kDisabled, "RHP is compiled out (RHP_ENABLE=0)", std::string{where});
+}
+
+// Starts listening (or, in reverse mode, dialing); errors are kept and reported by port().
 [[nodiscard]] engine_ptr make_engine(setup s);
-[[nodiscard]] result<void> listening(const engine& e);
-[[nodiscard]] std::uint16_t port(const engine& e) noexcept;
+// The port the host listens on (0 in reverse mode), or why it isn't listening.
+[[nodiscard]] result<std::uint16_t> port(const engine& e);
 [[nodiscard]] result<std::uint16_t> gateway_port(const engine& e);
 result<void> advertise(engine& e, net::advertise_options options);
 result<void> discovery_status(engine& e);

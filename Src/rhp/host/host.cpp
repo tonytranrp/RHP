@@ -2486,11 +2486,10 @@ engine_ptr make_engine(setup s) {
     return engine_ptr{new engine{std::move(s)}};
 }
 
-result<void> listening(const engine& e) {
-    return e.listening();
-}
-
-std::uint16_t port(const engine& e) noexcept {
+result<std::uint16_t> port(const engine& e) {
+    if (auto ok = e.listening(); !ok) {
+        return std::unexpected{std::move(ok).error()};
+    }
     return e.port();
 }
 

@@ -64,7 +64,7 @@ template <configuration Cfg, std::invocable F>
 #else
     (void)options;
     (void)while_browsing;
-    return fail(errc::kDisabled, "RHP is compiled out (RHP_ENABLE=0)", "fleet.discover");
+    return client_detail::compiled_out("fleet.discover");
 #endif
 }
 
@@ -221,7 +221,7 @@ public:
         (void)envelope;
         (void)plan;
         rollout_report out;
-        out.err = make_error(errc::kDisabled, "RHP is compiled out (RHP_ENABLE=0)", "fleet.rollout");
+        out.err = client_detail::compiled_out("fleet.rollout").error();
         return out;
 #endif
     }
@@ -314,7 +314,7 @@ private:
         std::vector<host_result<T>> out;
         out.reserve(records_.size());
         for (const auto& r : records_) {
-            out.push_back({r, fail(errc::kDisabled, "RHP is compiled out (RHP_ENABLE=0)", where)});
+            out.push_back({r, client_detail::compiled_out(where)});
         }
         return out;
     }

@@ -109,7 +109,7 @@ public:
 #if RHP_ENABLE
         return finish(client_detail::port(*engine_));
 #else
-        return finish(result<std::uint16_t>{fail(errc::kDisabled, "RHP is compiled out (RHP_ENABLE=0)", "client")});
+        return finish(result<std::uint16_t>{client_detail::compiled_out("client")});
 #endif
     }
 
@@ -236,7 +236,7 @@ public:
         (void)sink;
         (void)bytes;
         (void)name;
-        return finish(result<void>{fail(errc::kDisabled, "RHP is compiled out (RHP_ENABLE=0)", "client")});
+        return finish(result<void>{client_detail::compiled_out("client")});
 #endif
     }
 
@@ -251,7 +251,7 @@ public:
 #else
         (void)name;
         (void)fn;
-        return finish(result<std::uint64_t>{fail(errc::kDisabled, "RHP is compiled out (RHP_ENABLE=0)", "client")});
+        return finish(result<std::uint64_t>{client_detail::compiled_out("client")});
 #endif
     }
 
@@ -261,7 +261,7 @@ public:
         return finish(client_detail::unsubscribe(*engine_, callback));
 #else
         (void)callback;
-        return finish(result<void>{fail(errc::kDisabled, "RHP is compiled out (RHP_ENABLE=0)", "client")});
+        return finish(result<void>{client_detail::compiled_out("client")});
 #endif
     }
 
@@ -446,7 +446,7 @@ private:
 #if RHP_ENABLE
         return client_detail::connect(*engine_);
 #else
-        return fail(errc::kDisabled, "RHP is compiled out (RHP_ENABLE=0)", "client");
+        return client_detail::compiled_out("client");
 #endif
     }
 
@@ -460,7 +460,7 @@ private:
 #else
         (void)code;
         (void)body;
-        return fail(errc::kDisabled, "RHP is compiled out (RHP_ENABLE=0)", "client");
+        return client_detail::compiled_out("client");
 #endif
     }
 
@@ -486,7 +486,7 @@ private:
         (void)body;
         (void)convert;
         auto state = std::make_shared<client_detail::pending_state<T>>(0, nullptr);
-        state->complete(fail(errc::kDisabled, "RHP is compiled out (RHP_ENABLE=0)", "client"));
+        state->complete(client_detail::compiled_out("client"));
         return pending_t<T>{std::move(state)};
 #endif
     }
