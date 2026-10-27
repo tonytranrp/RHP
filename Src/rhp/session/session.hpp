@@ -146,6 +146,10 @@ public:
     [[nodiscard]] role granted() const noexcept { return granted_; }
     [[nodiscard]] const std::string& peer() const noexcept { return peer_; }
     [[nodiscard]] const std::string& peer_platform() const noexcept { return peer_platform_; }
+    // Host side: the key name the client's hello offered (the `key` field of its authenticator's
+    // hello, as the PSK authenticator sends it), authenticated or not; empty before the hello, or
+    // when it named none. For reports of failed handshakes.
+    [[nodiscard]] const std::string& offered_key() const noexcept { return offered_key_; }
     // The current link is encrypted (TLS).
     [[nodiscard]] bool encrypted() const noexcept { return link_ != nullptr && link_->encrypted(); }
     // This connection only carried a resume: its link went to the session it named.
@@ -256,6 +260,7 @@ private:
     role granted_ = role::kObserve;
     std::string peer_;
     std::string peer_platform_;
+    std::string offered_key_;
     std::unique_ptr<wire::frame_sealer> outgoing_;
     std::unique_ptr<wire::frame_sealer> incoming_;
     bool challenged_ = false;  // host: hello answered; client: response sent

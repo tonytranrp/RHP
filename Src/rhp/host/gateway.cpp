@@ -46,6 +46,16 @@ struct operation {
     return type;
 }
 
+// The key name an Authorization header names ("RHP <key-name>,..."), for reports of failed proofs.
+[[nodiscard]] std::string_view offered_key(std::string_view authorization) noexcept {
+    constexpr std::string_view kScheme = "RHP ";
+    if (!authorization.starts_with(kScheme)) {
+        return {};
+    }
+    const auto name = authorization.substr(kScheme.size());
+    return name.substr(0, name.find(','));
+}
+
 [[nodiscard]] bool valid_token(std::string_view token) noexcept {
     return !token.empty() && token.size() <= kMaxRequestToken &&
            std::ranges::all_of(token, [](char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-'; });
@@ -162,8 +172,8 @@ void respond(const http::http_reply& reply, const error& why, const answer_key& 
 // ---- gateway -----------------------------------------------------------------------------------
 
 struct http_gateway::impl {
-    impl(net::io_context& context, Rhp::limits budget, gateway_sink& s, bool bind)
-        : io(context), limits(budget), sink(s), require_binding(bind), replay(kReplayPerIdentity), idle_timer(context) {}
+    impl(net::io_context& context, Rhp::limits budget, gateway_sink& s, session::admission& a, bool bind)
+        : io(context), limits(budget), sink(s), admission(a), require_binding(bind), replay(kReplayPerIdentity), idle_timer(context) {}
 
     struct pending_request {
         http::http_reply reply;
@@ -182,13 +192,14 @@ struct http_gateway::impl {
 
     struct connection {
         std::unique_ptr<http::http_connection> http;
-        bool handshaking = true;                                      // holds one unauthenticated-handshake slot until its proof checks out
+        session::admission::ticket ticket = 0;                        // an unauthenticated-connection slot until its proof checks out
         std::optional<std::pair<std::string, std::uint64_t>> request; // (identity, req) in flight
     };
 
     net::io_context& io;
     Rhp::limits limits;
     gateway_sink& sink;
+    session::admission& admission;
     bool require_binding = false;
     session::channel_policy policy;
     std::unique_ptr<net::listener> listener;
@@ -203,27 +214,29 @@ struct http_gateway::impl {
         if (!sink.accepting()) {
             return;
         }
-        auto secure = policy.wrap(std::move(stream));
-        if (!secure || !sink.acquire_handshake()) {
+        const auto id = ++next_connection;
+        // A connection the admission gives up on (it sent nothing) is dropped, never answered.
+        auto ticket = admission.admit(stream, [this, id](const error&) { connections.erase(id); });
+        if (!ticket) {
             return;
         }
-        utils::scope_guard release{[this] { sink.release_handshake(); }};
-        const auto id = ++next_connection;
+        utils::scope_guard release{[this, t = *ticket] { admission.release(t); }};
+        auto secure = policy.wrap(std::move(stream));
+        if (!secure) {
+            return;
+        }
         const http::http_connection_options options{static_cast<std::size_t>(limits.max_frame), std::chrono::milliseconds{limits.handshake_timeout_ms}};
         auto http = std::make_unique<http::http_connection>(
             io, std::move(*secure), options, [this, id](http::http_request r, http::http_reply reply) { on_request(id, std::move(r), std::move(reply)); },
             [this, id] { on_connection_closed(id); });
         auto& entry = connections[id];
         entry.http = std::move(http);
+        entry.ticket = *ticket;
         release.release(); // the connection entry owns the slot now
         entry.http->start();
     }
 
-    void finish_handshake(connection& c) {
-        if (std::exchange(c.handshaking, false)) {
-            sink.release_handshake();
-        }
-    }
+    void finish_handshake(connection& c) { admission.release(std::exchange(c.ticket, 0)); }
 
     void on_request(std::uint64_t connection_id, http::http_request r, http::http_reply reply) {
         auto& conn = connections.at(connection_id);
@@ -240,14 +253,14 @@ struct http_gateway::impl {
             } else if (require_binding && !grant->bound) {
                 // Genuine but unbound: answered (and signed), not run, and reported like any refusal.
                 auto unbound = make_error(errc::kAuth, "this host accepts only HTTP proofs bound to their TLS connection (X-RHP-Channel: tls-exporter)", kWhere);
-                sink.refused(r.peer, unbound);
+                sink.refused(r.peer, unbound, grant->identity);
                 respond(reply, unbound, grant->answer_key);
                 return;
             }
         }
         if (!grant) {
             if (grant.error().code == errc::kAuth) {
-                sink.refused(r.peer, grant.error());
+                sink.refused(r.peer, grant.error(), std::string{offered_key(proof.authorization)});
             }
             respond(reply, grant.error());
             return;
@@ -421,8 +434,8 @@ struct http_gateway::impl {
     }
 };
 
-http_gateway::http_gateway(net::io_context& io, Rhp::limits limits, gateway_sink& sink, bool require_binding)
-    : impl_(std::make_unique<impl>(io, limits, sink, require_binding)) {}
+http_gateway::http_gateway(net::io_context& io, Rhp::limits limits, gateway_sink& sink, session::admission& admission, bool require_binding)
+    : impl_(std::make_unique<impl>(io, limits, sink, admission, require_binding)) {}
 
 http_gateway::~http_gateway() {
     stop();

@@ -7,6 +7,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <optional>
 #include <system_error>
 #include <utility>
 #include <vector>
@@ -424,6 +425,7 @@ public:
 
     [[nodiscard]] std::string peer() const override { return detail::address_text(state_->remote.address(), state_->remote.port()); }
     [[nodiscard]] bool loopback() const noexcept override { return detail::is_loopback(state_->remote.address()); }
+    [[nodiscard]] std::optional<ip_address> address() const noexcept override { return detail::to_ip_address(state_->remote.address()); }
 
 private:
     std::shared_ptr<peer_state> state_;

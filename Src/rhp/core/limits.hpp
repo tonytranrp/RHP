@@ -31,8 +31,10 @@ struct limits {
     std::uint32_t max_frame = 4u * 1024u * 1024u;         // payload bytes per wire frame, both ways (larger ones are refused); 0 = only empty payloads
     std::uint64_t max_blob = 256ull * 1024ull * 1024ull;  // bytes per blob (host.on_blob); 0 = only empty blobs
     std::uint32_t revisions = 8;                          // revisions kept per module; 0 keeps 1 (the live one)
-    std::uint32_t pending_handshakes = 64;                // unauthenticated connections allowed at once; 0 = every connection is refused
+    std::uint32_t pending_handshakes = 64;                // unauthenticated connections allowed at once (a new one takes the place of the oldest that has sent nothing); 0 = every connection is refused
+    std::uint32_t handshakes_per_source = 8;              // unauthenticated connections at once from one IPv4 address or IPv6 /64 (links without an IP address don't count); 0 = no per-source cap
     std::uint32_t handshake_timeout_ms = 5'000;           // a connection that hasn't authenticated by then is dropped (also an HTTP gateway request's head); 0 = no deadline
+    std::uint32_t first_byte_ms = 2'000;                  // an unauthenticated connection that has sent nothing by then is dropped; 0 = no deadline
     std::uint32_t heartbeat_ms = 2'000;                   // a ping per interval on a quiet session; 0 = no heartbeats (a dead link is noticed only by the transport)
     std::uint32_t heartbeat_misses = 3;                   // quiet intervals in a row before the link counts as dead; 0 = never
     std::uint32_t resume_ms = 6'000;                      // a lost link may come back (resume) within this; 0 = a lost link ends the session

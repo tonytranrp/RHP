@@ -52,7 +52,8 @@ TEST_CASE("to_json writes one escaped line", "[event][json]") {
     event::auth_failed failed;
     failed.peer = "127.0.0.1:5000";
     failed.reason = make_error(errc::kAuth, "bad\tproof\x01", "psk");
-    CHECK(event::to_json(failed).ends_with(R"("peer":"127.0.0.1:5000","reason":{"code":"auth","message":"bad\tproof\u0001","where":"psk"}})"));
+    failed.key = "ops";
+    CHECK(event::to_json(failed).ends_with(R"("peer":"127.0.0.1:5000","key":"ops","reason":{"code":"auth","message":"bad\tproof\u0001","where":"psk"}})"));
     CHECK(event::to_json(failed).find('\n') == std::string::npos);
 }
 

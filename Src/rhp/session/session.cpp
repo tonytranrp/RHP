@@ -39,6 +39,8 @@ constexpr std::size_t kMaxRetired = 4;
 constexpr std::uint32_t kResumeAttemptMs = 2'000;
 constexpr std::string_view kResumeLabel = "rhp/resume";
 constexpr std::string_view kResumedLabel = "rhp/resumed";
+// A longer key name in a hello isn't kept for reports (it can't be a real one).
+constexpr std::size_t kMaxOfferedKey = 256;
 
 [[nodiscard]] std::chrono::milliseconds ms(std::uint32_t n) noexcept {
     return std::chrono::milliseconds{n};
@@ -359,6 +361,11 @@ void session::host_hello(const value& body) {
         return;
     }
     peer_platform_ = hello->platform;
+    if (const value* key = hello->auth.find("key"); key != nullptr) {
+        if (const std::string* name = key->get_if<std::string>(); name != nullptr && name->size() <= kMaxOfferedKey) {
+            offered_key_ = *name;
+        }
+    }
     auto& hs = *std::get<std::unique_ptr<security::host_handshake>>(handshake_);
     hs.bind_channel(link_->channel_binding());
     auto auth = hs.challenge(hello->auth);

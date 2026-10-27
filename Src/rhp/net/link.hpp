@@ -2,11 +2,13 @@
 
 #include <cstddef>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <utility>
 
 #include <rhp/core/error.hpp>
+#include <rhp/net/address.hpp>
 #include <rhp/utils/byte_buffer.hpp>
 
 namespace Rhp::net {
@@ -51,6 +53,10 @@ public:
     // TLS); empty without. Valid once the first bytes arrived. Authenticators mix it into their
     // proofs, so a relay that terminates the channel on both sides can't pass the handshake.
     [[nodiscard]] virtual std::span<const std::byte> channel_binding() const noexcept { return {}; }
+    // The peer's IP address when the transport has one (TCP, WebSocket, reliable UDP); nullopt for
+    // the others (in-process, IPC, a custom transport that doesn't say). Hosts and listening clients
+    // cap unauthenticated connections per source by it.
+    [[nodiscard]] virtual std::optional<ip_address> address() const noexcept { return std::nullopt; }
 
 protected:
     link() = default;
@@ -59,9 +65,9 @@ protected:
 };
 
 // A link that wraps another (metering, logging, fault injection). It forwards everything, including
-// the properties the session's security depends on (loopback, encrypted, channel_binding); override
-// only what you change. A wrapper that derives from `link` directly must forward those three itself,
-// or the session sees a plaintext, remote, unbound stream.
+// the properties the session's security depends on (loopback, encrypted, channel_binding, address);
+// override only what you change. A wrapper that derives from `link` directly must forward those
+// itself, or the session sees a plaintext, remote, unbound stream from an unknown address.
 class link_decorator : public link {
 public:
     explicit link_decorator(std::unique_ptr<link> inner) noexcept : inner_(std::move(inner)) {}
@@ -73,6 +79,7 @@ public:
     [[nodiscard]] bool loopback() const noexcept override { return inner_->loopback(); }
     [[nodiscard]] bool encrypted() const noexcept override { return inner_->encrypted(); }
     [[nodiscard]] std::span<const std::byte> channel_binding() const noexcept override { return inner_->channel_binding(); }
+    [[nodiscard]] std::optional<ip_address> address() const noexcept override { return inner_->address(); }
 
 protected:
     [[nodiscard]] link& inner() noexcept { return *inner_; }

@@ -1,5 +1,6 @@
 #include <format>
 #include <memory>
+#include <optional>
 #include <string>
 #include <system_error>
 #include <utility>
@@ -13,6 +14,7 @@
 
 #include <rhp/core/error.hpp>
 #include <rhp/core/result.hpp>
+#include <rhp/net/address.hpp>
 #include <rhp/net/detail/asio_support.hpp>
 #include <rhp/net/endpoint.hpp>
 #include <rhp/net/io_context.hpp>
@@ -54,7 +56,11 @@ using tcp_link = detail::stream_link<atcp::socket, tcp_traits>;
     const auto remote = socket.remote_endpoint(ec);
     std::string name = ec ? std::string{"tcp:?"} : describe(remote);
     const bool on_this_machine = !ec && detail::is_loopback(remote.address());
-    return std::make_unique<tcp_link>(std::move(socket), std::move(name), on_this_machine);
+    std::optional<ip_address> ip;
+    if (!ec) {
+        ip = detail::to_ip_address(remote.address());
+    }
+    return std::make_unique<tcp_link>(std::move(socket), std::move(name), on_this_machine, ip);
 }
 
 // ---- addresses -------------------------------------------------------------------------------------

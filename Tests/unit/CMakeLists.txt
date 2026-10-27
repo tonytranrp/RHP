@@ -94,6 +94,7 @@ if(RHP_ENABLE)
 
     rhp_add_test_suite(rhp_net_tests
         SOURCES
+            net/address_tests.cpp
             net/loopback_tests.cpp
             net/tcp_tests.cpp
             net/http_tests.cpp
@@ -108,6 +109,7 @@ if(RHP_ENABLE)
 
     rhp_add_test_suite(rhp_session_tests
         SOURCES
+            session/admission_tests.cpp
             session/session_tests.cpp
         LINKS
             Rhp::session

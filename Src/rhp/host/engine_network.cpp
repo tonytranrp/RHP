@@ -54,7 +54,7 @@ void engine::start_gateway() {
         gateway_error_ = std::move(policy).error();
         return;
     }
-    gateway_ = std::make_unique<http_gateway>(io_, setup_.limits, static_cast<gateway_sink&>(*this), setup_.options.http_require_binding);
+    gateway_ = std::make_unique<http_gateway>(io_, setup_.limits, static_cast<gateway_sink&>(*this), admission_, setup_.options.http_require_binding);
     if (auto ok = gateway_->listen(std::move(*policy)); !ok) {
         gateway_error_ = std::move(ok).error();
         gateway_.reset();
@@ -72,14 +72,6 @@ void engine::sample_clock() noexcept {
         const auto offset = std::chrono::duration_cast<std::chrono::nanoseconds>(setup_.clock() - std::chrono::steady_clock::now());
         clock_offset_ns_.store(offset.count(), std::memory_order_relaxed);
     }
-}
-
-bool engine::acquire_handshake() noexcept {
-    if (pending_handshakes_ >= setup_.limits.pending_handshakes) {
-        return false;
-    }
-    ++pending_handshakes_;
-    return true;
 }
 
 result<security::http_grant> engine::authorize(const security::http_proof& request) {
@@ -129,32 +121,43 @@ void engine::accept(std::unique_ptr<net::link> link) {
     }
     if (!is_enabled()) {
         log(log_level::kInfo, "refusing {}: the host is disabled", link->peer());
-        refused(link->peer(), make_error(errc::kDisabled, "the host is disabled", "host"));
+        refused(link->peer(), make_error(errc::kDisabled, "the host is disabled", "host"), {});
         park(std::move(link));
         return;
     }
-    if (pending_handshakes_ >= setup_.limits.pending_handshakes) {
-        log(log_level::kWarn, "refusing {}: {} handshakes already pending", link->peer(), pending_handshakes_);
-        refused(link->peer(), make_error(errc::kLimitExceeded, std::format("{} handshakes already pending", pending_handshakes_), "host"));
+    const session_id id = session_ids_.next();
+    auto ticket = admission_.admit(link, [this, id](const error& why) { drop_unauthenticated(id, why); });
+    if (!ticket) {
+        log(log_level::kWarn, "refusing {}: {}", link->peer(), ticket.error());
+        refused(link->peer(), std::move(ticket).error(), {});
         park(std::move(link));
         return;
     }
     std::string peer = link->peer();
     auto wrapped = policy_.wrap(std::move(link));
     if (!wrapped) {
+        admission_.release(*ticket);
         log(log_level::kWarn, "refusing {}: {}", peer, wrapped.error());
-        refused(std::move(peer), std::move(wrapped).error());
+        refused(std::move(peer), std::move(wrapped).error(), {});
         return;
     }
-    (void)start_session(std::move(*wrapped));
+    start_session(id, std::move(*wrapped), false, *ticket);
 }
 
-void engine::refused(std::string peer, error why) {
+void engine::drop_unauthenticated(session_id id, const error& why) {
+    if (const auto it = sessions_.find(id); it != sessions_.end()) {
+        it->second.ticket = 0; // the admission has let go of it already
+        it->second.s->close(why);
+    }
+}
+
+void engine::refused(std::string peer, error why, std::string key) {
     if (setup_.events == nullptr || !setup_.events->wants(event::kind_of<event::auth_failed>)) {
         return;
     }
     inbound in;
     in.what = inbound::kind::kAuthFailed;
+    in.identity = std::move(key);
     in.peer = std::move(peer);
     in.reason = std::move(why);
     (void)to_pump(std::move(in));
@@ -168,19 +171,17 @@ void engine::park(std::unique_ptr<net::link> link) {
     }
 }
 
-session_id engine::start_session(std::unique_ptr<net::link> link, bool dialed) {
-    const session_id id = session_ids_.next();
+void engine::start_session(session_id id, std::unique_ptr<net::link> link, bool dialed, session::admission::ticket ticket) {
     auto handshake = setup_.begin_handshake();
     io_session rec;
     session::options opts = session_options_;
     opts.speaks_first = dialed;
     rec.s = std::make_unique<session::session>(io_, std::move(link), std::move(handshake), static_cast<session::handler&>(*this), std::move(opts), id);
+    rec.ticket = ticket;
     session::session& s = *rec.s;
     sessions_.emplace(id, std::move(rec));
     open_sessions_.store(sessions_.size(), std::memory_order_release);
-    ++pending_handshakes_;
     s.start();
-    return id;
 }
 
 void engine::dial_out(session_id resume_id) {
@@ -209,7 +210,8 @@ void engine::dial_out(session_id resume_id) {
             redial();
             return;
         }
-        outgoing_ = start_session(std::move(*link), true);
+        outgoing_ = session_ids_.next();
+        start_session(outgoing_, std::move(*link), true, 0);
     });
 }
 
@@ -255,11 +257,11 @@ session::session* engine::resume_target(session::session& fresh, session_id id) 
 }
 
 void engine::on_ready(session::session& s) {
-    --pending_handshakes_;
     auto it = sessions_.find(s.id());
     if (it == sessions_.end()) {
         return;
     }
+    admission_.release(std::exchange(it->second.ticket, 0));
     if (s.id() == outgoing_) {
         attempts_ = 0;
     }
@@ -342,15 +344,13 @@ void engine::on_closed(session::session& s, const error& why) {
     }
     const bool was_ready = it->second.ready;
     const std::string identity = it->second.identity;
+    admission_.release(it->second.ticket);
     if (was_ready) {
         log(log_level::kInfo, "session {} ({}) ended: {}", id, identity, why);
         unregister_session(id, identity, s.peer(), why);
-    } else if (s.handed_over()) {
-        --pending_handshakes_; // it only carried a resume: its link went to that session
-    } else {
-        --pending_handshakes_;
+    } else if (!s.handed_over()) { // (a connection that only carried a resume: its link went to that session)
         log(log_level::kInfo, "connection from {} closed before authenticating: {}", s.peer(), why);
-        refused(s.peer(), why);
+        refused(s.peer(), why, s.offered_key());
     }
     sessions_.erase(it); // allowed inside on_closed
     open_sessions_.store(sessions_.size(), std::memory_order_release);

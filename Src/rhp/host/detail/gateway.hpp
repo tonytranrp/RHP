@@ -15,6 +15,7 @@
 #include <rhp/core/value.hpp>
 #include <rhp/net/io_context.hpp>
 #include <rhp/security/http_auth.hpp>
+#include <rhp/session/admission.hpp>
 #include <rhp/session/secure_link.hpp>
 #include <rhp/wire/ops.hpp>
 
@@ -37,9 +38,6 @@ public:
     // True when steady_now() isn't std::chrono::steady_clock: the gateway then can't sleep until a
     // deadline and re-checks it on a short period instead.
     [[nodiscard]] virtual bool custom_clock() const noexcept = 0;
-    // The unauthenticated-connection budget native handshakes use too.
-    [[nodiscard]] virtual bool acquire_handshake() noexcept = 0;
-    virtual void release_handshake() noexcept = 0;
     [[nodiscard]] virtual result<security::http_grant> authorize(const security::http_proof& request) = 0;
     // An identity's first request opens its logical session; it ends with close_http.
     [[nodiscard]] virtual session_id open_http(const security::http_grant& grant, const http_peer& peer) = 0;
@@ -48,7 +46,8 @@ public:
     [[nodiscard]] virtual bool submit_http(session_id session, std::uint64_t req, wire::op code, value body, const http_peer& peer) = 0;
     // One request (`target`), or with target 0 every request numbered up to `upto`.
     virtual void cancel_http(session_id session, std::uint64_t target, std::uint64_t upto) = 0;
-    virtual void refused(std::string peer, error why) = 0;
+    // A request whose proof failed; `key` is the key name it tried, if it named one.
+    virtual void refused(std::string peer, error why, std::string key) = 0;
 
 protected:
     gateway_sink() = default;
@@ -58,10 +57,12 @@ protected:
 };
 
 // REST over HTTP/1.1 into the host dispatcher. HTTP has logical sessions: one per identity, kept
-// across connections and ended after `limits.gateway_idle_ms` without requests in flight.
+// across connections and ended after `limits.gateway_idle_ms` without requests in flight. A
+// connection holds a slot of `admission` (the native listener's: one budget for both) until its
+// first proof checks out.
 class http_gateway {
 public:
-    http_gateway(net::io_context& io, Rhp::limits limits, gateway_sink& sink, bool require_binding = false);
+    http_gateway(net::io_context& io, Rhp::limits limits, gateway_sink& sink, session::admission& admission, bool require_binding = false);
     ~http_gateway();
 
     http_gateway(const http_gateway&) = delete;

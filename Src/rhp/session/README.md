@@ -4,8 +4,9 @@ One authenticated, reliable conversation over a link, and TLS over any link. Nam
 
 | Header | What |
 |---|---|
-| `session.hpp` | `session` (host or client side: `start`, `send`, `close`, `resume`; `id`, `current`, `ready`, `usable`, `identity`, `granted`, `peer`, `peer_platform`, `encrypted`, `handed_over`, `stats`), `handler` (`on_ready`, `on_message`, `on_closed`; `on_detached`, `on_resumed`, `resume_target` for resume), `options`, `state` (`kHandshaking`, `kReady`, `kDetached`, `kClosed`) |
+| `session.hpp` | `session` (host or client side: `start`, `send`, `close`, `resume`; `id`, `current`, `ready`, `usable`, `identity`, `granted`, `peer`, `peer_platform`, `offered_key`, `encrypted`, `handed_over`, `stats`), `handler` (`on_ready`, `on_message`, `on_closed`; `on_detached`, `on_resumed`, `resume_target` for resume), `options`, `state` (`kHandshaking`, `kReady`, `kDetached`, `kClosed`) |
 | `secure_link.hpp` | `tls_client` / `tls_server` (TLS over any `net::link`; the server sniffs the first byte: `0x16` is TLS), `channel_policy` (which connections of an endpoint get TLS: `make`, `transport_endpoint`, `wrap` (a link, or a dial's outcome), `tls`) |
+| `admission.hpp` | `admission`: who may wait unauthenticated (`admit` / `release`, tickets; see below) |
 | `backoff.hpp` | `backoff_delay` (capped exponential backoff with full jitter for redials; hosts and clients) and `random_seed` (64 bits from the OS random source) |
 
 ## What a session does
@@ -29,6 +30,16 @@ errors      a fatal problem goes to the peer as an unsequenced kError (sealed on
 ```
 
 With delayed acks a call and its reply are two frames instead of four; the protocol is unchanged (`ack_delay_ms = 0` acks every read at once).
+
+## Admission (`admission`)
+
+Every accepted connection takes a slot until it authenticates, is handed to the session it resumes, or closes (a host's listener and its HTTP gateway share one admission; a listening client has its own):
+
+- at most `limits.pending_handshakes` at once, and at most `limits.handshakes_per_source` from one source (`net::ip_address::source()`: an IPv4 address or an IPv6 /64; a link without an address counts toward the total only);
+- a connection that has sent nothing within `limits.first_byte_ms` is closed (its first byte is seen below TLS: a ClientHello counts);
+- a new connection that finds a cap full takes the place of the oldest connection under that cap that has sent nothing; when every one has sent something, it is refused (`kLimitExceeded`).
+
+So silent connections can't keep a real client out, nor a client resuming its session (a resume is a connection whose first frame is `kResume`: it needs its slot only until that frame arrives).
 
 ## TLS policy (`channel_policy`)
 
