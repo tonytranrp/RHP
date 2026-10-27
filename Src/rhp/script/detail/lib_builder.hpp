@@ -412,11 +412,6 @@ bool take_plain(stack& s, int index, const arg_slot& slot, plain_storage_t<Handl
     }
 }
 
-// A plain parameter whose take may throw: a handle (its is_alive is user code) or a std::string
-// (it allocates). The others take without a guard.
-template <utils::type_list_like Handles, class T>
-inline constexpr bool plain_take_throws_v = is_handle_v<Handles, T> || std::same_as<storage_t<T>, std::string>;
-
 template <utils::type_list_like Handles, class T>
 decltype(auto) plain_value(plain_storage_t<Handles, T>& held) {
     if constexpr (is_handle_v<Handles, T>) {
@@ -429,35 +424,47 @@ decltype(auto) plain_value(plain_storage_t<Handles, T>& held) {
 // The plain trampoline: one stack::read_args for every plain argument (handles are pulled as on the
 // general path), no result<> per argument, then the call and push_return as on the general path. An
 // argument that doesn't fit sends the call down the general path, which raises the error it always has.
+//
+// The hot path: taking the arguments and the call share one try block written here (call_guarded's
+// rules, without a call to it): an exception from an is_alive, a std::string's allocation or the
+// binding becomes the same labelled error (binding_error), raised after the try block.
 template <utils::type_list_like Handles, class Entry, class Label, std::size_t... Is>
 int call_plain(stack& s, Label label, [[maybe_unused]] std::index_sequence<Is...> seq) {
     using args = typename Entry::traits::args;
     using R = typename Entry::traits::return_type;
 
     [[maybe_unused]] std::tuple<plain_storage_t<Handles, utils::at_t<args, Is>>...> values;
-    if constexpr (sizeof...(Is) > 0) {
-        static constexpr arg_kind kinds[] = {plain_kind<Handles, utils::at_t<args, Is>>()...};
-        constexpr bool any_read = ((kinds[Is] != arg_kind::kOther) || ...);
-        arg_slot slots[sizeof...(Is)];
-        const auto take_all = [&] { return (take_plain<Handles, utils::at_t<args, Is>>(s, static_cast<int>(Is) + 1, slots[Is], std::get<Is>(values)) && ...); };
-        bool taken = !any_read || s.read_args(kinds, slots, static_cast<int>(sizeof...(Is)));
-        if constexpr ((plain_take_throws_v<Handles, utils::at_t<args, Is>> || ...)) {
-            taken = taken && call_guarded(s, label, take_all); // an is_alive is user code; a std::string allocates
-        } else {
-            taken = taken && take_all();
+    std::conditional_t<std::is_void_v<R>, char, std::optional<R>> out{};
+    std::optional<error> thrown;
+    bool taken = true;
+    try {
+        if constexpr (sizeof...(Is) > 0) {
+            static constexpr arg_kind kinds[] = {plain_kind<Handles, utils::at_t<args, Is>>()...};
+            constexpr bool any_read = ((kinds[Is] != arg_kind::kOther) || ...);
+            arg_slot slots[sizeof...(Is)];
+            taken = (!any_read || s.read_args(kinds, slots, static_cast<int>(sizeof...(Is)))) &&
+                    (take_plain<Handles, utils::at_t<args, Is>>(s, static_cast<int>(Is) + 1, slots[Is], std::get<Is>(values)) && ...);
         }
-        if (!taken) [[unlikely]] {
-            return invoke_fn<Handles, Entry>(s, label, seq);
+        if (taken) [[likely]] {
+            if constexpr (std::is_void_v<R>) {
+                std::invoke(Entry::function, plain_value<Handles, utils::at_t<args, Is>>(std::get<Is>(values))...);
+            } else {
+                out.emplace(std::invoke(Entry::function, plain_value<Handles, utils::at_t<args, Is>>(std::get<Is>(values))...));
+            }
         }
+    } catch (const std::exception& e) {
+        thrown.emplace(binding_error(e, label));
     }
-
-    const auto call = [&]() -> R { return std::invoke(Entry::function, plain_value<Handles, utils::at_t<args, Is>>(std::get<Is>(values))...); };
+    if (thrown) {
+        s.raise(*thrown);
+    }
+    if (!taken) [[unlikely]] {
+        return invoke_fn<Handles, Entry>(s, label, seq);
+    }
     if constexpr (std::is_void_v<R>) {
-        call_guarded(s, label, call);
         return 0;
     } else {
-        R out = call_guarded(s, label, call);
-        return push_return<Handles>(s, label, out);
+        return push_return<Handles>(s, label, *out);
     }
 }
 
