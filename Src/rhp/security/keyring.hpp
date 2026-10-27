@@ -36,9 +36,13 @@ public:
     [[nodiscard]] static result<keyring> from_file(const std::string& path);
     [[nodiscard]] const keyring_entry* find(std::string_view name) const noexcept;
     [[nodiscard]] std::size_t size() const noexcept { return entries_.size(); }
+    // What from_file noticed that isn't fatal: a file other users can read. Callers show them (the
+    // headless server example prints "warning: ..."), as identity_file::warnings.
+    [[nodiscard]] const std::vector<std::string>& warnings() const noexcept { return warnings_; }
 
 private:
     std::vector<keyring_entry> entries_;
+    std::vector<std::string> warnings_;
 };
 
 } // namespace Rhp::security

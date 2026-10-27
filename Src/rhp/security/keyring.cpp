@@ -1,5 +1,6 @@
 #include <format>
 #include <initializer_list>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -64,6 +65,9 @@ result<keyring> keyring::from_file(const std::string& path) {
     }
     auto ring = parse(*text);
     secure_wipe(text->data(), text->size());
+    if (auto warning = ring ? detail::exposure_warning(path) : std::nullopt) {
+        ring->warnings_.push_back(std::move(*warning));
+    }
     return ring;
 }
 
