@@ -1,10 +1,12 @@
 include_guard(GLOBAL)
 
-# rhp_embed_text(<output.cpp> NAMESPACE <ns> FUNCTION <fn> PREFIX <chunk prefix> FILES <files...>)
+# rhp_embed_text(<output.cpp> NAMESPACE <ns> FUNCTION <fn> HEADER <header> PREFIX <chunk prefix>
+#                [BASE_DIR <dir>] FILES <files...>)
 #
 # Writes a .cpp defining `std::span<const <ns>::lua_source> <ns>::<fn>() noexcept` with the bytes of
-# every file (in order) and its chunk name (<prefix><file name>). Regenerated at configure time when
-# a file changes (CMAKE_CONFIGURE_DEPENDS), and only rewritten when the text differs.
+# every file (in order) and its chunk name (<prefix><file name>). It includes <header>, which declares
+# <ns>::lua_source and the function. Regenerated at configure time when a file changes
+# (CMAKE_CONFIGURE_DEPENDS), and only rewritten when the text differs.
 #
 # With BASE_DIR <dir>, a file's name is its path relative to <dir> ("specs/a_spec.lua") instead of
 # its file name.
