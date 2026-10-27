@@ -1,6 +1,7 @@
 include_guard(GLOBAL)
 
-# Every third-party pin lives in this file. Stages add their dependencies here, never inline.
+# Every third-party pin lives in this file. Stages add their dependencies here, never inline. The one
+# exception is CPM.cmake itself (version and SHA-256 in cmake/CPM.cmake): the bootstrap runs first.
 #   Stage 0: Catch2 (tests only)
 #   Stage 1: Lua 5.5.1        Stage 3: Asio 1.38.2, Monocypher 4.0.3
 #   Stage 4: replxx, CLI11    Stage 5: OpenSSL (the system's, >= 3.0), Mbed TLS 4.2.0

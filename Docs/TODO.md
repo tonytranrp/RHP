@@ -35,7 +35,7 @@ Done when: *a host keeps a signed release across restarts, refuses old, foreign,
 - [x] `fleet::rollout` (canaries, stages, health-watched, rollback on failure), `fleet::release_status`
 - [x] `rhp-cli release` / `revoke` / `rollout`; `headless_server --releases`
 - [x] Tests: unit (codecs, trust, manager), host/client integration, rollout over three TCP hosts, a CLI process test across a restart
-- Stage 10 follow-ups: release ops on the HTTP gateway; the Python client's release calls (and its protocol revision); delta updates; a host-side rollout coordinator.
+- Stage 10 follow-ups: release ops on the HTTP gateway; delta updates; a host-side rollout coordinator. (The Python client's release calls and protocol revision 6: done.)
 
 ## Stage 9 — asynchronous bindings and methods on handles
 
@@ -55,9 +55,9 @@ Done when: *a stranger can install RHP with `find_package`, the reproduced threa
 - [x] Hardening: logger level race, `network` required on transports (+ `link_decorator`), pump-thread checks for setup calls, `pending::request()` after `co_await`, `var` writes across threads, unsubscribe and detach barriers, blocking calls and destruction on the client's network thread, throwing callbacks
 - [x] One generated build header (`<rhp/build_config.hpp>`) instead of per-header `RHP_ENABLE` / `RHP_TLS_HAS_*` fallbacks
 - [x] Packaging: `install()` + exported `rhp-config.cmake`, a consumer test (`Tests/package`), third-party notices, hashed dependency pins
-- [x] CI: `RHP_ENABLE=OFF`, MSVC ASan, fuzz smoke and package-consumer jobs (not yet run on GitHub: the account's billing block)
+- [x] CI: `RHP_ENABLE=OFF`, MSVC ASan, fuzz smoke and package-consumer jobs (they run on GitHub Actions with the rest of `ci.yml`)
 - [x] Benchmarks (`Tests/bench`) and the optimizations they justify, results in [benchmarks](benchmarks.md)
-- Stage 8 follow-ups: coroutine yields still throw on the MSVC ABI (a `_longjmp` there unwinds); binding calls cost about 3x a raw C function (argument conversion through `result<T>`, role and label lookups); `msgpack` encoding appends byte by byte; an optional LTO build (static libraries built with LTO tie consumers to one compiler version, so it can't be the default). A `zero_threads` client may destroy itself from a callback its `poll()` runs; a fleet member destroyed from its own callback is not covered. Mbed TLS builds as `rhp_mbedtls_*` targets so a parent project can build its own copy; OpenSSL is found with `find_package` and shared with the parent.
+- Stage 8 follow-ups: coroutine yields still throw with the MSVC ABI outside x64 (on x64 they jump, `RHP_LUA_JUMP_YIELDS`); binding calls cost about 3x a raw C function (argument conversion through `result<T>`, role and label lookups). Done since: `msgpack` encoding appends whole values (`byte_buffer` appends with `memcpy`); an optional LTO build, `RHP_LTO` (off by default: static libraries built with LTO tie consumers to one compiler version). A `zero_threads` client may destroy itself from a callback its `poll()` runs; a fleet member destroyed from its own callback is not covered. Mbed TLS builds as `rhp_mbedtls_*` targets so a parent project can build its own copy; OpenSSL is found with `find_package` and shared with the parent.
 
 ## Open items
 
@@ -71,7 +71,7 @@ Done when: *a stranger can install RHP with `find_package`, the reproduced threa
 - [ ] Branch hygiene: completed stage branches (`stage-0-scaffold` … `stage-7-scheduling-events`, `stage-6-finish`, `codex/stage6`) and the agent worktree branch can be pruned once their PRs are merged; inspect the live remote refs first.
 - [ ] Optional: a second script engine behind a `config<>::engine<>` slot (the `engine` concept is deferred until a second engine exists). Luau was re-examined for speed in the Lua speed pass and deferred ([lua-runtime](decisions/lua-runtime.md#alternatives)): a build-time engine choice if ever, behind a one-week benchmark gate.
 - Stage 7 follow-ups: a per-task `on_error` (tasks take the sandbox default because `rhp.spawn`'s varargs leave no room for an options table); `task:join(timeout)`; remote `stats`; an HTTP event stream; `sandbox.publish(name, values)` from C++ into script events.
-- Stage 6 follow-ups: close fleet members in parallel at teardown (now one after another, each with the existing 1 s close wait); with a custom `config<>::clock`, re-arm the gateway's idle timer when `pump()` samples a new offset instead of re-checking every 25 ms; share one TLS-relay test fixture between `stage5_tests.cpp` and `stage6_tests.cpp`; `rhp-cli fleet` `load`/`call` modes; carry `http_grant::bound` into audit events.
+- Stage 6 follow-ups: close fleet members in parallel at teardown (now one after another, each with the existing 1 s close wait); with a custom `config<>::clock`, re-arm the gateway's idle timer when `pump()` samples a new offset instead of re-checking every 25 ms; `rhp-cli fleet` `load`/`call` modes; carry `http_grant::bound` into audit events.
 
 `CLAUDE.md` is committed; `.claude/handoff.md` (written by a local hook) and `.claude/worktrees/` are ignored.
 

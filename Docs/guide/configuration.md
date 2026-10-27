@@ -162,7 +162,7 @@ The supplied memory resource must outlive the sandbox. It covers Lua allocations
 | `RHP_FUZZ` | OFF | build libFuzzer executables (Clang); otherwise they are ctest replay drivers |
 | `RHP_SANITIZE` | empty | `address;undefined`, `address` (MSVC) or `thread` |
 
-`CPM_SOURCE_CACHE` can be shared across builds. Dependency versions are pinned in one file, `cmake/Dependencies.cmake`: each git dependency's checkout must be the commit its tag named when it was pinned (a moved tag fails the configure), and CPM.cmake itself is checked against its SHA-256.
+`CPM_SOURCE_CACHE` can be shared across builds. Dependency versions are pinned in one file, `cmake/Dependencies.cmake` (CPM.cmake itself in `cmake/CPM.cmake`, which bootstraps it): each git dependency's checkout must be the commit its tag named when it was pinned (a moved tag fails the configure), and CPM.cmake itself is checked against its SHA-256.
 
 When RHP is the top-level project and the generator is Ninja, links share a job pool sized by the machine's memory (a full Debug build otherwise runs out of memory linking every test at once).
 
