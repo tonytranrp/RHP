@@ -469,3 +469,37 @@ TEST_CASE("a finalizer may cancel a task waiting for the event being delivered",
     pump(box, 2);
     CHECK(out.lines.empty());
 }
+
+TEST_CASE("a spawn that can't start leaves nothing behind on the main stack", "[script][tasks]") {
+    capture out;
+    Rhp::limits limits;
+    limits.memory = 2u * 1024u * 1024u;
+    limits.cancel_checks = Rhp::cancel_scope::kNone; // no hook: the memory stop only fails allocations
+    sandbox box = make_box(out, limits, Rhp::role::kAdmin);
+    const auto mod = box.load("tests.tasks.spawn_oom", R"lua(
+        local M = {} -- an exports table without a metatable: sandbox::call can take its unprotected path
+        function M.go(fill)
+            if not fill then return end
+            local token = setmetatable({}, {__gc = function() print("spawned function collected") end})
+            local f = function() return token end
+            collectgarbage("stop") -- nothing is freed or moved from here: the counts below are exact
+            pcall(pcall, type, 1)  -- call depth (and stack) for pcall(rhp.spawn) below, made now
+            local before = collectgarbage("count") * 1024
+            local probe = rhp.buffer.new(1024)
+            local overhead = collectgarbage("count") * 1024 - before - 1024
+            local room = 2 * 1024 * 1024 - collectgarbage("count") * 1024
+            local pad = rhp.buffer.new(room - overhead - 64) -- 64 bytes left: too few for a coroutine
+            pcall(rhp.spawn, f) -- its coroutine can't be made: start_request raises
+            return probe, pad
+        end
+        return M
+    )lua");
+    REQUIRE(mod.has_value());
+    REQUIRE(box.call(*mod, "go", false)); // makes the next call of go take the unprotected path
+    const auto stopped = box.call(*mod, "go", true);
+    REQUIRE_FALSE(stopped.has_value());
+    CHECK(stopped.error().code == errc::kMemoryExceeded);
+    // Nothing holds the function the spawn was given any more: its upvalue is finalized.
+    REQUIRE(box.collect_garbage(2));
+    CHECK(out.lines == std::vector<std::string>{"spawned function collected"});
+}

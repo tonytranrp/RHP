@@ -15,6 +15,7 @@
 #include <rhp/script/puc_lua/builtins.hpp>
 #include <rhp/script/puc_lua/keys.hpp>
 #include <rhp/script/puc_lua/sandbox_impl.hpp>
+#include <rhp/utils/scope_guard.hpp>
 
 namespace Rhp::script::detail {
 
@@ -186,9 +187,19 @@ void sandbox_impl::spawn(lua_State* L) {
     if (lua_checkstack(state_, nargs + 8) == 0) {
         stack{L}.raise(make_error(errc::kLimitExceeded, std::format("{} arguments are too many", nargs), "rhp.spawn"));
     }
+    // If starting raises, they come off the main stack again: under call_unprotected nothing else
+    // resets it. (rhp.spawn never yields, so the guard always runs.)
+    const int main_top = lua_gettop(state_);
     lua_xmove(L, state_, nargs + 1);
+    bool started = false;
+    const utils::scope_guard restore{[this, main_top, &started]() noexcept {
+        if (!started) {
+            lua_settop(state_, main_top);
+        }
+    }};
     // Its coroutine, if the pool has none, is made on this one: an allocation that fails raises here.
     request_record& req = start_request(request_kind::kTask, effect_owner{current_.module, current_.revision}, {}, nargs, false, L);
+    started = true;
     req.start_args = nargs;
     req.wake_frame = frame_ + 1; // never inside the spawner: at the next pump()
     req.task_key = key;
