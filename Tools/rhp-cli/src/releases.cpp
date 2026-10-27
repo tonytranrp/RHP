@@ -1,6 +1,7 @@
 // rhp-cli release / revoke: building, signing and inspecting .rhprel / .rhprev files, and sending
 // them to a host that serves a release manager.
 #include <chrono>
+#include <concepts>
 #include <cstddef>
 #include <format>
 #include <memory>
@@ -23,7 +24,7 @@ namespace rhp_cli {
 namespace {
 
 // Adds the identity's signature to a release or revocation file (in place).
-template <class Doc, class Decode, class Encode>
+template <std::invocable<const std::vector<std::byte>&> Decode, class Encode>
 int sign_file(const std::string& path, const std::string& identity, Decode decode, Encode encode) {
     auto id = Rhp::security::identity_file::load(identity);
     auto bytes = read_binary_file(path);
@@ -54,6 +55,37 @@ int sign_file(const std::string& path, const std::string& identity, Decode decod
     return 0;
 }
 
+// `release build` / `revoke build`: the document built, signed by every identity in turn, written to
+// `out_path` (or the path `default_path` names), and described.
+template <class Doc, std::invocable<const Doc&> Encode, std::invocable<const Doc&> DefaultPath>
+int write_signed(Rhp::result<Doc> built, const std::vector<std::string>& identities, const std::string& out_path, Encode encode, DefaultPath default_path) {
+    if (!built) {
+        std::println(stderr, "{}", built.error());
+        return 1;
+    }
+    for (const std::string& identity : identities) {
+        auto id = Rhp::security::identity_file::load(identity);
+        auto key = id ? id->signer_key() : std::nullopt;
+        if (!key) {
+            std::println(stderr, "{}: no signing key", identity);
+            return 1;
+        }
+        if (auto ok = Rhp::release::sign(*built, *key); !ok) {
+            std::println(stderr, "{}", ok.error());
+            return 1;
+        }
+    }
+    auto bytes = encode(*built);
+    const std::string path = out_path.empty() ? std::string{default_path(*built)} : out_path;
+    if (!bytes || !write_binary_file(path, *bytes)) {
+        std::println(stderr, "can't write {}", path);
+        return 1;
+    }
+    std::print("{}", describe(*built));
+    std::println("wrote {}", path);
+    return 0;
+}
+
 // What `release sign` and `revoke sign` take.
 struct sign_file_options {
     std::string file;
@@ -81,36 +113,13 @@ struct release_build_options {
 };
 
 int run_release_build(const release_build_options& o) {
-    auto r = build_release(o.spec, std::chrono::system_clock::now());
-    if (!r) {
-        std::println(stderr, "{}", r.error());
-        return 1;
-    }
-    for (const std::string& identity : o.sign_with) {
-        auto id = Rhp::security::identity_file::load(identity);
-        auto key = id ? id->signer_key() : std::nullopt;
-        if (!key) {
-            std::println(stderr, "{}: no signing key", identity);
-            return 1;
-        }
-        if (auto ok = Rhp::release::sign(*r, *key); !ok) {
-            std::println(stderr, "{}", ok.error());
-            return 1;
-        }
-    }
-    auto bytes = Rhp::release::encode_release(*r);
-    const std::string path = o.out_path.empty() ? std::format("{}.{}.rhprel", r->body.channel, r->body.seq) : o.out_path;
-    if (!bytes || !write_binary_file(path, *bytes)) {
-        std::println(stderr, "can't write {}", path);
-        return 1;
-    }
-    std::print("{}", describe(*r));
-    std::println("wrote {}", path);
-    return 0;
+    return write_signed(
+        build_release(o.spec, std::chrono::system_clock::now()), o.sign_with, o.out_path, [](const Rhp::release::release& r) { return Rhp::release::encode_release(r); },
+        [](const Rhp::release::release& r) { return std::format("{}.{}.rhprel", r.body.channel, r.body.seq); });
 }
 
 int run_release_sign(const sign_file_options& o) {
-    return sign_file<Rhp::release::release>(
+    return sign_file(
         o.file, o.identity, [](const std::vector<std::byte>& b) { return Rhp::release::decode_release(b); },
         [](const Rhp::release::release& r) { return Rhp::release::encode_release(r); });
 }
@@ -200,36 +209,14 @@ struct revoke_build_options {
 };
 
 int run_revoke_build(const revoke_build_options& o) {
-    auto r = build_revocations(o.spec, std::chrono::system_clock::now());
-    if (!r) {
-        std::println(stderr, "{}", r.error());
-        return 1;
-    }
-    for (const std::string& identity : o.sign_with) {
-        auto id = Rhp::security::identity_file::load(identity);
-        auto key = id ? id->signer_key() : std::nullopt;
-        if (!key) {
-            std::println(stderr, "{}: no signing key", identity);
-            return 1;
-        }
-        if (auto ok = Rhp::release::sign(*r, *key); !ok) {
-            std::println(stderr, "{}", ok.error());
-            return 1;
-        }
-    }
-    auto bytes = Rhp::release::encode_revocations(*r);
-    const std::string path = o.out_path.empty() ? std::format("revocations.{}.rhprev", r->body.seq) : o.out_path;
-    if (!bytes || !write_binary_file(path, *bytes)) {
-        std::println(stderr, "can't write {}", path);
-        return 1;
-    }
-    std::print("{}", describe(*r));
-    std::println("wrote {}", path);
-    return 0;
+    return write_signed(
+        build_revocations(o.spec, std::chrono::system_clock::now()), o.sign_with, o.out_path,
+        [](const Rhp::release::signed_revocations& r) { return Rhp::release::encode_revocations(r); },
+        [](const Rhp::release::signed_revocations& r) { return std::format("revocations.{}.rhprev", r.body.seq); });
 }
 
 int run_revoke_sign(const sign_file_options& o) {
-    return sign_file<Rhp::release::signed_revocations>(
+    return sign_file(
         o.file, o.identity, [](const std::vector<std::byte>& b) { return Rhp::release::decode_revocations(b); },
         [](const Rhp::release::signed_revocations& r) { return Rhp::release::encode_revocations(r); });
 }

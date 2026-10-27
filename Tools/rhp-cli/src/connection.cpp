@@ -4,8 +4,6 @@
 #include <cstdint>
 #include <cstdio>
 #include <format>
-#include <fstream>
-#include <iterator>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -85,12 +83,12 @@ std::optional<connected> open_connection(const connection_options& o, replxx::Re
         if (path->empty()) {
             continue;
         }
-        std::ifstream in{*path, std::ios::binary};
-        if (!in) {
+        auto pem = read_text_file(*path);
+        if (!pem) {
             (*out)(style::kError, std::format("can't read {}", *path));
             return std::nullopt;
         }
-        *field = std::string{std::istreambuf_iterator<char>{in}, {}};
+        *field = std::move(*pem);
     }
     options.tls.server_name = o.server_name;
     terminal* sink = out.get();

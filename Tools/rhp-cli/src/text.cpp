@@ -6,7 +6,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <format>
+#include <fstream>
+#include <iterator>
 #include <locale>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <string>
@@ -344,6 +347,14 @@ std::string module_name_for(std::string_view path) {
         name += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     }
     return name;
+}
+
+std::optional<std::string> read_text_file(const std::string& path) {
+    std::ifstream in{path, std::ios::binary};
+    if (!in) {
+        return std::nullopt;
+    }
+    return std::string{std::istreambuf_iterator<char>{in}, std::istreambuf_iterator<char>{}};
 }
 
 } // namespace rhp_cli

@@ -93,8 +93,8 @@ private:
 // `next_byte()` returns the next byte as an unsigned char value, or EOF.
 template <std::invocable Next>
 [[nodiscard]] std::optional<std::string> read_dap_message(Next&& next_byte) {
-    constexpr std::size_t kMaxHeader = 1024;   // bytes in one header line
-    constexpr std::size_t kMaxHeaders = 32;    // header lines in one message
+    constexpr std::size_t kMaxHeader = 1024; // bytes in one header line
+    constexpr std::size_t kMaxHeaders = 32;  // header lines in one message
     constexpr std::size_t kMaxBody = 64u << 20;
     std::optional<std::size_t> length;
     std::size_t headers = 0;
@@ -353,8 +353,7 @@ private:
     void host_event(const Rhp::value& e) {
         const std::string kind = str(e, "kind");
         if (kind == "paused") {
-            const std::string reason = str(e, "reason");
-            event("stopped", obj({{"reason", Rhp::value{reason == "pause" ? std::string{"pause"} : reason}},
+            event("stopped", obj({{"reason", Rhp::value{str(e, "reason")}},
                                   {"threadId", Rhp::value{num(e, "request")}},
                                   {"allThreadsStopped", Rhp::value{false}}}));
         } else if (kind == "hit") {

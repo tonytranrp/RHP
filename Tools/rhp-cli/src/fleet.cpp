@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <format>
 #include <memory>
+#include <optional>
 #include <print>
 #include <string>
 #include <string_view>
@@ -11,8 +12,8 @@
 #include <vector>
 
 #include "commands.hpp"
-#include "connection.hpp"
 #include "release_files.hpp"
+#include "shell.hpp"
 #include "text.hpp"
 
 #include <rhp/rhp.hpp>
@@ -53,12 +54,44 @@ int run_discover(const discovery_options& o) {
     return 0;
 }
 
+// The TLS choices fleet and rollout take (the hosts' addresses come from discovery or --host).
+struct fleet_tls_options {
+    bool tls = false;
+    bool insecure_lan = false;
+    std::string ca;
+    std::string server_name;
+};
+
+void add_fleet_tls_options(CLI::App& cmd, fleet_tls_options& o) {
+    cmd.add_flag("--tls", o.tls, "TLS even on loopback");
+    cmd.add_flag("--insecure-lan", o.insecure_lan, "allow plaintext to non-loopback endpoints");
+    cmd.add_option("--ca", o.ca, "validate host certificates against this CA (PEM)");
+    cmd.add_option("--server-name", o.server_name, "expected certificate name (with --ca)");
+}
+
+// The fleet's options for o; nullopt (after saying so) when the CA file can't be read.
+[[nodiscard]] std::optional<Rhp::fleet_options> fleet_options_from(const fleet_tls_options& o, std::string_view command) {
+    Rhp::fleet_options options;
+    options.insecure_lan = o.insecure_lan;
+    options.tls = o.tls ? Rhp::net::tls_mode::kRequire : Rhp::net::tls_mode::kAuto;
+    options.client.tls.server_name = o.server_name;
+    if (!o.ca.empty()) {
+        auto ca = read_text_file(o.ca);
+        if (!ca) {
+            std::println(stderr, "can't read {} CA {}", command, o.ca);
+            return std::nullopt;
+        }
+        options.client.tls.ca_pem = std::move(*ca);
+    }
+    return options;
+}
+
 struct broadcast_options {
     std::string file;
     std::string identity;
     discovery_options discovery;
     int timeout_ms = 10000;
-    connection_options conn;
+    fleet_tls_options tls;
 };
 
 int run_fleet(const broadcast_options& o) {
@@ -77,20 +110,12 @@ int run_fleet(const broadcast_options& o) {
         std::println(stderr, "fleet requires an identity with a signing key");
         return 1;
     }
-    Rhp::fleet_options options;
-    options.timeout = std::chrono::milliseconds{o.timeout_ms};
-    options.insecure_lan = o.conn.insecure_lan;
-    options.tls = o.conn.tls ? Rhp::net::tls_mode::kRequire : Rhp::net::tls_mode::kAuto;
-    options.client.tls.server_name = o.conn.server_name;
-    if (!o.conn.ca.empty()) {
-        auto ca = read_text_file(o.conn.ca);
-        if (!ca) {
-            std::println(stderr, "can't read fleet CA {}", o.conn.ca);
-            return 1;
-        }
-        options.client.tls.ca_pem = std::move(*ca);
+    auto options = fleet_options_from(o.tls, "fleet");
+    if (!options) {
+        return 1;
     }
-    Rhp::fleet<cli_cfg> group{id->credential(), std::move(*signer), std::move(options)};
+    options->timeout = std::chrono::milliseconds{o.timeout_ms};
+    Rhp::fleet<cli_cfg> group{id->credential(), std::move(*signer), std::move(*options)};
     auto discovered = group.discover(o.discovery.to_browse());
     if (!discovered) {
         std::println(stderr, "{}", discovered.error());
@@ -121,7 +146,7 @@ struct rollout_options {
     std::size_t max_failures = 0;
     bool keep_on_failure = false;
     discovery_options discovery;
-    connection_options conn;
+    fleet_tls_options tls;
 };
 
 int run_rollout(const rollout_options& o) {
@@ -132,20 +157,12 @@ int run_rollout(const rollout_options& o) {
         return 1;
     }
     auto signer = id->signer_key();
-    Rhp::fleet_options options;
-    options.insecure_lan = o.conn.insecure_lan;
-    options.tls = o.conn.tls ? Rhp::net::tls_mode::kRequire : Rhp::net::tls_mode::kAuto;
-    options.client.tls.server_name = o.conn.server_name;
-    if (!o.conn.ca.empty()) {
-        auto ca = read_text_file(o.conn.ca);
-        if (!ca) {
-            std::println(stderr, "can't read rollout CA {}", o.conn.ca);
-            return 1;
-        }
-        options.client.tls.ca_pem = std::move(*ca);
+    auto options = fleet_options_from(o.tls, "rollout");
+    if (!options) {
+        return 1;
     }
-    auto group = signer ? std::make_unique<Rhp::fleet<cli_cfg>>(id->credential(), std::move(*signer), std::move(options))
-                        : std::make_unique<Rhp::fleet<cli_cfg>>(id->credential(), std::move(options));
+    auto group = signer ? std::make_unique<Rhp::fleet<cli_cfg>>(id->credential(), std::move(*signer), std::move(*options))
+                        : std::make_unique<Rhp::fleet<cli_cfg>>(id->credential(), std::move(*options));
     if (o.hosts.empty()) {
         if (auto found = group->discover(o.discovery.to_browse()); !found) {
             std::println(stderr, "{}", found.error());
@@ -153,7 +170,7 @@ int run_rollout(const rollout_options& o) {
         }
     }
     for (const std::string& h : o.hosts) {
-        auto ep = parse_endpoint(h, false, o.conn.insecure_lan);
+        auto ep = parse_endpoint(h, false, o.tls.insecure_lan);
         if (!ep) {
             std::println(stderr, "{}: {}", h, ep.error().message);
             return 2;
@@ -216,10 +233,7 @@ void add_fleet(CLI::App& app, command_list& out) {
     cmd->add_option("-i,--identity", o->identity, "identity file")->required()->envname("RHP_IDENTITY");
     add_discovery_options(*cmd, o->discovery);
     cmd->add_option("--timeout", o->timeout_ms, "broadcast deadline in milliseconds (default 10000)")->check(CLI::Range(1, 3600000));
-    cmd->add_flag("--tls", o->conn.tls, "TLS even on loopback");
-    cmd->add_flag("--insecure-lan", o->conn.insecure_lan, "allow plaintext to non-loopback endpoints");
-    cmd->add_option("--ca", o->conn.ca, "validate host certificates against this CA (PEM)");
-    cmd->add_option("--server-name", o->conn.server_name, "expected certificate name (with --ca)");
+    add_fleet_tls_options(*cmd, o->tls);
     out.emplace_back(cmd, [o] { return run_fleet(*o); });
 }
 
@@ -234,10 +248,7 @@ void add_rollout(CLI::App& app, command_list& out) {
     cmd->add_option("--max-failures", o->max_failures, "hosts that may fail before the rollout stops");
     cmd->add_flag("--keep-on-failure", o->keep_on_failure, "don't deactivate the release where it went when the rollout stops");
     add_discovery_options(*cmd, o->discovery);
-    cmd->add_flag("--tls", o->conn.tls, "TLS even on loopback");
-    cmd->add_option("--ca", o->conn.ca, "validate host certificates against this CA (PEM)");
-    cmd->add_option("--server-name", o->conn.server_name, "expected certificate name (with --ca)");
-    cmd->add_flag("--insecure-lan", o->conn.insecure_lan, "allow plaintext to non-loopback endpoints");
+    add_fleet_tls_options(*cmd, o->tls);
     out.emplace_back(cmd, [o] { return run_rollout(*o); });
 }
 

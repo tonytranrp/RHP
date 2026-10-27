@@ -35,6 +35,9 @@ namespace rhp_cli {
 // Words to complete from LuaLS stubs: lib names, `lib.function`, `lib.variable`.
 [[nodiscard]] std::vector<std::string> names_from_stubs(std::string_view stubs);
 
+// The whole file as bytes in a string (no newline translation); nullopt when it can't be read.
+[[nodiscard]] std::optional<std::string> read_text_file(const std::string& path);
+
 // A module name for a script file: its stem, lowercased ("Low_Grav.lua" → "low_grav").
 [[nodiscard]] std::string module_name_for(std::string_view path);
 

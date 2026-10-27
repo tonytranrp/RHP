@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <concepts>
@@ -10,7 +11,6 @@
 #include <fstream>
 #include <functional>
 #include <iterator>
-#include <algorithm>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -44,14 +44,6 @@ enum class style : std::uint8_t {
 
 // Where the shell writes. Must be thread-safe: `watch` reports from its own thread.
 using printer = std::function<void(style, std::string_view)>;
-
-[[nodiscard]] inline std::optional<std::string> read_text_file(const std::string& path) {
-    std::ifstream in{path, std::ios::binary};
-    if (!in) {
-        return std::nullopt;
-    }
-    return std::string{std::istreambuf_iterator<char>{in}, std::istreambuf_iterator<char>{}};
-}
 
 // A module named by id ("#3" or "3") or name.
 [[nodiscard]] inline Rhp::module_ref parse_module(std::string_view text) {
@@ -140,10 +132,8 @@ public:
                     args.push_back(parse_literal(quoted[i]));
                 }
                 const std::string function = arg(2);
-                (void)wait_or_detach(client_.async().call(parse_module(arg(1)), function, args), function, [this](const Rhp::result<Rhp::value_list>& r) {
-                    report_values(r);
-                    return r.has_value();
-                });
+                (void)wait_or_detach(client_.async().call(parse_module(arg(1)), function, args), function,
+                                     [this](const Rhp::result<Rhp::value_list>& r) { return report_values(r); });
             }
         } else if (cmd == "rollback") {
             if (need(1, "rollback <module> [steps]")) {
@@ -277,16 +267,7 @@ public:
     // Runs Lua in the scratch module and prints what it returned. True on success. A script that
     // pauses at a breakpoint goes to the background: its result prints when it finishes.
     bool exec(std::string_view source) {
-        return wait_or_detach(client_.async().exec(source), "exec", [this](const Rhp::result<Rhp::value_list>& r) {
-            if (!r) {
-                error(r.error());
-                return false;
-            }
-            if (!r->empty()) {
-                plain(format_values(*r));
-            }
-            return true;
-        });
+        return wait_or_detach(client_.async().exec(source), "exec", [this](const Rhp::result<Rhp::value_list>& r) { return report_values(r); });
     }
 
     // Waits for a request (Ctrl+C cancels it). When a script of it pauses at a breakpoint (a pause
@@ -501,10 +482,10 @@ public:
     }
 
     [[nodiscard]] static std::vector<std::string> commands() {
-        return {"help",     "exec",   "load",  "reload",    "call",   "rollback", "revert", "unload",   "pin",      "unpin",  "checkpoint",
-                "revert_to", "revert_all", "list", "status", "stubs", "blob",     "watch",  "unwatch",  "subscribe", "unsubscribe", "tunables",
-                "tune",     "profile", "break", "pause",     "paused", "continue", "step",   "stack",    "locals",   "upvalues", "globals",
-                "print",    "whoami", "quit"};
+        return {"help", "exec", "load", "reload", "call", "rollback", "revert", "unload", "pin", "unpin", "checkpoint",
+                "revert_to", "revert_all", "list", "status", "stubs", "blob", "watch", "unwatch", "subscribe", "unsubscribe", "tunables",
+                "tune", "profile", "break", "pause", "paused", "continue", "step", "stack", "locals", "upvalues", "globals",
+                "print", "whoami", "quit"};
     }
 
     // ---- tunables, profiler, debugger --------------------------------------------------------------
@@ -923,14 +904,16 @@ Ctrl+C cancels a running script.)");
         return line;
     }
 
-    void report_values(const Rhp::result<Rhp::value_list>& r) {
+    // Prints what a request returned (or its error). True on success.
+    bool report_values(const Rhp::result<Rhp::value_list>& r) {
         if (!r) {
             error(r.error());
-            return;
+            return false;
         }
         if (!r->empty()) {
             plain(format_values(*r));
         }
+        return true;
     }
 
     void report_summary(std::string_view what, const Rhp::result<Rhp::revert_summary>& r) {
@@ -981,7 +964,7 @@ Ctrl+C cancels a running script.)");
     std::atomic<bool> pause_seen_{false};
     std::atomic<std::uint64_t> last_paused_{0};
     std::mutex pause_mutex_;
-    std::string pause_label_;                        // of the last pause (guarded by pause_mutex_)
+    std::string pause_label_;                       // of the last pause (guarded by pause_mutex_)
     std::vector<std::function<bool()>> background_; // requests that paused while the shell waited: true once done and printed
     std::jthread watcher_;
 };

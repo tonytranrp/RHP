@@ -102,14 +102,12 @@ Rhp::result<Rhp::release::release> build_release(const release_spec& spec, std::
         const auto eq = item.find('=');
         const std::string path = eq == std::string::npos ? item : item.substr(eq + 1);
         const std::string name = eq == std::string::npos ? module_name_for(path) : item.substr(0, eq);
-        auto bytes = Rhp::platform::read_file(path);
-        if (!bytes) {
+        auto source = read_text_file(path);
+        if (!source) {
             return std::unexpected{usage(std::format("can't read module source {}", path))};
         }
-        std::string source(bytes->size(), '\0');
-        std::ranges::transform(*bytes, source.begin(), [](std::byte b) { return static_cast<char>(b); });
         m.modules.push_back(Rhp::release::module_entry{name, {}});
-        sources.push_back(std::move(source));
+        sources.push_back(std::move(*source));
     }
     return Rhp::release::make_release(std::move(m), std::move(sources));
 }
