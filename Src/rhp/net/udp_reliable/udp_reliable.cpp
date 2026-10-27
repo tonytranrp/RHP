@@ -547,15 +547,16 @@ void udp_service::process(std::size_t n) {
     }
 }
 
+// Sending only writes to the socket (no peer re-enters `owing`), so the list is walked in place and
+// keeps its capacity for the next drain.
 void udp_service::flush_acks() {
-    auto peers_owing = std::move(owing);
-    owing.clear();
-    for (const auto& peer : peers_owing) {
+    for (const auto& peer : owing) {
         if (peer->ack_owed && !peer->closed) {
             peer->send(rudp::packet_kind::kAck);
         }
         peer->ack_owed = false;
     }
+    owing.clear();
 }
 
 void udp_service::dispatch(const rudp::packet& in, const udp::endpoint& source) {

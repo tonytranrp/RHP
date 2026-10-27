@@ -118,8 +118,9 @@ void io_context::timer::start(std::chrono::milliseconds delay, std::function<voi
         if (ec || self == nullptr || self->generation != generation) {
             return;
         }
-        // Copied: fn may re-arm (replace itself) while running.
-        const auto fn = self->fn;
+        // Taken out: fn may re-arm (replace itself) while running, and a one-shot timer has no use
+        // for it afterwards.
+        const auto fn = std::exchange(self->fn, nullptr);
         if (fn) {
             fn();
         }
