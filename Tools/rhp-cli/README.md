@@ -43,7 +43,11 @@ A dropped connection is redialed and the session resumed on its own. When rhp-cl
 
 ```bash
 rhp-cli connect 127.0.0.1:7777 -i dev.rhpid
+rhp-cli connect --dev            # a dev session of a program on this machine
+rhp-cli connect --dev my_game    # when several programs have one
 ```
+
+`--dev [app]` needs no address and no identity file: a dev build of a program that listens only on loopback or local IPC can open a dev session (`host_options::dev_session`), which writes a connect file with a fresh identity and signing key to `<user config>/rhp/dev/<app>.rhpdev` (`%APPDATA%`, `~/Library/Application Support`, `$XDG_CONFIG_HOME` or `~/.config`) and removes it when it stops. Without an app rhp-cli uses the only file there and lists them when there are several; it refuses a file whose endpoint isn't a loopback TCP address or local IPC. The usual handshake and script signatures still run. `--timeout` applies; the other connection options don't.
 
 ```text
 rhp> return game.gravity
@@ -88,7 +92,7 @@ Tab completes commands, lib names and functions (from the host's stubs) and load
 
 | Subcommand | Example |
 |---|---|
-| `connect <host:port>` | `rhp-cli connect 127.0.0.1:7777 -i dev.rhpid` (the REPL) |
+| `connect <host:port>` / `connect --dev [app]` | `rhp-cli connect 127.0.0.1:7777 -i dev.rhpid` (the REPL; `--dev`: a local program's dev session) |
 | `run <file> [--pin] [--name m]` | `rhp-cli run patch.lua -c 127.0.0.1:7777 -i dev.rhpid --pin` (exec a file, or load it as a module and pin it) |
 | `exec "<lua>"` | `rhp-cli exec "return game.tick" -c 127.0.0.1:7777 -i dev.rhpid` (prints what it returns) |
 | `stubs [-o file]` | `rhp-cli stubs -c 127.0.0.1:7777 -i dev.rhpid -o rhp_api.lua` |
@@ -136,11 +140,12 @@ rhp-cli test -s scripts tests/combat_spec.lua --reporter junit:report.xml
 | `src/release_files.hpp/.cpp` | building, signing and describing `.rhprel` / `.rhprev` files; rollout stage parsing |
 | `src/json.hpp` | rhp-cli's names for `Rhp::json` |
 | `src/commands.hpp` | `rhp_cli::command` and every family's `add_<name>`: each subcommand adds itself with an options struct of its own and the function that runs it |
-| `src/connection.hpp/.cpp` | the terminal, the connection options network subcommands share, `open_connection`, `load_identity` (prints its warnings), `load_signer` |
+| `src/connection.hpp/.cpp` | the terminal, the connection options network subcommands share, `open_connection`, `open_dev_connection` (TCP or local IPC), `load_identity` (prints its warnings), `load_signer` |
+| `src/dev.hpp/.cpp` | `connect --dev`: which dev session file (`pick_dev_session`) and where it may point (`dev_endpoint`) |
 | `src/keys.cpp` | `keygen`, `pubkey`, `sign` |
 | `src/fleet.cpp` | `discover`, `fleet`, `rollout` |
 | `src/releases.cpp` | `release ...`, `revoke ...` |
 | `src/test_command.cpp` | `test` |
 | `src/main.cpp` | the replxx REPL (`connect`), the subcommands that run through the shell (`run`, `exec`, `stubs`, `blob`, `events`, `watch`, `tune`, `profile`, `dap`), Ctrl+C, and running the subcommand parsed |
 
-`rhp_cli_core` (the text helpers, the release files and the header-only shell and DAP server) is a static library so `Tests/tools/rhp_cli_tests.cpp` can drive the shell in-process.
+`rhp_cli_core` (the text helpers, the release files, the dev session choice and the header-only shell and DAP server) is a static library so `Tests/tools/rhp_cli_tests.cpp` can drive the shell in-process.

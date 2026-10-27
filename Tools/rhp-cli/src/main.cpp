@@ -2,6 +2,7 @@
 //
 //   rhp-cli keygen dev                                  # dev.rhpid + the lines for the host
 //   rhp-cli connect 127.0.0.1:7777 -i dev.rhpid         # REPL
+//   rhp-cli connect --dev                               # REPL on a program's dev session
 //   rhp-cli run patch.lua -c 127.0.0.1:7777 -i dev.rhpid --pin
 //   rhp-cli stubs -c 127.0.0.1:7777 -i dev.rhpid -o rhp_api.lua
 //   rhp-cli release build --channel game.balance --module tuning.lua -i dev.rhpid -o balance.rhprel
@@ -27,6 +28,7 @@
 #include <string_view>
 #include <system_error>
 #include <thread>
+#include <variant>
 #include <vector>
 
 #include "commands.hpp"
@@ -71,14 +73,10 @@ extern "C" void on_interrupt(int) {
 
 // ---- connect: the REPL ---------------------------------------------------------------------------
 
-int run_connect(const connection_options& o) {
-    const bool interactive = Rhp::platform::stdin_is_terminal();
-    replxx::Replxx rx;
-    auto conn = rhp_cli::open_connection(o, interactive ? &rx : nullptr);
-    if (!conn) {
-        return 1;
-    }
-    cli_shell sh{*conn->client, [out = conn->out.get()](rhp_cli::style s, std::string_view t) { (*out)(s, t); }, &interrupted};
+// The REPL over one connection (TCP, or a dev session's local IPC).
+template <class Cfg>
+int run_repl(rhp_cli::connection<Cfg>& conn, replxx::Replxx& rx, bool interactive) {
+    rhp_cli::shell<Cfg> sh{*conn.client, [out = conn.out.get()](rhp_cli::style s, std::string_view t) { (*out)(s, t); }, &interrupted};
     if (!interactive) {
         // Scripted input (a pipe or file): one command per line, no line editing.
         std::string line;
@@ -113,7 +111,7 @@ int run_connect(const connection_options& o) {
         }
         return out;
     });
-    (*conn->out)(rhp_cli::style::kInfo, "type `help` for commands, `quit` to leave (Ctrl+C cancels a running script)");
+    (*conn.out)(rhp_cli::style::kInfo, "type `help` for commands, `quit` to leave (Ctrl+C cancels a running script)");
     while (true) {
         g_interrupted.store(false);
         const char* input = rx.input(sh.continuing() ? "...> " : "rhp> ");
@@ -121,7 +119,7 @@ int run_connect(const connection_options& o) {
             if (errno == EAGAIN) { // Ctrl+C at the prompt: drop the line (and unfinished multi-line Lua)
                 if (sh.continuing()) {
                     sh.reset();
-                    (*conn->out)(rhp_cli::style::kInfo, "(multi-line input dropped)");
+                    (*conn.out)(rhp_cli::style::kInfo, "(multi-line input dropped)");
                 }
                 continue;
             }
@@ -139,11 +137,37 @@ int run_connect(const connection_options& o) {
     return 0;
 }
 
+struct connect_options {
+    connection_options conn;
+    std::string dev_app;
+};
+
+int run_connect(const connect_options& o, bool dev) {
+    const bool interactive = Rhp::platform::stdin_is_terminal();
+    replxx::Replxx rx;
+    if (dev) {
+        if (!o.conn.address.empty()) {
+            std::println(stderr, "--dev reads the address and the identity from the dev session file");
+            return 2;
+        }
+        auto conn = rhp_cli::open_dev_connection(o.dev_app, o.conn.timeout_ms, interactive ? &rx : nullptr);
+        return conn ? std::visit([&](auto& c) { return run_repl(c, rx, interactive); }, *conn) : 1;
+    }
+    if (o.conn.address.empty() || o.conn.identity.empty()) {
+        std::println(stderr, "connect needs the host's address and -i/--identity (or --dev)");
+        return 2;
+    }
+    auto conn = rhp_cli::open_connection(o.conn, interactive ? &rx : nullptr);
+    return conn ? run_repl(*conn, rx, interactive) : 1;
+}
+
 void add_connect(CLI::App& app, command_list& out) {
-    auto o = std::make_shared<connection_options>();
+    auto o = std::make_shared<connect_options>();
     auto* cmd = app.add_subcommand("connect", "interactive REPL (reads commands from stdin when it isn't a terminal)");
-    rhp_cli::add_connection_options(*cmd, *o, true);
-    out.emplace_back(cmd, [o] { return run_connect(*o); });
+    rhp_cli::add_connection_options(*cmd, o->conn, true, false);
+    auto* dev = cmd->add_option("--dev", o->dev_app, "connect to a dev session of a program on this machine (its file in the user config folder; the app, when there are several)")
+                    ->expected(0, 1);
+    out.emplace_back(cmd, [o, dev] { return run_connect(*o, dev->count() > 0); });
 }
 
 // ---- subcommands that run one shell command -----------------------------------------------------

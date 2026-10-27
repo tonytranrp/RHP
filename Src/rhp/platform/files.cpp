@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <expected>
 #include <filesystem>
 #include <format>
@@ -18,6 +19,8 @@
 #include <rhp/core/error.hpp>
 #include <rhp/core/result.hpp>
 #include <rhp/platform/files.hpp>
+#include <rhp/platform/os.hpp>
+#include <rhp/platform/process.hpp>
 #include <rhp/platform/random.hpp>
 #include <rhp/utils/scope_guard.hpp>
 
@@ -302,6 +305,34 @@ result<void> make_private_directory(const std::filesystem::path& path) {
     }
 #endif
     return {};
+}
+
+result<std::filesystem::path> user_config_dir() {
+#if defined(RHP_PLATFORM_IOS) || defined(RHP_PLATFORM_ANDROID)
+    return fail(errc::kDisabled, std::format("{} apps have no user configuration folder", kOsName), "platform.files");
+#elif defined(RHP_PLATFORM_WINDOWS)
+    wchar_t* appdata = nullptr;
+    std::size_t length = 0;
+    if (_wdupenv_s(&appdata, &length, L"APPDATA") != 0 || appdata == nullptr || *appdata == L'\0') {
+        std::free(appdata);
+        return fail(errc::kNotFound, "APPDATA is not set", "platform.files");
+    }
+    std::filesystem::path dir{appdata}; // wide: user names outside the ANSI code page survive
+    std::free(appdata);
+    return dir;
+#else
+    if constexpr (kOs == os_kind::kLinux) {
+        // The XDG base directory spec ignores a relative XDG_CONFIG_HOME.
+        if (const std::filesystem::path xdg{environment_variable("XDG_CONFIG_HOME")}; xdg.is_absolute()) {
+            return xdg;
+        }
+    }
+    const std::string home = environment_variable("HOME");
+    if (home.empty()) {
+        return fail(errc::kNotFound, "HOME is not set", "platform.files");
+    }
+    return std::filesystem::path{home} / (kOs == os_kind::kMacos ? "Library/Application Support" : ".config");
+#endif
 }
 
 void binary_stdio() noexcept {

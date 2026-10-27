@@ -89,7 +89,7 @@ struct text_line {
     return std::string{std::istreambuf_iterator<char>{in}, std::istreambuf_iterator<char>{}};
 }
 
-// The warning for a key file other users can read (identity files), if it is one.
+// The warning for a key file other users can read (identity and dev session files), if it is one.
 [[nodiscard]] inline std::optional<std::string> exposure_warning(const std::filesystem::path& path) {
     if (!platform::readable_by_others(path)) {
         return std::nullopt;

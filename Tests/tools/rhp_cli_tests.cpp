@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "dap.hpp"
+#include "dev.hpp"
 #include "json.hpp"
 #include "release_files.hpp"
 #include "shell.hpp"
@@ -39,6 +40,7 @@
 #include <rhp/net/tcp/tcp.hpp>
 #include <rhp/platform/random.hpp>
 #include <rhp/script/lib.hpp>
+#include <rhp/security/dev_session.hpp>
 #include <rhp/security/ed25519.hpp>
 #include <rhp/security/identity_file.hpp>
 #include <rhp/security/key.hpp>
@@ -302,6 +304,56 @@ TEST_CASE("rhp-cli: values / words / literals / stubs / module names", "[cli][te
     CHECK(rhp_cli::parse_module("123456789012345678901234").name == "123456789012345678901234"); // too long for an id
     CHECK(rhp_cli::split_words(R"(call m f "42" 42)", true) == std::vector<std::string>{"call", "m", "f", R"("42")", "42"});
     CHECK(rhp_cli::parse_literal(R"("42")") == value{"42"});
+}
+
+TEST_CASE("rhp-cli: connect --dev picks the one dev session or the named one", "[cli][dev]") {
+    scratch_dir dir;
+    const fs::path sessions = dir.path / "dev";
+    CHECK(rhp_cli::pick_dev_session(sessions, "").error().code == Rhp::errc::kNotFound); // no folder yet
+    fs::create_directories(sessions);
+    dir.write("dev/notes.txt", "not a session");
+    CHECK(rhp_cli::pick_dev_session(sessions, "").error().code == Rhp::errc::kNotFound);
+
+    dir.write("dev/game.rhpdev", "");
+    CHECK(*rhp_cli::pick_dev_session(sessions, "") == sessions / "game.rhpdev");
+    CHECK(*rhp_cli::pick_dev_session(sessions, "game") == sessions / "game.rhpdev");
+    CHECK(rhp_cli::pick_dev_session(sessions, "editor").error().code == Rhp::errc::kNotFound);
+    CHECK(rhp_cli::pick_dev_session(sessions, "../dev/game").error().code == Rhp::errc::kInvalidArgument);
+
+    dir.write("dev/editor.rhpdev", "");
+    const auto several = rhp_cli::pick_dev_session(sessions, "");
+    REQUIRE_FALSE(several);
+    CHECK(several.error().code == Rhp::errc::kInvalidArgument);
+    CHECK(several.error().message.find("editor, game") != std::string::npos);
+    CHECK(*rhp_cli::pick_dev_session(sessions, "editor") == sessions / "editor.rhpdev");
+}
+
+TEST_CASE("rhp-cli: a dev session must be on loopback or local IPC", "[cli][dev]") {
+    Rhp::security::dev_session s;
+    s.app = "game";
+    s.transport = "tcp";
+    s.port = 7777;
+    for (const char* host : {"127.0.0.1", "::1", "localhost"}) {
+        s.host = host;
+        const auto target = rhp_cli::dev_endpoint(s);
+        REQUIRE(target);
+        CHECK_FALSE(target->ipc);
+        CHECK(target->ep == Rhp::endpoint::dial(host, 7777));
+    }
+    for (const char* host : {"10.0.0.5", "0.0.0.0", "example.com", "cafe1"}) {
+        s.host = host;
+        CHECK(rhp_cli::dev_endpoint(s).error().code == Rhp::errc::kForbidden);
+    }
+    s.transport = "websocket"; // not a transport rhp-cli dials for dev sessions, even on loopback
+    s.host = "127.0.0.1";
+    CHECK(rhp_cli::dev_endpoint(s).error().code == Rhp::errc::kForbidden);
+    s.transport = "local_ipc";
+    s.host = "game";
+    s.port = 0;
+    const auto ipc = rhp_cli::dev_endpoint(s);
+    REQUIRE(ipc);
+    CHECK(ipc->ipc);
+    CHECK(ipc->ep == Rhp::endpoint::dial("game", 0));
 }
 
 // ---- the shell, in-process ----------------------------------------------------------------------------------
@@ -649,6 +701,65 @@ TEST_CASE("rhp-cli: keygen keeps the PSK in the file and makes patch identities"
     REQUIRE(run(std::format("{} keygen shown --role admin --show-secret --out {} > {} 2> {}", kCli, q(shown), q(dir.path / "shown.txt"), q(dir.path / "shown_err.txt"))) == 0);
     CHECK(dir.read("shown.txt").find(Rhp::security::identity_file::load(shown.string())->keyring_line(Rhp::role::kAdmin)) != std::string::npos);
     CHECK(dir.read("shown_err.txt").find("warning: an admin identity") != std::string::npos);
+}
+
+TEST_CASE("rhp-cli: connect --dev reads a dev session file", "[cli][process]") {
+    scratch_dir dir;
+    const auto id = dir.path / "dev.rhpid";
+    REQUIRE(run(std::format("{} keygen dev --out {} > {}", kCli, q(id), q(dir.path / "keygen.txt"))) == 0);
+    auto identity = Rhp::security::identity_file::load(id.string());
+    REQUIRE(identity);
+    REQUIRE(run(std::format("{} pubkey -i {} > {}", kCli, q(id), q(dir.path / "lines.txt"))) == 0);
+    const std::string lines = dir.read("lines.txt");
+    const auto nl = lines.find('\n');
+    REQUIRE(nl != std::string::npos);
+    dir.write("keys.txt", lines.substr(0, nl + 1));
+    dir.write("signers.pub", lines.substr(nl + 1));
+    std::jthread server{[&] {
+        (void)run(std::format("{} --port 0 --keys {} --signers {} --port-file {} --stop-file {} --seconds 120 > {} 2>&1", kHost, q(dir.path / "keys.txt"),
+                              q(dir.path / "signers.pub"), q(dir.path / "port.txt"), q(dir.path / "stop"), q(dir.path / "server.log")));
+    }};
+    REQUIRE(eventually([&] { return fs::exists(dir.path / "port.txt") && !dir.read("port.txt").empty(); }));
+
+    // The program's dev session file, where rhp-cli looks for it with the user config folder moved here.
+#if defined(_WIN32)
+    const std::string env = std::format("set \"APPDATA={}\" && ", (dir.path / "config").string());
+    const fs::path sessions = dir.path / "config" / "rhp" / "dev";
+#elif defined(__APPLE__)
+    const std::string env = std::format("HOME={} ", q(dir.path));
+    const fs::path sessions = dir.path / "Library" / "Application Support" / "rhp" / "dev";
+#else
+    const std::string env = std::format("XDG_CONFIG_HOME={} ", q(dir.path / "config"));
+    const fs::path sessions = dir.path / "config" / "rhp" / "dev";
+#endif
+    Rhp::security::dev_session session;
+    session.app = "game";
+    session.transport = "tcp";
+    session.host = "127.0.0.1";
+    session.port = static_cast<std::uint16_t>(std::stoi(dir.read("port.txt")));
+    session.identity = std::move(*identity);
+    REQUIRE(Rhp::security::write_dev_session(sessions / "game.rhpdev", session));
+    dir.write("cmds.txt", "return 6 * 7\nquit\n");
+    const auto connect_dev = [&](std::string_view app, std::string_view out) {
+        return run(std::format("{}{} connect --dev {} < {} > {} 2>&1", env, kCli, app, q(dir.path / "cmds.txt"), q(dir.path / out)));
+    };
+    CHECK(connect_dev("", "dev.txt") == 0);
+    CHECK(dir.read("dev.txt").find("dev session of game at tcp://127.0.0.1:") != std::string::npos);
+    CHECK(dir.read("dev.txt").find("42") != std::string::npos);
+
+    // With two, name one; one that isn't on this machine is refused.
+    session.app = "far";
+    session.host = "10.1.2.3";
+    REQUIRE(Rhp::security::write_dev_session(sessions / "far.rhpdev", session));
+    CHECK(connect_dev("", "several.txt") == 1);
+    CHECK(dir.read("several.txt").find("(far, game)") != std::string::npos);
+    CHECK(connect_dev("far", "far.txt") == 1);
+    CHECK(dir.read("far.txt").find("loopback") != std::string::npos);
+    CHECK(connect_dev("game", "game.txt") == 0);
+    CHECK(dir.read("game.txt").find("42") != std::string::npos);
+
+    dir.write("stop", "");
+    server.join();
 }
 
 TEST_CASE("rhp-cli: test runs Lua tests offline and with a host's API faked", "[cli][process]") {

@@ -1,17 +1,19 @@
 #pragma once
 
 // rhp-cli's connections: the terminal its network commands print to, the options they share,
-// opening a client, and loading the identity that signs.
+// opening a client (or a dev session's), and loading the identity that signs.
 
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <variant>
 
 #include "shell.hpp"
 
 #include <rhp/client/client.hpp>
+#include <rhp/net/local/local.hpp>
 #include <rhp/security/ed25519.hpp>
 #include <rhp/security/identity_file.hpp>
 
@@ -24,6 +26,9 @@ class Replxx;
 } // namespace replxx
 
 namespace rhp_cli {
+
+// Dev sessions on local IPC (connect --dev): the REPL over a named pipe or a Unix socket.
+using cli_ipc_cfg = Rhp::config<>::transport<Rhp::net::local_ipc>::logger<Rhp::core::null_logger>;
 
 // Writes shell output: colored through replxx in the REPL, plain lines otherwise. Thread-safe.
 class terminal {
@@ -53,15 +58,25 @@ struct connection_options {
     int timeout_ms = 0; // 0: 10 s when dialing, 10 min when listening
 };
 
-void add_connection_options(CLI::App& cmd, connection_options& o, bool positional_address);
+// `required`: the address and -i/--identity must be given (connect checks them itself: --dev reads
+// both from the dev session file).
+void add_connection_options(CLI::App& cmd, connection_options& o, bool positional_address, bool required = true);
 
 // The connection a network command works over.
-struct connected {
-    std::unique_ptr<Rhp::client<cli_cfg>> client;
+template <class Cfg>
+struct connection {
+    std::unique_ptr<Rhp::client<Cfg>> client;
     std::unique_ptr<terminal> out;
 };
+using connected = connection<cli_cfg>;
+// A dev session's: over TCP on loopback, or local IPC.
+using dev_connected = std::variant<connection<cli_cfg>, connection<cli_ipc_cfg>>;
 
 [[nodiscard]] std::optional<connected> open_connection(const connection_options& o, replxx::Replxx* rx, bool to_stderr = false);
+
+// connect --dev [app]: the dev session file pick_dev_session chooses in the user's config folder,
+// connected with its endpoint (refused unless loopback or local IPC) and identity.
+[[nodiscard]] std::optional<dev_connected> open_dev_connection(std::string_view app, int timeout_ms, replxx::Replxx* rx);
 
 // identity_file::load, its warnings printed first ("warning: ..."); nullopt after printing the
 // error. Through `out` when given, else to stderr.
