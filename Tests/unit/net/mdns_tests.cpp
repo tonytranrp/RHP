@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <format>
 #include <string>
 #include <utility>
 #include <vector>
@@ -44,7 +45,7 @@ TEST_CASE("mdns: DNS records round trip and malformed names are refused", "[net]
         CHECK_FALSE(Rhp::net::detail::read_dns(bytes->view().first(n)));
     }
     // An answer to a query: the asked record in the answer section, the rest additional.
-    const std::vector<std::pair<std::string, std::uint16_t>> asked{{"dns-parser._rhp._tcp.local", std::uint16_t{33}}};
+    const std::vector<std::pair<std::string, std::uint16_t>> asked{{"dns-parser._rhp._tcp.local", static_cast<std::uint16_t>(Rhp::net::detail::rr_type::kSrv)}};
     auto answer = Rhp::net::detail::dns_service_packet(record, 120, false, asked);
     REQUIRE(answer);
     const auto counts = answer->view().subspan(6, 6);

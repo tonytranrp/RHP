@@ -623,8 +623,7 @@ private:
     return ep.insecure_lan || ep.tls == tls_mode::kRequire || is_loopback(address);
 }
 
-template <class Results>
-[[nodiscard]] result<udp::endpoint> choose(const endpoint& ep, const std::error_code& ec, const Results& found) {
+[[nodiscard]] result<udp::endpoint> choose(const endpoint& ep, const std::error_code& ec, const udp::resolver::results_type& found) {
     if (ec || found.empty()) {
         return fail(errc::kTransport, std::format("can't resolve {}: {}", ep.host, ec ? ec.message() : "no address"), kWhere);
     }

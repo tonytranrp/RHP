@@ -1,5 +1,4 @@
 #include <algorithm>
-#include <cctype>
 #include <charconv>
 
 #include <rhp/net/detail/http.hpp>

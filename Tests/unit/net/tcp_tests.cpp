@@ -23,21 +23,14 @@ using rhp_test::recorder;
 
 namespace {
 
-Rhp::result<std::unique_ptr<net_link>> dial(io_context& io, const endpoint& ep, std::initializer_list<io_context*> also) {
+Rhp::result<std::unique_ptr<net_link>> dial(io_context& io, const endpoint& ep) {
     bool done = false;
     Rhp::result<std::unique_ptr<net_link>> out = Rhp::fail(errc::kTimeout, "no dial result");
     tcp::dial(io, ep, [&](Rhp::result<std::unique_ptr<net_link>> r) {
         done = true;
         out = std::move(r);
     });
-    std::vector<io_context*> all{&io};
-    all.insert(all.end(), also.begin(), also.end());
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{10};
-    while (!done && std::chrono::steady_clock::now() < deadline) {
-        for (auto* c : all) {
-            c->poll();
-        }
-    }
+    (void)poll_until({&io}, [&] { return done; });
     return out;
 }
 
@@ -51,7 +44,7 @@ TEST_CASE("tcp: listen on port 0, dial, talk, close", "[net][tcp]") {
     const auto port = (*listener)->port();
     REQUIRE(port != 0);
 
-    auto dialed = dial(io, endpoint::dial("127.0.0.1", port), {});
+    auto dialed = dial(io, endpoint::dial("127.0.0.1", port));
     REQUIRE(dialed);
     REQUIRE(poll_until({&io}, [&] { return accepted != nullptr; }));
 
@@ -94,7 +87,7 @@ TEST_CASE("tcp: non-loopback addresses need insecure_lan", "[net][tcp]") {
     auto lan = tcp::listen(io, endpoint::listen("0.0.0.0", 0, Rhp::net::insecure_lan), [](std::unique_ptr<net_link>) {});
     CHECK(lan);
 
-    auto remote = dial(io, endpoint::dial("192.0.2.1", 9), {}); // TEST-NET-1: never routed
+    auto remote = dial(io, endpoint::dial("192.0.2.1", 9)); // TEST-NET-1: never routed
     REQUIRE_FALSE(remote);
     CHECK(remote.error().code == errc::kForbidden);
 }
@@ -109,7 +102,7 @@ TEST_CASE("tcp: a port in use and a closed port fail cleanly", "[net][tcp]") {
     CHECK(second.error().code == errc::kTransport);
 
     first->reset();
-    auto refused = dial(io, endpoint::dial("127.0.0.1", port), {});
+    auto refused = dial(io, endpoint::dial("127.0.0.1", port));
     REQUIRE_FALSE(refused);
     CHECK(refused.error().code == errc::kTransport);
 }

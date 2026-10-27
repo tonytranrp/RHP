@@ -1,5 +1,4 @@
 #include <algorithm>
-#include <array>
 
 #include <asio/ip/address.hpp>
 

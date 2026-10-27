@@ -1,5 +1,7 @@
 #pragma once
 
+#include <memory>
+
 #include <rhp/net/io_context.hpp>
 
 namespace rhp_test {

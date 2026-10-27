@@ -8,8 +8,6 @@ namespace Rhp::net::detail {
 
 namespace {
 
-constexpr std::string_view kStreamService = "_rhp._tcp";
-constexpr std::string_view kDatagramService = "_rhp._udp";
 constexpr std::string_view kInstanceChars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_";
 constexpr std::size_t kMaxLabel = 63;      // DNS label (RFC 1035)
 constexpr std::size_t kMaxTxtItem = 255;   // one TXT string (RFC 6763 §6.1)
@@ -40,7 +38,7 @@ std::string instance_domain(const service_record& record) {
 }
 
 bool supported_service(std::string_view service) noexcept {
-    return service == kStreamService || service == kDatagramService;
+    return service == dns_sd_service("tcp") || service == dns_sd_service("udp_reliable");
 }
 
 service_record normalized(service_record record) {

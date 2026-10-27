@@ -33,7 +33,6 @@ enum class opcode : std::uint8_t {
 enum class close_code : std::uint16_t {
     kNormal = 1000,
     kProtocolError = 1002,
-    kUnsupportedData = 1003,
     kMessageTooBig = 1009
 };
 
