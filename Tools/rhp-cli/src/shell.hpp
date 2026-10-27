@@ -275,16 +275,24 @@ public:
     // runs when it ends; returns what `done` returned, or true for a backgrounded request.
     template <class Pending, class Done>
     bool wait_or_detach(Pending p, std::string label, Done done) {
+        return wait_or_detach(std::move(p), std::move(label), std::move(done), interrupted_);
+    }
+
+    // The same, cancelled when `interrupted` says so (`watch` passes its own stop request: the
+    // shell's Ctrl+C belongs to the thread that reads commands).
+    template <class Pending, class Done>
+    bool wait_or_detach(Pending p, std::string label, Done done, const std::function<bool()>& interrupted) {
         pause_seen_.store(false); // pauses before this request aren't its own
         bool cancelled = false;
         while (!p.wait_for(std::chrono::milliseconds{50})) {
-            if (!cancelled && interrupted_ && interrupted_()) {
+            if (!cancelled && interrupted && interrupted()) {
                 client_.cancel(p.request());
                 cancelled = true;
                 info("cancelling...");
             }
             if (took_pause(label)) {
                 auto held = std::make_shared<Pending>(std::move(p));
+                const std::scoped_lock lock{background_mutex_};
                 background_.push_back([held, done]() mutable {
                     if (!held->wait_for(std::chrono::milliseconds{0})) {
                         return false;
@@ -300,6 +308,11 @@ public:
 
     // load (or reload, by name) a file as a module; `pin` keeps it after this client leaves.
     bool load_file(const std::string& name, const std::string& path, bool reload_only = false, bool pin = false) {
+        return load_file(name, path, reload_only, pin, interrupted_);
+    }
+
+    // The same, cancelled when `interrupted` says so.
+    bool load_file(const std::string& name, const std::string& path, bool reload_only, bool pin, const std::function<bool()>& interrupted) {
         const auto source = read_text_file(path);
         if (!source) {
             error(std::format("can't read {}", path));
@@ -313,7 +326,8 @@ public:
                 }
                 info(std::format("reloaded {} (revision {})", name, *r));
                 return true;
-            });
+            },
+                                  interrupted);
         }
         return wait_or_detach(client_.async().load(name, *source), name, [this, name, pin](const Rhp::result<Rhp::module_id>& mod) {
             if (!mod) {
@@ -329,7 +343,8 @@ public:
                 info(std::format("pinned {}: it stays after this client disconnects", name));
             }
             return true;
-        });
+        },
+                              interrupted);
     }
 
     // Writes the host's LuaLS stubs to `path` (empty: prints them).
@@ -431,7 +446,10 @@ public:
             return false;
         }
         info(std::format("watching {} (save a .lua file to reload it; `unwatch` stops)", folder));
+        // The watcher's reloads are cancelled by its own stop request (unwatch), never by the shell's
+        // Ctrl+C: taking that flag here would leave the thread reading commands without it.
         watcher_ = std::jthread{[this, folder](std::stop_token stop) {
+            const std::function<bool()> stopping = [&stop] { return stop.stop_requested(); };
             std::map<std::filesystem::path, std::filesystem::file_time_type> seen = snapshot(folder);
             while (!stop.stop_requested()) {
                 std::this_thread::sleep_for(std::chrono::milliseconds{200});
@@ -441,7 +459,7 @@ public:
                         continue;
                     }
                     seen[file] = time;
-                    (void)load_file(module_name_for(file.string()), file.string());
+                    (void)load_file(module_name_for(file.string()), file.string(), false, false, stopping);
                 }
             }
         }};
@@ -847,15 +865,26 @@ private:
     }
 
     // Prints the results of requests that paused and have finished since. True if one did.
+    // The watcher's thread adds to them too: the list is taken under the lock and the callbacks
+    // (which print and may talk to the host) run outside it.
     bool report_background() {
+        std::vector<std::function<bool()>> pending;
+        {
+            const std::scoped_lock lock{background_mutex_};
+            pending.swap(background_);
+        }
         bool any = false;
-        for (auto it = background_.begin(); it != background_.end();) {
-            if ((*it)()) {
-                it = background_.erase(it);
+        std::vector<std::function<bool()>> unfinished;
+        for (auto& entry : pending) {
+            if (entry()) {
                 any = true;
             } else {
-                ++it;
+                unfinished.push_back(std::move(entry));
             }
+        }
+        if (!unfinished.empty()) {
+            const std::scoped_lock lock{background_mutex_};
+            background_.insert(background_.begin(), std::make_move_iterator(unfinished.begin()), std::make_move_iterator(unfinished.end()));
         }
         return any;
     }
@@ -965,7 +994,8 @@ Ctrl+C cancels a running script.)");
     std::atomic<std::uint64_t> last_paused_{0};
     std::mutex pause_mutex_;
     std::string pause_label_;                       // of the last pause (guarded by pause_mutex_)
-    std::vector<std::function<bool()>> background_; // requests that paused while the shell waited: true once done and printed
+    std::mutex background_mutex_;
+    std::vector<std::function<bool()>> background_; // requests that paused while the shell waited: true once done and printed (guarded by background_mutex_)
     std::jthread watcher_;
 };
 
