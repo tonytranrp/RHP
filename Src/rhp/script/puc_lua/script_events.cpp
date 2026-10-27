@@ -304,22 +304,31 @@ void sandbox_impl::deliver_now(std::string_view event, event_pusher args, module
         }
     }
     // 2. Waiters: they resume at the next resume pass with the arguments. One at a time, so a
-    // failure part way (memory) leaves the rest waiting rather than stranded.
+    // failure part way (memory) leaves the rest waiting rather than stranded. The arguments are
+    // pushed and packed before the waiter is taken, and it is looked up again after: those are Lua
+    // allocations, and a collection they run can call a finalizer that ends the waiting request.
     if (waiters_.contains(event)) {
         const std::string name{event};
         for (;;) {
-            const auto it = waiters_.find(name);
+            auto it = waiters_.find(name);
             if (it == waiters_.end() || it->second.empty()) {
                 break;
             }
-            const auto req = requests_.find(it->second.front());
-            if (req == requests_.end() || req->second->waiting != wait_kind::kEvent) {
+            const request_id id = it->second.front();
+            if (const auto req = requests_.find(id); req == requests_.end() || req->second->waiting != wait_kind::kEvent) {
                 it->second.erase(it->second.begin());
                 continue;
             }
             stack s{state_};
             const int nargs = args(s);
             const int packed = pack_top(state_, nargs);
+            it = waiters_.find(name);
+            const auto req = requests_.find(id);
+            if (it == waiters_.end() || it->second.empty() || it->second.front() != id || req == requests_.end() ||
+                req->second->waiting != wait_kind::kEvent) {
+                luaL_unref(state_, LUA_REGISTRYINDEX, packed); // it went meanwhile: the next one, if any
+                continue;
+            }
             it->second.erase(it->second.begin());
             luaL_unref(state_, LUA_REGISTRYINDEX, req->second->resume_ref);
             req->second->resume_ref = packed;

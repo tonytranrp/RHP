@@ -445,3 +445,27 @@ TEST_CASE("a failed task stays failed under remove and fault", "[script][tasks]"
         CHECK(out.failures[0].action == policy);
     }
 }
+
+TEST_CASE("a finalizer may cancel a task waiting for the event being delivered", "[script][tasks]") {
+    capture out;
+    sandbox box = make_box(out, {}, Rhp::role::kAdmin); // collectgarbage: a collection at a chosen allocation
+    REQUIRE(box.exec(R"lua(
+        waiter = rhp.spawn(function() rhp.wait_event("tests.tasks.gc_event") print("woken") end)
+        trap = setmetatable({}, {__gc = function() waiter:cancel() end})
+        rhp.on("tests.tasks.gc_event", function()
+            -- From here every allocation runs a whole collection: the delivery's next one (packing
+            -- the event's values for the waiter) finalizes the trap, which cancels the waiter.
+            pause = collectgarbage("param", "pause", 0)
+            stepsize = collectgarbage("param", "stepsize", 0)
+            collectgarbage()
+            trap = nil
+        end)
+    )lua"));
+    box.pump(); // the task starts and waits
+    REQUIRE(box.exec("rhp.publish('tests.tasks.gc_event', 1)"));
+    box.pump(); // the handler, then the waiter
+    REQUIRE(box.exec("collectgarbage('param', 'pause', pause) collectgarbage('param', 'stepsize', stepsize)"));
+    CHECK(box.exec<std::string>("return waiter:status()") == "cancelled");
+    pump(box, 2);
+    CHECK(out.lines.empty());
+}
