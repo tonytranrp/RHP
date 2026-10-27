@@ -11,7 +11,7 @@ from typing import Optional
 
 from ._errors import RhpError
 
-__all__ = ["Stream", "TcpStream", "TlsStream", "open_stream", "is_loopback"]
+__all__ = ["Stream", "TcpStream", "TlsStream", "open_stream", "is_loopback", "certificate_names_host"]
 
 # The tls-exporter channel binding (RFC 9266): 32 bytes, this label, no context.
 _EXPORTER_LABEL = b"EXPORTER-Channel-Binding"
@@ -77,8 +77,9 @@ class TcpStream(Stream):
 
 
 class TlsStream(Stream):
-    """TLS 1.3 over a TCP socket with pyOpenSSL. Without `ca_file` the host's certificate isn't checked:
-    the pre-shared key proofs are bound to this connection's tls-exporter value, so a relay that
+    """TLS 1.3 over a TCP socket with pyOpenSSL. With `ca_file` the host's certificate must chain to it
+    and name `server_name` (certificate_names_host). Without it the certificate isn't checked: the
+    pre-shared key proofs are bound to this connection's tls-exporter value, so a relay that
     terminates TLS can't complete the handshake (as RHP's own clients do)."""
 
     encrypted = True
@@ -108,6 +109,10 @@ class TlsStream(Stream):
         except SSL.Error as exc:
             raise RhpError("tls", "TLS handshake failed: %s" % (exc,), "client") from None
         self._conn = conn
+        # OpenSSL checked the chain; the name is checked here (pyOpenSSL has no hostname option).
+        if ca_file and not certificate_names_host(_peer_certificate(conn), server_name or ""):
+            self.close()
+            raise RhpError("tls", "the host's certificate isn't for %s" % (server_name,), "client")
         self.binding = conn.export_keying_material(_EXPORTER_LABEL, 32, None)
 
     def send_all(self, data: bytes) -> None:
@@ -147,6 +152,43 @@ def _is_ip(host: str) -> bool:
         return True
     except ValueError:
         return False
+
+
+def _peer_certificate(conn):
+    """The host's certificate as a `cryptography` x509.Certificate (pyOpenSSL depends on it), or None."""
+    try:
+        return conn.get_peer_certificate(as_cryptography=True)  # pyOpenSSL 24.3+
+    except TypeError:
+        certificate = conn.get_peer_certificate()
+        return certificate.to_cryptography() if certificate is not None else None
+
+
+def certificate_names_host(certificate, host: str) -> bool:
+    """Whether `certificate` (a `cryptography` x509.Certificate) is for `host`: an IP address must be
+    one of its subject alternative name IP addresses, a name one of its DNS names (case-insensitive; a
+    leading "*." stands for exactly one label). The subject's common name doesn't count (RFC 6125)."""
+    if certificate is None or not host:
+        return False
+    from cryptography import x509  # type: ignore
+
+    try:
+        names = certificate.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
+    except x509.ExtensionNotFound:
+        return False
+    try:
+        return ipaddress.ip_address(host.strip("[]")) in names.get_values_for_type(x509.IPAddress)
+    except ValueError:
+        pass
+    try:
+        wanted = host.rstrip(".").encode("idna").decode("ascii").lower()
+    except UnicodeError:
+        return False
+    label, _, parent = wanted.partition(".")
+    for pattern in names.get_values_for_type(x509.DNSName):
+        pattern = pattern.rstrip(".").lower()
+        if pattern == wanted or (pattern.startswith("*.") and label and parent and pattern[2:] == parent):
+            return True
+    return False
 
 
 def open_stream(host: str, port: int, tls: bool, ca_file: Optional[str], timeout: float) -> Stream:

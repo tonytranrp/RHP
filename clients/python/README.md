@@ -34,7 +34,7 @@ RHP has no release numbers; the package's version is `0+stage11`, the stage whos
 | Option | Default | What |
 |---|---|---|
 | `tls` | TLS except on loopback | `True` / `False` to force; TLS needs the `tls` extra |
-| `ca_file` | none | check the host's certificate against this CA. Without it the certificate isn't checked: the key proofs are bound to the TLS connection, so a relay that terminates TLS can't authenticate |
+| `ca_file` | none | check the host's certificate: it must chain to this CA and name the host dialed (a DNS name or IP address in its subject alternative names; `*.` covers one label; the common name doesn't count). Needs `cryptography`, which pyOpenSSL brings. Without it the certificate isn't checked: the key proofs are bound to the TLS connection, so a relay that terminates TLS can't authenticate |
 | `timeout` | 10 s | connect and handshake |
 | `request_timeout` | none | how long a blocking call waits for its reply |
 | `resume` | `True` | when the link drops, reconnect and continue the same session; requests in flight are sent again and run once |
@@ -82,7 +82,7 @@ python -m rhp_client -i dev.rhpid 127.0.0.1:7777 events game.round_over
 python -m rhp_client keygen dev
 ```
 
-Commands: `exec`, `load`, `call` (arguments parse as JSON when they can, else stay strings), `unload [--force]`, `revert`, `list`, `describe`, `events`. Options: `--tls` (TLS on loopback too), `--plain` (no TLS; the host must allow it with `insecure_lan`), `--ca FILE`. Exit status: 0 ok, 1 an RHP error, 2 bad usage.
+Commands: `exec`, `load`, `call` (arguments parse as JSON when they can, else stay strings), `unload [--force]`, `revert`, `list`, `describe`, `events`. Options: `--tls` (TLS on loopback too), `--plain` (no TLS; the host must allow it with `insecure_lan`), `--ca FILE` (the certificate must also name the host). Exit status: 0 ok, 1 an RHP error, 2 bad usage.
 
 `keygen NAME [--role observe|patch|admin] [--show-secret]` writes `NAME.rhpid` (never overwriting) and prints the host's keyring and signers lines, as `rhp-cli keygen` does: the role defaults to `patch` (`admin` prints a warning), and the keyring line shows `<psk from NAME.rhpid>` instead of the key unless `--show-secret` is given. The file is written to a temporary created exclusively with mode 0600, then renamed into place. On Windows Python's mode only sets the read-only flag, so the file gets its folder's permissions (your own folders are private to you; `rhp-cli keygen` sets an owner-only DACL instead).
 
@@ -97,4 +97,4 @@ pip install "./clients/python[test]"
 pytest clients/python/tests
 ```
 
-`tests/test_keygen.py` checks keygen's file and output. `tests/test_protocol.py` checks the codec, frames, handshake derivations and Ed25519 against golden vectors (`tests/vectors.json`; RHP's C++ suite checks the same frames). `tests/test_live.py` runs sessions against RHP's own host when `RHP_HEADLESS_SERVER` names a built `headless_server` and is skipped otherwise; RHP's ctest sets it (`python.client`, when Python 3 with pytest is found and `RHP_BUILD_EXAMPLES` is on).
+`tests/test_keygen.py` checks keygen's file and output; `tests/test_tls_names.py` the certificate name check (its TLS connection part needs pyOpenSSL). `tests/test_protocol.py` checks the codec, frames, handshake derivations and Ed25519 against golden vectors (`tests/vectors.json`; RHP's C++ suite checks the same frames). `tests/test_live.py` runs sessions against RHP's own host when `RHP_HEADLESS_SERVER` names a built `headless_server` and is skipped otherwise; RHP's ctest sets it (`python.client`, when Python 3 with pytest is found and `RHP_BUILD_EXAMPLES` is on).
