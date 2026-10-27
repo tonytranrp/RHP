@@ -13,6 +13,7 @@
 #include <rhp/core/error.hpp>
 #include <rhp/core/ids.hpp>
 #include <rhp/core/result.hpp>
+#include <rhp/core/role.hpp>
 #include <rhp/core/value.hpp>
 #include <rhp/script/lib.hpp>
 #include <rhp/script/lua_event.hpp>
@@ -392,4 +393,28 @@ TEST_CASE("pause and resume apply to subscriptions", "[script][schedule]") {
     REQUIRE(box.call(*mod, "resume"));
     fx::ping.fire(2);
     CHECK(out.lines == std::vector<std::string>{"got 2"});
+}
+
+TEST_CASE("rhp.timers skips an entry a finalizer removes while it builds the list", "[script][schedule]") {
+    manual_clock clock;
+    capture out;
+    sandbox_options options;
+    options.caller_role = Rhp::role::kAdmin; // collectgarbage: a collection at a chosen allocation
+    options.clock = clock.fn();
+    options.output = [&out](std::string_view line) { out.lines.emplace_back(line); };
+    sandbox box{std::move(options)};
+    const auto r = box.exec(R"lua(
+        local a = rhp.after(1000, function() end)
+        b = rhp.after(2000, function() end)
+        local pause = collectgarbage("param", "pause", 0)
+        local stepsize = collectgarbage("param", "stepsize", 0)
+        collectgarbage() -- from here every allocation runs a whole collection
+        setmetatable({}, {__gc = function() rhp.off(b) end}) -- garbage at once
+        local list = rhp.timers() -- its first allocation finalizes the garbage, which removes b
+        collectgarbage("param", "pause", pause)
+        collectgarbage("param", "stepsize", stepsize)
+        return #list, list[1].id == a
+    )lua");
+    REQUIRE(r.has_value());
+    CHECK(*r == value_list{Rhp::value{1}, Rhp::value{true}});
 }

@@ -315,17 +315,23 @@ void sandbox_impl::reschedule(lua_State* L, std::uint64_t seq, double interval) 
 
 void sandbox_impl::push_timers(lua_State* L) {
     const steady::time_point now = script_now();
-    std::vector<std::pair<std::uint64_t, const schedule_entry*>> mine; // in creation order
+    // The keys, in creation order; each entry is looked up again and copied before it is pushed:
+    // pushing allocates, and a collection can run a finalizer that removes an entry (rhp.off).
+    std::vector<std::uint64_t> mine;
     for (const auto& [key, e] : schedule_) {
         if (e.owner.module == current_.module) {
-            mine.emplace_back(key, &e);
+            mine.push_back(key);
         }
     }
-    std::ranges::sort(mine, {}, &std::pair<std::uint64_t, const schedule_entry*>::first);
+    std::ranges::sort(mine);
     lua_newtable(L);
     lua_Integer n = 0;
-    for (const auto& [key, entry] : mine) {
-        const schedule_entry& e = *entry;
+    for (const std::uint64_t key : mine) {
+        const auto it = schedule_.find(key);
+        if (it == schedule_.end()) {
+            continue;
+        }
+        const schedule_entry e = it->second;
         lua_createtable(L, 0, 9);
         lua_pushinteger(L, static_cast<lua_Integer>(e.seq));
         lua_setfield(L, -2, "id");
