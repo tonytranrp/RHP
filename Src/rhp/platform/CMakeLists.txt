@@ -1,4 +1,5 @@
-# Layer 2: the only folder that branches on the target OS (RHP_PLATFORM_*).
+# Layer 2: the folder for general OS facts (branches on RHP_PLATFORM_*); the net/local and net/mdns
+# backends branch inside their own .cpp files too.
 set(rhp_platform_libs "")
 if(RHP_PLATFORM STREQUAL "WINDOWS")
     list(APPEND rhp_platform_libs bcrypt)

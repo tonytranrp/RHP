@@ -4,8 +4,8 @@ The types every other module speaks. Namespace `Rhp` (the logger concept and log
 
 | Header | What |
 |---|---|
-| `error.hpp` | `Rhp::errc` (kPascal codes, `kLastErrc`), `Rhp::error` (`code`, owning `message`, `where`, `traceback`), `make_error`, `std::formatter` for both |
-| `result.hpp` | `Rhp::result<T>` = `std::expected<T, Rhp::error>`, `Rhp::fail(errc, "msg", "where")`, `Rhp::exception`, `Rhp::unwrap` |
+| `error.hpp` | `Rhp::errc` (kPascal codes, `kLastErrc`), `to_string` / `parse_errc` (a code's wire name), `Rhp::error` (`code`, owning `message`, `where`, `traceback`), `make_error`, `std::formatter` for both |
+| `result.hpp` | `Rhp::result<T>` = `std::expected<T, Rhp::error>`, `Rhp::fail(errc, "msg", "where")`, `Rhp::exception`, `Rhp::unwrap`, `is_result_v` |
 | `errors_mode.hpp` | `Rhp::errors::expected` (calls return `result<T>`) / `Rhp::errors::throwing` (calls return `T`, throw `Rhp::exception`); the `Rhp::errors::mode` concept |
 | `value.hpp` | `Rhp::value`: nil, bool, integer, number, string, bytes, array, map; `Rhp::nil`, `Rhp::value_list` |
 | `convert.hpp` | `Rhp::convert<T>` customization point, `to_value` / `from_value`, the `to_value_convertible` / `from_value_convertible` concepts; built-ins for scalars, strings, `vector`, `optional`, `map`, ids (`strong_id` as its integer) and `Rhp::error` (a map: code name, message, where, traceback) |
@@ -13,7 +13,7 @@ The types every other module speaks. Namespace `Rhp` (the logger concept and log
 | `log.hpp` | `log_level`, the `Rhp::core::logger` concept, `null_logger`, `stderr_logger`, `Rhp::log(...)` |
 | `role.hpp` | `Rhp::role` (`kObserve` < `kPatch` < `kAdmin`), `Rhp::allows(have, need)`, `parse_role`, `to_string` |
 | `limits.hpp` | `Rhp::limits` (structural, so it is a template argument: `config<>::limits<Rhp::limits{...}>`), `kDefaultLimits`, `cancel_scope` (`kNone` / `kRequests` / `kEverything`: which runs check for cancels) |
-| `async.hpp` | `Rhp::async<T>` / `Rhp::promise<T>` / `Rhp::make_async<T>()`: a result a binding delivers later, from any thread; `promise::stop_requested()` once the reader is gone |
+| `async.hpp` | `Rhp::async<T>` / `Rhp::promise<T>` / `Rhp::make_async<T>()`: a result a binding delivers later, from any thread; `promise::stop_requested()` once the reader is gone; `is_async_v` |
 | `json.hpp` | `Rhp::json::parse` / `to_text(value, indent)`: JSON for `Rhp::value` (rhp-cli, test reports, API descriptions); integers stay integers, floats keep a decimal point |
 | `subscription.hpp` | `Rhp::subscribable` (hands out ids) and `Rhp::subscription` (RAII, move-only, may outlive its source) |
 | `listener_table.hpp` | `Rhp::core::listener_table<Key, Fn>`: callbacks by key, added and removed from any thread, dispatched outside the lock |
@@ -44,4 +44,4 @@ Rhp::async<std::string> fetch(std::string url) {
 - `errc` values only grow (`kLastErrc` names the highest); the wire sends a code's name.
 - `async<T>`: the first `complete()` wins (the rest return false); the last promise copy dropped without completing gives the reader an error; `abandon()` requests a stop and hands back an outcome that arrived but wasn't taken, so whoever abandons it can undo it (the sandbox does this; see `script/README.md`).
 - `listener_table::remove()` is a barrier: once it returns, that callback neither runs nor starts on another thread. A callback may remove itself. Don't remove from a thread holding a lock the callback takes.
-- `limits` fields where 0 is not "off" say so in `limits.hpp` (`max_frame`, `max_blob`, `revisions`, the handshake and heartbeat times, `resume_ms`, `cancel_check_instructions`, `event_queue`).
+- Each `limits` field's comment in `limits.hpp` says what 0 means (usually unlimited / off; not for `max_frame`, `max_blob`, `revisions`, `pending_handshakes`, `backoff_min_ms` or `cancel_check_instructions`).

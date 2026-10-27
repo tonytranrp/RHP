@@ -62,10 +62,12 @@ struct auth_failed {
 };
 
 // A request that runs code or changes state: exec, load, reload, rollback, call, revert, unload,
-// checkpoint, revert_to, revert_all, pin, unpin - including refused ones (`outcome` is kOk when it
-// ran; a suspended request is reported when it finishes, with its final outcome, or kCancelled if
-// its identity is torn down first). `hash` is the BLAKE2b-256 of the source
-// (hex) for exec / load / reload, `signer` who signed it (empty: unsigned).
+// checkpoint, revert_to, revert_all, pin, unpin, release_apply, release_confirm, release_deactivate,
+// revoke, tune, and the debugger's actions other than paused / stack / variables / evaluate
+// (break, pause, continue / into / over / out, reset) - including refused ones (`outcome` is kOk
+// when it ran; a suspended request is reported when it finishes, with its final outcome, or
+// kCancelled if its identity is torn down first). `hash` is the BLAKE2b-256 of the source (hex) for
+// exec / load / reload, `signer` who signed it (empty: unsigned).
 struct script_executed {
     static constexpr std::string_view name = "script_executed";
     time_point time;
