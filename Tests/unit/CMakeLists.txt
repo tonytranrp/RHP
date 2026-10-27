@@ -5,6 +5,7 @@ rhp_add_test_suite(rhp_utils_tests
         utils/fixed_string_tests.cpp
         utils/function_traits_tests.cpp
         utils/scope_guard_tests.cpp
+        utils/siphash_tests.cpp
         utils/spsc_ring_tests.cpp
         utils/type_list_tests.cpp
         utils/units_tests.cpp

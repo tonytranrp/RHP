@@ -7,6 +7,7 @@ rhp_add_module(utils
         function_traits.hpp
         overloaded.hpp
         scope_guard.hpp
+        siphash.hpp
         spsc_ring.hpp
         type_list.hpp
         units.hpp
