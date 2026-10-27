@@ -1081,42 +1081,17 @@ struct runner::impl {
         return out;
     }
 
-    test_result run_one(sandbox& box, const listed& t, std::uint32_t repeat, reporter& out) {
-        test_result r;
-        r.id = t.id;
-        r.name = t.info.name;
-        r.file = current_file;
-        r.line = t.info.line;
-        r.tags = t.info.tags;
-        r.repeat = repeat;
-        if (t.info.skipped) {
-            r.outcome = status::kSkipped;
-            return r;
-        }
-        out.test_started(t.info);
-        output.clear();
-        emitted.clear();
-        failures.clear();
-        std::uint64_t frames = 0;
-        bool timed_out = false;
-        const auto started = steady::now();
+    // What a test's checkpoint saw: the counts its revert must bring back, and the meter at its start.
+    struct test_baseline {
+        script::sandbox_stats stats{};
+        std::size_t effects = 0;
+        std::vector<script::tunable_info> vars;
+        script::run_meter meter{};
+    };
 
-        // Setup of the blocks above it (lasts for the file: outside the test's checkpoint).
-        auto prepared = run_request(box, std::format("return __rhp_t.prepare({})", t.id), "rhp.test/prepare", frames, timed_out);
-        if (!prepared || prepared->empty() || !bool_of(prepared->front(), "ok")) {
-            r.outcome = status::kError;
-            if (!prepared) {
-                r.message = std::format("setup failed: {}", prepared.error());
-            } else if (!prepared->empty()) {
-                r.message = text_of(prepared->front(), "message");
-                r.fail_file = text_of(prepared->front(), "source");
-                r.fail_line = static_cast<std::uint32_t>(int_of(prepared->front(), "line"));
-                r.traceback = text_of(prepared->front(), "traceback");
-            }
-            r.where = where_of(r);
-            return r;
-        }
-
+    // Before a test (after the setup of its blocks): the fakes' calls and Lua-set results go, then the
+    // checkpoint and what it must come back to, a collection, the meter's start and the profiler.
+    test_baseline begin_test(sandbox& box) {
         // fake<L>: calls and the results a test set from Lua belong to that test (results set from C++
         // before the run stay).
         fake_registry::instance().clear_calls();
@@ -1124,23 +1099,25 @@ struct runner::impl {
             fake_registry::instance().reset(path);
         }
         (void)box.checkpoint("rhp.test");
-        const script::sandbox_stats before_stats = box.stats();
-        const std::size_t before_effects = box.effects().size();
-        std::vector<script::tunable_info> before_vars;
+        test_baseline before;
+        before.stats = box.stats();
+        before.effects = box.effects().size();
         if (auto vars = box.tunables()) {
-            before_vars = std::move(*vars);
+            before.vars = std::move(*vars);
         }
         if (options.measure) {
             (void)box.collect_garbage(1);
         }
         box.reset_peak();
-        const script::run_meter m0 = box.meter();
+        before.meter = box.meter();
         if (options.profile) {
             (void)box.start_profile({.interval = options.profile_interval});
         }
+        return before;
+    }
 
-        auto ran = run_request(box, std::format("return __rhp_t.run({})", t.id), "rhp.test/run", frames, timed_out);
-
+    // What the test's request cost, from the meter at its start (`m0`).
+    void collect_cost(sandbox& box, const script::run_meter& m0, std::uint64_t frames, test_result& r) {
         const script::run_meter m1 = box.meter();
         if (options.profile) {
             const script::profile_report p = box.stop_profile();
@@ -1164,8 +1141,36 @@ struct runner::impl {
         }
         r.cost.frames = frames;
         r.output = output;
+    }
 
-        // The test's own outcome.
+    // A budget the test set: a passing test over it fails.
+    static void apply_budget(const value& budget, test_result& r) {
+        std::vector<std::string> over;
+        const auto limit = [&](std::string_view key, double actual) {
+            const value* l = field(budget, key);
+            if (l == nullptr) {
+                return;
+            }
+            const double max = number_of(budget, key);
+            if (actual > max) {
+                over.push_back(std::format("{} {} > {}", key, actual, max));
+            }
+        };
+        limit("instructions", static_cast<double>(r.cost.instructions));
+        limit("memory", static_cast<double>(r.cost.peak));
+        limit("peak", static_cast<double>(r.cost.peak));
+        limit("allocations", static_cast<double>(r.cost.allocations));
+        limit("bytes", static_cast<double>(r.cost.bytes));
+        limit("retained", static_cast<double>(r.cost.retained));
+        limit("time_ms", r.cost.time_ms);
+        if (!over.empty() && r.outcome == status::kPassed) {
+            r.outcome = status::kFailed;
+            r.message = std::format("over budget: {}", join(over, ", "));
+        }
+    }
+
+    // The test's own outcome, from what __rhp_t.run returned.
+    static void read_outcome(const result<value_list>& ran, test_result& r) {
         if (!ran) {
             r.outcome = status::kError;
             r.message = std::format("{}", ran.error());
@@ -1214,62 +1219,37 @@ struct runner::impl {
             }
             // A budget the test set (test.budget or it(..., {budget = ...})).
             if (const value* budget = field(v, "budget"); budget != nullptr && budget->get_if<value::map>() != nullptr) {
-                std::vector<std::string> over;
-                const auto limit = [&](std::string_view key, double actual) {
-                    const value* l = field(*budget, key);
-                    if (l == nullptr) {
-                        return;
-                    }
-                    const double max = number_of(*budget, key);
-                    if (actual > max) {
-                        over.push_back(std::format("{} {} > {}", key, actual, max));
-                    }
-                };
-                limit("instructions", static_cast<double>(r.cost.instructions));
-                limit("memory", static_cast<double>(r.cost.peak));
-                limit("peak", static_cast<double>(r.cost.peak));
-                limit("allocations", static_cast<double>(r.cost.allocations));
-                limit("bytes", static_cast<double>(r.cost.bytes));
-                limit("retained", static_cast<double>(r.cost.retained));
-                limit("time_ms", r.cost.time_ms);
-                if (!over.empty() && r.outcome == status::kPassed) {
-                    r.outcome = status::kFailed;
-                    r.message = std::format("over budget: {}", join(over, ", "));
-                }
+                apply_budget(*budget, r);
             }
             note_globals(v, r.notes);
             if (bool_of(v, "strict_undo")) {
                 r.notes.emplace_back("strict-undo");
             }
         }
+    }
 
-        // A test stopped by a limit, a timeout or a cancel never ran its cleanup: finally, after_each
-        // and the removal of its globals run now, in a request of their own.
-        if (!ran) {
-            std::uint64_t abort_frames = 0;
-            bool abort_timed_out = false;
-            auto aborted = run_request(box, "return __rhp_t.abort()", "rhp.test/abort", abort_frames, abort_timed_out);
-            if (!aborted) {
-                r.notes.push_back(std::format("its cleanup failed too: {}", aborted.error()));
-            } else if (!aborted->empty()) {
-                note_globals(aborted->front(), r.notes);
-                if (const auto* errs = array_of(aborted->front(), "errors")) {
-                    for (const value& e : *errs) {
-                        if (const auto* text = e.get_if<std::string>()) {
-                            r.notes.push_back(std::format("its cleanup failed: {}", *text));
-                        }
+    // A test stopped by a limit, a timeout or a cancel never ran its cleanup: finally, after_each and
+    // the removal of its globals run now, in a request of their own.
+    void run_abort(sandbox& box, test_result& r) {
+        std::uint64_t abort_frames = 0;
+        bool abort_timed_out = false;
+        auto aborted = run_request(box, "return __rhp_t.abort()", "rhp.test/abort", abort_frames, abort_timed_out);
+        if (!aborted) {
+            r.notes.push_back(std::format("its cleanup failed too: {}", aborted.error()));
+        } else if (!aborted->empty()) {
+            note_globals(aborted->front(), r.notes);
+            if (const auto* errs = array_of(aborted->front(), "errors")) {
+                for (const value& e : *errs) {
+                    if (const auto* text = e.get_if<std::string>()) {
+                        r.notes.push_back(std::format("its cleanup failed: {}", *text));
                     }
                 }
             }
         }
+    }
 
-        // Events the test published that are still queued reach their handlers now (within this
-        // test, whose revert follows), not in the next test.
-        for (int round = 0; round < 4 && box.stats().queued_events != 0; ++round) {
-            pump(box, r.cost.frames);
-        }
-
-        // Undo it, and check that everything it did is gone.
+    // Undoes the test and checks that everything it did is gone: a leak fails a passing test.
+    void check_leaks(sandbox& box, const test_baseline& before, test_result& r) {
         const bool strict = options.strict_undo || std::ranges::find(r.notes, std::string{"strict-undo"}) != r.notes.end();
         std::erase(r.notes, std::string{"strict-undo"});
         auto undone = box.revert_to("rhp.test");
@@ -1290,20 +1270,20 @@ struct runner::impl {
             }
         }
         const script::sandbox_stats after_stats = box.stats();
-        const auto compare = [&](std::size_t before, std::size_t after, std::string_view what) {
-            if (after > before) {
-                leaks.push_back(std::format("{} {} left after the test was undone", after - before, what));
+        const auto compare = [&](std::size_t had, std::size_t has, std::string_view what) {
+            if (has > had) {
+                leaks.push_back(std::format("{} {} left after the test was undone", has - had, what));
             }
         };
-        compare(before_stats.schedule_entries, after_stats.schedule_entries, "timer(s) or frame callback(s)");
-        compare(before_stats.subscriptions, after_stats.subscriptions, "subscription(s)");
-        compare(before_stats.tasks, after_stats.tasks, "task(s)");
-        compare(before_stats.waiting, after_stats.waiting, "waiting request(s)");
-        compare(before_effects, box.effects().size(), "ledger effect(s)");
+        compare(before.stats.schedule_entries, after_stats.schedule_entries, "timer(s) or frame callback(s)");
+        compare(before.stats.subscriptions, after_stats.subscriptions, "subscription(s)");
+        compare(before.stats.tasks, after_stats.tasks, "task(s)");
+        compare(before.stats.waiting, after_stats.waiting, "waiting request(s)");
+        compare(before.effects, box.effects().size(), "ledger effect(s)");
         if (auto vars = box.tunables()) {
             for (const script::tunable_info& now : *vars) {
-                const auto was = std::ranges::find(before_vars, now.path, &script::tunable_info::path);
-                if (was != before_vars.end() && was->current != now.current) {
+                const auto was = std::ranges::find(before.vars, now.path, &script::tunable_info::path);
+                if (was != before.vars.end() && was->current != now.current) {
                     leaks.push_back(std::format("{} is still changed after the test was undone", now.path));
                 }
             }
@@ -1316,6 +1296,61 @@ struct runner::impl {
                 r.notes.push_back(std::move(l));
             }
         }
+    }
+
+    test_result run_one(sandbox& box, const listed& t, std::uint32_t repeat, reporter& out) {
+        test_result r;
+        r.id = t.id;
+        r.name = t.info.name;
+        r.file = current_file;
+        r.line = t.info.line;
+        r.tags = t.info.tags;
+        r.repeat = repeat;
+        if (t.info.skipped) {
+            r.outcome = status::kSkipped;
+            return r;
+        }
+        out.test_started(t.info);
+        output.clear();
+        emitted.clear();
+        failures.clear();
+        std::uint64_t frames = 0;
+        bool timed_out = false;
+        const auto started = steady::now();
+
+        // Setup of the blocks above it (lasts for the file: outside the test's checkpoint).
+        auto prepared = run_request(box, std::format("return __rhp_t.prepare({})", t.id), "rhp.test/prepare", frames, timed_out);
+        if (!prepared || prepared->empty() || !bool_of(prepared->front(), "ok")) {
+            r.outcome = status::kError;
+            if (!prepared) {
+                r.message = std::format("setup failed: {}", prepared.error());
+            } else if (!prepared->empty()) {
+                r.message = text_of(prepared->front(), "message");
+                r.fail_file = text_of(prepared->front(), "source");
+                r.fail_line = static_cast<std::uint32_t>(int_of(prepared->front(), "line"));
+                r.traceback = text_of(prepared->front(), "traceback");
+            }
+            r.where = where_of(r);
+            return r;
+        }
+
+        const test_baseline before = begin_test(box);
+
+        auto ran = run_request(box, std::format("return __rhp_t.run({})", t.id), "rhp.test/run", frames, timed_out);
+
+        collect_cost(box, before.meter, frames, r);
+        read_outcome(ran, r);
+        if (!ran) {
+            run_abort(box, r);
+        }
+
+        // Events the test published that are still queued reach their handlers now (within this
+        // test, whose revert follows), not in the next test.
+        for (int round = 0; round < 4 && box.stats().queued_events != 0; ++round) {
+            pump(box, r.cost.frames);
+        }
+
+        check_leaks(box, before, r);
         if (timed_out && r.outcome == status::kPassed) {
             r.outcome = status::kError;
             r.message = "the test timed out";
