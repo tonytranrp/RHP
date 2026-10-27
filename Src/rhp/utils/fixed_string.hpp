@@ -74,10 +74,4 @@ fixed_string(const char (&)[N]) -> fixed_string<N - 1>;
     return std::ranges::all_of(name, [&](char c) { return is_alpha(c) || is_digit(c); });
 }
 
-template <class T>
-inline constexpr bool is_fixed_string_v = false;
-
-template <std::size_t N>
-inline constexpr bool is_fixed_string_v<fixed_string<N>> = true;
-
 } // namespace Rhp::utils
