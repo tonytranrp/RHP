@@ -132,7 +132,7 @@ jobs:
       - name: Fuzz (60 s per target)
         run: |
           dir=build/linux-clang-fuzz/Tests/fuzz/RelWithDebInfo
-          for target in frame msgpack envelope sandbox_escape network; do
+          for target in frame msgpack envelope sandbox_escape network release; do
             mkdir -p corpus/$target
             $dir/rhp_fuzz_${target}_replay --write-corpus corpus/$target
             $dir/rhp_fuzz_$target -max_total_time=60 -timeout=10 -rss_limit_mb=2048 corpus/$target
