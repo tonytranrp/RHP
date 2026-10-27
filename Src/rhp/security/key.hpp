@@ -37,6 +37,12 @@ public:
     [[nodiscard]] bool empty() const noexcept { return bytes_.empty(); }
     [[nodiscard]] std::string to_base64() const;
 
+    // Whether the bytes look chosen by a person rather than random: printable ASCII only (a
+    // passphrase, base64-encoded) or fewer distinct values than half the size (zeros, a repeated
+    // pattern). 32 random bytes pass both with near certainty. For warnings only (identity files
+    // report it): never a reason to refuse a key.
+    [[nodiscard]] bool looks_weak() const noexcept;
+
 private:
     void wipe() noexcept;
 

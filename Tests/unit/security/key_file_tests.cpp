@@ -55,6 +55,10 @@ void let_everyone_read(const fs::path& file) {
 #endif
 }
 
+[[nodiscard]] key key_of(std::string_view text) {
+    return *key::from_bytes(std::as_bytes(std::span{text}));
+}
+
 } // namespace key_file_fixtures
 
 using namespace key_file_fixtures;
@@ -86,6 +90,23 @@ TEST_CASE("identity files are saved owner-only and warn when others can read the
     CHECK(std::distance(fs::directory_iterator{dir.path}, fs::directory_iterator{}) == 1); // no temporaries left
 
     CHECK(identity_file::generate("x")->save((dir.path / "no" / "such" / "folder" / "x.rhpid").string()).error().code == errc::kInvalidArgument);
+}
+
+TEST_CASE("a psk that looks like a passphrase loads with a warning", "[security][files]") {
+    CHECK_FALSE(key::generate()->looks_weak());
+    CHECK(key_of("correct horse battery staple").looks_weak());                                     // printable text
+    CHECK(key_of(std::string(32, '\0')).looks_weak());                                              // zeros
+    CHECK(key_of("\x01\x02\x01\x02\x01\x02\x01\x02\x01\x02\x01\x02\x01\x02\x01\x02").looks_weak()); // a pattern
+    CHECK_FALSE(key{}.looks_weak());
+
+    // It still loads: the warning is only a warning.
+    const std::string text = std::format("name = \"dev\"\npsk = \"{}\"\n", key_of("correct horse battery staple").to_base64());
+    auto weak = identity_file::parse(text);
+    REQUIRE(weak);
+    REQUIRE(weak->warnings.size() == 1);
+    CHECK(weak->warnings.front().find("not random") != std::string::npos);
+    auto strong = identity_file::generate("dev");
+    CHECK(identity_file::parse(strong->to_text())->warnings.empty());
 }
 
 TEST_CASE("dev session files round-trip owner-only", "[security][dev_session]") {
