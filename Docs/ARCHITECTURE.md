@@ -913,7 +913,7 @@ ctest --preset windows-msvc -C Debug
 ### 12.4 Consuming RHP (CPM / add_subdirectory)
 
 ```cmake
-CPMAddPackage(NAME rhp GITHUB_REPOSITORY tonytranrp/RHP GIT_TAG stage-11)  # a stage tag or a commit sha
+CPMAddPackage(NAME rhp GITHUB_REPOSITORY tonytranrp/RHP GIT_TAG stage-12)  # a stage tag or a commit sha
 target_link_libraries(my_game PRIVATE Rhp::rhp)
 ```
 

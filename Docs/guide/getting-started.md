@@ -31,10 +31,10 @@ The executable is `build/Debug/rhp_demo.exe`. Run it from the directory holding 
 For a project that already uses CPM, replace `add_subdirectory` with a pinned package declaration:
 
 ```cmake
-CPMAddPackage(NAME rhp GITHUB_REPOSITORY tonytranrp/RHP GIT_TAG stage-11)   # or a commit sha
+CPMAddPackage(NAME rhp GITHUB_REPOSITORY tonytranrp/RHP GIT_TAG stage-12)   # or a commit sha
 ```
 
-Releases are tagged by stage (`stage-0` ... `stage-11`); there are no version numbers. This guide describes Stage 12, which has no tag yet: pin a commit sha to use it. A host and its clients must use the same protocol revision (Stages 11 and 12 both speak revision 6). RHP's tests, tools, examples and install rules default to OFF when consumed as a subproject, and its warnings aren't errors there; build the CLI from RHP's own checkout as described next.
+Releases are tagged by stage (`stage-0` ... `stage-12`); there are no version numbers. This guide describes Stage 12 (`stage-12`). A host and its clients must use the same protocol revision (Stages 11 and 12 both speak revision 6). RHP's tests, tools, examples and install rules default to OFF when consumed as a subproject, and its warnings aren't errors there; build the CLI from RHP's own checkout as described next.
 
 ### Installed package
 

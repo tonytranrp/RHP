@@ -97,11 +97,11 @@ Then follow the [first run](Docs/guide/getting-started.md#first-run-host-plus-rh
 ## Use it in your project
 
 ```cmake
-CPMAddPackage(NAME rhp GITHUB_REPOSITORY tonytranrp/RHP GIT_TAG stage-11)   # or a commit sha
+CPMAddPackage(NAME rhp GITHUB_REPOSITORY tonytranrp/RHP GIT_TAG stage-12)   # or a commit sha
 target_link_libraries(my_app PRIVATE Rhp::rhp)
 ```
 
-`add_subdirectory` works the same way. Or install RHP once and use `find_package(rhp CONFIG REQUIRED)` with no version ([installed package](Docs/guide/getting-started.md#installed-package)). Releases are tagged by stage (`stage-0` ... `stage-11`); there are no version numbers. Stage 12 is not tagged yet: pin a commit to use it. Hosts, clients and `rhp-cli` must speak the same protocol revision (Stages 7 to 9: revision 4; Stage 10: 5; Stages 11 and 12: 6).
+`add_subdirectory` works the same way. Or install RHP once and use `find_package(rhp CONFIG REQUIRED)` with no version ([installed package](Docs/guide/getting-started.md#installed-package)). Releases are tagged by stage (`stage-0` ... `stage-12`); there are no version numbers. Hosts, clients and `rhp-cli` must speak the same protocol revision (Stages 7 to 9: revision 4; Stage 10: 5; Stages 11 and 12: 6).
 
 ## Documentation
 

@@ -1,6 +1,6 @@
 # Status and TODO
 
-Last updated 2026-10-24. Stages 0–12 are implemented and merged (tags `stage-0` … `stage-11`; Stage 12 is untagged, so pin a commit for it). Progress is tracked as "Stage N" only (no `v1` / `v2` naming anywhere). Known limits are in [the guide's limitations page](guide/limitations.md).
+Last updated 2026-10-27. Stages 0–12 are implemented, merged and tagged (`stage-0` … `stage-12`). Progress is tracked as "Stage N" only (no `v1` / `v2` naming anywhere). Known limits are in [the guide's limitations page](guide/limitations.md).
 
 ## Stage 12 — a test engine for Lua scripts
 
@@ -78,6 +78,23 @@ Done when: *a stranger can install RHP with `find_package`, the reproduced threa
 Process for every stage: one branch + PR per stage, conventional commits (`feat:`, `fix:`, `test:`, `docs:`, `ci:`), rebase-merge only when told to.
 
 ## Recorded validation
+
+### Cleanup pass (2026-10-27)
+
+Debug builds of the `refactor-cleanup` branch (section-by-section cleanup, 33 bug fixes) on this Windows/WSL host, plus hosted CI:
+
+| Check | Result |
+|---|---|
+| `windows-msvc` | 938/938 |
+| `windows-msvc`, unity build | 932/932 |
+| `windows-msvc`, `RHP_ENABLE=OFF` | 230/230 |
+| `windows-clang-cl` | 932/932 |
+| `windows-msvc-asan` | 927/927 |
+| `linux-clang` (WSL, unity build) | 932/932 |
+| `linux-clang-asan` (WSL, no PCH) | 930/930 |
+| `linux-clang-tsan` (WSL) | 930/930 |
+| Hosted CI (Linux, Windows, Apple, Android, fuzz) | all 15 jobs pass |
+| Release benchmarks against `main` | within noise; the one regression found (an empty test file) fixed ([benchmarks](benchmarks.md#cleanup-pass)) |
 
 ### Lua speed pass (2026-10-26)
 
