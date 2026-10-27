@@ -82,10 +82,10 @@ result<typename Entry::type> pull_handle(stack& s, int index) {
 
 // How a pulled argument is held for the call: a struct view's object by const reference stays a
 // reference (no copy); everything else is held by value.
-template <class Handles, class T>
+template <utils::type_list_like Handles, class T>
 using pulled_t = std::conditional_t<view_param_kind<Handles, T>() == view_param::kConstRef, std::reference_wrapper<const std::remove_cvref_t<T>>, std::remove_cvref_t<T>>;
 
-template <class Handles, class T>
+template <utils::type_list_like Handles, class T>
 result<pulled_t<Handles, T>> pull_arg(stack& s, int index) {
     using U = std::remove_cvref_t<T>;
     if constexpr (is_span_v<U>) {
@@ -129,7 +129,7 @@ result<pulled_t<Handles, T>> pull_arg(stack& s, int index) {
     }
 }
 
-template <class Handles, class T>
+template <utils::type_list_like Handles, class T>
 void push_arg(stack& s, const T& v) {
     using U = std::remove_cvref_t<T>;
     if constexpr (is_handle_v<Handles, U>) {
@@ -147,7 +147,7 @@ void push_arg(stack& s, const T& v) {
 
 // Pushes a binding's result; returns the number of Lua results. Rhp::result errors are raised.
 // `label` is a string or a binding_label (read only when an error needs it).
-template <class Handles, class R, class Label>
+template <utils::type_list_like Handles, class R, class Label>
 int push_return(stack& s, const Label& label, R& r) {
     if constexpr (is_tuple_v<R>) {
         std::apply([&](const auto&... items) { (push_arg<Handles>(s, items), ...); }, r);
@@ -272,7 +272,7 @@ struct static_label {
 };
 
 // `label` converts to std::string_view (binding_label, static_label).
-template <class Handles, class Entry, class Label, std::size_t... Is>
+template <utils::type_list_like Handles, class Entry, class Label, std::size_t... Is>
 int invoke_fn(stack& s, Label label, std::index_sequence<Is...>) {
     using args = typename Entry::traits::args;
     using R = typename Entry::traits::return_type;
@@ -349,10 +349,10 @@ int invoke_fn(stack& s, Label label, std::index_sequence<Is...>) {
 
 // How the plain trampoline holds one argument: as itself, or a handle (which needn't be default
 // constructible) in an optional.
-template <class Handles, class T>
+template <utils::type_list_like Handles, class T>
 using plain_storage_t = std::conditional_t<is_handle_v<Handles, T>, std::optional<storage_t<T>>, storage_t<T>>;
 
-template <class Handles, class T>
+template <utils::type_list_like Handles, class T>
 consteval arg_kind plain_kind() {
     if constexpr (is_handle_v<Handles, T>) {
         return arg_kind::kOther;
@@ -362,7 +362,7 @@ consteval arg_kind plain_kind() {
 }
 
 // Converts read slot `slot` (a plain argument) or pulls the handle at `index` into `out`.
-template <class Handles, class T>
+template <utils::type_list_like Handles, class T>
 bool take_plain(stack& s, int index, const arg_slot& slot, plain_storage_t<Handles, T>& out) {
     if constexpr (is_handle_v<Handles, T>) {
         auto h = pull_handle<find_handle_t<Handles, T>>(s, index);
@@ -376,7 +376,7 @@ bool take_plain(stack& s, int index, const arg_slot& slot, plain_storage_t<Handl
     }
 }
 
-template <class Handles, class T>
+template <utils::type_list_like Handles, class T>
 decltype(auto) plain_value(plain_storage_t<Handles, T>& held) {
     if constexpr (is_handle_v<Handles, T>) {
         return static_cast<storage_t<T>&&>(*held);
@@ -388,7 +388,7 @@ decltype(auto) plain_value(plain_storage_t<Handles, T>& held) {
 // The plain trampoline: one stack::read_args for every plain argument (handles are pulled as on the
 // general path), no result<> per argument, then the call and push_return as on the general path. An
 // argument that doesn't fit sends the call down the general path, which raises the error it always has.
-template <class Handles, class Entry, class Label, std::size_t... Is>
+template <utils::type_list_like Handles, class Entry, class Label, std::size_t... Is>
 int call_plain(stack& s, Label label, [[maybe_unused]] std::index_sequence<Is...> seq) {
     using args = typename Entry::traits::args;
     using R = typename Entry::traits::return_type;
@@ -478,7 +478,7 @@ bool view_find(R&& r, region& out) noexcept {
 }
 
 // Whether a handle argument of a view binding is still alive (true for every other argument).
-template <class Handles, class T>
+template <utils::type_list_like Handles, class T>
 bool arg_alive(const T& v) {
     if constexpr (is_handle_v<Handles, T>) {
         return std::invoke(find_handle_t<Handles, T>::is_alive, v);
@@ -490,7 +490,7 @@ bool arg_alive(const T& v) {
 }
 
 // Sets `out` when a handle argument of a view binding died since the view was made.
-template <class Handles, class T>
+template <utils::type_list_like Handles, class T>
 void check_alive(const T& v, std::optional<error>& out) {
     if (out) {
         return;
@@ -515,7 +515,7 @@ inline constexpr char binding_tag_v = 0;
 // A host view's source: the binding and copies of the arguments it was called with. Every access
 // calls the binding again (handle arguments checked first), so the view never holds a pointer that
 // could dangle.
-template <class Handles, class Entry, class... Captured>
+template <utils::type_list_like Handles, class Entry, class... Captured>
 class binding_source final : public view_source {
 public:
     template <class... A>
@@ -585,7 +585,7 @@ private:
     std::tuple<Captured...> args_;
 };
 
-template <class Handles, class Entry>
+template <utils::type_list_like Handles, class Entry>
 consteval host_view_init view_init_of() {
     using V = view_result<Handles, typename Entry::traits::return_type>;
     host_view_init init{};
@@ -605,7 +605,7 @@ struct view_type_of {
 // Calls a binding that returns a view and pushes the view (nil for a null pointer): a userdata
 // holding a binding_source with copies of the arguments. Errors raise at the call, as on the
 // general path.
-template <class Handles, class Entry, class Label, std::size_t... Is>
+template <utils::type_list_like Handles, class Entry, class Label, std::size_t... Is>
 int call_view(stack& s, Label label, std::index_sequence<Is...>) {
     using args = typename Entry::traits::args;
     using source = binding_source<Handles, Entry, capture_t<utils::at_t<args, Is>>...>;
@@ -639,7 +639,7 @@ int call_view(stack& s, Label label, std::index_sequence<Is...>) {
 
 // One call of an asynchronous binding: its Rhp::async<T>, plus copies of the arguments when its
 // undo<G> takes them.
-template <class Handles, class Entry, class... Captured>
+template <utils::type_list_like Handles, class Entry, class... Captured>
 class async_call final : public async_wait {
 public:
     using async_type = std::remove_cvref_t<typename Entry::traits::return_type>;
@@ -732,7 +732,7 @@ private:
 
 // Calls an asynchronous binding. Returns its number of results when it finished at once, or -1
 // when the request must wait (the sandbox keeps the call).
-template <class Handles, class Entry, std::size_t... Is>
+template <utils::type_list_like Handles, class Entry, std::size_t... Is>
 int start_async(stack& s, context& ctx, std::string_view label, std::index_sequence<Is...>) {
     using args = typename Entry::traits::args;
     using R = std::remove_cvref_t<typename Entry::traits::return_type>;
@@ -799,7 +799,7 @@ int start_async(stack& s, context& ctx, std::string_view label, std::index_seque
 }
 
 // Upvalue 1 of every binding closure is its full label ("game.debug.dump").
-template <class Handles, class Entry>
+template <utils::type_list_like Handles, class Entry>
 int call_fn(lua_State* L) {
     stack s{L};
     check_role<Entry::required>(s, binding_label{s});
@@ -823,7 +823,7 @@ int call_fn(lua_State* L) {
 // A property's getter: no upvalues, so its handle's __index (handle_index, stack.cpp) runs it in its
 // own frame, the handle at index 1. Called from Lua (a test's swapped-out original) it reads the
 // handle at index 1 too. Its label ("entity.hp") is known at compile time.
-template <class Handles, class M>
+template <utils::type_list_like Handles, class M>
 int get_property(lua_State* L) {
     static_assert(plain_binding_v<Handles, M>, "a property takes only its handle and never waits or journals");
     using H = find_handle_t<Handles, typename M::self_type>;
@@ -838,7 +838,7 @@ int get_property(lua_State* L) {
 }
 
 // Reads no upvalues and raises nothing that needs a label: the lib proxy calls it in its own frame.
-template <class Handles, class Entry>
+template <utils::type_list_like Handles, class Entry>
 int get_var(lua_State* L) {
     stack s{L};
     if constexpr (Entry::kind == entry_kind::kVar) {
@@ -850,7 +850,7 @@ int get_var(lua_State* L) {
 }
 
 // Called as setter(new_value). Journals the replaced value through the variable's layer stack.
-template <class Handles, class Entry>
+template <utils::type_list_like Handles, class Entry>
 int set_var(lua_State* L) {
     stack s{L};
     context& ctx = s.context();
@@ -877,10 +877,10 @@ int set_var(lua_State* L) {
 // getters, setters) into a locked userdata proxy named `label`; leaves the proxy on top.
 void make_lib_proxy(stack& s, std::string_view label);
 
-template <class Lib, class Handles>
+template <class Lib, utils::type_list_like Handles>
 struct lib_builder;
 
-template <utils::fixed_string Name, class... Entries, class Handles>
+template <utils::fixed_string Name, class... Entries, utils::type_list_like Handles>
 struct lib_builder<lib<Name, Entries...>, Handles> {
     // Pushes the proxy for this lib; `label` is its full dotted path ("game", "game.debug").
     static void push(stack& s, std::string_view label) {
@@ -922,10 +922,10 @@ private:
 
 // ---- methods and properties ---------------------------------------------------------------------------
 
-template <class Handles, class Members>
+template <utils::type_list_like Handles, class Members>
 struct member_installer;
 
-template <class Handles, class... Ms>
+template <utils::type_list_like Handles, class... Ms>
 struct member_installer<Handles, utils::type_list<Ms...>> {
     // All or nothing: every name is checked free on its handle before any is added.
     static void install([[maybe_unused]] stack& s) {
@@ -952,7 +952,7 @@ private:
     }
 };
 
-template <class Handles>
+template <utils::type_list_like Handles>
 struct handle_definer;
 
 template <class... Hs>
@@ -981,7 +981,7 @@ void* field_address(void* object) noexcept {
     return const_cast<void*>(static_cast<const volatile void*>(std::addressof(static_cast<C*>(object)->*Member)));
 }
 
-template <class Handles, class F>
+template <utils::type_list_like Handles, class F>
 consteval field_desc make_field() {
     using M = typename F::value_type;
     field_desc d{};
@@ -1006,10 +1006,10 @@ consteval field_desc make_field() {
 }
 
 // The fields of view type V (a view_entry) among the tree's Fields, in declaration order.
-template <class Handles, class Fields, class V>
+template <utils::type_list_like Handles, class Fields, class V>
 struct view_fields;
 
-template <class Handles, class... Fs, class V>
+template <utils::type_list_like Handles, class... Fs, class V>
 struct view_fields<Handles, utils::type_list<Fs...>, V> {
     template <class F>
     static constexpr bool mine = std::is_same_v<typename F::owner_type, typename V::type>;
@@ -1030,7 +1030,7 @@ struct view_fields<Handles, utils::type_list<Fs...>, V> {
     static constexpr std::array<field_desc, count> fields = make();
 };
 
-template <class Handles, class Fields>
+template <utils::type_list_like Handles, class Fields>
 struct view_definer;
 
 template <class... Hs, class Fields>

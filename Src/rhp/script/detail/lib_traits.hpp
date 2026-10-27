@@ -93,7 +93,7 @@ using members_of_t = utils::filter_t<flat_entries_t<Lib>, is_member_entry>;
 template <class Lib>
 using fields_in_t = utils::filter_t<flat_entries_t<Lib>, is_field_entry>;
 
-template <class Handles, class T, entry_kind K>
+template <utils::type_list_like Handles, class T, entry_kind K>
 struct find_typed;
 
 // The entry of kind K for C++ type T in Handles, or void.
@@ -103,17 +103,17 @@ struct find_typed<utils::type_list<Hs...>, T, K> {
 };
 
 // The handle entry for C++ type T in Handles, or void.
-template <class Handles, class T>
+template <utils::type_list_like Handles, class T>
 using find_handle_t = typename find_typed<Handles, std::remove_cvref_t<T>, entry_kind::kHandle>::type;
 
-template <class Handles, class T>
+template <utils::type_list_like Handles, class T>
 inline constexpr bool is_handle_v = !std::is_void_v<find_handle_t<Handles, T>>;
 
 // The view entry for C++ type T in Handles, or void.
-template <class Handles, class T>
+template <utils::type_list_like Handles, class T>
 using find_view_t = typename find_typed<Handles, std::remove_cvref_t<T>, entry_kind::kView>::type;
 
-template <class Handles, class T>
+template <utils::type_list_like Handles, class T>
 inline constexpr bool is_view_v = !std::is_void_v<find_view_t<Handles, T>>;
 
 // How a parameter takes a struct view's object: by value (a copy), by const reference, as a const
@@ -125,7 +125,7 @@ enum class view_param : std::uint8_t {
     kConstPointer
 };
 
-template <class Handles, class T>
+template <utils::type_list_like Handles, class T>
 consteval view_param view_param_kind() {
     if constexpr (std::is_lvalue_reference_v<T>) {
         using U = std::remove_reference_t<T>;
@@ -145,7 +145,7 @@ consteval view_param view_param_kind() {
 template <class T>
 inline constexpr bool by_value_or_const_ref_v = !std::is_reference_v<T> || std::is_const_v<std::remove_reference_t<T>>;
 
-template <class Handles, class T>
+template <utils::type_list_like Handles, class T>
 struct arg_traits {
     using U = std::remove_cvref_t<T>;
     static constexpr bool handle = is_handle_v<Handles, U>;
@@ -164,27 +164,27 @@ struct arg_traits {
     static constexpr bool push_ok = handle || optional_handle || pushable<U>;
 };
 
-template <class Handles, class R>
+template <utils::type_list_like Handles, class R>
 struct return_traits {
     static constexpr bool ok = arg_traits<Handles, R>::push_ok;
 };
 
-template <class Handles>
+template <utils::type_list_like Handles>
 struct return_traits<Handles, void> {
     static constexpr bool ok = true;
 };
 
-template <class Handles, class... Ts>
+template <utils::type_list_like Handles, class... Ts>
 struct return_traits<Handles, std::tuple<Ts...>> {
     static constexpr bool ok = (arg_traits<Handles, Ts>::push_ok && ...);
 };
 
-template <class Handles, class T, class E>
+template <utils::type_list_like Handles, class T, class E>
 struct return_traits<Handles, std::expected<T, E>> {
     static constexpr bool ok = std::is_same_v<E, error> && return_traits<Handles, T>::ok;
 };
 
-template <class Handles, class T>
+template <utils::type_list_like Handles, class T>
 struct return_traits<Handles, Rhp::async<T>> {
     static constexpr bool ok = return_traits<Handles, T>::ok;
 };
@@ -284,16 +284,16 @@ struct plain_arg<std::span<const E>> {
 template <class Handles, class T>
 concept plain_param = by_value_or_const_ref_v<T> && (requires { plain_arg<std::remove_cvref_t<T>>::kind; } || is_handle_v<Handles, T>);
 
-template <class Handles, class List>
+template <utils::type_list_like Handles, class List>
 inline constexpr bool plain_params_v = false;
 
-template <class Handles, class... Args>
+template <utils::type_list_like Handles, class... Args>
 inline constexpr bool plain_params_v<Handles, utils::type_list<Args...>> = (plain_param<Handles, Args> && ...);
 
 // A binding (function, method or property) the plain trampoline calls: synchronous, nothing
 // journaled (no undo<G>, not irreversible), every parameter plain. Its result is anything
 // push_return takes; a role it needs is still checked (call_fn).
-template <class Handles, class Entry>
+template <utils::type_list_like Handles, class Entry>
 inline constexpr bool plain_binding_v = !Entry::is_async && Entry::feed == undo_feed::kNone && !Entry::is_irreversible &&
                                         plain_params_v<Handles, typename Entry::traits::args>;
 
@@ -301,16 +301,16 @@ inline constexpr bool plain_binding_v = !Entry::is_async && Entry::feed == undo_
 
 // What a binding's result is as a view (Rhp::result<> peeled): a span (a typed view of its
 // elements), a pointer or reference to a declared view type (a struct view), or neither.
-template <class Handles, class R>
+template <utils::type_list_like Handles, class R>
 struct view_result {
     static constexpr view_shape shape = view_shape::kSpan;
     static constexpr bool is_view = false;
 };
 
-template <class Handles, class T>
+template <utils::type_list_like Handles, class T>
 struct view_result<Handles, std::expected<T, error>> : view_result<Handles, T> {};
 
-template <class Handles, class E>
+template <utils::type_list_like Handles, class E>
 struct view_result<Handles, std::span<E>> {
     static constexpr view_shape shape = view_shape::kSpan;
     static constexpr bool is_view = span_element<std::remove_const_t<E>>;
@@ -318,7 +318,7 @@ struct view_result<Handles, std::span<E>> {
     static constexpr elem_kind elem = elem_kind_of<std::remove_const_t<E>>();
 };
 
-template <class Handles, class T>
+template <utils::type_list_like Handles, class T>
 struct view_result<Handles, T*> {
     using object = std::remove_cv_t<T>;
     static constexpr view_shape shape = view_shape::kObject;
@@ -327,16 +327,16 @@ struct view_result<Handles, T*> {
     static constexpr elem_kind elem = elem_kind::kU8;
 };
 
-template <class Handles, class T>
+template <utils::type_list_like Handles, class T>
 struct view_result<Handles, T* const> : view_result<Handles, T*> {};
 
-template <class Handles, class T>
+template <utils::type_list_like Handles, class T>
 struct view_result<Handles, T&> : view_result<Handles, T*> {};
 
-template <class Handles, class E>
+template <utils::type_list_like Handles, class E>
 struct view_result<Handles, const std::span<E>> : view_result<Handles, std::span<E>> {};
 
-template <class Handles, class Entry>
+template <utils::type_list_like Handles, class Entry>
 inline constexpr bool returns_view_v = view_result<Handles, typename Entry::traits::return_type>::is_view;
 
 // An array field's element type and count.
@@ -357,22 +357,22 @@ struct array_traits<std::array<E, N>> {
 
 // ---- install-time checks ---------------------------------------------------------------------------------------
 
-template <class List, class Handles>
+template <class List, utils::type_list_like Handles>
 inline constexpr bool params_pull_ok_v = false;
 
-template <class... Args, class Handles>
+template <class... Args, utils::type_list_like Handles>
 inline constexpr bool params_pull_ok_v<utils::type_list<Args...>, Handles> = (arg_traits<Handles, Args>::pull_ok && ...);
 
 // A view binding is called again on every access with copies of its arguments: they own their data
 // (no span, no struct view parameter), and the binding has nothing to undo and never waits.
-template <class List, class Handles>
+template <class List, utils::type_list_like Handles>
 inline constexpr bool owning_view_params_v = false;
 
-template <class... Args, class Handles>
+template <class... Args, utils::type_list_like Handles>
 inline constexpr bool owning_view_params_v<utils::type_list<Args...>, Handles> =
     ((!is_span_v<std::remove_cvref_t<Args>> && view_param_kind<Handles, Args>() == view_param::kNone) && ...);
 
-template <class Entry, class Handles>
+template <class Entry, utils::type_list_like Handles>
 consteval bool view_binding_ok() {
     if constexpr (!returns_view_v<Handles, Entry>) {
         return true;
@@ -386,7 +386,7 @@ consteval bool view_binding_ok() {
 // cross the Lua boundary (a method's or property's handle is one of the tree's), a variable's type
 // crosses both ways (a ::ro's only out), a field belongs to a view type of the tree and a struct
 // field's type is one too.
-template <class Entry, class Handles>
+template <class Entry, utils::type_list_like Handles>
 consteval bool entry_ok() {
     constexpr entry_kind kind = Entry::kind;
     if constexpr (kind == entry_kind::kFn || kind == entry_kind::kMethod || kind == entry_kind::kProperty) {
@@ -411,13 +411,13 @@ consteval bool entry_ok() {
     }
 }
 
-template <class Entries, class Handles>
+template <class Entries, utils::type_list_like Handles>
 inline constexpr bool entries_ok_v = false;
 
-template <class... Entries, class Handles>
+template <class... Entries, utils::type_list_like Handles>
 inline constexpr bool entries_ok_v<utils::type_list<Entries...>, Handles> = (entry_ok<Entries, Handles>() && ...);
 
-template <class Handles>
+template <utils::type_list_like Handles>
 struct handles_distinct;
 
 template <class... Hs>

@@ -723,7 +723,14 @@ consteval bool field_clash(std::string_view name) {
 template <utils::fixed_string N, class Owner, class... Entries>
 concept field_free = (!field_clash<Entries, Owner>(N.view()) && ...);
 
+// True for every Rhp::lib<> (specialized after it).
+template <class T>
+inline constexpr bool is_lib_v = false;
+
 } // namespace detail
+
+template <class T>
+concept lib_type = detail::is_lib_v<T>;
 
 // ---- the lib DSL -------------------------------------------------------------------------------------
 
@@ -783,7 +790,8 @@ struct lib {
                      std::predicate<decltype(IsAlive), const H&>
     using handle = lib<Name, Entries..., detail::handle_entry<N, H, IsAlive>>;
 
-    template <class Sub>
+    // Another lib, reached as a member of this one (game.debug.dump).
+    template <lib_type Sub>
         requires detail::name_free<Sub::fixed_name, Entries...>
     using sub = lib<Name, Entries..., detail::sub_entry<Sub>>;
 
@@ -826,16 +834,10 @@ struct lib {
 
 namespace detail {
 
-template <class T>
-inline constexpr bool is_lib_v = false;
-
 template <utils::fixed_string Name, class... Entries>
 inline constexpr bool is_lib_v<lib<Name, Entries...>> = true;
 
 } // namespace detail
-
-template <class T>
-concept lib_type = detail::is_lib_v<T>;
 
 } // namespace Rhp::script
 
