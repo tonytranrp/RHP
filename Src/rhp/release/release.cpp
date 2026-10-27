@@ -112,24 +112,21 @@ value revocation_value(const revocation_list& list) {
     for (const release_id& id : releases) {
         ids.push_back(detail::digest_value(id));
     }
-    std::vector<value::bytes> key_bytes;
+    std::vector<value::bytes> raw_keys;
     for (const auto& k : list.keys) {
-        key_bytes.emplace_back(k.bytes().begin(), k.bytes().end());
+        raw_keys.push_back(detail::key_bytes(k));
     }
-    std::ranges::sort(key_bytes);
-    key_bytes.erase(std::ranges::unique(key_bytes).begin(), key_bytes.end());
+    std::ranges::sort(raw_keys);
+    raw_keys.erase(std::ranges::unique(raw_keys).begin(), raw_keys.end());
     value::array keys;
-    for (auto& k : key_bytes) {
+    for (auto& k : raw_keys) {
         keys.emplace_back(std::move(k));
     }
     std::vector<seq_floor> floors = list.floors;
     std::ranges::sort(floors, {}, &seq_floor::channel);
     value::array floor_values;
     for (const seq_floor& f : floors) {
-        value::map m;
-        m.emplace_back(value{"channel"}, value{f.channel});
-        m.emplace_back(value{"seq"}, value{f.seq});
-        floor_values.emplace_back(std::move(m));
+        floor_values.push_back(detail::floor_value(f));
     }
     value::map out;
     out.emplace_back(value{"rhp"}, value{"revocations"});

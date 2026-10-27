@@ -10,12 +10,15 @@
 #include <utility>
 #include <vector>
 
+#include <rhp/core/convert.hpp>
 #include <rhp/core/error.hpp>
 #include <rhp/core/result.hpp>
 #include <rhp/core/value.hpp>
 #include <rhp/release/bytecode.hpp>
 #include <rhp/release/detail/codec.hpp>
 #include <rhp/release/manifest.hpp>
+#include <rhp/release/release.hpp>
+#include <rhp/security/ed25519.hpp>
 #include <rhp/security/hash.hpp>
 #include <rhp/utils/byte_buffer.hpp>
 #include <rhp/wire/codec/msgpack.hpp>
@@ -42,15 +45,6 @@ std::vector<std::string> canonical_set(std::vector<std::string> items) {
     const auto dup = std::ranges::unique(items);
     items.erase(dup.begin(), dup.end());
     return items;
-}
-
-value string_array(const std::vector<std::string>& items) {
-    value::array out;
-    out.reserve(items.size());
-    for (const std::string& s : items) {
-        out.emplace_back(s);
-    }
-    return value{std::move(out)};
 }
 
 result<std::vector<std::byte>> encode(const value& v) {
@@ -134,6 +128,17 @@ value digest_value(const security::digest256& d) {
     return value{value::bytes(d.begin(), d.end())};
 }
 
+value floor_value(const seq_floor& f) {
+    value::map m;
+    m.emplace_back(value{"channel"}, value{f.channel});
+    m.emplace_back(value{"seq"}, value{f.seq});
+    return value{std::move(m)};
+}
+
+value::bytes key_bytes(const security::ed25519_public_key& k) {
+    return value::bytes(k.bytes().begin(), k.bytes().end());
+}
+
 result<void> exact_size(const value::map& m, std::size_t n, std::string_view what) {
     if (m.size() != n) {
         return std::unexpected{bad_body(std::format("{} must have exactly {} fields", what, n))};
@@ -178,7 +183,7 @@ value manifest_value(const manifest& m) {
         modules.emplace_back(std::move(entry));
     }
     value::map health;
-    health.emplace_back(value{"fail_events"}, detail::string_array(detail::canonical_set(m.health.fail_events)));
+    health.emplace_back(value{"fail_events"}, Rhp::to_value(detail::canonical_set(m.health.fail_events)));
     health.emplace_back(value{"max_handler_failures"}, value{m.health.max_handler_failures});
 
     value::map out;
@@ -187,12 +192,12 @@ value manifest_value(const manifest& m) {
     out.emplace_back(value{"seq"}, value{m.seq});
     out.emplace_back(value{"label"}, value{m.label});
     out.emplace_back(value{"app"}, value{m.app});
-    out.emplace_back(value{"builds"}, detail::string_array(detail::canonical_set(m.builds)));
-    out.emplace_back(value{"platforms"}, detail::string_array(detail::canonical_set(m.platforms)));
+    out.emplace_back(value{"builds"}, Rhp::to_value(detail::canonical_set(m.builds)));
+    out.emplace_back(value{"platforms"}, Rhp::to_value(detail::canonical_set(m.platforms)));
     out.emplace_back(value{"not_before"}, value{m.not_before});
     out.emplace_back(value{"not_after"}, value{m.not_after});
     out.emplace_back(value{"role"}, value{to_string(m.run_as)});
-    out.emplace_back(value{"libs"}, detail::string_array(detail::canonical_set(m.libs)));
+    out.emplace_back(value{"libs"}, Rhp::to_value(detail::canonical_set(m.libs)));
     out.emplace_back(value{"modules"}, value{std::move(modules)});
     out.emplace_back(value{"health"}, value{std::move(health)});
     return value{std::move(out)};

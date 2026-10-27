@@ -14,6 +14,8 @@
 #include <rhp/core/error.hpp>
 #include <rhp/core/result.hpp>
 #include <rhp/core/value.hpp>
+#include <rhp/release/release.hpp>
+#include <rhp/security/ed25519.hpp>
 #include <rhp/security/hash.hpp>
 
 namespace Rhp::release::detail {
@@ -29,8 +31,11 @@ inline constexpr std::string_view kBytecodePrefix = "bytecode/";
 
 // Sorted, without duplicates: lists that are sets encode one way only.
 [[nodiscard]] std::vector<std::string> canonical_set(std::vector<std::string> items);
-[[nodiscard]] value string_array(const std::vector<std::string>& items);
 [[nodiscard]] value digest_value(const security::digest256& d);
+// {channel, seq}: a floor in a revocation list and in the manager's state.
+[[nodiscard]] value floor_value(const seq_floor& f);
+// A public key's 32 bytes, as revocation lists and the manager's state hold it.
+[[nodiscard]] value::bytes key_bytes(const security::ed25519_public_key& k);
 
 [[nodiscard]] result<std::vector<std::byte>> encode(const value& v);
 [[nodiscard]] result<value> decode(std::span<const std::byte> bytes);

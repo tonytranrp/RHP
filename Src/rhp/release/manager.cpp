@@ -30,6 +30,7 @@
 #include <rhp/security/ed25519.hpp>
 #include <rhp/security/hash.hpp>
 #include <rhp/utils/byte_buffer.hpp>
+#include <rhp/utils/scope_guard.hpp>
 
 namespace Rhp::release {
 
@@ -58,8 +59,18 @@ std::uint64_t unix_seconds(std::chrono::system_clock::time_point t) {
     return s < 0 ? 0 : static_cast<std::uint64_t>(s);
 }
 
+// Where a refusal of a channel's release points: "release 'game.balance'".
+std::string channel_where(std::string_view channel) {
+    return std::format("release '{}'", channel);
+}
+
 error refused(errc code, std::string message, std::string_view channel) {
-    return make_error(code, std::move(message), std::format("release '{}'", channel));
+    return make_error(code, std::move(message), channel_where(channel));
+}
+
+// A save that failed, as the error of the change that needed it: its code, "<what>: <why>".
+error save_failed(const error& why, std::string_view what, std::string where) {
+    return make_error(why.code, std::format("{}: {}", what, why.message), std::move(where));
 }
 
 // A stored release a restore couldn't read or check may still run at the next one: the store
@@ -91,19 +102,31 @@ struct revoked_set {
     std::vector<security::ed25519_public_key> keys;
     std::vector<seq_floor> floors; // per channel: releases at or below it are revoked
 
-    void merge(const revocation_list& l) {
-        seq = std::max(seq, l.seq);
-        for (const release_id& id : l.releases) {
+    void merge(const revocation_list& l) { merge(l.seq, l.releases, l.keys, l.floors); }
+    void merge(const revoked_set& o) { merge(o.seq, o.releases, o.keys, o.floors); }
+
+    [[nodiscard]] bool revokes(const release_id& id) const { return std::ranges::find(releases, id) != releases.end(); }
+
+    [[nodiscard]] std::uint64_t floor_of(std::string_view channel) const {
+        const auto it = std::ranges::find(floors, channel, &seq_floor::channel);
+        return it != floors.end() ? it->seq : 0;
+    }
+
+private:
+    void merge(std::uint64_t list_seq, std::span<const release_id> ids, std::span<const security::ed25519_public_key> revoked_keys,
+               std::span<const seq_floor> revoked_floors) {
+        seq = std::max(seq, list_seq);
+        for (const release_id& id : ids) {
             if (std::ranges::find(releases, id) == releases.end()) {
                 releases.push_back(id);
             }
         }
-        for (const auto& k : l.keys) {
+        for (const auto& k : revoked_keys) {
             if (std::ranges::find(keys, k) == keys.end()) {
                 keys.push_back(k);
             }
         }
-        for (const seq_floor& f : l.floors) {
+        for (const seq_floor& f : revoked_floors) {
             const auto it = std::ranges::find(floors, f.channel, &seq_floor::channel);
             if (it == floors.end()) {
                 floors.push_back(f);
@@ -111,22 +134,6 @@ struct revoked_set {
                 it->seq = std::max(it->seq, f.seq);
             }
         }
-    }
-
-    void merge(const revoked_set& o) {
-        revocation_list l;
-        l.seq = o.seq;
-        l.releases = o.releases;
-        l.keys = o.keys;
-        l.floors = o.floors;
-        merge(l);
-    }
-
-    [[nodiscard]] bool revokes(const release_id& id) const { return std::ranges::find(releases, id) != releases.end(); }
-
-    [[nodiscard]] std::uint64_t floor_of(std::string_view channel) const {
-        const auto it = std::ranges::find(floors, channel, &seq_floor::channel);
-        return it != floors.end() ? it->seq : 0;
     }
 };
 
@@ -186,14 +193,11 @@ result<std::vector<std::byte>> encode_state(const std::vector<channel_state>& ch
     }
     value::array keys;
     for (const auto& k : revoked.keys) {
-        keys.emplace_back(value::bytes(k.bytes().begin(), k.bytes().end()));
+        keys.emplace_back(key_bytes(k));
     }
     value::array floors;
     for (const seq_floor& f : revoked.floors) {
-        value::map m;
-        m.emplace_back(value{"channel"}, value{f.channel});
-        m.emplace_back(value{"seq"}, value{f.seq});
-        floors.emplace_back(std::move(m));
+        floors.push_back(floor_value(f));
     }
     value::map doc;
     doc.emplace_back(value{"rhp"}, value{"release-state"});
@@ -379,6 +383,9 @@ struct channel_runtime {
     std::uint64_t handler_failures = 0;
     std::string unhealthy;
     std::vector<Rhp::subscription> watches;
+
+    // The sandbox runs the candidate (not the active release).
+    [[nodiscard]] bool runs_candidate() const noexcept { return state.candidate && running && running->r.id == *state.candidate; }
 };
 
 class manager_impl {
@@ -392,6 +399,8 @@ public:
         caching_ = !options_.bytecode_key.empty() && build_ != security::digest256{};
     }
 
+    // The sandboxes go first, while channels_ is whole: their callbacks (on_handler_error, the health
+    // watches) look their channel up in it.
     ~manager_impl() {
         for (auto& [name, c] : channels_) {
             c.watches.clear();
@@ -403,7 +412,7 @@ public:
     manager_impl& operator=(const manager_impl&) = delete;
 
     result<void> install_lib(std::string_view name, result<void> (*fn)(script::sandbox&)) {
-        if (std::ranges::any_of(libs_, [&](const auto& l) { return l.first == name; })) {
+        if (has_lib(name)) {
             return fail(errc::kAlreadyLoaded, std::format("lib '{}' is already installed", name), "release.manager");
         }
         libs_.emplace_back(std::string{name}, fn);
@@ -471,9 +480,7 @@ public:
             }
         }
         for (const seq_floor& f : revoked_.floors) {
-            channel_runtime& c = channels_[f.channel];
-            c.state.name = f.channel;
-            c.state.floor = std::max(c.state.floor, f.seq);
+            raise_floor(f);
         }
         for (auto& [name, c] : channels_) {
             restore_channel(c, report);
@@ -553,7 +560,6 @@ public:
             promote_to_active(c, id);
             c.state.candidate.reset();
             c.watches.clear();
-            c.unhealthy.clear();
         } else {
             c.state.candidate = id;
             start_watch(c);
@@ -567,7 +573,7 @@ public:
             forget_if_empty(channel, created);
             dirty_state_ = false; // the store still holds `before`
             collect_garbage();
-            return refuse(channel, refused(saved.error().code, std::format("the release state couldn't be saved: {}", saved.error().message), channel));
+            return refuse(channel, save_failed(saved.error(), "the release state couldn't be saved", channel_where(channel)));
         }
         collect_garbage();
         apply_result out{channel, id, seq, current_slot(c), false, replaced, c.running->signers};
@@ -582,7 +588,7 @@ public:
             return std::unexpected{std::move(ready).error()};
         }
         channel_runtime* c = find(channel);
-        if (c == nullptr || !c->state.candidate || !c->running || c->running->r.id != *c->state.candidate) {
+        if (c == nullptr || !c->runs_candidate()) {
             return fail(errc::kNotFound, std::format("channel '{}' runs no candidate", channel), "release.manager");
         }
         const release_id id = *c->state.candidate;
@@ -599,7 +605,7 @@ public:
             c->state = before; // still the candidate, still watched
             c->active_info = before_info;
             dirty_state_ = false;
-            return fail(saved.error().code, std::format("the release state couldn't be saved: {}", saved.error().message), "release.manager");
+            return std::unexpected{save_failed(saved.error(), "the release state couldn't be saved", "release.manager")};
         }
         c->watches.clear();
         c->unhealthy.clear();
@@ -623,7 +629,7 @@ public:
         roll_back(*c, hold ? "deactivated (held)" : "deactivated", hold);
         if (auto saved = persist(); !saved) {
             // It stopped; a restart would bring it back until the state is saved (pump() retries).
-            return fail(saved.error().code, std::format("deactivated, but the release state couldn't be saved: {}", saved.error().message), "release.manager");
+            return std::unexpected{save_failed(saved.error(), "deactivated, but the release state couldn't be saved", "release.manager")};
         }
         collect_garbage();
         return stopped;
@@ -654,7 +660,7 @@ public:
             s.channel = name;
             s.running = current_slot(c);
             s.active = c.active_info;
-            if (c.state.candidate && c.running && c.running->r.id == *c.state.candidate) {
+            if (c.runs_candidate()) {
                 s.candidate = info_of(*c.running);
             }
             s.previous = c.state.previous;
@@ -678,13 +684,8 @@ public:
         for (auto& [name, c] : channels_) {
             if (c.box) {
                 pumping_ = true; // a channel's script calling back into the manager is refused
-                try {
-                    c.box->pump();
-                } catch (...) {
-                    pumping_ = false;
-                    throw;
-                }
-                pumping_ = false;
+                const utils::scope_guard pumped{[this]() noexcept { pumping_ = false; }};
+                c.box->pump();
             }
             if (!c.running) {
                 continue;
@@ -822,7 +823,7 @@ private:
             return std::unexpected{refused(errc::kForbidden, std::format("asks to run as {}, this host allows at most {}", m.run_as, options_.max_role), channel)};
         }
         for (const std::string& lib : m.libs) {
-            if (!std::ranges::any_of(libs_, [&](const auto& l) { return l.first == lib; })) {
+            if (!has_lib(lib)) {
                 return std::unexpected{refused(errc::kNotFound, std::format("needs lib '{}', which this host doesn't have", lib), channel)};
             }
         }
@@ -1206,7 +1207,7 @@ private:
 
     // A health-watched candidate runs.
     [[nodiscard]] static bool watched(const channel_runtime& c) noexcept {
-        return c.state.candidate && c.state.confirm == confirm_mode::kHealth && c.running && c.running->r.id == *c.state.candidate;
+        return c.runs_candidate() && c.state.confirm == confirm_mode::kHealth;
     }
 
     void start_watch(channel_runtime& c) {
@@ -1237,6 +1238,43 @@ private:
         c.state.attempts = 0;
     }
 
+    // What restore() made of one stored release of a channel.
+    enum class restore_outcome : std::uint8_t {
+        kRuns,     // it runs
+        kDeferred, // it runs nothing this time but is kept (report.deferred): tried again at the next restore
+        kGivenUp,  // it can't run (report.failed)
+    };
+
+    // Loads stored release `id` into the channel for restore(). A candidate's boot attempt is counted
+    // (and saved) before it loads: a crash while it loads counts too, and a candidate whose attempts
+    // can't be counted doesn't run (it could crash the program forever).
+    restore_outcome try_restore(channel_runtime& c, const release_id& id, bool candidate, restore_report& report) {
+        const std::string name = c.state.name;
+        auto r = load_stored(id);
+        if (!r) {
+            if (kept_after_read(r.error())) {
+                report.deferred.emplace_back(name, std::move(r).error()); // no attempt used
+                return restore_outcome::kDeferred;
+            }
+            report.failed.emplace_back(name, std::move(r).error());
+            return restore_outcome::kGivenUp;
+        }
+        if (candidate) {
+            ++c.state.attempts;
+            if (auto saved = persist(); !saved) {
+                --c.state.attempts;
+                report.deferred.emplace_back(name, save_failed(saved.error(), "its boot attempt couldn't be saved", "release.manager"));
+                return restore_outcome::kDeferred;
+            }
+        }
+        if (auto swapped = swap_in(c, *r); !swapped) {
+            const bool kept = kept_after_load(swapped.error());
+            (kept ? report.deferred : report.failed).emplace_back(name, std::move(swapped).error());
+            return kept ? restore_outcome::kDeferred : restore_outcome::kGivenUp;
+        }
+        return restore_outcome::kRuns;
+    }
+
     void restore_channel(channel_runtime& c, restore_report& report) {
         const std::string name = c.state.name;
         if (c.state.held) {
@@ -1248,44 +1286,24 @@ private:
                 quarantine(c, candidate);
                 report.quarantined.emplace_back(name, candidate);
             } else {
-                auto r = load_stored(candidate);
-                if (!r && kept_after_read(r.error())) {
-                    report.deferred.emplace_back(name, std::move(r).error()); // runs nothing this time; no attempt used
+                switch (try_restore(c, candidate, true, report)) {
+                case restore_outcome::kRuns:
+                    if (c.state.active) {
+                        if (auto a = load_stored(*c.state.active)) {
+                            c.active_info = info_of(*a);
+                        }
+                    }
+                    if (c.state.confirm == confirm_mode::kHealth) {
+                        start_watch(c);
+                    }
+                    report.restored.push_back(name);
                     return;
+                case restore_outcome::kDeferred: return;
+                case restore_outcome::kGivenUp:
+                    quarantine(c, candidate);
+                    report.quarantined.emplace_back(name, candidate);
+                    break;
                 }
-                if (r) {
-                    // Counted before it loads: a crash while it loads counts too. A candidate whose
-                    // attempts can't be counted doesn't run (it could crash the program forever).
-                    ++c.state.attempts;
-                    if (auto saved = persist(); !saved) {
-                        --c.state.attempts;
-                        report.deferred.emplace_back(name, make_error(saved.error().code, std::format("its boot attempt couldn't be saved: {}", saved.error().message),
-                                                                      "release.manager"));
-                        return;
-                    }
-                    auto swapped = swap_in(c, *r);
-                    if (swapped) {
-                        if (c.state.active) {
-                            if (auto a = load_stored(*c.state.active)) {
-                                c.active_info = info_of(*a);
-                            }
-                        }
-                        if (c.state.confirm == confirm_mode::kHealth) {
-                            start_watch(c);
-                        }
-                        report.restored.push_back(name);
-                        return;
-                    }
-                    if (kept_after_load(swapped.error())) {
-                        report.deferred.emplace_back(name, std::move(swapped).error());
-                        return;
-                    }
-                    report.failed.emplace_back(name, std::move(swapped).error());
-                } else {
-                    report.failed.emplace_back(name, std::move(r).error());
-                }
-                quarantine(c, candidate);
-                report.quarantined.emplace_back(name, candidate);
             }
         }
         const std::optional<release_id> active = c.state.active;
@@ -1302,22 +1320,11 @@ private:
             if (!target) {
                 continue;
             }
-            auto r = load_stored(*target);
-            if (!r && kept_after_read(r.error())) {
-                report.deferred.emplace_back(name, std::move(r).error()); // runs nothing this time; kept
+            const restore_outcome step = try_restore(c, *target, false, report);
+            if (step == restore_outcome::kDeferred) {
                 return;
             }
-            if (!r) {
-                report.failed.emplace_back(name, std::move(r).error());
-                forget(target);
-                continue;
-            }
-            if (auto swapped = swap_in(c, *r); !swapped) {
-                if (kept_after_load(swapped.error())) {
-                    report.deferred.emplace_back(name, std::move(swapped).error());
-                    return;
-                }
-                report.failed.emplace_back(name, std::move(swapped).error());
+            if (step == restore_outcome::kGivenUp) {
                 forget(target);
                 continue;
             }
@@ -1335,7 +1342,8 @@ private:
         c.state.confirm = confirm_mode::kNow;
     }
 
-    result<checked_release> load_stored(const release_id& id) {
+    // The envelope of release `id` the store holds, decoded (not checked).
+    result<release> read_stored(const release_id& id) {
         auto bytes = store_.read(release_key(id));
         if (!bytes) {
             if (bytes.error().code == errc::kNotFound) {
@@ -1349,6 +1357,14 @@ private:
         }
         if (r->id != id) {
             return fail(errc::kIntegrity, "a stored release doesn't match its name", "release.store");
+        }
+        return r;
+    }
+
+    result<checked_release> load_stored(const release_id& id) {
+        auto r = read_stored(id);
+        if (!r) {
+            return std::unexpected{std::move(r).error()};
         }
         return check(std::move(*r));
     }
@@ -1375,9 +1391,7 @@ private:
         const std::uint64_t seq = list->body.seq;
         revoked_.merge(list->body);
         for (const seq_floor& f : list->body.floors) {
-            channel_runtime& c = channels_[f.channel];
-            c.state.name = f.channel;
-            c.state.floor = std::max(c.state.floor, f.seq);
+            raise_floor(f);
         }
         std::size_t changed = 0;
         for (auto& [name, c] : channels_) {
@@ -1399,8 +1413,8 @@ private:
         auto saved = persist();
         emit(release_event{release_event::kind::kRevocations, {}, std::nullopt, std::nullopt, revoked_.seq, {}, std::nullopt});
         if (!saved) {
-            return fail(saved.error().code, std::format("revocation list {} is in effect here, but couldn't be saved (tried again later): {}", seq, saved.error().message),
-                        "release.revocations");
+            return std::unexpected{
+                save_failed(saved.error(), std::format("revocation list {} is in effect here, but couldn't be saved (tried again later)", seq), "release.revocations")};
         }
         return changed;
     }
@@ -1412,12 +1426,8 @@ private:
 
     // A stored release the lists revoke (one that can't be read is left alone).
     [[nodiscard]] bool stored_revoked(const release_id& id) {
-        auto bytes = store_.read(release_key(id));
-        if (!bytes) {
-            return false;
-        }
-        auto r = decode_release(*bytes);
-        return r && r->id == id && revoked_by_lists(*r);
+        const auto r = read_stored(id);
+        return r && revoked_by_lists(*r);
     }
 
     // ---- persistence -----------------------------------------------------------------------------------
@@ -1486,11 +1496,22 @@ private:
         return it != channels_.end() ? &it->second : nullptr;
     }
 
+    [[nodiscard]] bool has_lib(std::string_view name) const {
+        return std::ranges::any_of(libs_, [&](const auto& l) { return l.first == name; });
+    }
+
+    // A floor a revocation list sets: the channel (made if new) never runs a seq at or below it.
+    void raise_floor(const seq_floor& f) {
+        channel_runtime& c = channels_[f.channel];
+        c.state.name = f.channel;
+        c.state.floor = std::max(c.state.floor, f.seq);
+    }
+
     [[nodiscard]] static slot current_slot(const channel_runtime& c) noexcept {
         if (!c.running) {
             return slot::kEmpty;
         }
-        return c.state.candidate && c.running->r.id == *c.state.candidate ? slot::kCandidate : slot::kActive;
+        return c.runs_candidate() ? slot::kCandidate : slot::kActive;
     }
 
     [[nodiscard]] static release_info info_of(const checked_release& r) {
