@@ -18,9 +18,10 @@
 #include <rhp/core/result.hpp>
 #include <rhp/core/role.hpp>
 #include <rhp/core/subscription.hpp>
-#include <rhp/core/value.hpp>
 #include <rhp/release/bytecode.hpp>
 #include <rhp/release/detail/codec.hpp>
+#include <rhp/release/detail/compiled_cache.hpp>
+#include <rhp/release/detail/state.hpp>
 #include <rhp/release/manager.hpp>
 #include <rhp/release/manifest.hpp>
 #include <rhp/release/release.hpp>
@@ -28,8 +29,6 @@
 #include <rhp/release/trust.hpp>
 #include <rhp/script/sandbox.hpp>
 #include <rhp/security/ed25519.hpp>
-#include <rhp/security/hash.hpp>
-#include <rhp/utils/byte_buffer.hpp>
 #include <rhp/utils/scope_guard.hpp>
 
 namespace Rhp::release {
@@ -44,7 +43,6 @@ constexpr std::string_view kStateKey = "state";
 constexpr std::string_view kRevocationsKey = "revocations"; // the newest list (stores written before every list was kept)
 constexpr std::string_view kRevocationsPrefix = "revocations/"; // every accepted list, by seq
 constexpr std::uint32_t kDefaultWallMs = 10'000;
-constexpr std::size_t kQuarantineKept = 16; // newest quarantined ids a channel remembers
 
 std::string release_key(const release_id& id) {
     return std::string{kReleasesPrefix} + to_hex(id);
@@ -94,246 +92,6 @@ bool kept_after_load(const error& e) {
     return e.code == errc::kTimeout || e.code == errc::kBudgetExceeded || e.code == errc::kMemoryExceeded;
 }
 
-// Everything every revocation list applied so far withdrew: lists only ever add to it, so a newer
-// list can't forgive what an older one revoked (not even one signed by a key that older list revoked).
-struct revoked_set {
-    std::uint64_t seq = 0; // the newest list applied
-    std::vector<release_id> releases;
-    std::vector<security::ed25519_public_key> keys;
-    std::vector<seq_floor> floors; // per channel: releases at or below it are revoked
-
-    void merge(const revocation_list& l) { merge(l.seq, l.releases, l.keys, l.floors); }
-    void merge(const revoked_set& o) { merge(o.seq, o.releases, o.keys, o.floors); }
-
-    [[nodiscard]] bool revokes(const release_id& id) const { return std::ranges::find(releases, id) != releases.end(); }
-
-    [[nodiscard]] std::uint64_t floor_of(std::string_view channel) const {
-        const auto it = std::ranges::find(floors, channel, &seq_floor::channel);
-        return it != floors.end() ? it->seq : 0;
-    }
-
-private:
-    void merge(std::uint64_t list_seq, std::span<const release_id> ids, std::span<const security::ed25519_public_key> revoked_keys,
-               std::span<const seq_floor> revoked_floors) {
-        seq = std::max(seq, list_seq);
-        for (const release_id& id : ids) {
-            if (std::ranges::find(releases, id) == releases.end()) {
-                releases.push_back(id);
-            }
-        }
-        for (const auto& k : revoked_keys) {
-            if (std::ranges::find(keys, k) == keys.end()) {
-                keys.push_back(k);
-            }
-        }
-        for (const seq_floor& f : revoked_floors) {
-            const auto it = std::ranges::find(floors, f.channel, &seq_floor::channel);
-            if (it == floors.end()) {
-                floors.push_back(f);
-            } else {
-                it->seq = std::max(it->seq, f.seq);
-            }
-        }
-    }
-};
-
-// What persists of one channel.
-struct channel_state {
-    std::string name;
-    std::uint64_t floor = 0;
-    std::optional<release_id> active;
-    std::optional<release_id> previous;
-    std::optional<release_id> candidate;
-    confirm_mode confirm = confirm_mode::kNow;
-    std::uint32_t attempts = 0;
-    bool held = false;
-    std::vector<release_id> quarantined;
-};
-
-value optional_id(const std::optional<release_id>& id) {
-    return id ? digest_value(*id) : value{};
-}
-
-result<std::optional<release_id>> read_optional_id(const value& v, std::string_view key) {
-    if (v.is_nil()) {
-        return std::optional<release_id>{};
-    }
-    auto d = digest(v, key);
-    if (!d) {
-        return std::unexpected{std::move(d).error()};
-    }
-    return std::optional<release_id>{*d};
-}
-
-// The state document: BLAKE2b-256(body) || body. The checksum notices a torn or corrupted file, not
-// a deliberate edit: whoever can write the store can lower floors (signatures are still checked on
-// every restore, so only signed releases ever run).
-result<std::vector<std::byte>> encode_state(const std::vector<channel_state>& channels, const revoked_set& revoked) {
-    value::array list;
-    for (const channel_state& c : channels) {
-        value::array quarantined;
-        for (const release_id& id : c.quarantined) {
-            quarantined.push_back(digest_value(id));
-        }
-        value::map m;
-        m.emplace_back(value{"channel"}, value{c.name});
-        m.emplace_back(value{"floor"}, value{c.floor});
-        m.emplace_back(value{"active"}, optional_id(c.active));
-        m.emplace_back(value{"previous"}, optional_id(c.previous));
-        m.emplace_back(value{"candidate"}, optional_id(c.candidate));
-        m.emplace_back(value{"confirm"}, value{to_string(c.confirm)});
-        m.emplace_back(value{"attempts"}, value{c.attempts});
-        m.emplace_back(value{"held"}, value{c.held});
-        m.emplace_back(value{"quarantined"}, value{std::move(quarantined)});
-        list.emplace_back(std::move(m));
-    }
-    value::array ids;
-    for (const release_id& id : revoked.releases) {
-        ids.push_back(digest_value(id));
-    }
-    value::array keys;
-    for (const auto& k : revoked.keys) {
-        keys.emplace_back(key_bytes(k));
-    }
-    value::array floors;
-    for (const seq_floor& f : revoked.floors) {
-        floors.push_back(floor_value(f));
-    }
-    value::map doc;
-    doc.emplace_back(value{"rhp"}, value{"release-state"});
-    doc.emplace_back(value{"revocation_seq"}, value{revoked.seq});
-    doc.emplace_back(value{"revoked_releases"}, value{std::move(ids)});
-    doc.emplace_back(value{"revoked_keys"}, value{std::move(keys)});
-    doc.emplace_back(value{"revoked_floors"}, value{std::move(floors)});
-    doc.emplace_back(value{"channels"}, value{std::move(list)});
-    auto body = encode(value{std::move(doc)});
-    if (!body) {
-        return body;
-    }
-    const auto check = security::blake2b_256(*body);
-    std::vector<std::byte> out(check.begin(), check.end());
-    out.insert(out.end(), body->begin(), body->end());
-    return out;
-}
-
-struct decoded_state {
-    std::vector<channel_state> channels;
-    revoked_set revoked;
-};
-
-result<revoked_set> decode_revoked(const value& doc) {
-    revoked_set out;
-    if (const value* seq = doc.find("revocation_seq"); seq != nullptr) {
-        auto n = count(*seq, "revocation_seq");
-        if (!n) {
-            return std::unexpected{std::move(n).error()};
-        }
-        out.seq = *n;
-    }
-    if (const value* ids = doc.find("revoked_releases"); ids != nullptr && ids->get_if<value::array>() != nullptr) {
-        for (const value& id : *ids->get_if<value::array>()) {
-            auto d = digest(id, "revoked_releases");
-            if (!d) {
-                return std::unexpected{std::move(d).error()};
-            }
-            out.releases.push_back(*d);
-        }
-    }
-    if (const value* keys = doc.find("revoked_keys"); keys != nullptr && keys->get_if<value::array>() != nullptr) {
-        for (const value& k : *keys->get_if<value::array>()) {
-            const auto* raw = k.get_if<value::bytes>();
-            auto key = raw != nullptr ? security::ed25519_public_key::from_bytes(*raw)
-                                      : result<security::ed25519_public_key>{std::unexpected{bad_body("a revoked key is not bytes")}};
-            if (!key) {
-                return std::unexpected{std::move(key).error()};
-            }
-            out.keys.push_back(*key);
-        }
-    }
-    if (const value* floors = doc.find("revoked_floors"); floors != nullptr && floors->get_if<value::array>() != nullptr) {
-        for (const value& f : *floors->get_if<value::array>()) {
-            const value* channel = f.find("channel");
-            const value* seq = f.find("seq");
-            auto name = channel != nullptr ? text(*channel, "channel") : result<std::string>{std::unexpected{bad_body("a revoked floor has no channel")}};
-            auto n = seq != nullptr ? count(*seq, "seq") : result<std::uint64_t>{std::unexpected{bad_body("a revoked floor has no seq")}};
-            if (!name || !n) {
-                return std::unexpected{bad_body("a revoked floor of the release state is malformed")};
-            }
-            out.floors.push_back(seq_floor{std::move(*name), *n});
-        }
-    }
-    return out;
-}
-
-result<decoded_state> decode_state(std::span<const std::byte> bytes) {
-    constexpr std::size_t kCheck = security::digest256{}.size();
-    if (bytes.size() < kCheck) {
-        return fail(errc::kIntegrity, "the release state is truncated", "release.state");
-    }
-    const auto body = bytes.subspan(kCheck);
-    const auto check = security::blake2b_256(body);
-    if (!std::ranges::equal(check, bytes.first(kCheck))) {
-        return fail(errc::kIntegrity, "the release state doesn't match its checksum", "release.state");
-    }
-    auto v = decode(body);
-    if (!v) {
-        return std::unexpected{std::move(v).error()};
-    }
-    const value* tag = v->find("rhp");
-    if (tag == nullptr || tag->get_if<std::string>() == nullptr || *tag->get_if<std::string>() != "release-state") {
-        return std::unexpected{bad_body("not a release state document")};
-    }
-    decoded_state out;
-    auto revoked = decode_revoked(*v);
-    if (!revoked) {
-        return std::unexpected{std::move(revoked).error()};
-    }
-    out.revoked = std::move(*revoked);
-    const value* channels = v->find("channels");
-    const auto* list = channels != nullptr ? channels->get_if<value::array>() : nullptr;
-    if (list == nullptr) {
-        return std::unexpected{bad_body("the release state has no channels")};
-    }
-    for (const value& item : *list) {
-        channel_state c;
-        const auto get = [&](std::string_view key) -> const value& {
-            static const value kNil{};
-            const value* f = item.find(key);
-            return f != nullptr ? *f : kNil;
-        };
-        auto name = text(get("channel"), "channel");
-        auto floor = count(get("floor"), "floor");
-        auto active = read_optional_id(get("active"), "active");
-        auto previous = read_optional_id(get("previous"), "previous");
-        auto candidate = read_optional_id(get("candidate"), "candidate");
-        auto confirm = text(get("confirm"), "confirm");
-        auto attempts = count(get("attempts"), "attempts");
-        if (!name || !floor || !active || !previous || !candidate || !confirm || !attempts || !get("held").is_bool()) {
-            return std::unexpected{bad_body("a channel of the release state is malformed")};
-        }
-        c.name = std::move(*name);
-        c.floor = *floor;
-        c.active = *active;
-        c.previous = *previous;
-        c.candidate = *candidate;
-        c.confirm = parse_confirm_mode(*confirm).value_or(confirm_mode::kNow);
-        c.attempts = static_cast<std::uint32_t>(std::min<std::uint64_t>(*attempts, 1000));
-        c.held = *get("held").get_if<bool>();
-        if (const auto* q = get("quarantined").get_if<value::array>(); q != nullptr) {
-            for (const value& id : *q) {
-                if (auto d = digest(id, "quarantined")) {
-                    c.quarantined.push_back(*d);
-                }
-            }
-            if (c.quarantined.size() > kQuarantineKept) { // the newest
-                c.quarantined.erase(c.quarantined.begin(), c.quarantined.end() - static_cast<std::ptrdiff_t>(kQuarantineKept));
-            }
-        }
-        out.channels.push_back(std::move(c));
-    }
-    return out;
-}
-
 // The manager's event listeners: a subscription may outlive the manager.
 class release_listeners final : public subscribable {
 public:
@@ -353,22 +111,6 @@ private:
 struct checked_release {
     release r;
     std::vector<std::string> signers;
-};
-
-// The bytecode one swap loads a release's modules from (the compiled-chunk cache), and what it
-// compiled for the cache meanwhile.
-struct chunk_set {
-    std::optional<compiled_release> stored; // the release's entry from the store, checked
-    std::vector<std::string> made;          // per module: compiled here
-    std::vector<char> refused;              // per module: Lua refused the stored bytecode (the source was parsed)
-
-    [[nodiscard]] std::string_view stored_code(std::size_t i) const noexcept {
-        if (!stored || i >= stored->modules.size() || refused[i] != 0) {
-            return {};
-        }
-        const std::vector<std::byte>& code = stored->modules[i].code;
-        return std::string_view{reinterpret_cast<const char*>(code.data()), code.size()};
-    }
 };
 
 struct channel_runtime {
@@ -395,8 +137,6 @@ public:
         if (options_.limits.wall_ms == 0) {
             options_.limits.wall_ms = kDefaultWallMs;
         }
-        build_ = compiled_build();
-        caching_ = !options_.bytecode_key.empty() && build_ != security::digest256{};
     }
 
     // The sandboxes go first, while channels_ is whole: their callbacks (on_handler_error, the health
@@ -431,7 +171,7 @@ public:
 
     [[nodiscard]] const manager_options& options() const noexcept { return options_; }
     [[nodiscard]] std::uint64_t revocation_seq() const noexcept { return revoked_.seq; }
-    [[nodiscard]] const bytecode_stats& bytecode_cache_stats() const noexcept { return cache_stats_; }
+    [[nodiscard]] const bytecode_stats& bytecode_cache_stats() const noexcept { return cache_.bytecode_cache_stats(); }
 
     script::sandbox* sandbox(std::string_view channel) noexcept {
         const auto it = channels_.find(channel);
@@ -886,7 +626,7 @@ private:
             }
             return std::unexpected{std::move(err)};
         };
-        chunk_set chunks = cached_chunks(next.r);
+        chunk_set chunks = cache_.cached_chunks(next.r);
         for (std::size_t i = 0; i < m.modules.size(); ++i) {
             const std::string& name = m.modules[i].name;
             const auto existing = std::ranges::find(c.modules, name, &std::pair<std::string, module_id>::first);
@@ -894,7 +634,7 @@ private:
                 const bool same = c.running && i < c.running->r.body.modules.size() && c.running->r.body.modules[i].name == name &&
                                   c.running->r.body.modules[i].hash == m.modules[i].hash;
                 if (!same) {
-                    auto rev = reload_module(box, existing->second, next.r, i, chunks);
+                    auto rev = cache_.reload_module(box, existing->second, next.r, i, chunks);
                     if (!rev || *rev == revision_id{}) {
                         if (rev) { // suspended in its top level (or deferred): not a release's module
                             undo.push_back(undo_step{existing->second, true});
@@ -907,7 +647,7 @@ private:
                 modules.emplace_back(name, existing->second);
                 continue;
             }
-            auto mod = load_module(box, next.r, i, chunks);
+            auto mod = cache_.load_module(box, next.r, i, chunks);
             if (!mod) {
                 return failed(std::move(mod).error());
             }
@@ -918,7 +658,7 @@ private:
             undo.push_back(undo_step{*mod, false});
             modules.emplace_back(name, *mod);
         }
-        keep_chunks(box, next.r, chunks, c.running ? &c.running->r : nullptr);
+        cache_.keep_chunks(box, next.r, chunks, c.running ? &c.running->r : nullptr);
         if (fresh) {
             c.watches.clear();
             c.box = std::move(made); // the old sandbox goes, reverting what the old release did
@@ -936,171 +676,6 @@ private:
         c.handler_failures = 0;
         c.unhealthy.clear();
         return {};
-    }
-
-    // ---- compiled-chunk cache ----------------------------------------------------------------------
-    // Bytecode is only ever read from the store, and only after its MAC checks out under the host's
-    // key; envelopes from the wire are parsed (text). See bytecode.hpp.
-
-    // What a swap of `r` loads from: its checked entry, or nothing (the cache is off, there is none,
-    // or it was thrown away).
-    chunk_set cached_chunks(const release& r) {
-        chunk_set out;
-        out.made.resize(r.sources.size());
-        out.refused.resize(r.sources.size(), 0);
-        if (!caching_) {
-            return out;
-        }
-        auto bytes = store_.read(compiled_store_key(r.id));
-        if (!bytes) {
-            return out; // none yet (or unreadable right now): compiled here
-        }
-        auto entry = check_entry(*bytes, r);
-        if (!entry) {
-            discard(r.id, std::move(entry).error());
-            return out;
-        }
-        out.stored = std::move(*entry);
-        return out;
-    }
-
-    // An entry whose MAC checks out, made by this Lua build for exactly `r`'s modules.
-    result<compiled_release> check_entry(std::span<const std::byte> bytes, const release& r) const {
-        auto entry = open_compiled(bytes, options_.bytecode_key);
-        if (!entry) {
-            return entry;
-        }
-        if (entry->build != build_) {
-            return fail(errc::kOutOfScope, "a bytecode cache entry was made by another Lua build", "release.bytecode");
-        }
-        const std::vector<module_entry>& mods = r.body.modules;
-        bool same = entry->release == r.id && entry->modules.size() == mods.size();
-        for (std::size_t i = 0; same && i < mods.size(); ++i) {
-            same = entry->modules[i].name == mods[i].name && entry->modules[i].hash == mods[i].hash;
-        }
-        if (!same) {
-            return fail(errc::kIntegrity, std::format("a bytecode cache entry doesn't hold release {}'s modules", short_id(r.id)), "release.bytecode");
-        }
-        return entry;
-    }
-
-    void discard(const release_id& id, error why) {
-        (void)store_.remove(compiled_store_key(id));
-        ++cache_stats_.discarded;
-        cache_stats_.last_discarded = std::move(why);
-    }
-
-    // The bytecode to load module i of `r` from: the stored entry's, else (the cache on) compiled here
-    // and kept in `chunks`; empty: parse the source.
-    std::string_view bytecode_for(script::sandbox& box, const release& r, std::size_t i, chunk_set& chunks) {
-        if (const std::string_view code = chunks.stored_code(i); !code.empty()) {
-            return code;
-        }
-        if (!caching_) {
-            return {};
-        }
-        auto made = box.compile_module(r.body.modules[i].name, r.sources[i]);
-        if (!made) {
-            return {}; // loading the source reports why
-        }
-        ++cache_stats_.compiled;
-        chunks.made[i] = std::move(*made);
-        return chunks.made[i];
-    }
-
-    // Runs a load given bytecode; notes whether Lua refused stored bytecode (the sandbox parsed the source).
-    template <class F>
-    auto tracked(script::sandbox& box, std::size_t i, chunk_set& chunks, F&& load) {
-        const bool from_store = !chunks.stored_code(i).empty();
-        const std::uint64_t refused_before = box.stats().bytecode_rejected;
-        auto out = load();
-        if (box.stats().bytecode_rejected != refused_before) {
-            chunks.refused[i] = 1;
-        } else if (from_store) {
-            ++cache_stats_.loaded;
-        }
-        return out;
-    }
-
-    result<module_id> load_module(script::sandbox& box, const release& r, std::size_t i, chunk_set& chunks) {
-        const std::string& name = r.body.modules[i].name;
-        const std::string_view code = bytecode_for(box, r, i, chunks);
-        if (code.empty()) {
-            return box.load(name, r.sources[i]);
-        }
-        return tracked(box, i, chunks, [&] { return box.load(name, r.sources[i], script::trusted_bytecode{code}); });
-    }
-
-    result<revision_id> reload_module(script::sandbox& box, module_id mod, const release& r, std::size_t i, chunk_set& chunks) {
-        const std::string_view code = bytecode_for(box, r, i, chunks);
-        if (code.empty()) {
-            return box.reload(mod, r.sources[i]);
-        }
-        return tracked(box, i, chunks, [&] { return box.reload(mod, r.sources[i], script::trusted_bytecode{code}); });
-    }
-
-    // After a swap loaded `r`: stores its entry unless the store's served every module. Modules the
-    // swap didn't load (unchanged since `before`) take their bytecode from `before`'s entry, else are
-    // compiled here (parsed, nothing runs). Failing to store only costs the next load a parse.
-    void keep_chunks(script::sandbox& box, const release& r, const chunk_set& chunks, const release* before) {
-        if (!caching_) {
-            return;
-        }
-        const bool refused = std::ranges::any_of(chunks.refused, [](char x) { return x != 0; });
-        if (chunks.stored && !refused) {
-            return;
-        }
-        if (refused) {
-            discard(r.id, make_error(errc::kIntegrity, "Lua refused a module's cached bytecode", "release.bytecode"));
-        }
-        std::optional<compiled_release> prior;
-        bool prior_read = false;
-        compiled_release entry;
-        entry.release = r.id;
-        entry.build = build_;
-        for (std::size_t i = 0; i < r.body.modules.size(); ++i) {
-            const module_entry& m = r.body.modules[i];
-            std::vector<std::byte> code;
-            if (!chunks.made[i].empty()) {
-                const auto bytes = utils::as_bytes(chunks.made[i]);
-                code.assign(bytes.begin(), bytes.end());
-            } else if (const std::string_view stored = chunks.stored_code(i); !stored.empty()) {
-                code = chunks.stored->modules[i].code;
-            } else {
-                if (before != nullptr && !prior_read && chunks.refused[i] == 0) {
-                    prior_read = true;
-                    if (auto bytes = store_.read(compiled_store_key(before->id))) {
-                        if (auto e = check_entry(*bytes, *before)) {
-                            prior = std::move(*e);
-                        }
-                    }
-                }
-                if (prior && chunks.refused[i] == 0) {
-                    for (const compiled_module& p : prior->modules) {
-                        if (p.name == m.name && p.hash == m.hash) {
-                            code = p.code;
-                            break;
-                        }
-                    }
-                }
-                if (code.empty()) {
-                    auto made = box.compile_module(m.name, r.sources[i]);
-                    if (!made) {
-                        return;
-                    }
-                    ++cache_stats_.compiled;
-                    const auto bytes = utils::as_bytes(*made);
-                    code.assign(bytes.begin(), bytes.end());
-                }
-            }
-            entry.modules.push_back(compiled_module{m.name, m.hash, std::move(code)});
-        }
-        auto sealed = seal_compiled(entry, options_.bytecode_key);
-        if (!sealed || !store_.write(compiled_store_key(r.id), *sealed)) {
-            ++cache_stats_.store_failures;
-            return;
-        }
-        ++cache_stats_.stored;
     }
 
     void tear_down(channel_runtime& c) {
@@ -1549,9 +1124,7 @@ private:
     steady::time_point retry_at_{};
     std::vector<std::pair<std::string, std::vector<std::byte>>> unsaved_lists_; // revocation lists not stored yet
     std::optional<restore_report> last_restore_;
-    security::digest256 build_{}; // compiled_build()
-    bool caching_ = false;        // a bytecode key, and a build to key entries by
-    bytecode_stats cache_stats_;
+    compiled_cache cache_{store_, options_.bytecode_key};
 };
 
 } // namespace detail

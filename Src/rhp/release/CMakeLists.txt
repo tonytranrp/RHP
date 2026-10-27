@@ -3,7 +3,7 @@
 # so making, checking and running releases report kDisabled (release_disabled.cpp).
 set(rhp_release_sources manifest.cpp store.cpp trust.cpp)
 if(RHP_ENABLE)
-    list(APPEND rhp_release_sources bytecode.cpp manager.cpp release.cpp)
+    list(APPEND rhp_release_sources bytecode.cpp detail/compiled_cache.cpp detail/state.cpp manager.cpp release.cpp)
 else()
     list(APPEND rhp_release_sources release_disabled.cpp)
 endif()
