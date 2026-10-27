@@ -1,7 +1,7 @@
 #include <cstddef>
-#include <cstdint>
 #include <span>
 
+#include <rhp/build_config.hpp>
 #include <rhp/core/error.hpp>
 #include <rhp/core/result.hpp>
 #include <rhp/platform/random.hpp>

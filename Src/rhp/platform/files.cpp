@@ -1,14 +1,16 @@
+#include <algorithm>
 #include <atomic>
-#include <cerrno>
-#include <cstdint>
 #include <cstddef>
+#include <cstdint>
 #include <cstdio>
+#include <expected>
 #include <filesystem>
 #include <format>
 #include <fstream>
 #include <iterator>
 #include <span>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <vector>
 
@@ -16,7 +18,6 @@
 #include <rhp/core/error.hpp>
 #include <rhp/core/result.hpp>
 #include <rhp/platform/files.hpp>
-#include <rhp/platform/os.hpp>
 #include <rhp/platform/random.hpp>
 
 #if defined(RHP_PLATFORM_WINDOWS)
@@ -40,8 +41,8 @@ namespace Rhp::platform {
 
 namespace {
 
-error file_error(errc code, const std::filesystem::path& path, std::string_view what) {
-    return make_error(code, std::format("{}: {}", path.string(), what), "platform.files");
+std::unexpected<error> file_error(errc code, const std::filesystem::path& path, std::string_view what) {
+    return fail(code, std::format("{}: {}", path.string(), what), "platform.files");
 }
 
 // Flushes `f`'s data to the device.
@@ -110,22 +111,20 @@ result<std::vector<std::byte>> read_file(const std::filesystem::path& path) {
     std::error_code ec;
     const bool there = std::filesystem::exists(path, ec);
     if (ec) { // can't even look (permissions, I/O): not the same as missing
-        return std::unexpected{file_error(errc::kRuntime, path, ec.message())};
+        return file_error(errc::kRuntime, path, ec.message());
     }
     if (!there) {
-        return std::unexpected{file_error(errc::kNotFound, path, "no such file")};
+        return file_error(errc::kNotFound, path, "no such file");
     }
     std::ifstream in{path, std::ios::binary};
     if (!in) {
-        return std::unexpected{file_error(errc::kRuntime, path, "can't open")};
+        return file_error(errc::kRuntime, path, "can't open");
     }
-    std::vector<char> chars{std::istreambuf_iterator<char>{in}, std::istreambuf_iterator<char>{}};
+    std::vector<std::byte> out;
+    std::transform(std::istreambuf_iterator<char>{in}, std::istreambuf_iterator<char>{}, std::back_inserter(out),
+                   [](char c) { return static_cast<std::byte>(c); });
     if (in.bad()) {
-        return std::unexpected{file_error(errc::kRuntime, path, "read failed")};
-    }
-    std::vector<std::byte> out(chars.size());
-    for (std::size_t i = 0; i < chars.size(); ++i) {
-        out[i] = static_cast<std::byte>(chars[i]);
+        return file_error(errc::kRuntime, path, "read failed");
     }
     return out;
 }
@@ -144,7 +143,7 @@ result<void> replace_file(const std::filesystem::path& path, std::span<const std
         f = create_private(temp);
     }
     if (f == nullptr) {
-        return std::unexpected{file_error(errc::kRuntime, temp, "can't create")};
+        return file_error(errc::kRuntime, temp, "can't create");
     }
     const bool written = bytes.empty() || std::fwrite(bytes.data(), 1, bytes.size(), f) == bytes.size();
     const bool synced = written && flush_to_device(f);
@@ -152,11 +151,11 @@ result<void> replace_file(const std::filesystem::path& path, std::span<const std
     std::error_code ec;
     if (!written || !synced || !closed) {
         std::filesystem::remove(temp, ec);
-        return std::unexpected{file_error(errc::kRuntime, temp, "write failed")};
+        return file_error(errc::kRuntime, temp, "write failed");
     }
     if (!move_over(temp, path)) {
         std::filesystem::remove(temp, ec);
-        return std::unexpected{file_error(errc::kRuntime, path, "can't replace")};
+        return file_error(errc::kRuntime, path, "can't replace");
     }
     sync_directory(path.parent_path().empty() ? std::filesystem::path{"."} : path.parent_path());
     return {};
@@ -177,7 +176,7 @@ result<void> make_private_directory(const std::filesystem::path& path) {
     }
     std::filesystem::create_directories(path, ec);
     if (ec) {
-        return std::unexpected{file_error(errc::kRuntime, path, ec.message())};
+        return file_error(errc::kRuntime, path, ec.message());
     }
 #if !defined(RHP_PLATFORM_WINDOWS)
     for (const std::filesystem::path& p : made) {
