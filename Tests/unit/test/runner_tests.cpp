@@ -807,6 +807,26 @@ TEST_CASE("reporters write the formats they promise", "[test][reporter]") {
     check_golden("basics.github", report_with(Rhp::test::report_kind::kGithub, o));
 }
 
+TEST_CASE("xml_escape keeps well-formed UTF-8 and replaces every other byte", "[test][reporter]") {
+    using Rhp::test::xml_escape;
+    const std::string r = "\xEF\xBF\xBD"; // U+FFFD
+    CHECK(xml_escape("a<b & \"c\"") == "a&lt;b &amp; &quot;c&quot;");
+    CHECK(xml_escape("\xC3\xA9") == "\xC3\xA9");                 // U+00E9
+    CHECK(xml_escape("\xE2\x82\xAC") == "\xE2\x82\xAC");         // U+20AC
+    CHECK(xml_escape("\xF0\x9F\x98\x80") == "\xF0\x9F\x98\x80"); // U+1F600
+    CHECK(xml_escape("\xF4\x8F\xBF\xBF") == "\xF4\x8F\xBF\xBF"); // U+10FFFF
+    CHECK(xml_escape("\xF4\x90\x80\x80") == r + r + r + r);      // above U+10FFFF
+    CHECK(xml_escape("\xC0\x80") == r + r);                      // overlong
+    CHECK(xml_escape("\xED\xA0\x80") == r + r + r);              // a surrogate
+    CHECK(xml_escape("\xEF\xBF\xBE") == r + r + r);              // U+FFFE: not an XML character
+    // 0xF5-0xFF lead no sequence: each byte is replaced, continuation bytes included.
+    CHECK(xml_escape("\xF5\x80\x80") == r + r + r);
+    CHECK(xml_escape("\xF7\xBF\xBF\xBF") == r + r + r + r);
+    CHECK(xml_escape("\xF8\x88\x80\x80\x80") == r + r + r + r + r);
+    CHECK(xml_escape("\xFF"
+                     "a") == r + "a");
+}
+
 TEST_CASE("the API description lists libs functions variables and handles", "[test][fake]") {
     auto api = Rhp::test::describe_api(install_arena());
     REQUIRE(api);

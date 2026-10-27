@@ -722,9 +722,10 @@ std::string xml_escape(std::string_view text) {
             continue;
         }
         // A UTF-8 sequence: copied when valid, else U+FFFD.
-        std::size_t len = c >= 0xF0 && c <= 0xF4 ? 4 : c >= 0xE0           ? 3
-                                                   : c >= 0xC2 && c < 0xE0 ? 2
-                                                                           : 0;
+        std::size_t len = c >= 0xF0 && c <= 0xF4   ? 4
+                          : c >= 0xE0 && c <= 0xEF ? 3
+                          : c >= 0xC2 && c <= 0xDF ? 2
+                                                   : 0; // 0x80-0xC1 and 0xF5-0xFF never lead a sequence
         bool valid = len != 0 && i + len <= text.size();
         for (std::size_t k = 1; valid && k < len; ++k) {
             valid = (static_cast<unsigned char>(text[i + k]) & 0xC0) == 0x80;
