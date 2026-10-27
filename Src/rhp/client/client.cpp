@@ -773,8 +773,7 @@ private:
             }
         }
         for (const auto& [req, name] : sends) {
-            const wire::envelope env{req, next_key(), Rhp::to_value(wire::subscribe_request{name})};
-            send_or_queue(wire::op::kSubscribe, Rhp::to_value(env), req);
+            send_or_queue(wire::op::kSubscribe, wire::envelope_value(req, next_key(), Rhp::to_value(wire::subscribe_request{name})), req);
         }
     }
 
@@ -986,8 +985,8 @@ private:
     std::map<std::uint64_t, std::string> listener_names_;
     std::map<std::string, std::size_t, std::less<>> remote_names_;
     core::listener_table<std::string, remote_event_fn> listeners_; // any thread; dispatched on the network thread
-    std::mutex subscribe_mutex_; // serializes on() / off() across their blocking requests (never taken on the network thread)
-    bool had_session_ = false; // network thread: a session was ready before (resubscribe on the next)
+    std::mutex subscribe_mutex_;                                   // serializes on() / off() across their blocking requests (never taken on the network thread)
+    bool had_session_ = false;                                     // network thread: a session was ready before (resubscribe on the next)
 };
 
 // ---- the C++ wall --------------------------------------------------------------------------------------
