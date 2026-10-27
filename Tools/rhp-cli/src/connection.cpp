@@ -7,6 +7,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <print>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -115,6 +116,20 @@ std::optional<connected> open_connection(const connection_options& o, replxx::Re
     const auto who = c->info();
     (*out)(style::kInfo, std::format("connected as {} ({}) to a {} host{}", who.identity, who.granted, who.host_platform, who.tls ? " over TLS" : ""));
     return connected{std::move(c), std::move(out)};
+}
+
+std::optional<signer> load_signer(const std::string& path) {
+    auto id = Rhp::security::identity_file::load(path);
+    if (!id) {
+        std::println(stderr, "{}", id.error());
+        return std::nullopt;
+    }
+    auto key = id->signer_key();
+    if (!key) {
+        std::println(stderr, "{} has no signing_key", path);
+        return std::nullopt;
+    }
+    return signer{std::move(*id), std::move(*key)};
 }
 
 } // namespace rhp_cli

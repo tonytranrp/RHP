@@ -7,6 +7,7 @@
 #include <system_error>
 
 #include "commands.hpp"
+#include "connection.hpp"
 #include "shell.hpp"
 
 #include <rhp/core/role.hpp>
@@ -77,14 +78,8 @@ struct sign_options {
 };
 
 int run_sign(const sign_options& o) {
-    auto id = Rhp::security::identity_file::load(o.identity);
-    if (!id) {
-        std::println(stderr, "{}", id.error());
-        return 1;
-    }
-    auto key = id->signer_key();
-    if (!key) {
-        std::println(stderr, "{} has no signing_key", o.identity);
+    const auto s = load_signer(o.identity);
+    if (!s) {
         return 1;
     }
     const auto source = read_text_file(o.file);
@@ -92,13 +87,13 @@ int run_sign(const sign_options& o) {
         std::println(stderr, "can't read {}", o.file);
         return 1;
     }
-    auto signature = key->sign(*source);
+    auto signature = s->key.sign(*source);
     if (!signature) {
         std::println(stderr, "{}", signature.error());
         return 1;
     }
     const auto* sig = signature->find("sig");
-    std::println("{} {}", key->name, Rhp::security::base64_encode(*sig->get_if<Rhp::value::bytes>()));
+    std::println("{} {}", s->key.name, Rhp::security::base64_encode(*sig->get_if<Rhp::value::bytes>()));
     return 0;
 }
 

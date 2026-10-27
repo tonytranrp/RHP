@@ -1,7 +1,7 @@
 #pragma once
 
-// rhp-cli's connections: the terminal its network commands print to, the options they share, and
-// opening a client.
+// rhp-cli's connections: the terminal its network commands print to, the options they share,
+// opening a client, and loading the identity that signs.
 
 #include <memory>
 #include <mutex>
@@ -12,6 +12,8 @@
 #include "shell.hpp"
 
 #include <rhp/client/client.hpp>
+#include <rhp/security/ed25519.hpp>
+#include <rhp/security/identity_file.hpp>
 
 namespace CLI {
 class App;
@@ -60,5 +62,15 @@ struct connected {
 };
 
 [[nodiscard]] std::optional<connected> open_connection(const connection_options& o, replxx::Replxx* rx, bool to_stderr = false);
+
+// An identity that signs scripts and release files.
+struct signer {
+    Rhp::security::identity_file id;
+    Rhp::security::signing_key key;
+};
+
+// The identity file at `path` with its signing key; nullopt, after printing why, when it can't be
+// loaded (the load's own error) or has no signing_key.
+[[nodiscard]] std::optional<signer> load_signer(const std::string& path);
 
 } // namespace rhp_cli

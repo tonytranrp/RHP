@@ -26,15 +26,13 @@ namespace {
 // Adds the identity's signature to a release or revocation file (in place).
 template <std::invocable<const std::vector<std::byte>&> Decode, class Encode>
 int sign_file(const std::string& path, const std::string& identity, Decode decode, Encode encode) {
-    auto id = Rhp::security::identity_file::load(identity);
-    auto bytes = read_binary_file(path);
-    if (!id || !bytes) {
-        std::println(stderr, "{}", !id ? std::format("{}", id.error()) : std::format("can't read {}", path));
+    const auto s = load_signer(identity);
+    if (!s) {
         return 1;
     }
-    auto key = id->signer_key();
-    if (!key) {
-        std::println(stderr, "{} has no signing_key", identity);
+    auto bytes = read_binary_file(path);
+    if (!bytes) {
+        std::println(stderr, "can't read {}", path);
         return 1;
     }
     auto doc = decode(*bytes);
@@ -42,7 +40,7 @@ int sign_file(const std::string& path, const std::string& identity, Decode decod
         std::println(stderr, "{}", doc.error());
         return 1;
     }
-    if (auto signed_ok = Rhp::release::sign(*doc, *key); !signed_ok) {
+    if (auto signed_ok = Rhp::release::sign(*doc, s->key); !signed_ok) {
         std::println(stderr, "{}", signed_ok.error());
         return 1;
     }
@@ -51,7 +49,7 @@ int sign_file(const std::string& path, const std::string& identity, Decode decod
         std::println(stderr, "can't write {}", path);
         return 1;
     }
-    std::println("{}: signed by {} ({} signatures)", path, key->name, doc->signatures.size());
+    std::println("{}: signed by {} ({} signatures)", path, s->key.name, doc->signatures.size());
     return 0;
 }
 
@@ -64,13 +62,11 @@ int write_signed(Rhp::result<Doc> built, const std::vector<std::string>& identit
         return 1;
     }
     for (const std::string& identity : identities) {
-        auto id = Rhp::security::identity_file::load(identity);
-        auto key = id ? id->signer_key() : std::nullopt;
-        if (!key) {
-            std::println(stderr, "{}: no signing key", identity);
+        const auto s = load_signer(identity);
+        if (!s) {
             return 1;
         }
-        if (auto ok = Rhp::release::sign(*built, *key); !ok) {
+        if (auto ok = Rhp::release::sign(*built, s->key); !ok) {
             std::println(stderr, "{}", ok.error());
             return 1;
         }

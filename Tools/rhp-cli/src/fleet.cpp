@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "commands.hpp"
+#include "connection.hpp"
 #include "release_files.hpp"
 #include "shell.hpp"
 #include "text.hpp"
@@ -95,19 +96,13 @@ struct broadcast_options {
 };
 
 int run_fleet(const broadcast_options& o) {
-    auto id = Rhp::security::identity_file::load(o.identity);
-    auto source = read_text_file(o.file);
-    if (!id) {
-        std::println(stderr, "{}", id.error());
+    auto s = load_signer(o.identity);
+    if (!s) {
         return 1;
     }
+    auto source = read_text_file(o.file);
     if (!source) {
         std::println(stderr, "can't read fleet source {}", o.file);
-        return 1;
-    }
-    auto signer = id->signer_key();
-    if (!signer) {
-        std::println(stderr, "fleet requires an identity with a signing key");
         return 1;
     }
     auto options = fleet_options_from(o.tls, "fleet");
@@ -115,7 +110,7 @@ int run_fleet(const broadcast_options& o) {
         return 1;
     }
     options->timeout = std::chrono::milliseconds{o.timeout_ms};
-    Rhp::fleet<cli_cfg> group{id->credential(), std::move(*signer), std::move(*options)};
+    Rhp::fleet<cli_cfg> group{s->id.credential(), std::move(s->key), std::move(*options)};
     auto discovered = group.discover(o.discovery.to_browse());
     if (!discovered) {
         std::println(stderr, "{}", discovered.error());
