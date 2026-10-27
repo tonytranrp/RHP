@@ -1740,10 +1740,42 @@ private:
         return who;
     }
 
-    // Runs one sandbox operation as the network request `in`; a request that suspends is answered
-    // from on_result later. request() has already marked it running in the relay.
-    template <class Op>
-    void run_tracked(identity_runtime& rt, const inbound& in, module_id module, Op&& op) {
+    // One network request while request() handles it: the request, its session and its identity.
+    struct request_ctx {
+        const inbound& in;
+        pump_session& sess;
+        identity_runtime& rt;
+        script::sandbox& box;
+    };
+
+    // The request's body as M, or nothing once the request was answered with why it isn't one.
+    template <from_value_convertible M>
+    [[nodiscard]] std::optional<M> decode(request_ctx& c) {
+        auto m = Rhp::from_value<M>(c.in.body);
+        if (!m) {
+            reject(c, m.error());
+            return std::nullopt;
+        }
+        return std::move(*m);
+    }
+
+    // Answers the request with the value, or with the error.
+    void answer(request_ctx& c, result<value> r) {
+        if (!r) {
+            reject(c, r.error());
+            return;
+        }
+        reply(c.in.session, c.in.req, std::move(*r));
+    }
+
+    void reject(request_ctx& c, const error& err) { reply_error(c.in.session, c.in.req, err); }
+
+    // Runs one sandbox operation as the request; a request that suspends is answered from
+    // on_result later. request() has already marked it running in the relay.
+    template <std::invocable Op>
+    void run_tracked(request_ctx& c, module_id module, Op&& op) {
+        const inbound& in = c.in;
+        identity_runtime& rt = c.rt;
         const request_id before = rt.box->last_request();
         const bool pinned = module && rt.pinned.contains(module);
         {
@@ -1775,7 +1807,7 @@ private:
             return;
         }
         if (!outcome) {
-            reply_error(in.session, in.req, outcome.error());
+            reject(c, outcome.error());
             return;
         }
         reply(in.session, in.req, std::move(*outcome));
@@ -1856,7 +1888,6 @@ private:
             return;
         }
         identity_runtime& rt = it->second;
-        script::sandbox& box = *rt.box;
         {
             const std::scoped_lock lock{rt.relay->mutex};
             if (rt.relay->dead(in.session)) {
@@ -1871,324 +1902,353 @@ private:
                 return;
             }
         }
+        request_ctx c{in, sess, rt, *rt.box};
         if (in.code == wire::op::kBlob) {
-            blob(sess, in);
-            return;
+            return blob(sess, in);
         }
         if (in.code == wire::op::kSubscribe || in.code == wire::op::kUnsubscribe) {
-            subscription_request(sess, in);
-            return;
+            return subscription_request(sess, in);
         }
         if (is_release_op(in.code)) {
-            if (!releases_.handle) {
-                return reply_error(in.session, in.req,
-                                   make_error(errc::kNotFound, "this host serves no releases (host.serve)", std::string{wire::to_string(in.code)}));
-            }
-            auto r = releases_.handle(in.code, in.body);
-            if (!r) {
-                return reply_error(in.session, in.req, std::move(r).error());
-            }
-            return reply(in.session, in.req, std::move(*r));
+            return op_release(c);
         }
         const running_scope running{*rt.relay, in};
-
-        const auto bad_request = [&](const error& err) { reply_error(in.session, in.req, err); };
-
         switch (in.code) {
-        case wire::op::kExec: {
-            auto m = Rhp::from_value<wire::exec_request>(in.body);
-            if (!m) {
-                return bad_request(m.error());
-            }
-            if (auto who = check_signature(sess, in, "", m->source, m->signature); !who) {
-                return bad_request(who.error());
-            }
-            run_tracked(rt, in, {}, [&]() -> result<value> {
-                auto r = box.exec(m->source, m->chunk);
-                if (!r) {
-                    return std::unexpected{std::move(r).error()};
-                }
-                return value{std::move(*r)}; // a value_list is a value::array
-            });
-            return;
-        }
-        case wire::op::kLoad: {
-            auto m = Rhp::from_value<wire::load_request>(in.body);
-            if (!m) {
-                return bad_request(m.error());
-            }
-            if (auto who = check_signature(sess, in, m->name, m->source, m->signature); !who) {
-                return bad_request(who.error());
-            }
-            // The module id is only known once load() returns: track it through `loaded` (a load of a
-            // loaded name is a reload of that module).
-            module_id loaded;
-            const auto existing = box.find(m->name);
-            const request_id before = box.last_request();
-            run_tracked(rt, in, existing ? *existing : module_id{}, [&]() -> result<value> {
-                auto r = box.load(m->name, m->source);
-                if (!r) {
-                    return std::unexpected{std::move(r).error()};
-                }
-                loaded = *r;
-                return Rhp::to_value(*r);
-            });
-            if (const request_id after = box.last_request(); after != before) {
-                if (const auto w = rt.waiting.find(after); w != rt.waiting.end()) {
-                    w->second.module = loaded;
-                }
-            }
-            return;
-        }
-        case wire::op::kCall: {
-            auto m = Rhp::from_value<wire::call_request>(in.body);
-            if (!m) {
-                return bad_request(m.error());
-            }
-            if (audit) {
-                audit->module = ref_text(m->module);
-            }
-            auto mod = resolve(box, m->module);
-            if (!mod) {
-                return bad_request(mod.error());
-            }
-            run_tracked(rt, in, *mod, [&]() -> result<value> {
-                auto r = box.call(*mod, m->function, m->args);
-                if (!r) {
-                    return std::unexpected{std::move(r).error()};
-                }
-                return value{value::array(std::make_move_iterator(r->begin()), std::make_move_iterator(r->end()))};
-            });
-            return;
-        }
+        case wire::op::kExec: return op_exec(c);
+        case wire::op::kLoad: return op_load(c);
+        case wire::op::kCall: return op_call(c);
         case wire::op::kReload:
-        case wire::op::kRollback: {
-            module_id target;
-            std::optional<wire::reload_request> reload;
-            std::optional<wire::rollback_request> rollback;
-            if (in.code == wire::op::kReload) {
-                auto m = Rhp::from_value<wire::reload_request>(in.body);
-                if (!m) {
-                    return bad_request(m.error());
-                }
-                reload = std::move(*m);
-                if (auto who = check_signature(sess, in, ref_text(reload->module), reload->source, reload->signature); !who) {
-                    return bad_request(who.error());
-                }
-            } else {
-                auto m = Rhp::from_value<wire::rollback_request>(in.body);
-                if (!m) {
-                    return bad_request(m.error());
-                }
-                rollback = std::move(*m);
-                if (audit) {
-                    audit->module = ref_text(rollback->module);
-                }
-            }
-            auto mod = resolve(box, reload ? reload->module : rollback->module);
-            if (!mod) {
-                return bad_request(mod.error());
-            }
-            target = *mod;
-            run_tracked(rt, in, target, [&]() -> result<value> {
-                auto r = reload ? box.reload(target, reload->source)
-                                : box.rollback(target, rollback->steps > std::numeric_limits<std::size_t>::max() ? std::numeric_limits<std::size_t>::max()
-                                                                                                                 : static_cast<std::size_t>(rollback->steps));
-                if (!r) {
-                    return std::unexpected{std::move(r).error()};
-                }
-                return Rhp::to_value(*r);
-            });
-            return;
-        }
+        case wire::op::kRollback: return op_reload(c);
         case wire::op::kUnload:
         case wire::op::kRevert:
         case wire::op::kStatus:
         case wire::op::kPin:
-        case wire::op::kUnpin: {
-            wire::module_ref ref;
-            bool forced = false;
-            if (in.code == wire::op::kUnload) {
-                auto m = Rhp::from_value<wire::unload_request>(in.body);
-                if (!m) {
-                    return bad_request(m.error());
-                }
-                ref = std::move(m->module);
-                forced = m->force;
-            } else {
-                auto m = Rhp::from_value<wire::module_request>(in.body);
-                if (!m) {
-                    return bad_request(m.error());
-                }
-                ref = std::move(m->module);
+        case wire::op::kUnpin: return op_module(c);
+        case wire::op::kCheckpoint:
+        case wire::op::kRevertTo: return op_tag(c);
+        case wire::op::kRevertAll: return op_revert_all(c);
+        case wire::op::kList:
+        case wire::op::kDescribe: return op_list(c);
+        case wire::op::kTunables: return op_tunables(c);
+        case wire::op::kTune: return op_tune(c);
+        case wire::op::kProfile: return op_profile(c);
+        case wire::op::kDebug: return op_debug(c);
+        default:
+            return reject(c, make_error(errc::kInvalidArgument, std::format("{} is not supported by this host", in.code), std::string{wire::to_string(in.code)}));
+        }
+    }
+
+    // ---- pump thread: one function per group of ops (request() has checked role, identity and cancels) ----
+
+    // release_apply / confirm / deactivate / status, revoke: the served release manager answers.
+    void op_release(request_ctx& c) {
+        if (!releases_.handle) {
+            return reject(c, make_error(errc::kNotFound, "this host serves no releases (host.serve)", std::string{wire::to_string(c.in.code)}));
+        }
+        answer(c, releases_.handle(c.in.code, c.in.body));
+    }
+
+    void op_exec(request_ctx& c) {
+        auto m = decode<wire::exec_request>(c);
+        if (!m) {
+            return;
+        }
+        if (auto who = check_signature(c.sess, c.in, "", m->source, m->signature); !who) {
+            return reject(c, who.error());
+        }
+        run_tracked(c, {}, [&]() -> result<value> {
+            auto r = c.box.exec(m->source, m->chunk);
+            if (!r) {
+                return std::unexpected{std::move(r).error()};
             }
-            if (audit) {
-                audit->module = ref_text(ref);
+            return value{std::move(*r)}; // a value_list is a value::array
+        });
+    }
+
+    void op_load(request_ctx& c) {
+        auto m = decode<wire::load_request>(c);
+        if (!m) {
+            return;
+        }
+        if (auto who = check_signature(c.sess, c.in, m->name, m->source, m->signature); !who) {
+            return reject(c, who.error());
+        }
+        // The module id is only known once load() returns: track it through `loaded` (a load of a
+        // loaded name is a reload of that module).
+        module_id loaded;
+        const auto existing = c.box.find(m->name);
+        const request_id before = c.box.last_request();
+        run_tracked(c, existing ? *existing : module_id{}, [&]() -> result<value> {
+            auto r = c.box.load(m->name, m->source);
+            if (!r) {
+                return std::unexpected{std::move(r).error()};
             }
-            auto mod = resolve(box, ref);
-            if (!mod) {
-                return bad_request(mod.error());
+            loaded = *r;
+            return Rhp::to_value(*r);
+        });
+        if (const request_id after = c.box.last_request(); after != before) {
+            if (const auto w = c.rt.waiting.find(after); w != c.rt.waiting.end()) {
+                w->second.module = loaded;
             }
-            const auto info = box.status(*mod);
-            if (!info) {
-                return bad_request(make_error(errc::kNotFound, std::format("no module {}", *mod), std::string{wire::to_string(in.code)}));
+        }
+    }
+
+    void op_call(request_ctx& c) {
+        auto m = decode<wire::call_request>(c);
+        if (!m) {
+            return;
+        }
+        if (audit_ != nullptr) {
+            audit_->module = ref_text(m->module);
+        }
+        auto mod = resolve(c.box, m->module);
+        if (!mod) {
+            return reject(c, mod.error());
+        }
+        run_tracked(c, *mod, [&]() -> result<value> {
+            auto r = c.box.call(*mod, m->function, m->args);
+            if (!r) {
+                return std::unexpected{std::move(r).error()};
             }
-            if (in.code == wire::op::kStatus) {
-                return reply(in.session, in.req, Rhp::to_value(describe(*info, rt.pinned.contains(*mod))));
+            return value{value::array(std::make_move_iterator(r->begin()), std::make_move_iterator(r->end()))};
+        });
+    }
+
+    // reload (signed new source) and rollback (to an earlier revision): both answer the revision.
+    void op_reload(request_ctx& c) {
+        std::optional<wire::reload_request> reload;
+        std::optional<wire::rollback_request> rollback;
+        if (c.in.code == wire::op::kReload) {
+            reload = decode<wire::reload_request>(c);
+            if (!reload) {
+                return;
             }
-            if (in.code == wire::op::kPin || in.code == wire::op::kUnpin) {
-                if (info->scratch) {
-                    return bad_request(make_error(errc::kInvalidArgument, "the scratch module can't be pinned (load a module)", std::string{wire::to_string(in.code)}));
-                }
-                const bool pin = in.code == wire::op::kPin;
-                if (pin) {
-                    rt.pinned.insert(*mod);
-                } else {
-                    rt.pinned.erase(*mod);
-                }
-                {
-                    // Its requests suspended right now outlive their sessions from now on (or stop doing so).
-                    const std::scoped_lock lock{rt.relay->mutex};
-                    for (const auto& [r, p] : rt.waiting) {
-                        if (p.module == *mod) {
-                            if (const auto s = rt.relay->suspended.find({p.session.value(), p.req}); s != rt.relay->suspended.end()) {
-                                s->second.pinned = pin;
-                            }
-                        }
+            if (auto who = check_signature(c.sess, c.in, ref_text(reload->module), reload->source, reload->signature); !who) {
+                return reject(c, who.error());
+            }
+        } else {
+            rollback = decode<wire::rollback_request>(c);
+            if (!rollback) {
+                return;
+            }
+            if (audit_ != nullptr) {
+                audit_->module = ref_text(rollback->module);
+            }
+        }
+        auto mod = resolve(c.box, reload ? reload->module : rollback->module);
+        if (!mod) {
+            return reject(c, mod.error());
+        }
+        const module_id target = *mod;
+        run_tracked(c, target, [&]() -> result<value> {
+            auto r = reload ? c.box.reload(target, reload->source)
+                            : c.box.rollback(target, rollback->steps > std::numeric_limits<std::size_t>::max() ? std::numeric_limits<std::size_t>::max()
+                                                                                                               : static_cast<std::size_t>(rollback->steps));
+            if (!r) {
+                return std::unexpected{std::move(r).error()};
+            }
+            return Rhp::to_value(*r);
+        });
+    }
+
+    // unload, revert, status, pin, unpin: one module of the identity.
+    void op_module(request_ctx& c) {
+        const inbound& in = c.in;
+        wire::module_ref ref;
+        bool forced = false;
+        if (in.code == wire::op::kUnload) {
+            auto m = decode<wire::unload_request>(c);
+            if (!m) {
+                return;
+            }
+            ref = std::move(m->module);
+            forced = m->force;
+        } else {
+            auto m = decode<wire::module_request>(c);
+            if (!m) {
+                return;
+            }
+            ref = std::move(m->module);
+        }
+        if (audit_ != nullptr) {
+            audit_->module = ref_text(ref);
+        }
+        auto mod = resolve(c.box, ref);
+        if (!mod) {
+            return reject(c, mod.error());
+        }
+        const auto info = c.box.status(*mod);
+        if (!info) {
+            return reject(c, make_error(errc::kNotFound, std::format("no module {}", *mod), std::string{wire::to_string(in.code)}));
+        }
+        if (in.code == wire::op::kStatus) {
+            return answer(c, Rhp::to_value(describe(*info, c.rt.pinned.contains(*mod))));
+        }
+        if (in.code == wire::op::kPin || in.code == wire::op::kUnpin) {
+            return op_pin(c, *mod, *info);
+        }
+        if (c.rt.pinned.contains(*mod)) {
+            return reject(c, make_error(errc::kForbidden, std::format("module {} is pinned: unpin it first", info->name), std::string{wire::to_string(in.code)}));
+        }
+        auto r = in.code == wire::op::kRevert ? c.box.revert(*mod) : forced ? c.box.unload(*mod, script::force)
+                                                                            : c.box.unload(*mod);
+        if (!r) {
+            return reject(c, r.error());
+        }
+        answer(c, Rhp::to_value(summarize(*r)));
+    }
+
+    // pin / unpin of a module op_module found.
+    void op_pin(request_ctx& c, module_id mod, const script::module_info& info) {
+        if (info.scratch) {
+            return reject(c, make_error(errc::kInvalidArgument, "the scratch module can't be pinned (load a module)", std::string{wire::to_string(c.in.code)}));
+        }
+        identity_runtime& rt = c.rt;
+        const bool pinning = c.in.code == wire::op::kPin;
+        if (pinning) {
+            rt.pinned.insert(mod);
+        } else {
+            rt.pinned.erase(mod);
+        }
+        {
+            // Its requests suspended right now outlive their sessions from now on (or stop doing so).
+            const std::scoped_lock lock{rt.relay->mutex};
+            for (const auto& [r, p] : rt.waiting) {
+                if (p.module == mod) {
+                    if (const auto s = rt.relay->suspended.find({p.session.value(), p.req}); s != rt.relay->suspended.end()) {
+                        s->second.pinned = pinning;
                     }
                 }
-                log(log_level::kInfo, "{} {} module {} ({})", sess.identity, in.code == wire::op::kPin ? "pinned" : "unpinned", info->name, *mod);
-                return reply(in.session, in.req, value{});
             }
-            if (rt.pinned.contains(*mod)) {
-                return bad_request(make_error(errc::kForbidden, std::format("module {} is pinned: unpin it first", info->name), std::string{wire::to_string(in.code)}));
-            }
-            auto r = in.code == wire::op::kRevert ? box.revert(*mod) : forced ? box.unload(*mod, script::force)
-                                                                              : box.unload(*mod);
+        }
+        log(log_level::kInfo, "{} {} module {} ({})", c.sess.identity, pinning ? "pinned" : "unpinned", info.name, mod);
+        answer(c, value{});
+    }
+
+    // checkpoint / revert_to: a named mark in the identity's journal.
+    void op_tag(request_ctx& c) {
+        auto m = decode<wire::tag_request>(c);
+        if (!m) {
+            return;
+        }
+        if (audit_ != nullptr) {
+            audit_->module = m->tag;
+        }
+        if (c.in.code == wire::op::kCheckpoint) {
+            auto r = c.box.checkpoint(m->tag);
             if (!r) {
-                return bad_request(r.error());
+                return reject(c, r.error());
             }
-            return reply(in.session, in.req, Rhp::to_value(summarize(*r)));
+            return answer(c, value{});
         }
-        case wire::op::kCheckpoint:
-        case wire::op::kRevertTo: {
-            auto m = Rhp::from_value<wire::tag_request>(in.body);
-            if (!m) {
-                return bad_request(m.error());
-            }
-            if (audit) {
-                audit->module = m->tag;
-            }
-            if (in.code == wire::op::kCheckpoint) {
-                auto r = box.checkpoint(m->tag);
-                if (!r) {
-                    return bad_request(r.error());
-                }
-                return reply(in.session, in.req, value{});
-            }
-            if (!rt.pinned.empty()) {
-                // revert_to undoes every effect after the mark, whatever module made it: it would
-                // hollow out pinned modules, which only unpin + revert / unload or revert_all may undo.
-                return bad_request(make_error(errc::kForbidden, "this identity has pinned modules: unpin them before revert_to", "revert_to"));
-            }
-            auto r = box.revert_to(m->tag);
-            if (!r) {
-                return bad_request(r.error());
-            }
-            return reply(in.session, in.req, Rhp::to_value(summarize(*r)));
+        if (!c.rt.pinned.empty()) {
+            // revert_to undoes every effect after the mark, whatever module made it: it would
+            // hollow out pinned modules, which only unpin + revert / unload or revert_all may undo.
+            return reject(c, make_error(errc::kForbidden, "this identity has pinned modules: unpin them before revert_to", "revert_to"));
         }
-        case wire::op::kRevertAll: {
-            // The panic button: every module of every identity, pinned ones included.
-            script::revert_report total;
-            std::vector<std::string> sessionless;
-            for (auto& [name, other] : identities_) {
-                total += other.box->revert_all();
-                other.pinned.clear();
-                if (other.sessions.empty()) {
-                    sessionless.push_back(name);
-                }
-            }
-            for (const std::string& name : sessionless) {
-                if (const auto gone = identities_.find(name); gone != identities_.end()) {
-                    teardown(gone->second);
-                    identities_.erase(gone);
-                }
-            }
-            identity_count_.store(identities_.size(), std::memory_order_release);
-            log(log_level::kWarn, "revert_all by {}: {} effects undone", sess.identity, total.undone);
-            return reply(in.session, in.req, Rhp::to_value(summarize(total)));
+        auto r = c.box.revert_to(m->tag);
+        if (!r) {
+            return reject(c, r.error());
         }
-        case wire::op::kList: {
-            value::array modules;
-            for (const script::module_info& m : box.list()) {
-                modules.push_back(Rhp::to_value(describe(m, rt.pinned.contains(m.id))));
+        answer(c, Rhp::to_value(summarize(*r)));
+    }
+
+    // The panic button: every module of every identity, pinned ones included.
+    void op_revert_all(request_ctx& c) {
+        script::revert_report total;
+        std::vector<std::string> sessionless;
+        for (auto& [name, other] : identities_) {
+            total += other.box->revert_all();
+            other.pinned.clear();
+            if (other.sessions.empty()) {
+                sessionless.push_back(name);
             }
-            return reply(in.session, in.req, value{std::move(modules)});
         }
-        case wire::op::kDescribe: return reply(in.session, in.req, value{box.stubs()});
-        case wire::op::kTunables: {
-            auto m = Rhp::from_value<wire::tunables_request>(in.body);
-            if (!m) {
-                return bad_request(m.error());
+        for (const std::string& name : sessionless) {
+            if (const auto gone = identities_.find(name); gone != identities_.end()) {
+                teardown(gone->second);
+                identities_.erase(gone);
             }
-            auto list = box.tunables(m->prefix);
-            if (!list) {
-                return bad_request(list.error());
-            }
-            value::array out;
-            out.reserve(list->size());
-            for (script::tunable_info& t : *list) {
-                out.push_back(Rhp::to_value(wire::tunable_message{std::move(t.path), std::move(t.type), std::move(t.current), t.writable, t.min, t.max, t.step,
-                                                                  std::move(t.unit), std::move(t.doc)}));
-            }
-            return reply(in.session, in.req, value{std::move(out)});
         }
-        case wire::op::kTune: {
-            auto m = Rhp::from_value<wire::tune_request>(in.body);
-            if (!m) {
-                return bad_request(m.error());
-            }
-            if (auto r = box.tune(m->path, m->to); !r) {
-                return bad_request(r.error());
-            }
-            return reply(in.session, in.req, value{});
+        identity_count_.store(identities_.size(), std::memory_order_release);
+        log(log_level::kWarn, "revert_all by {}: {} effects undone", c.sess.identity, total.undone);
+        answer(c, Rhp::to_value(summarize(total)));
+    }
+
+    // list (the identity's modules) and describe (LuaLS stubs of what it can use).
+    void op_list(request_ctx& c) {
+        if (c.in.code == wire::op::kDescribe) {
+            return answer(c, value{c.box.stubs()});
         }
-        case wire::op::kProfile: {
-            auto m = Rhp::from_value<wire::profile_request>(in.body);
-            if (!m) {
-                return bad_request(m.error());
-            }
-            if (m->action == "start") {
-                const script::profile_options options{m->interval, static_cast<std::size_t>(m->max_depth), static_cast<std::size_t>(m->max_stacks)};
-                if (auto r = box.start_profile(options); !r) {
-                    return bad_request(r.error());
-                }
-                rt.profiler = in.session;
-                return reply(in.session, in.req, Rhp::to_value(profile_message(box.profile(), setup_.limits.max_frame)));
-            }
-            if (m->action == "read") {
-                return reply(in.session, in.req, Rhp::to_value(profile_message(box.profile(), setup_.limits.max_frame)));
-            }
-            if (m->action == "stop") {
-                rt.profiler = session_id{};
-                return reply(in.session, in.req, Rhp::to_value(profile_message(box.stop_profile(), setup_.limits.max_frame)));
-            }
-            return bad_request(make_error(errc::kInvalidArgument, std::format("profile action is start, read or stop, not '{}'", m->action), "profile"));
+        value::array modules;
+        for (const script::module_info& m : c.box.list()) {
+            modules.push_back(Rhp::to_value(describe(m, c.rt.pinned.contains(m.id))));
         }
-        case wire::op::kDebug: {
-            auto m = Rhp::from_value<wire::debug_request>(in.body);
-            if (!m) {
-                return bad_request(m.error());
-            }
-            auto r = debug(rt, box, in.session, *m);
-            if (!r) {
-                return bad_request(r.error());
-            }
-            return reply(in.session, in.req, Rhp::to_value(*r));
+        answer(c, value{std::move(modules)});
+    }
+
+    void op_tunables(request_ctx& c) {
+        auto m = decode<wire::tunables_request>(c);
+        if (!m) {
+            return;
         }
-        default:
-            return bad_request(make_error(errc::kInvalidArgument, std::format("{} is not supported by this host", in.code), std::string{wire::to_string(in.code)}));
+        auto list = c.box.tunables(m->prefix);
+        if (!list) {
+            return reject(c, list.error());
         }
+        value::array out;
+        out.reserve(list->size());
+        for (script::tunable_info& t : *list) {
+            out.push_back(Rhp::to_value(wire::tunable_message{std::move(t.path), std::move(t.type), std::move(t.current), t.writable, t.min, t.max, t.step,
+                                                              std::move(t.unit), std::move(t.doc)}));
+        }
+        answer(c, value{std::move(out)});
+    }
+
+    void op_tune(request_ctx& c) {
+        auto m = decode<wire::tune_request>(c);
+        if (!m) {
+            return;
+        }
+        if (auto r = c.box.tune(m->path, m->to); !r) {
+            return reject(c, r.error());
+        }
+        answer(c, value{});
+    }
+
+    void op_profile(request_ctx& c) {
+        auto m = decode<wire::profile_request>(c);
+        if (!m) {
+            return;
+        }
+        if (m->action == "start") {
+            const script::profile_options options{m->interval, static_cast<std::size_t>(m->max_depth), static_cast<std::size_t>(m->max_stacks)};
+            if (auto r = c.box.start_profile(options); !r) {
+                return reject(c, r.error());
+            }
+            c.rt.profiler = c.in.session;
+            return answer(c, Rhp::to_value(profile_message(c.box.profile(), setup_.limits.max_frame)));
+        }
+        if (m->action == "read") {
+            return answer(c, Rhp::to_value(profile_message(c.box.profile(), setup_.limits.max_frame)));
+        }
+        if (m->action == "stop") {
+            c.rt.profiler = session_id{};
+            return answer(c, Rhp::to_value(profile_message(c.box.stop_profile(), setup_.limits.max_frame)));
+        }
+        reject(c, make_error(errc::kInvalidArgument, std::format("profile action is start, read or stop, not '{}'", m->action), "profile"));
+    }
+
+    void op_debug(request_ctx& c) {
+        auto m = decode<wire::debug_request>(c);
+        if (!m) {
+            return;
+        }
+        auto r = debug(c.rt, c.box, c.in.session, *m);
+        if (!r) {
+            return reject(c, r.error());
+        }
+        answer(c, Rhp::to_value(*r));
     }
 
     // One debug request of `session` against its identity's sandbox.
