@@ -22,7 +22,7 @@
 | **envelope** (`.rhprel`) | The manifest's bytes, the module sources, the signatures, and optionally a revocation list to apply first. |
 | **revocation list** (`.rhprev`) | Release ids and signing keys to stop trusting, and channel floors at or below which every release is revoked. A host adds each list it accepts (higher `seq`) to what it revoked already: nothing a list revoked comes back. |
 | **trust** | The keys that may sign releases (separate from script signers), each limited to channel patterns (`game.*`, `*`), with a threshold of distinct signers. |
-| **store** | Where a manager keeps its state, the revocation list and the envelopes it may run again: `memory_store` or `directory_store` (one file per key, written through a synced rename). Anything that models `Rhp::release::storage` works. |
+| **store** | Where a manager keeps its state (`state`), every revocation list it accepted (`revocations/<seq>`), the envelopes it may run again (`releases/<id>`) and, with a bytecode key, their compiled chunks (`bytecode/<id>`): `memory_store` or `directory_store` (one file per key, written through a synced rename). Anything that models `Rhp::release::storage` works. |
 
 ## Running releases in C++
 

@@ -30,4 +30,4 @@ Protocol revision 5: `kReleaseApply` (admin) `{envelope, confirm}` → `release_
 
 ## Consequences
 
-`Rhp::release` (layer 4) depends on script, security, wire and platform; the host links it. The client doesn't (it parses only what rollout needs). `platform/files.hpp` is the one place file durability is OS-specific. With `RHP_ENABLE=OFF` manifests still encode and decode, everything else reports `kDisabled`. Not done: release ops on the HTTP gateway, the Python client's release calls, delta updates.
+`Rhp::release` (layer 4) depends on script, security, wire and platform; the host links it. The client doesn't (it parses only what rollout needs). `platform/files.hpp` is the one place file durability is OS-specific. With `RHP_ENABLE=OFF` manifests still encode and decode, everything else reports `kDisabled`. (As built, trust lists and the stores work there too: `manifest.cpp`, `store.cpp` and `trust.cpp` build in every configuration; making, checking and running releases report `kDisabled`.) Not done: release ops on the HTTP gateway, the Python client's release calls, delta updates.

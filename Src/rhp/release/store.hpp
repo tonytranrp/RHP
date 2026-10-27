@@ -19,9 +19,11 @@
 namespace Rhp::release {
 
 // Where a release manager keeps what must survive a restart: the channel state, the revocation
-// list and the envelopes of the releases it may run again. Keys are short paths of [a-z0-9._-/]
-// ("state", "revocations", "releases/<hex id>"). read() of a missing key is kNotFound; write()
-// replaces a value as a whole (a crash leaves the old value or the new one).
+// lists and the envelopes of the releases it may run again. Keys are short paths of [a-z0-9._-/]:
+// "state", "revocations/<seq, zero-padded to 20 digits>" (every accepted list; a plain "revocations"
+// from older stores is still read, never written), "releases/<hex id>" (envelopes) and
+// "bytecode/<hex id>" (the compiled-chunk cache, bytecode.hpp). read() of a missing key is
+// kNotFound; write() replaces a value as a whole (a crash leaves the old value or the new one).
 //
 //   struct S {
 //       result<std::vector<std::byte>> read(std::string_view key);

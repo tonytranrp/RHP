@@ -8,7 +8,7 @@
 | `runner.hpp` | `runner` (`run(reporter&)`, `list()`: discovery, a sandbox per file or per test, the fake clock, each test between a checkpoint and a revert, leak checks, snapshots, fuzz corpus, coverage), `install_fn`, `describe_api` |
 | `options.hpp` | `run_options`, `cli_options`, `report_spec`, `coverage_spec`; the command line (`parse_args`, `usage`) |
 | `report.hpp` | what a run produces: `test_result` (outcome, place, expected / actual, cost, measures, benches, output, notes, profile), `file_result`, `run_result`, `counts`, `file_coverage` |
-| `reporter.hpp` | the `reporter` interface, `reporter_list`, `make_text_reporter` / `make_tap_reporter` / `make_junit_reporter` / `make_json_reporter` / `make_github_reporter`, `lcov_text`, `cobertura_text`, `folded_text` |
+| `reporter.hpp` | the `reporter` interface, `reporter_list`, `make_text_reporter` / `make_tap_reporter` / `make_junit_reporter` / `make_json_reporter` / `make_github_reporter`, `lcov_text`, `cobertura_text`, `folded_text`, `xml_escape` |
 | `cli.hpp` | `run_cli(args, install, program, out, err, api)` (any streams; `api`: a description to fake, as `--api FILE` would), `run_cli(args, install, program)` (`std::cout` / `std::cerr`), and `Rhp::test::main(argc, argv, install)`: a test executable in one line |
 | `fake.hpp` | `fake<L>`: a lib with L's shape whose functions record their calls |
 | `fake_registry.hpp` | what `fake<L>` functions were called with and return (process-wide, thread-safe) |

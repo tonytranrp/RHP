@@ -246,7 +246,7 @@ An event a test publishes just before it ends still reaches its handlers within 
 
 ## Measuring
 
-Every test's cost is measured exactly from the request that ran it: instructions (Lua VM instructions, counted exactly, not sampled), the time Lua ran, allocations and bytes allocated, peak memory above where the test started, memory retained after a full collection, objects made by kind, and frames. `-v` prints it for every test; the text report always lists the tests with the most instructions and memory.
+Every test's cost is measured exactly from the request that ran it: instructions (Lua VM instructions, counted exactly, not sampled), the time Lua ran, allocations and bytes allocated, peak memory above where the test started, memory retained after a full collection, objects made by kind, and frames. `-v` prints it for every test; when more than three tests ran, the text report ends with the three with the most instructions and the most memory.
 
 ```lua
 local m = test.measure(function() return rules.total(basket) end, { name = "total of 200" })
@@ -258,7 +258,7 @@ test.expect_budget(function() rules.total(basket) end, { instructions = 5000, by
 it("stays cheap", function() ... end, { budget = { instructions = 10000 } })
 ```
 
-`test.measure` collects garbage around the call (`{gc = false}` skips that). Instruction counts don't change between runs or machines; times do. A measure's `retained` includes what the function returns. The first call of something can grow Lua's internal tables (the string table, say): warm up before measuring what has to be exact. Measures and benches appear in every report. `--no-measure` skips the collections around each test (faster, no retained memory).
+`test.measure` collects garbage around the call (`{gc = false}` skips that). Instruction counts don't change between runs or machines; times do. A measure's `retained` includes what the function returns. The first call of something can grow Lua's internal tables (the string table, say): warm up before measuring what has to be exact. Benches appear in the text report (measures too with `-v`) and in the JSON events; TAP, JUnit and GitHub reports leave them out. `--no-measure` skips the collections around each test (faster, no retained memory).
 
 ## Snapshots
 

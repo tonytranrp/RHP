@@ -154,7 +154,8 @@ struct release_event {
     std::optional<release_id> release{};
     std::optional<release_id> fallback{};
     std::uint64_t seq = 0;
-    std::string reason; // why it rolled back ("unhealthy: handler failures", "deactivated", "revoked", "expired")
+    std::string reason; // why it rolled back: "unhealthy: 3 handler failures", "unhealthy: module 'x' faulted",
+                        // "unhealthy: 'game.desync' was published", "deactivated", "deactivated (held)", "revoked", "expired"
     std::optional<error> err{};
 };
 

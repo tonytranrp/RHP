@@ -743,9 +743,8 @@ namespace runner_tests_fixture {
 // Report text without what changes between runs: durations, timestamps, table addresses.
 std::string normalized(std::string text) {
     static const std::regex ms_text{R"(\b\d+(\.\d+)? (ms|s)\b)"};
-    static const std::regex ms_json{R"#("(ms|time_ms|wall_ms|duration_ms)":-?[0-9.e+-]+)#"};
+    static const std::regex ms_json{R"#("(ms|time_ms)":-?[0-9.e+-]+)#"};
     static const std::regex xml_time{R"#(\b(time|timestamp)="[^"]*")#"};
-    static const std::regex tap_time{R"(duration_ms: [0-9.]+)"};
     static const std::regex address{R"((table|function|userdata|thread): (0x)?[0-9A-Fa-f]+)"};
     static const std::regex sizes{R"(peak [0-9.]+ (B|KiB|MiB), [0-9]+ alloc)"};
     static const std::regex json_costs{R"#("(peak|bytes|allocations|retained|frames|instructions)":-?[0-9]+)#"};
@@ -753,7 +752,6 @@ std::string normalized(std::string text) {
     text = std::regex_replace(text, ms_text, "<time>");
     text = std::regex_replace(text, ms_json, "\"$1\":0");
     text = std::regex_replace(text, xml_time, "$1=\"0\"");
-    text = std::regex_replace(text, tap_time, "duration_ms: 0");
     text = std::regex_replace(text, address, "$1: <addr>");
     text = std::regex_replace(text, sizes, "<memory>");
     text = std::regex_replace(text, json_costs, "\"$1\":0");

@@ -23,7 +23,6 @@ namespace {
 namespace fs = std::filesystem;
 using script::sandbox;
 
-// Long-bracket Lua text for a string: [==[...]==] at a level the text doesn't close.
 // A Lua long string holding `text` exactly: [[...]], [=[...]=], ... (multi-line text starts on its
 // own line: Lua drops a newline right after the opening bracket).
 std::string long_bracket(std::string_view text) {

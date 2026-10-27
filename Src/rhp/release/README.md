@@ -27,7 +27,7 @@ Clients reach it through `client.release_apply` / `release_confirm` / `release_d
 
 - The manifest encoding is canonical: a field added to `manifest` must be added to `manifest_value` and `manifest_from` (`manifest.cpp`) at a fixed position, and changes every existing release id. Envelope fields may be added freely (decoding ignores unknown keys).
 - Everything a manager runs goes through `manager_impl::check` (revoked ids and seq floors, trust and threshold, app / build / platform, validity window with `clock_skew`, `max_role`, required libs) — on apply and on every restore. Never run a stored envelope without it.
-- The store is written envelope first, state second; garbage collection only removes envelopes no channel names. The state is checksummed against torn writes, not against someone who can write the store.
+- The store is written envelope first, state second; garbage collection only removes envelopes no channel names (with their `bytecode/` cache entries). The state is checksummed against torn writes, not against someone who can write the store.
 - A change (apply, confirm, deactivate) needs the last state saved: while a save keeps failing they fail too (`pump()` retries). A revocation list takes effect even when it can't be saved.
 - A channel's floor only rises. Rolling back, deactivating and quarantining never lower it. Revocations only add up.
 - A swap has no gap: modules reload in place, and a failure leaves the old release running. A candidate that keeps failing to be confirmed across restarts (`max_boot_attempts`) is quarantined.

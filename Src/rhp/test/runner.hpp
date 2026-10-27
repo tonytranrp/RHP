@@ -31,7 +31,8 @@ using install_fn = std::function<result<void>(script::sandbox&)>;
 //   auto report = Rhp::test::make_text_reporter(std::cout, true, false);
 //   Rhp::test::run_result result = r.run(*report);
 //
-// One runner, one thread. With RHP_ENABLE=0 every test file reports kDisabled.
+// One runner, one thread. With RHP_ENABLE=0 every test file reports a file_error ("this build has
+// no Lua (RHP_ENABLE=OFF): Lua tests can't run"), from run() and list() alike.
 class runner {
 public:
     explicit runner(run_options options, install_fn install = {});
