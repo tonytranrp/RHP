@@ -24,7 +24,7 @@ struct psk_identity {
 // PSK mutual challenge-response with keyed BLAKE2b (Monocypher):
 //
 //   client -> hello     {key = name, nonce = Nc}
-//   host   -> challenge {nonce = Nh, proof = MAC(psk, "rhp/host"   || T)}     T = name || Nc || Nh
+//   host   -> challenge {nonce = Nh, proof = MAC(psk, "rhp/host"   || T)}     T = len || name || Nc || Nh
 //   client -> response  {proof = MAC(psk, "rhp/client" || T)}                  (after checking the host's proof)
 //   frame keys: MAC(psk, "rhp/c2h" || T) and MAC(psk, "rhp/h2c" || T), 32 bytes each
 //

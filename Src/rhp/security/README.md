@@ -7,7 +7,7 @@ Who may connect, what each frame proves, and who signed a script. Namespace `Rhp
 | `authenticator.hpp` | the `authenticator` / `credential` concepts (`config<>::auth<A>`, clients use `A::credential`); `host_handshake` / `client_handshake` (one per connection); `auth_grant` (identity, role, per-direction frame sealers) |
 | `keyring.hpp` | `keyring`: name → key → role; `parse` / `from_file` read one `name role base64-key` per line (`#` comments) |
 | `psk_keyring.hpp` | `psk_identity` (a client's name + key), `psk_keyring` (the default authenticator, made from a `keyring`) |
-| `key.hpp` | `key` (16..64-byte secret, wiped on destruction): `from_base64` / `from_bytes` / `from_env` / `from_file` / `generate`, `to_base64` |
+| `key.hpp` | `key` (16..64-byte secret, wiped on destruction): `from_base64` / `from_bytes` / `from_env` / `from_file` / `generate`, `to_base64`; `secure_wipe`, `base64_encode`, `base64_decode` |
 | `signer.hpp` | the `signer` concept (`config<>::signer<S>`: `S::key` signs, `S::trust` verifies), `kScriptSignatureDomain`, `unsigned_scripts` (the typed opt-out) |
 | `ed25519.hpp` | `ed25519` (the default signer): `ed25519_secret_key` / `ed25519_public_key`, `signing_key` (client: name + secret, `sign(source)`), `trusted_signers` (host: `parse` / `from_file` of `name base64-public-key` lines, `verify(source, signature)` → signer name) |
 | `identity_file.hpp` | a developer's `.rhpid` file (`load`, `parse`, `generate`, `to_text`, `save`): name, PSK, signing key; `credential()`, `signer_key()`, and the host's `keyring_line(role)` / `signers_line()` |
@@ -35,7 +35,7 @@ under TLS          T also ends with the connection's tls-exporter value (bind_ch
                    terminates TLS on both sides has two values, so no proof matches
 ```
 
-MAC = keyed BLAKE2b-256 (Monocypher). Proofs and MACs are compared in constant time (`crypto_verify32`).
+MAC = keyed BLAKE2b-256 (Monocypher). Proofs and MACs are compared in constant time (`digests_equal`, Monocypher's `crypto_verify32`).
 
 ## Rules
 
@@ -43,7 +43,7 @@ MAC = keyed BLAKE2b-256 (Monocypher). Proofs and MACs are compared in constant t
 - Authentication is mutual: a client never sends its proof to a host that failed to prove the key first.
 - An unknown key name gets a normal-looking challenge (made with a random secret), so key names can't be probed.
 - HTTP requests carry a per-request MAC instead of the handshake. Unknown key names are checked against a per-process decoy key, so timing can't probe them either. Proofs are accepted once (`http_replay_guard`, a quota per key). With `X-RHP-Channel: tls-exporter` they are channel-bound like the handshake; answers carry `X-RHP-Proof`, a MAC under a key derived from the request's MAC, so clients can check them without trusting the transport.
-- Secrets are wiped (`crypto_wipe`) when keys, handshakes and sealers die.
+- Secrets are wiped (`secure_wipe` / `crypto_wipe`) when keys, handshakes and sealers die.
 - Script signatures are Ed25519 (RFC 8032) over `"rhp/script\0" ‖ source`; the host checks them before anything runs, except unsigned code from observe sessions. A signature that is present must verify.
 - Signing and verifying share a process-wide cache (64 recent signatures made, 64 found valid), keyed by public key, signature and the source's BLAKE2b-256, under one mutex. Ed25519 is deterministic, so a repeated signed exec signs and verifies once. Both are facts about bytes: `trusted_signers::verify` still checks that it trusts the signer before it looks; a different key, signature or source misses.
 - `RHP_ENABLE=OFF`: keys, the keyring, signing keys, trusted signers and identity files still build (`signing_keys.cpp`); signing and verifying report `kDisabled` (`ed25519_disabled.cpp`); the handshake and hashing aren't built and Monocypher isn't fetched.
