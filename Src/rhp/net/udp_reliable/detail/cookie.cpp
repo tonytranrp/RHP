@@ -7,67 +7,10 @@
 
 #include <rhp/net/udp_reliable/detail/cookie.hpp>
 #include <rhp/platform/random.hpp>
+#include <rhp/utils/byte_buffer.hpp>
+#include <rhp/utils/siphash.hpp>
 
 namespace Rhp::net::detail::rudp {
-
-namespace {
-
-[[nodiscard]] constexpr std::uint64_t rotl(std::uint64_t x, int bits) noexcept {
-    return (x << bits) | (x >> (64 - bits));
-}
-
-[[nodiscard]] std::uint64_t load64(const std::byte* at) noexcept {
-    return utils::load_le<std::uint64_t>(std::span<const std::byte, 8>{at, 8});
-}
-
-} // namespace
-
-std::uint64_t siphash24(const cookie_key& key, utils::bytes_view data) noexcept {
-    const std::uint64_t k0 = load64(key.data());
-    const std::uint64_t k1 = load64(key.data() + 8);
-    std::uint64_t v0 = 0x736f'6d65'7073'6575u ^ k0;
-    std::uint64_t v1 = 0x646f'7261'6e64'6f6du ^ k1;
-    std::uint64_t v2 = 0x6c79'6765'6e65'7261u ^ k0;
-    std::uint64_t v3 = 0x7465'6462'7974'6573u ^ k1;
-    const auto round = [&]() noexcept {
-        v0 += v1;
-        v1 = rotl(v1, 13);
-        v1 ^= v0;
-        v0 = rotl(v0, 32);
-        v2 += v3;
-        v3 = rotl(v3, 16);
-        v3 ^= v2;
-        v0 += v3;
-        v3 = rotl(v3, 21);
-        v3 ^= v0;
-        v2 += v1;
-        v1 = rotl(v1, 17);
-        v1 ^= v2;
-        v2 = rotl(v2, 32);
-    };
-    const std::size_t whole = data.size() - data.size() % 8;
-    for (std::size_t at = 0; at < whole; at += 8) {
-        const std::uint64_t m = load64(data.data() + at);
-        v3 ^= m;
-        round();
-        round();
-        v0 ^= m;
-    }
-    std::uint64_t last = static_cast<std::uint64_t>(data.size()) << 56;
-    for (std::size_t i = whole; i < data.size(); ++i) {
-        last |= std::to_integer<std::uint64_t>(data[i]) << (8 * (i - whole));
-    }
-    v3 ^= last;
-    round();
-    round();
-    v0 ^= last;
-    v2 ^= 0xff;
-    round();
-    round();
-    round();
-    round();
-    return v0 ^ v1 ^ v2 ^ v3;
-}
 
 result<cookie_jar> cookie_jar::make(time_point now) {
     cookie_jar jar;
@@ -120,7 +63,7 @@ std::uint64_t cookie_jar::mac(const cookie_key& key, std::uint64_t bucket, const
     utils::store_le<std::uint16_t>(std::span<std::byte, 2>{input.data() + 16, 2}, from.port);
     utils::store_le<std::uint64_t>(std::span<std::byte, 8>{input.data() + 18, 8}, from.token);
     utils::store_le<std::uint64_t>(std::span<std::byte, 8>{input.data() + 26, 8}, bucket);
-    return siphash24(key, input);
+    return utils::siphash24(key, input);
 }
 
 } // namespace Rhp::net::detail::rudp

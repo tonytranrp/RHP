@@ -18,6 +18,13 @@
 // 0. The buffer's frame is cleared right after setjmp, so the yield is a plain jump there too -
 // unless the process runs with a CET shadow stack (an executable linked /CETCOMPAT on a CPU that has
 // one): a plain jump leaves the shadow stack behind and the process dies, so yields throw there.
+
+// Before Lua's sources: their macros (cast, G, ...) stay out of the standard headers these include.
+#include <array>
+#include <cstddef>
+
+#include <rhp/utils/siphash.hpp>
+
 #if defined(RHP_LUA_JUMP_YIELDS)
 #include <setjmp.h> // NOLINT(modernize-deprecated-headers): _setjmp / _longjmp are POSIX, not in <csetjmp>
 
@@ -263,11 +270,12 @@ static ptrdiff_t rhp_lua_steps_due(lua_State* L, ptrdiff_t left) {
     }
 
 // Addresses. tostring and string.format's %p (the patched lauxlib.c and lstrlib.c) show
-// rhp_lua_topointer's value where they showed an object's address: SipHash-2-4 of the address under
-// the state's 128-bit key (rhp_lua_set_address_key), so code learns nothing of the address space
-// layout from them (a C function's address is the program's). Lua never moves an object, so the
-// value stays the object's for its life, and at 64 bits two live objects practically never share one.
-// A state without a key (not a sandbox) shows the address, as upstream does.
+// rhp_lua_topointer's value where they showed an object's address: SipHash-2-4
+// (Rhp::utils::siphash24) of the address's 8 little-endian bytes under the state's 128-bit key
+// (rhp_lua_set_address_key), so code learns nothing of the address space layout from them (a C
+// function's address is the program's). Lua never moves an object, so the value stays the object's
+// for its life, and at 64 bits two live objects practically never share one. A state without a key
+// (not a sandbox) shows the address, as upstream does.
 #include <stdint.h> // NOLINT(modernize-deprecated-headers): uint64_t, uintptr_t, like the C sources around
 
 static const char rhp_lua_address_key = 'a'; // its address: the registry key of the key
@@ -275,42 +283,6 @@ static const char rhp_lua_address_key = 'a'; // its address: the registry key of
 void rhp_lua_set_address_key(lua_State* L, const char* key) {
     lua_pushlstring(L, key, 16);
     lua_rawsetp(L, LUA_REGISTRYINDEX, &rhp_lua_address_key);
-}
-
-static uint64_t rhp_lua_rotl(uint64_t x, int b) {
-    return (x << b) | (x >> (64 - b));
-}
-
-static void rhp_lua_sipround(uint64_t v[4]) {
-    v[0] += v[1];
-    v[1] = rhp_lua_rotl(v[1], 13) ^ v[0];
-    v[0] = rhp_lua_rotl(v[0], 32);
-    v[2] += v[3];
-    v[3] = rhp_lua_rotl(v[3], 16) ^ v[2];
-    v[0] += v[3];
-    v[3] = rhp_lua_rotl(v[3], 21) ^ v[0];
-    v[2] += v[1];
-    v[1] = rhp_lua_rotl(v[1], 17) ^ v[2];
-    v[2] = rhp_lua_rotl(v[2], 32);
-}
-
-// SipHash-2-4 of one 8-byte message (m's little-endian bytes) under the key (k0, k1).
-static uint64_t rhp_lua_siphash(uint64_t k0, uint64_t k1, uint64_t m) {
-    uint64_t v[4] = {k0 ^ 0x736f6d6570736575u, k1 ^ 0x646f72616e646f6du, k0 ^ 0x6c7967656e657261u, k1 ^ 0x7465646279746573u};
-    const uint64_t length = (uint64_t)8 << 56; // the last block: no bytes left, the message length
-    v[3] ^= m;
-    rhp_lua_sipround(v);
-    rhp_lua_sipround(v);
-    v[0] ^= m;
-    v[3] ^= length;
-    rhp_lua_sipround(v);
-    rhp_lua_sipround(v);
-    v[0] ^= length;
-    v[2] ^= 0xff;
-    for (int i = 0; i < 4; ++i) {
-        rhp_lua_sipround(v);
-    }
-    return v[0] ^ v[1] ^ v[2] ^ v[3];
 }
 
 const void* rhp_lua_topointer(lua_State* L, int idx) {
@@ -322,10 +294,12 @@ const void* rhp_lua_topointer(lua_State* L, int idx) {
         lua_pop(L, 1);
         return p;
     }
-    uint64_t key[2];
-    memcpy(key, lua_tostring(L, -1), sizeof key); // rhp_lua_set_address_key stored 16 bytes
+    std::array<std::byte, 16> key;
+    memcpy(key.data(), lua_tostring(L, -1), key.size()); // rhp_lua_set_address_key stored 16 bytes
     lua_pop(L, 1);
-    const uint64_t h = rhp_lua_siphash(key[0], key[1], (uint64_t)(uintptr_t)p);
+    std::array<std::byte, 8> address;
+    Rhp::utils::store_le<uint64_t>(address, (uint64_t)(uintptr_t)p);
+    const uint64_t h = Rhp::utils::siphash24(key, address);
     return (const void*)(uintptr_t)(h != 0 ? h : 1); // never NULL: %p shows that as "(null)"
 }
 

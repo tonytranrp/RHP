@@ -6,7 +6,6 @@
 #include <cstdint>
 
 #include <rhp/core/result.hpp>
-#include <rhp/utils/byte_buffer.hpp>
 
 // Sans-IO stateless cookies of the reliable UDP transport. A listener answers a dialer's first Hello
 // with a kCookie packet instead of creating anything; the dialer echoes the cookie in its next Hello,
@@ -14,15 +13,11 @@
 // the dialer's address, port and token and the time bucket, so a spoofed source never sees one and
 // costs the listener one stateless reply the size of its Hello.
 //
-// The MAC is SipHash-2-4 (Aumasson and Bernstein, 2012): a keyed 64-bit PRF built for short inputs,
-// implemented here because Rhp::net sits below Rhp::security (no keyed BLAKE2b at this layer) and
-// needs nothing heavier for a 64-bit tag that lives two minutes.
+// The MAC is SipHash-2-4 (Rhp::utils::siphash24): Rhp::net sits below Rhp::security (no keyed
+// BLAKE2b at this layer) and needs nothing heavier for a 64-bit tag that lives two minutes.
 namespace Rhp::net::detail::rudp {
 
 using cookie_key = std::array<std::byte, 16>;
-
-// SipHash-2-4 of `data` under `key`.
-[[nodiscard]] std::uint64_t siphash24(const cookie_key& key, utils::bytes_view data) noexcept;
 
 // Who a Hello came from, as its cookie covers it.
 struct hello_source {

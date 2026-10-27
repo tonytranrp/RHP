@@ -18,21 +18,6 @@
 
 namespace rudp = Rhp::net::detail::rudp;
 
-TEST_CASE("udp_reliable: SipHash-2-4 matches the reference vectors", "[net][udp_reliable][cookie]") {
-    rudp::cookie_key key{};
-    for (std::size_t i = 0; i < key.size(); ++i) {
-        key[i] = static_cast<std::byte>(i);
-    }
-    std::array<std::byte, 15> message{};
-    for (std::size_t i = 0; i < message.size(); ++i) {
-        message[i] = static_cast<std::byte>(i);
-    }
-    // The paper's example (15 bytes) and the first and ninth entries of its vectors.h.
-    CHECK(rudp::siphash24(key, message) == 0xa129'ca61'49be'45e5u);
-    CHECK(rudp::siphash24(key, {}) == 0x726f'db47'dd0e'0e31u);
-    CHECK(rudp::siphash24(key, Rhp::utils::bytes_view{message}.first(8)) == 0x93f5'f579'9a93'2462u);
-}
-
 TEST_CASE("udp_reliable: cookies are bound to the source and live one to two periods", "[net][udp_reliable][cookie]") {
     const auto t0 = std::chrono::steady_clock::now();
     auto jar = rudp::cookie_jar::make(t0);

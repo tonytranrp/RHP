@@ -91,6 +91,7 @@ add_library(Rhp::lua ALIAS rhp_lua)
 # Build tree only: an installed RHP ships the archive (Rhp::script needs it at link time), not lua.h.
 target_include_directories(rhp_lua SYSTEM PUBLIC "$<BUILD_INTERFACE:${lua_SOURCE_DIR}>")
 target_compile_features(rhp_lua PUBLIC cxx_std_23)
+target_link_libraries(rhp_lua PRIVATE Rhp::utils) # rhp_lua_topointer's SipHash (utils/siphash.hpp)
 set_target_properties(rhp_lua PROPERTIES FOLDER "third_party" EXPORT_NAME lua)
 set_property(GLOBAL APPEND PROPERTY RHP_INSTALL_THIRD_PARTY_TARGETS rhp_lua)
 
