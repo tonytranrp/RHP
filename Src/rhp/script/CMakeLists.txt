@@ -47,6 +47,7 @@ rhp_add_module(script
         testing.hpp
         tunables.hpp
         views.hpp
+        detail/call_guard.hpp
         detail/context.hpp
         detail/event_registry.hpp
         detail/lib_builder.hpp

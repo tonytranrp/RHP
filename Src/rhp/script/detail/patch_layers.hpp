@@ -16,6 +16,7 @@
 
 #include <rhp/core/ids.hpp>
 #include <rhp/core/result.hpp>
+#include <rhp/script/detail/call_guard.hpp>
 #include <rhp/script/detail/context.hpp>
 #include <rhp/script/ledger.hpp>
 #include <rhp/script/marshal.hpp>
@@ -316,34 +317,16 @@ private:
         if (bad) {
             s.raise(*bad);
         }
-        std::optional<error> thrown;
-        int pushed = 0;
+        // The layer below or the C++ default may throw: its errors keep their own place (no label).
+        const auto call = [&]() -> std::remove_cvref_t<R> { return self.state_.call_below(&self, std::move(*std::get<Is>(pulled))...); };
         if constexpr (std::is_void_v<R>) {
-            try {
-                self.state_.call_below(&self, std::move(*std::get<Is>(pulled))...);
-            } catch (const Rhp::exception& e) {
-                thrown = e.err();
-            } catch (const std::exception& e) {
-                thrown = make_error(errc::kRuntime, e.what());
-            }
+            call_guarded(s, std::string_view{}, call);
+            return 0;
         } else {
-            std::optional<std::remove_cvref_t<R>> out;
-            try {
-                out.emplace(self.state_.call_below(&self, std::move(*std::get<Is>(pulled))...));
-            } catch (const Rhp::exception& e) {
-                thrown = e.err();
-            } catch (const std::exception& e) {
-                thrown = make_error(errc::kRuntime, e.what());
-            }
-            if (!thrown) {
-                push(s, *out);
-                pushed = 1;
-            }
+            const auto out = call_guarded(s, std::string_view{}, call);
+            push(s, out);
+            return 1;
         }
-        if (thrown) {
-            s.raise(*thrown);
-        }
-        return pushed;
     }
 
     context& ctx_;

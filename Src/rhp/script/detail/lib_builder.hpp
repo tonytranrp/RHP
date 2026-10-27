@@ -20,6 +20,7 @@
 #include <rhp/core/async.hpp>
 #include <rhp/core/result.hpp>
 #include <rhp/core/role.hpp>
+#include <rhp/script/detail/call_guard.hpp>
 #include <rhp/script/detail/context.hpp>
 #include <rhp/script/detail/lib_traits.hpp>
 #include <rhp/script/detail/var_layers.hpp>
@@ -227,18 +228,30 @@ Captured capture_value(A&& a) {
     }
 }
 
+// Copies of what a call was given (or gave back), kept after it: for an undo<G>, by a view (its
+// binding is called again on every access) and by an asynchronous call. Each Captured is a
+// capture_t, made with capture_value.
+template <class... Captured>
+struct captured_args {
+    template <class... A>
+        requires(sizeof...(A) == sizeof...(Captured) && !(sizeof...(A) == 1 && (std::same_as<std::remove_cvref_t<A>, captured_args> && ...)))
+    explicit captured_args(A&&... a) : values(capture_value<Captured>(std::forward<A>(a))...) {}
+
+    std::tuple<Captured...> values;
+};
+
 // Effect recorded by a binding tagged Rhp::undo<G>: calls G with the captured values.
 template <auto G, class... Captured>
 class undo_call_effect final : public effect {
 public:
     template <class... A>
         requires(sizeof...(A) == sizeof...(Captured))
-    explicit undo_call_effect(A&&... captured) : captured_(capture_value<Captured>(std::forward<A>(captured))...) {}
+    explicit undo_call_effect(A&&... captured) : captured_(std::forward<A>(captured)...) {}
 
-    void undo() override { std::apply(G, captured_); }
+    void undo() override { std::apply(G, captured_.values); }
 
 private:
-    std::tuple<Captured...> captured_;
+    captured_args<Captured...> captured_;
 };
 
 class irreversible_effect final : public effect {
@@ -246,6 +259,18 @@ public:
     void undo() override {}
     [[nodiscard]] bool irreversible() const noexcept override { return true; }
 };
+
+// Journals one successful call of Entry under `label`: its undo<G> with copies of `captured` (the
+// result or the arguments, as Captured...), or an irreversible mark; nothing for a binding with
+// neither.
+template <class Entry, class... Captured, class... A>
+void record_binding_effect(context& ctx, std::string label, A&&... captured) {
+    if constexpr (Entry::feed != undo_feed::kNone) {
+        ctx.record_effect(std::move(label), std::make_unique<undo_call_effect<Entry::undo_tag::function, Captured...>>(std::forward<A>(captured)...));
+    } else if constexpr (Entry::is_irreversible) {
+        ctx.record_effect(std::move(label), std::make_unique<irreversible_effect>());
+    }
+}
 
 template <class T>
 struct capture_of {
@@ -276,21 +301,35 @@ struct static_label {
     operator std::string_view() const noexcept { return Text.view(); } // NOLINT(google-explicit-constructor)
 };
 
-// `label` converts to std::string_view (binding_label, static_label).
-template <utils::type_list_like Handles, class Entry, class Label, std::size_t... Is>
-int invoke_fn(stack& s, Label label, std::index_sequence<Is...>) {
-    using args = typename Entry::traits::args;
-    using R = typename Entry::traits::return_type;
-    constexpr bool keep_args = Entry::feed == undo_feed::kArgs;
-
-    std::tuple<result<pulled_t<Handles, utils::at_t<args, Is>>>...> pulled{
-        pull_arg<Handles, utils::at_t<args, Is>>(s, static_cast<int>(Is) + 1)...};
+// Raises the first argument that couldn't be pulled, labelled with its position (arg_error).
+template <class Entry, class Label, class Pulled, std::size_t... Is>
+void raise_bad_arg(stack& s, const Label& label, const Pulled& pulled, std::index_sequence<Is...>) {
     std::optional<error> bad;
     ((bad || std::get<Is>(pulled) ? void() : void(bad = arg_error(std::get<Is>(pulled).error(), label, Is + 1, is_member_entry<Entry>::value))), ...);
     if (bad) {
         s.raise(*bad);
     }
+}
 
+// Pulls Entry's arguments as Pulled (a tuple of one result per argument) and raises the first that
+// doesn't fit.
+template <utils::type_list_like Handles, class Entry, class Pulled, class Label, std::size_t... Is>
+Pulled pull_args(stack& s, const Label& label, std::index_sequence<Is...> seq) {
+    using args = typename Entry::traits::args;
+    Pulled pulled{pull_arg<Handles, utils::at_t<args, Is>>(s, static_cast<int>(Is) + 1)...};
+    raise_bad_arg<Entry>(s, label, pulled, seq);
+    return pulled;
+}
+
+// The general trampoline. `label` converts to std::string_view (binding_label, static_label).
+template <utils::type_list_like Handles, class Entry, class Label, std::size_t... Is>
+int invoke_fn(stack& s, Label label, std::index_sequence<Is...> seq) {
+    using args = typename Entry::traits::args;
+    using R = typename Entry::traits::return_type;
+    constexpr bool keep_args = Entry::feed == undo_feed::kArgs;
+    constexpr bool journaled = Entry::feed != undo_feed::kNone || Entry::is_irreversible;
+
+    auto pulled = pull_args<Handles, Entry, std::tuple<result<pulled_t<Handles, utils::at_t<args, Is>>>...>>(s, label, seq);
     const auto arg = [&]<std::size_t I>() -> decltype(auto) {
         if constexpr (keep_args) {
             return static_cast<pulled_t<Handles, utils::at_t<args, I>>&>(*std::get<I>(pulled));
@@ -298,55 +337,40 @@ int invoke_fn(stack& s, Label label, std::index_sequence<Is...>) {
             return static_cast<pulled_t<Handles, utils::at_t<args, I>>&&>(*std::get<I>(pulled));
         }
     };
+    const auto call = [&]() -> R { return std::invoke(Entry::function, arg.template operator()<Is>()...); };
 
-    // Exceptions from user code become Lua errors. Lua's own error object is not a std::exception,
-    // so it passes through untouched; raising happens only after the try block.
-    std::optional<error> thrown;
-    std::conditional_t<std::is_void_v<R>, char, std::optional<R>> out{};
-    try {
-        if constexpr (std::is_void_v<R>) {
-            std::invoke(Entry::function, arg.template operator()<Is>()...);
-        } else {
-            out.emplace(std::invoke(Entry::function, arg.template operator()<Is>()...));
-        }
-    } catch (const Rhp::exception& e) {
-        thrown = e.err();
-    } catch (const std::exception& e) {
-        thrown = make_error(errc::kRuntime, e.what(), std::string{std::string_view{label}});
-    }
-    if (thrown) {
-        if (thrown->where.empty()) {
-            thrown->where = std::string{std::string_view{label}};
-        }
-        s.raise(*thrown);
-    }
-
-    // The C++ effect happened: journal it before pushing results (pushing may raise).
-    bool succeeded = true;
-    if constexpr (is_result_v<R>) {
-        succeeded = out->has_value();
-    }
-    if (succeeded) {
+    // The C++ effect happened: journal it before pushing results (pushing may raise). An undo<G> fed
+    // with the result gets a copy of `result`.
+    [[maybe_unused]] const auto journal = [&]([[maybe_unused]] auto&... result) {
         if constexpr (Entry::feed == undo_feed::kResult) {
-            using V = undo_input_t<Entry::function>;
-            if constexpr (is_result_v<R>) {
-                s.context().record_effect(std::string{std::string_view{label}}, std::make_unique<undo_call_effect<Entry::undo_tag::function, V>>(**out));
-            } else {
-                s.context().record_effect(std::string{std::string_view{label}}, std::make_unique<undo_call_effect<Entry::undo_tag::function, V>>(*out));
-            }
-        } else if constexpr (Entry::feed == undo_feed::kArgs) {
-            s.context().record_effect(std::string{std::string_view{label}},
-                                      std::make_unique<undo_call_effect<Entry::undo_tag::function, capture_t<utils::at_t<args, Is>>...>>(
-                                          *std::get<Is>(pulled)...));
-        } else if constexpr (Entry::is_irreversible) {
-            s.context().record_effect(std::string{std::string_view{label}}, std::make_unique<irreversible_effect>());
+            record_binding_effect<Entry, undo_input_t<Entry::function>>(s.context(), std::string{std::string_view{label}}, result...);
+        } else if constexpr (keep_args) {
+            record_binding_effect<Entry, capture_t<utils::at_t<args, Is>>...>(s.context(), std::string{std::string_view{label}}, *std::get<Is>(pulled)...);
+        } else { // irreversible
+            record_binding_effect<Entry>(s.context(), std::string{std::string_view{label}});
         }
-    }
+    };
 
     if constexpr (std::is_void_v<R>) {
+        call_guarded(s, label, call);
+        if constexpr (journaled) {
+            journal();
+        }
         return 0;
     } else {
-        return push_return<Handles>(s, label, *out);
+        R out = call_guarded(s, label, call);
+        if constexpr (journaled && is_result_v<R>) {
+            if constexpr (std::is_void_v<typename R::value_type>) {
+                if (out) {
+                    journal();
+                }
+            } else if (out) {
+                journal(*out);
+            }
+        } else if constexpr (journaled) {
+            journal(out);
+        }
+        return push_return<Handles>(s, label, out);
     }
 }
 
@@ -409,30 +433,13 @@ int call_plain(stack& s, Label label, [[maybe_unused]] std::index_sequence<Is...
         }
     }
 
-    // As in invoke_fn: exceptions become Lua errors, raised after the try block.
-    std::optional<error> thrown;
-    std::conditional_t<std::is_void_v<R>, char, std::optional<R>> out{};
-    try {
-        if constexpr (std::is_void_v<R>) {
-            std::invoke(Entry::function, plain_value<Handles, utils::at_t<args, Is>>(std::get<Is>(values))...);
-        } else {
-            out.emplace(std::invoke(Entry::function, plain_value<Handles, utils::at_t<args, Is>>(std::get<Is>(values))...));
-        }
-    } catch (const Rhp::exception& e) {
-        thrown = e.err();
-    } catch (const std::exception& e) {
-        thrown = make_error(errc::kRuntime, e.what(), std::string{std::string_view{label}});
-    }
-    if (thrown) {
-        if (thrown->where.empty()) {
-            thrown->where = std::string{std::string_view{label}};
-        }
-        s.raise(*thrown);
-    }
+    const auto call = [&]() -> R { return std::invoke(Entry::function, plain_value<Handles, utils::at_t<args, Is>>(std::get<Is>(values))...); };
     if constexpr (std::is_void_v<R>) {
+        call_guarded(s, label, call);
         return 0;
     } else {
-        return push_return<Handles>(s, label, *out);
+        R out = call_guarded(s, label, call);
+        return push_return<Handles>(s, label, out);
     }
 }
 
@@ -520,12 +527,12 @@ class binding_source final : public view_source {
 public:
     template <class... A>
         requires(sizeof...(A) == sizeof...(Captured))
-    explicit binding_source(A&&... captured) : args_(capture_value<Captured>(std::forward<A>(captured))...) {}
+    explicit binding_source(A&&... captured) : args_(std::forward<A>(captured)...) {}
 
     [[nodiscard]] result<region> resolve() const noexcept override {
         try {
             std::optional<error> stale;
-            std::apply([&](const Captured&... a) { (check_alive<Handles>(a, stale), ...); }, args_);
+            std::apply([&](const Captured&... a) { (check_alive<Handles>(a, stale), ...); }, args_.values);
             if (stale) {
                 return std::unexpected{std::move(*stale)};
             }
@@ -534,11 +541,9 @@ public:
                     decltype(auto) r = std::invoke(Entry::function, a...);
                     return view_region<decltype(r)>(static_cast<decltype(r)&&>(r));
                 },
-                args_);
-        } catch (const Rhp::exception& e) {
-            return std::unexpected{e.err()};
+                args_.values);
         } catch (const std::exception& e) {
-            return fail(errc::kRuntime, e.what());
+            return std::unexpected{binding_error(e, {})};
         } catch (...) { // C++ only in here (no Lua call): nothing else may escape a noexcept function
             return fail(errc::kRuntime, "the binding threw an unknown exception");
         }
@@ -554,7 +559,7 @@ public:
                     decltype(auto) r = std::invoke(Entry::function, a...);
                     return view_find<decltype(r)>(static_cast<decltype(r)&&>(r), out);
                 },
-                args_);
+                args_.values);
         } catch (...) { // C++ only in here; resolve() says what went wrong
             return false;
         }
@@ -568,7 +573,7 @@ public:
         }
         if constexpr ((std::equality_comparable<Captured> && ...)) {
             try {
-                return static_cast<const binding_source&>(other).args_ == args_;
+                return static_cast<const binding_source&>(other).args_.values == args_.values;
             } catch (...) { // a throwing operator==: not known to be the same memory
                 return false;
             }
@@ -582,7 +587,7 @@ public:
 private:
     binding_source(const binding_source&) = default;
 
-    std::tuple<Captured...> args_;
+    captured_args<Captured...> args_;
 };
 
 template <utils::type_list_like Handles, class Entry>
@@ -606,19 +611,13 @@ struct view_type_of {
 // holding a binding_source with copies of the arguments. Errors raise at the call, as on the
 // general path.
 template <utils::type_list_like Handles, class Entry, class Label, std::size_t... Is>
-int call_view(stack& s, Label label, std::index_sequence<Is...>) {
+int call_view(stack& s, Label label, std::index_sequence<Is...> seq) {
     using args = typename Entry::traits::args;
     using source = binding_source<Handles, Entry, capture_t<utils::at_t<args, Is>>...>;
     // Lua aligns a userdata's memory for its own types (8 bytes), not for over-aligned arguments.
     static_assert(alignof(source) <= 8, "a view binding's arguments are copied into the view: none may need more than 8-byte alignment");
 
-    std::tuple<result<pulled_t<Handles, utils::at_t<args, Is>>>...> pulled{
-        pull_arg<Handles, utils::at_t<args, Is>>(s, static_cast<int>(Is) + 1)...};
-    std::optional<error> bad;
-    ((bad || std::get<Is>(pulled) ? void() : void(bad = arg_error(std::get<Is>(pulled).error(), label, Is + 1, is_member_entry<Entry>::value))), ...);
-    if (bad) {
-        s.raise(*bad);
-    }
+    auto pulled = pull_args<Handles, Entry, std::tuple<result<pulled_t<Handles, utils::at_t<args, Is>>>...>>(s, label, seq);
 
     host_view_init init = view_init_of<Handles, Entry>();
     init.source_size = sizeof(source);
@@ -647,7 +646,7 @@ public:
 
     template <class... A>
     async_call(std::string label, async_type later, A&&... captured)
-        : label_(std::move(label)), later_(std::move(later)), captured_(Captured(std::forward<A>(captured))...) {}
+        : label_(std::move(label)), later_(std::move(later)), captured_(std::forward<A>(captured)...) {}
 
     async_call(const async_call&) = delete;
     async_call& operator=(const async_call&) = delete;
@@ -673,15 +672,11 @@ public:
         }
         // The C++ effect happened: journal it before pushing results (pushing may raise).
         if constexpr (Entry::feed == undo_feed::kResult) {
-            ctx.record_effect(label_, std::make_unique<undo_call_effect<Entry::undo_tag::function, value_type>>(*r));
+            record_binding_effect<Entry, value_type>(ctx, label_, *r);
         } else if constexpr (Entry::feed == undo_feed::kArgs) {
-            ctx.record_effect(label_, std::apply(
-                                          [](const Captured&... a) {
-                                              return std::make_unique<undo_call_effect<Entry::undo_tag::function, Captured...>>(a...);
-                                          },
-                                          captured_));
+            std::apply([&](const Captured&... a) { record_binding_effect<Entry, Captured...>(ctx, label_, a...); }, captured_.values);
         } else if constexpr (Entry::is_irreversible) {
-            ctx.record_effect(label_, std::make_unique<irreversible_effect>());
+            record_binding_effect<Entry>(ctx, label_);
         }
         if constexpr (std::is_void_v<value_type>) {
             return 0;
@@ -708,7 +703,7 @@ public:
                 if constexpr (Entry::feed == undo_feed::kResult) {
                     std::invoke(Entry::undo_tag::function, **r);
                 } else {
-                    std::apply(Entry::undo_tag::function, captured_);
+                    std::apply(Entry::undo_tag::function, captured_.values);
                 }
             } catch (...) { // an undo that throws is dropped, as when a revert runs it
             }
@@ -719,7 +714,7 @@ public:
 private:
     std::string label_;
     async_type later_;
-    std::tuple<Captured...> captured_;
+    captured_args<Captured...> captured_;
     bool settled_ = false; // finished or settled: the destructor has nothing to do
 };
 
@@ -733,7 +728,7 @@ private:
 // Calls an asynchronous binding. Returns its number of results when it finished at once, or -1
 // when the request must wait (the sandbox keeps the call).
 template <utils::type_list_like Handles, class Entry, std::size_t... Is>
-int start_async(stack& s, context& ctx, std::string_view label, std::index_sequence<Is...>) {
+int start_async(stack& s, context& ctx, std::string_view label, std::index_sequence<Is...> seq) {
     using args = typename Entry::traits::args;
     using R = std::remove_cvref_t<typename Entry::traits::return_type>;
     constexpr bool keep_args = Entry::feed == undo_feed::kArgs;
@@ -742,14 +737,7 @@ int start_async(stack& s, context& ctx, std::string_view label, std::index_seque
         s.raise(not_suspendable(label));
     }
 
-    std::tuple<result<storage_t<utils::at_t<args, Is>>>...> pulled{
-        pull_arg<Handles, utils::at_t<args, Is>>(s, static_cast<int>(Is) + 1)...};
-    std::optional<error> bad;
-    ((bad || std::get<Is>(pulled) ? void() : void(bad = arg_error(std::get<Is>(pulled).error(), label, Is + 1, is_member_entry<Entry>::value))), ...);
-    if (bad) {
-        s.raise(*bad);
-    }
-
+    auto pulled = pull_args<Handles, Entry, std::tuple<result<storage_t<utils::at_t<args, Is>>>...>>(s, label, seq);
     const auto arg = [&]<std::size_t I>() -> decltype(auto) {
         if constexpr (keep_args) {
             return static_cast<storage_t<utils::at_t<args, I>>&>(*std::get<I>(pulled));
@@ -757,40 +745,24 @@ int start_async(stack& s, context& ctx, std::string_view label, std::index_seque
             return static_cast<storage_t<utils::at_t<args, I>>&&>(*std::get<I>(pulled));
         }
     };
+    R out = call_guarded(s, label, [&]() -> R { return std::invoke(Entry::function, arg.template operator()<Is>()...); });
 
-    std::optional<error> thrown;
-    std::optional<R> out;
-    try {
-        out.emplace(std::invoke(Entry::function, arg.template operator()<Is>()...));
-    } catch (const Rhp::exception& e) {
-        thrown = e.err();
-    } catch (const std::exception& e) {
-        thrown = make_error(errc::kRuntime, e.what(), std::string{label});
-    }
-    if (thrown) {
-        if (thrown->where.empty()) {
-            thrown->where = std::string{label};
-        }
-        s.raise(*thrown);
-    }
-
-    if (out->ready()) {
+    if (out.ready()) {
         // Already over (a cache hit, an error found up front): finished here, without the shared
         // call a suspension needs. Nothing yields below; a raise unwinds `now` like any C++ object.
         if constexpr (keep_args) {
-            async_call<Handles, Entry, capture_t<utils::at_t<args, Is>>...> now{std::string{label}, std::move(*out), *std::get<Is>(pulled)...};
+            async_call<Handles, Entry, capture_t<utils::at_t<args, Is>>...> now{std::string{label}, std::move(out), *std::get<Is>(pulled)...};
             return now.finish(s, ctx);
         } else {
-            async_call<Handles, Entry> now{std::string{label}, std::move(*out)};
+            async_call<Handles, Entry> now{std::string{label}, std::move(out)};
             return now.finish(s, ctx);
         }
     }
     std::shared_ptr<async_wait> op;
     if constexpr (keep_args) {
-        op = std::make_shared<async_call<Handles, Entry, capture_t<utils::at_t<args, Is>>...>>(std::string{label}, std::move(*out),
-                                                                                               *std::get<Is>(pulled)...);
+        op = std::make_shared<async_call<Handles, Entry, capture_t<utils::at_t<args, Is>>...>>(std::string{label}, std::move(out), *std::get<Is>(pulled)...);
     } else {
-        op = std::make_shared<async_call<Handles, Entry>>(std::string{label}, std::move(*out));
+        op = std::make_shared<async_call<Handles, Entry>>(std::string{label}, std::move(out));
     }
     if (ctx.await_async(s.state(), op)) {
         return -1;
