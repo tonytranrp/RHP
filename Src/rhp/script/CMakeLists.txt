@@ -49,6 +49,7 @@ rhp_add_module(script
         detail/context.hpp
         detail/event_registry.hpp
         detail/lib_builder.hpp
+        detail/lib_traits.hpp
         detail/patch_layers.hpp
         detail/patch_registry.hpp
         detail/var_layers.hpp

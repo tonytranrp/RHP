@@ -36,7 +36,7 @@ enum class type_kind : std::int8_t {
     kThread
 };
 
-// How stack::read_args reads one argument of a plain binding (detail/lib_builder.hpp).
+// How stack::read_args reads one argument of a plain binding (plain_arg, detail/lib_traits.hpp).
 enum class arg_kind : std::uint8_t {
     kBool,    // a boolean
     kInteger, // a number with an integer value (2.0 too)

@@ -7,7 +7,7 @@
 #include <vector>
 
 #include <rhp/core/value.hpp>
-#include <rhp/script/detail/lib_builder.hpp>
+#include <rhp/script/detail/lib_traits.hpp>
 #include <rhp/script/lib.hpp>
 #include <rhp/script/stubs.hpp>
 #include <rhp/utils/fixed_string.hpp>

@@ -14,7 +14,7 @@
 #include <rhp/core/convert.hpp>
 #include <rhp/core/result.hpp>
 #include <rhp/core/role.hpp>
-#include <rhp/script/detail/lib_builder.hpp>
+#include <rhp/script/detail/lib_traits.hpp>
 #include <rhp/script/lib.hpp>
 #include <rhp/script/marshal.hpp>
 #include <rhp/utils/fixed_string.hpp>

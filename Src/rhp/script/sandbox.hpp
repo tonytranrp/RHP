@@ -24,13 +24,17 @@
 #include <rhp/core/value.hpp>
 #include <rhp/script/api.hpp>
 #include <rhp/script/debug.hpp>
-#include <rhp/script/detail/lib_builder.hpp>
+#include <rhp/script/detail/lib_traits.hpp>
 #include <rhp/script/ledger.hpp>
 #include <rhp/script/lib.hpp>
 #include <rhp/script/stack.hpp>
 #include <rhp/script/stubs.hpp>
 #include <rhp/script/testing.hpp>
 #include <rhp/script/tunables.hpp>
+
+#if RHP_ENABLE
+#include <rhp/script/detail/lib_builder.hpp> // install<L>: the lib's trampolines
+#endif
 
 namespace Rhp::script {
 
