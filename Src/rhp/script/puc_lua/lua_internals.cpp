@@ -81,6 +81,10 @@ bool hook_at_safepoints(lua_State* L) noexcept {
     return rhp_lua_hook_at_safepoints(L) != 0;
 }
 
+void set_step_function(lua_State* L, int (*f)(lua_State*)) {
+    rhp_lua_set_step_function(L, f);
+}
+
 std::uint32_t take_hook_progress(lua_State* L) noexcept {
     if (((L->hookmask & LUA_MASKCOUNT) == 0 && !hook_at_safepoints(L)) || L->basehookcount <= 0) {
         return 0;
