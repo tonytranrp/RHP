@@ -13,7 +13,6 @@
 #include <rhp/core/convert.hpp>
 #include <rhp/core/value.hpp>
 #include <rhp/script/detail/event_registry.hpp>
-#include <rhp/script/detail/lib_builder.hpp>
 #include <rhp/script/lib.hpp>
 #include <rhp/script/marshal.hpp>
 #include <rhp/script/stack.hpp>

@@ -486,6 +486,11 @@ template <class H>
 concept handle_value = std::is_trivially_copyable_v<H> && std::equality_comparable<H> && !std::is_arithmetic_v<H> &&
                        !std::is_pointer_v<H> && std::same_as<H, std::remove_cvref_t<H>>;
 
+// A unique address per C++ handle (or view) type, so two libs can't reuse a type name for different
+// types, and an event finds the lib that declared its handle argument's type.
+template <class H>
+inline constexpr char handle_type_tag_v = 0;
+
 template <utils::fixed_string Name, class H, auto IsAlive>
 struct handle_entry {
     static constexpr entry_kind kind = entry_kind::kHandle;

@@ -47,10 +47,6 @@ consteval auto concat_fixed() {
 template <class Entry>
 inline constexpr auto handle_key_v = concat_fixed<utils::fixed_string{"rhp.handle."}, Entry::fixed_name>();
 
-// A unique address per C++ handle type, so two libs can't reuse a handle name for different types.
-template <class H>
-inline constexpr char handle_type_tag_v = 0;
-
 // Registry key of a struct view type's metatable: "rhp.view.<name>".
 template <class Entry>
 inline constexpr auto view_key_v = concat_fixed<utils::fixed_string{"rhp.view."}, Entry::fixed_name>();
