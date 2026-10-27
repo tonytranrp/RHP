@@ -6,7 +6,9 @@
 // includes Lua's private headers. Lua is built from a pinned source (cmake/Dependencies.cmake), so
 // these layouts are the ones compiled in.
 
+#include <cstddef>
 #include <cstdint>
+#include <span>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -15,10 +17,12 @@ struct lua_State;
 struct lua_Debug;
 
 // cmake/lua/lua_cxx.cpp (the Lua translation unit): a count hook checked at safe points, the step
-// function of work done in C.
+// function of work done in C, the key addresses are shown under.
 void rhp_lua_sethook_safepoints(lua_State* L, void (*hook)(lua_State*, lua_Debug*), int count);
 int rhp_lua_hook_at_safepoints(lua_State* L);
 void rhp_lua_set_step_function(lua_State* L, int (*f)(lua_State*));
+void rhp_lua_set_address_key(lua_State* L, const char* key);
+const void* rhp_lua_topointer(lua_State* L, int idx);
 
 namespace Rhp::script::detail::internals {
 
@@ -35,6 +39,14 @@ void set_safepoint_hook(lua_State* L, void (*hook)(lua_State*, lua_Debug*), int 
 // every few thousand, on a thread that has a hook, call `f` directly (not through lua_call) with the
 // step count on top of the stack. `f` may raise to stop the run. Kept in L's registry (may raise).
 void set_step_function(lua_State* L, int (*f)(lua_State*));
+
+// tostring, string.format's %p and shown_pointer show a keyed hash (SipHash-2-4 under `key`) where
+// Lua showed an object's address, so scripts can't learn the address space layout. Kept in L's
+// registry (may raise).
+void set_address_key(lua_State* L, std::span<const std::byte, 16> key);
+
+// What tostring shows as the address of the value at `index` (nullptr for a value without one).
+[[nodiscard]] const void* shown_pointer(lua_State* L, int index);
 
 // Instructions L ran since its count hook last fired (or was set), and restarts the countdown so they
 // aren't reported twice. 0 while L's hook doesn't count.

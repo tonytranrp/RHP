@@ -24,6 +24,7 @@
 #include <rhp/core/error.hpp>
 #include <rhp/script/puc_lua/builtins.hpp>
 #include <rhp/script/puc_lua/keys.hpp>
+#include <rhp/script/puc_lua/lua_internals.hpp>
 #include <rhp/script/puc_lua/sandbox_impl.hpp>
 #include <rhp/script/puc_lua/tools.hpp>
 #include <rhp/script/stack.hpp>
@@ -420,7 +421,7 @@ value_list sandbox_impl::collect_results(lua_State* L, int first, int last) {
         if (v) {
             out.push_back(std::move(*v));
         } else {
-            out.emplace_back(std::format("{}: {}", luaL_typename(L, i), lua_topointer(L, i)));
+            out.emplace_back(std::format("{}: {}", luaL_typename(L, i), internals::shown_pointer(L, i))); // as tostring shows it
         }
     }
     return out;

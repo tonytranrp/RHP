@@ -27,6 +27,7 @@
 #include <lua.h>
 #include <lualib.h>
 
+#include <rhp/platform/random.hpp>
 #include <rhp/script/detail/event_registry.hpp>
 #include <rhp/script/detail/patch_layers.hpp>
 #include <rhp/script/detail/patch_registry.hpp>
@@ -368,6 +369,11 @@ sandbox_impl::sandbox_impl(sandbox_options options)
     unlisted_.reserve(kSpareRequests); // runs nested deeper than this grow it (start_request may allocate anyway)
     running_.reserve(kSpareRequests);  // likewise; the first sandbox::call can take call_unprotected's path
     call_keys_.reserve(kCallKeys);
+    // tostring and %p show addresses hashed under this key (internals::set_address_key).
+    auto address_key = Rhp::platform::random_array<16>();
+    if (!address_key) {
+        throw Rhp::exception{std::move(address_key).error()};
+    }
     state_ = lua_newstate(&sandbox_impl::allocate, this, luaL_makeseed(nullptr));
     if (state_ == nullptr) {
         throw std::bad_alloc{};
@@ -379,11 +385,12 @@ sandbox_impl::sandbox_impl(sandbox_options options)
 
     scratch_ = ids_.next();
     current_ = effect_owner{scratch_};
-    auto opened = protect(state_, [this] {
+    auto opened = protect(state_, [this, &address_key] {
         if (options_.gc != gc_mode::kIncremental) { // a new Lua 5.5 state starts incremental
             (void)lua_gc(state_, LUA_GCGEN);
             gc_mode_ = options_.gc;
         }
+        internals::set_address_key(state_, *address_key);
         open_libraries();
         open_stage7_libraries();
         module_record scratch;
