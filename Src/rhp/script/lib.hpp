@@ -73,6 +73,30 @@ struct doc {
 
 namespace detail {
 
+// The position of the first true among Matches, or sizeof...(Matches) when none is.
+template <bool... Matches>
+consteval std::size_t first_true() {
+    constexpr bool matches[] = {Matches..., true};
+    std::size_t i = 0;
+    while (!matches[i]) {
+        ++i;
+    }
+    return i;
+}
+
+template <class List, bool... Matches>
+struct first_match;
+
+template <class... Ts, bool... Matches>
+struct first_match<utils::type_list<Ts...>, Matches...> {
+    static_assert(sizeof...(Ts) == sizeof...(Matches), "one match per type");
+    using type = utils::at_t<utils::type_list<Ts..., void>, first_true<Matches...>()>;
+};
+
+// The first type of List whose match (one per type, in order) is true; void when none is.
+template <class List, bool... Matches>
+using first_match_t = typename first_match<List, Matches...>::type;
+
 enum class var_tag_kind : std::uint8_t {
     kNone, // not a variable tag
     kRange,
@@ -104,14 +128,7 @@ concept ro_tag = var_tag_kind_v<T> == var_tag_kind::kUnit || var_tag_kind_v<T> =
 
 // The tag of kind K among Tags (void when none).
 template <var_tag_kind K, class... Tags>
-struct var_tag_find {
-    using type = void;
-};
-
-template <var_tag_kind K, class T, class... Rest>
-struct var_tag_find<K, T, Rest...> {
-    using type = std::conditional_t<var_tag_kind_v<T> == K, T, typename var_tag_find<K, Rest...>::type>;
-};
+using var_tag_find_t = first_match_t<utils::type_list<Tags...>, (var_tag_kind_v<Tags> == K)...>;
 
 template <var_tag_kind K, class... Tags>
 inline constexpr std::size_t var_tag_count_v = (std::size_t{0} + ... + (var_tag_kind_v<Tags> == K ? 1u : 0u));
@@ -165,8 +182,8 @@ consteval bool step_fits() {
 // At most one tag of each kind; range and step only on numbers, with bounds that fit and min <= max.
 template <class T, class... Tags>
 concept valid_var_tags = (var_tag_count_v<var_tag_kind::kRange, Tags...> <= 1) && (var_tag_count_v<var_tag_kind::kStep, Tags...> <= 1) && (var_tag_count_v<var_tag_kind::kUnit, Tags...> <= 1) &&
-                         (var_tag_count_v<var_tag_kind::kDoc, Tags...> <= 1) && range_fits<T, typename var_tag_find<var_tag_kind::kRange, Tags...>::type>() &&
-                         step_fits<T, typename var_tag_find<var_tag_kind::kStep, Tags...>::type>();
+                         (var_tag_count_v<var_tag_kind::kDoc, Tags...> <= 1) && range_fits<T, var_tag_find_t<var_tag_kind::kRange, Tags...>>() &&
+                         step_fits<T, var_tag_find_t<var_tag_kind::kStep, Tags...>>();
 
 template <class... Tags>
 concept valid_ro_tags = (var_tag_count_v<var_tag_kind::kUnit, Tags...> <= 1) && (var_tag_count_v<var_tag_kind::kDoc, Tags...> <= 1);
@@ -174,10 +191,10 @@ concept valid_ro_tags = (var_tag_count_v<var_tag_kind::kUnit, Tags...> <= 1) && 
 // The metadata a variable's tags carry, as tools see it.
 template <class T, class... Tags>
 struct var_meta {
-    using range_tag = typename var_tag_find<var_tag_kind::kRange, Tags...>::type;
-    using step_tag = typename var_tag_find<var_tag_kind::kStep, Tags...>::type;
-    using unit_tag = typename var_tag_find<var_tag_kind::kUnit, Tags...>::type;
-    using doc_tag = typename var_tag_find<var_tag_kind::kDoc, Tags...>::type;
+    using range_tag = var_tag_find_t<var_tag_kind::kRange, Tags...>;
+    using step_tag = var_tag_find_t<var_tag_kind::kStep, Tags...>;
+    using unit_tag = var_tag_find_t<var_tag_kind::kUnit, Tags...>;
+    using doc_tag = var_tag_find_t<var_tag_kind::kDoc, Tags...>;
     static constexpr bool has_range = !std::is_void_v<range_tag>;
     static constexpr bool has_step = !std::is_void_v<step_tag>;
 
@@ -272,15 +289,9 @@ inline constexpr std::size_t undo_count_v = (std::size_t{0} + ... + (is_undo_v<T
 template <class... Tags>
 inline constexpr std::size_t role_count_v = (std::size_t{0} + ... + (is_requires_role_v<Tags> ? 1u : 0u));
 
+// The undo<G> among Tags (void when none).
 template <class... Tags>
-struct undo_of {
-    using type = void;
-};
-
-template <class Tag, class... Tags>
-struct undo_of<Tag, Tags...> {
-    using type = std::conditional_t<is_undo_v<Tag>, Tag, typename undo_of<Tags...>::type>;
-};
+using undo_of_t = first_match_t<utils::type_list<Tags...>, is_undo_v<Tags>...>;
 
 template <class R>
 struct unwrap_result {
@@ -381,7 +392,7 @@ consteval undo_feed undo_feed_of() {
 
 template <auto F, class... Tags>
 concept valid_fn_tags = (undo_count_v<Tags...> + count_tag_v<irreversible, Tags...> <= 1) && (role_count_v<Tags...> <= 1) &&
-                        (undo_feed_of<F, typename undo_of<Tags...>::type>() != undo_feed::kInvalid);
+                        (undo_feed_of<F, undo_of_t<Tags...>>() != undo_feed::kInvalid);
 
 // ---- spans -------------------------------------------------------------------------------------------
 
@@ -444,7 +455,7 @@ struct fn_entry {
     static constexpr std::string_view name = fixed_name.view();
     static constexpr auto function = F;
     using traits = utils::function_traits<decltype(F)>;
-    using undo_tag = typename undo_of<Tags...>::type;
+    using undo_tag = undo_of_t<Tags...>;
     static constexpr undo_feed feed = undo_feed_of<F, undo_tag>();
     static constexpr bool is_irreversible = count_tag_v<irreversible, Tags...> > 0;
     // Returns Rhp::async<T>: the calling script suspends until the result arrives.

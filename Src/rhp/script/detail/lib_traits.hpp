@@ -93,16 +93,13 @@ using members_of_t = utils::filter_t<flat_entries_t<Lib>, is_member_entry>;
 template <class Lib>
 using fields_in_t = utils::filter_t<flat_entries_t<Lib>, is_field_entry>;
 
-// The entry of kind K for C++ type T in Handles, or void.
 template <class Handles, class T, entry_kind K>
-struct find_typed {
-    using type = void;
-};
+struct find_typed;
 
-template <class T, entry_kind K, class Entry, class... Rest>
-struct find_typed<utils::type_list<Entry, Rest...>, T, K> {
-    using type = std::conditional_t<Entry::kind == K && std::is_same_v<typename Entry::type, T>, Entry,
-                                    typename find_typed<utils::type_list<Rest...>, T, K>::type>;
+// The entry of kind K for C++ type T in Handles, or void.
+template <class... Hs, class T, entry_kind K>
+struct find_typed<utils::type_list<Hs...>, T, K> {
+    using type = first_match_t<utils::type_list<Hs...>, (Hs::kind == K && std::is_same_v<typename Hs::type, T>)...>;
 };
 
 // The handle entry for C++ type T in Handles, or void.
