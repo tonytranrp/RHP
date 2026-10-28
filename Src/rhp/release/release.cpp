@@ -21,80 +21,13 @@ namespace Rhp::release {
 
 namespace {
 
-constexpr std::size_t kMaxEnvelope = 64u << 20; // a release's bytes, sources included
+using detail::add_signature;
+using detail::envelope_of;
+using detail::signatures_from;
+using detail::signatures_value;
 
 error integrity(std::string message) {
     return make_error(errc::kIntegrity, std::move(message), "release");
-}
-
-result<void> add_signature(std::vector<signature>& to, std::string_view domain, std::span<const std::byte> body, const security::signing_key& key) {
-    if (key.name.empty() || key.secret.empty()) {
-        return fail(errc::kInvalidArgument, "a signing key needs a name and a private key", "release.sign");
-    }
-    signature s;
-    s.signer = key.name;
-    s.bytes = key.secret.sign(detail::signed_message(domain, body));
-    if (const auto it = std::ranges::find(to, key.name, &signature::signer); it != to.end()) {
-        *it = std::move(s);
-    } else {
-        if (to.size() >= kMaxSignatures) {
-            return fail(errc::kLimitExceeded, std::format("at most {} signatures", kMaxSignatures), "release.sign");
-        }
-        to.push_back(std::move(s));
-    }
-    return {};
-}
-
-value signatures_value(const std::vector<signature>& sigs) {
-    value::array out;
-    for (const signature& s : sigs) {
-        value::map m;
-        m.emplace_back(value{"signer"}, value{s.signer});
-        m.emplace_back(value{"sig"}, value{value::bytes(s.bytes.begin(), s.bytes.end())});
-        out.emplace_back(std::move(m));
-    }
-    return value{std::move(out)};
-}
-
-result<std::vector<signature>> signatures_from(const value* v) {
-    std::vector<signature> out;
-    if (v == nullptr || v->is_nil()) {
-        return out;
-    }
-    const auto* list = v->get_if<value::array>();
-    if (list == nullptr || list->size() > kMaxSignatures) {
-        return std::unexpected{detail::bad_body(std::format("'signatures' must be an array of at most {} signatures", kMaxSignatures))};
-    }
-    for (const value& item : *list) {
-        const value* signer = item.find("signer");
-        const value* sig = item.find("sig");
-        const auto* name = signer != nullptr ? signer->get_if<std::string>() : nullptr;
-        const auto* bytes = sig != nullptr ? sig->get_if<value::bytes>() : nullptr;
-        if (name == nullptr || bytes == nullptr || bytes->size() != security::ed25519_secret_key::kSignatureSize) {
-            return std::unexpected{detail::bad_body("a signature is {signer = string, sig = 64 bytes}")};
-        }
-        signature s;
-        s.signer = *name;
-        std::ranges::copy(*bytes, s.bytes.begin());
-        out.push_back(std::move(s));
-    }
-    return out;
-}
-
-result<value> envelope_of(std::span<const std::byte> bytes, std::string_view tag) {
-    if (bytes.size() > kMaxEnvelope) {
-        return fail(errc::kLimitExceeded, std::format("an envelope is at most {} bytes", kMaxEnvelope), "release");
-    }
-    auto v = detail::decode(bytes);
-    if (!v) {
-        return std::unexpected{detail::bad_body(std::format("not a release document: {}", v.error().message))};
-    }
-    const value* rhp = v->find("rhp");
-    const auto* kind = rhp != nullptr ? rhp->get_if<std::string>() : nullptr;
-    if (kind == nullptr || *kind != tag) {
-        return std::unexpected{detail::bad_body(std::format("expected a '{}' document, got '{}'", tag, kind != nullptr ? *kind : "?"))};
-    }
-    return v;
 }
 
 const value::bytes* bytes_field(const value& v, std::string_view key) {

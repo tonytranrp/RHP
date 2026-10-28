@@ -40,6 +40,118 @@ std::vector<std::byte> signed_message(std::string_view domain, std::span<const s
     return out;
 }
 
+value signatures_value(const std::vector<signature>& sigs) {
+    value::array out;
+    for (const signature& s : sigs) {
+        value::map m;
+        m.emplace_back(value{"signer"}, value{s.signer});
+        m.emplace_back(value{"sig"}, value{value::bytes(s.bytes.begin(), s.bytes.end())});
+        out.emplace_back(std::move(m));
+    }
+    return value{std::move(out)};
+}
+
+result<std::vector<signature>> signatures_from(const value* v) {
+    std::vector<signature> out;
+    if (v == nullptr || v->is_nil()) {
+        return out;
+    }
+    const auto* list = v->get_if<value::array>();
+    if (list == nullptr || list->size() > kMaxSignatures) {
+        return std::unexpected{bad_body(std::format("'signatures' must be an array of at most {} signatures", kMaxSignatures))};
+    }
+    for (const value& item : *list) {
+        const value* signer = item.find("signer");
+        const value* sig = item.find("sig");
+        const auto* name = signer != nullptr ? signer->get_if<std::string>() : nullptr;
+        const auto* bytes = sig != nullptr ? sig->get_if<value::bytes>() : nullptr;
+        if (name == nullptr || bytes == nullptr || bytes->size() != security::ed25519_secret_key::kSignatureSize) {
+            return std::unexpected{bad_body("a signature is {signer = string, sig = 64 bytes}")};
+        }
+        signature s;
+        s.signer = *name;
+        std::ranges::copy(*bytes, s.bytes.begin());
+        out.push_back(std::move(s));
+    }
+    return out;
+}
+
+result<void> add_signature(std::vector<signature>& to, std::string_view domain, std::span<const std::byte> body, const security::signing_key& key) {
+    if (key.name.empty() || key.secret.empty()) {
+        return fail(errc::kInvalidArgument, "a signing key needs a name and a private key", "release.sign");
+    }
+    signature s;
+    s.signer = key.name;
+    s.bytes = key.secret.sign(signed_message(domain, body));
+    if (const auto it = std::ranges::find(to, key.name, &signature::signer); it != to.end()) {
+        *it = std::move(s);
+    } else {
+        if (to.size() >= kMaxSignatures) {
+            return fail(errc::kLimitExceeded, std::format("at most {} signatures", kMaxSignatures), "release.sign");
+        }
+        to.push_back(std::move(s));
+    }
+    return {};
+}
+
+result<value> envelope_of(std::span<const std::byte> bytes, std::string_view tag) {
+    if (bytes.size() > kMaxEnvelope) {
+        return fail(errc::kLimitExceeded, std::format("an envelope is at most {} bytes", kMaxEnvelope), "release");
+    }
+    auto v = decode(bytes);
+    if (!v) {
+        return std::unexpected{bad_body(std::format("not a release document: {}", v.error().message))};
+    }
+    const value* rhp = v->find("rhp");
+    const auto* kind = rhp != nullptr ? rhp->get_if<std::string>() : nullptr;
+    if (kind == nullptr || *kind != tag) {
+        return std::unexpected{bad_body(std::format("expected a '{}' document, got '{}'", tag, kind != nullptr ? *kind : "?"))};
+    }
+    return v;
+}
+
+result<std::vector<std::byte>> encode_signed(std::string_view tag, std::span<const std::byte> body, const std::vector<signature>& sigs) {
+    value::map out;
+    out.emplace_back(value{"rhp"}, value{std::string{tag}});
+    out.emplace_back(value{"body"}, value{value::bytes(body.begin(), body.end())});
+    out.emplace_back(value{"signatures"}, signatures_value(sigs));
+    return encode(value{std::move(out)});
+}
+
+result<signed_parts> decode_signed(std::span<const std::byte> envelope, std::string_view tag) {
+    auto v = envelope_of(envelope, tag);
+    if (!v) {
+        return std::unexpected{std::move(v).error()};
+    }
+    const value* body = v->find("body");
+    const auto* bytes = body != nullptr ? body->get_if<value::bytes>() : nullptr;
+    if (bytes == nullptr) {
+        return std::unexpected{bad_body(std::format("a '{}' needs a 'body'", tag))};
+    }
+    auto sigs = signatures_from(v->find("signatures"));
+    if (!sigs) {
+        return std::unexpected{std::move(sigs).error()};
+    }
+    return signed_parts{*bytes, std::move(*sigs)};
+}
+
+std::string document_tag(std::span<const std::byte> bytes) {
+    if (bytes.size() > kMaxEnvelope) {
+        return {};
+    }
+    auto v = decode(bytes);
+    const value* tag = v ? v->find("rhp") : nullptr;
+    return tag != nullptr && tag->get_if<std::string>() != nullptr ? *tag->get_if<std::string>() : std::string{};
+}
+
+result<value::bytes> raw_bytes(const value& v, std::string_view key, std::size_t max) {
+    const auto* b = v.get_if<value::bytes>();
+    if (b == nullptr || b->empty() || b->size() > max) {
+        return std::unexpected{bad_body(std::format("'{}' must be 1 to {} bytes", key, max))};
+    }
+    return *b;
+}
+
 std::vector<std::string> canonical_set(std::vector<std::string> items) {
     std::ranges::sort(items);
     const auto dup = std::ranges::unique(items);

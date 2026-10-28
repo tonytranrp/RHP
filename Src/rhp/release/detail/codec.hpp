@@ -27,6 +27,27 @@ inline constexpr std::string_view kBytecodePrefix = "bytecode/";
 // domain || body: what a release or revocation list signature covers.
 [[nodiscard]] std::vector<std::byte> signed_message(std::string_view domain, std::span<const std::byte> body);
 
+// Signature lists as every signed document carries them: [{signer, sig}] (at most kMaxSignatures).
+[[nodiscard]] value signatures_value(const std::vector<signature>& sigs);
+[[nodiscard]] result<std::vector<signature>> signatures_from(const value* v);
+// Adds `key`'s signature over domain || body (replacing an earlier one by the same signer).
+[[nodiscard]] result<void> add_signature(std::vector<signature>& to, std::string_view domain, std::span<const std::byte> body, const security::signing_key& key);
+// A signed document's envelope: decoded, tagged rhp = `tag`, at most kMaxEnvelope bytes.
+inline constexpr std::size_t kMaxEnvelope = 64u << 20;
+[[nodiscard]] result<value> envelope_of(std::span<const std::byte> bytes, std::string_view tag);
+// {rhp = tag, body, signatures}: the envelope of a root or an identity revocation list.
+[[nodiscard]] result<std::vector<std::byte>> encode_signed(std::string_view tag, std::span<const std::byte> body, const std::vector<signature>& sigs);
+// The body bytes of a {rhp = tag, body, signatures} envelope and its signatures.
+struct signed_parts {
+    value::bytes body;
+    std::vector<signature> signatures;
+};
+[[nodiscard]] result<signed_parts> decode_signed(std::span<const std::byte> envelope, std::string_view tag);
+// The "rhp" tag of a MessagePack document ("root-envelope", ...); empty when it has none.
+[[nodiscard]] std::string document_tag(std::span<const std::byte> bytes);
+// A non-empty byte string of at most `max` bytes (a public key of a named algorithm).
+[[nodiscard]] result<value::bytes> raw_bytes(const value& v, std::string_view key, std::size_t max);
+
 [[nodiscard]] error bad_body(std::string message);
 
 // Sorted, without duplicates: lists that are sets encode one way only.

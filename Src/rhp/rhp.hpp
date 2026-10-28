@@ -43,6 +43,7 @@
 #include <rhp/release/manager.hpp>
 #include <rhp/release/manifest.hpp>
 #include <rhp/release/release.hpp>
+#include <rhp/release/root_of_trust.hpp>
 #include <rhp/release/store.hpp>
 #include <rhp/release/trust.hpp>
 #include <rhp/script/api.hpp>
@@ -70,6 +71,7 @@
 #include <rhp/security/tls/tls.hpp>
 #include <rhp/session/secure_link.hpp>
 #include <rhp/session/session.hpp>
+#include <rhp/test/test.hpp>
 #include <rhp/utils/base64.hpp>
 #include <rhp/utils/byte_buffer.hpp>
 #include <rhp/utils/crc32c.hpp>
@@ -80,7 +82,6 @@
 #include <rhp/utils/spsc_ring.hpp>
 #include <rhp/utils/type_list.hpp>
 #include <rhp/utils/units.hpp>
-#include <rhp/test/test.hpp>
 #include <rhp/wire/codec.hpp>
 #include <rhp/wire/codec/msgpack.hpp>
 #include <rhp/wire/frame.hpp>

@@ -1,7 +1,7 @@
 # Layer 4: signed releases (Rhp::release). Manifests, envelopes, revocation lists and stores
 # build in every configuration; with RHP_ENABLE=OFF hashing and the script engine aren't there,
 # so making, checking and running releases report kDisabled (release_disabled.cpp).
-set(rhp_release_sources manifest.cpp store.cpp trust.cpp)
+set(rhp_release_sources manifest.cpp root_of_trust.cpp store.cpp trust.cpp)
 if(RHP_ENABLE)
     list(APPEND rhp_release_sources bytecode.cpp detail/compiled_cache.cpp detail/state.cpp manager.cpp release.cpp)
 else()
@@ -14,6 +14,7 @@ rhp_add_module(release
         manager.hpp
         manifest.hpp
         release.hpp
+        root_of_trust.hpp
         store.hpp
         trust.hpp
     SOURCES

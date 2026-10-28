@@ -129,6 +129,7 @@ if(RHP_ENABLE)
             release/bytecode_tests.cpp
             release/codec_tests.cpp
             release/manager_tests.cpp
+            release/root_tests.cpp
         LINKS
             Rhp::release
     )
