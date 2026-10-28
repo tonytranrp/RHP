@@ -5,10 +5,7 @@
 
 namespace Rhp::host_detail {
 
-namespace {
-
-// Roughly what a value costs to keep (and to encode): enough to bound a cache.
-[[nodiscard]] std::size_t approx_size(const value& v) noexcept {
+std::size_t approx_size(const value& v) noexcept {
     switch (v.type()) {
     case value::kind::kString: return v.get_if<std::string>()->size() + 8;
     case value::kind::kBytes: return v.get_if<value::bytes>()->size() + 8;
@@ -29,6 +26,8 @@ namespace {
     default: return 16;
     }
 }
+
+namespace {
 
 [[nodiscard]] bool final_reply(wire::op code, std::uint64_t req) noexcept {
     return req != 0 && (code == wire::op::kResult || code == wire::op::kError);

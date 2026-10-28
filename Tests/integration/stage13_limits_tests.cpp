@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <stop_token>
 #include <string>
@@ -14,6 +15,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 #include <rhp_test/eventually.hpp>
+#include <rhp_test/net_support.hpp>
 #include <rhp_test/script_support.hpp>
 
 #include <rhp/client/client.hpp>
@@ -27,12 +29,17 @@
 #include <rhp/event/events.hpp>
 #include <rhp/host/host.hpp>
 #include <rhp/net/endpoint.hpp>
+#include <rhp/net/io_context.hpp>
+#include <rhp/net/link.hpp>
 #include <rhp/net/loopback/loopback.hpp>
 #include <rhp/script/lib.hpp>
 #include <rhp/security/ed25519.hpp>
 #include <rhp/security/key.hpp>
 #include <rhp/security/keyring.hpp>
 #include <rhp/security/psk_keyring.hpp>
+#include <rhp/session/session.hpp>
+#include <rhp/wire/codec/msgpack.hpp>
+#include <rhp/wire/messages.hpp>
 
 using namespace std::chrono_literals;
 using Rhp::errc;
@@ -89,6 +96,51 @@ public:
 
 private:
     std::jthread thread_;
+};
+
+// Speaks the session protocol directly, to send blob chunks no client would: sends without waiting,
+// then waits for every answer.
+struct raw_session final : Rhp::session::handler {
+    Rhp::net::io_context io;
+    std::unique_ptr<Rhp::session::session> s;
+    bool ready = false;
+    std::vector<std::pair<Rhp::wire::op, Rhp::wire::envelope>> replies;
+    std::uint64_t next_req = 0;
+
+    raw_session(const Rhp::endpoint& at, const Rhp::security::psk_identity& who) {
+        Rhp::session::options opts;
+        opts.codec = Rhp::wire::codec_ops_for<Rhp::wire::msgpack>;
+        Rhp::net::loopback::dial(io, at, [this, opts, who](Rhp::result<std::unique_ptr<Rhp::net::link>> l) {
+            REQUIRE(l);
+            s = std::make_unique<Rhp::session::session>(io, std::move(*l), who.begin(), *this, opts);
+            s->start();
+        });
+        REQUIRE(rhp_test::poll_until({&io}, [this] { return ready; }));
+    }
+
+    void on_ready(Rhp::session::session&) override { ready = true; }
+    void on_message(Rhp::session::session&, Rhp::wire::op code, Rhp::value body) override {
+        replies.emplace_back(code, *Rhp::from_value<Rhp::wire::envelope>(body));
+    }
+    void on_closed(Rhp::session::session&, const Rhp::error&) override {}
+
+    void chunk(std::uint64_t transfer, std::uint64_t total, std::uint64_t offset, std::size_t n) {
+        const Rhp::wire::blob_chunk c{transfer, "s13l", "x.bin", total, offset, Rhp::value::bytes(n, std::byte{7})};
+        REQUIRE(s->send(Rhp::wire::op::kBlob, Rhp::to_value(Rhp::wire::envelope{++next_req, 0, Rhp::to_value(c)})));
+    }
+
+    // The answers to every chunk sent so far: how many were refused with `code`.
+    std::size_t refused_with(errc code) {
+        REQUIRE(rhp_test::poll_until({&io}, [this] { return replies.size() == next_req; }));
+        std::size_t n = 0;
+        for (const auto& [op, env] : replies) {
+            if (op == Rhp::wire::op::kError) {
+                const auto err = Rhp::from_value<Rhp::error>(env.body);
+                n += err && err->code == code ? 1 : 0;
+            }
+        }
+        return n;
+    }
 };
 
 // The order limits.pump_requests starts `turns` in within one pump(): rounds of one request per
@@ -181,6 +233,47 @@ TEST_CASE("stage13: limits.request_rate refuses beyond the rate and refills with
     CHECK(c.exec<int>("return s13l.run()") == 9);
     CHECK(c.exec<int>("return s13l.run()") == 10);
     CHECK(code_of(c.exec<int>("return s13l.run()")) == errc::kLimitExceeded);
+}
+
+TEST_CASE("stage13: blob chunks that don't continue the admitted transfer take request_rate tokens", "[host][limits][stage13]") {
+    // pump_requests too: chunks wait in the identity's queue before blob() sees them.
+    using rated_cfg = loop_cfg::limits<Rhp::limits{.request_rate = 3, .pump_requests = 1}>;
+    const keys k;
+    const auto at = Rhp::endpoint::listen("s13l.forged_chunks", 1);
+    Rhp::host<rated_cfg> host{at, k.ring(), k.trusted()};
+    std::atomic<std::size_t> received{0};
+    REQUIRE(host.on_blob(
+        "s13l",
+        [&](const Rhp::blob_view& b) -> Rhp::result<void> {
+            received = b.bytes.size();
+            return {};
+        },
+        Rhp::role::kPatch));
+    const pumping pump{host};
+
+    // A windowed blob in many chunks takes one token even while its chunks queue.
+    Rhp::client_options small_chunks;
+    small_chunks.blob_chunk = 16;
+    small_chunks.blob_window = 8;
+    Rhp::client<rated_cfg> c{at.reversed(), {"patch", k.patch}, k.dev(), small_chunks};
+    const std::vector<std::byte> blob(200, std::byte{7});
+    REQUIRE(c.blob("s13l", blob));
+    CHECK(received.load() == blob.size());
+
+    // A first chunk takes the second token; chunks claiming to continue it (a wrong offset, another
+    // transfer id, past its total) take the last one and then are refused for the rate, never run.
+    raw_session raw{at.reversed(), {"patch", k.patch}};
+    raw.chunk(77, 100, 0, 10);
+    constexpr int kForged = 30;
+    for (int i = 0; i < kForged; ++i) {
+        raw.chunk(i % 3 == 2 ? 78 : 77, 100, i % 3 == 0 ? 1 : 50, 10);
+    }
+    CHECK(raw.refused_with(errc::kLimitExceeded) == kForged - 1);
+
+    // A second later on the host's clock the bucket is full again.
+    g_clock_ms += 1'000;
+    REQUIRE(c.blob("s13l", blob));
+    CHECK(received.load() == blob.size());
 }
 
 TEST_CASE("stage13: without limits.request_rate a frozen clock refuses nothing", "[host][limits][stage13]") {
