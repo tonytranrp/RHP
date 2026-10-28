@@ -20,7 +20,7 @@
 //   --port-file FILE         write the bound port there once listening (tests, scripts)
 //   --stop-file FILE         exit once FILE exists
 //   --seconds N              exit after N seconds
-//   --insecure-lan           allow plaintext to and from non-loopback addresses (no TLS)
+//   --insecure-lan           allow plaintext with private / link-local peers (no TLS; dev builds only)
 //   --tls                    TLS on every connection, loopback included
 //   --cert FILE --key FILE   the host's TLS certificate chain and key (PEM); default: ephemeral self-signed
 //   --ca FILE                reverse mode: check the listening rhp-cli's certificate against this CA
