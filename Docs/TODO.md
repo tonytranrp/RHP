@@ -11,7 +11,7 @@ Done when: *one RHP serves a developer's PC, test phones, QA builds and store ap
 - [x] Hardening levels: `RHP_HARDENING=dev|lan|production`, `config<>::hardening`, `host_options::hardening` (strictest wins; a config below the build doesn't compile); dev-only and production-excluded code compiled out (AL1, AL2)
 - [x] Sandbox: no `__gc` for non-admin, pattern matching and plain find charged to the run (`lstrlib.c` patch), observe can't register handlers, hashed addresses, shared library tables restored on `revert_all` (AL3)
 - [x] Limits per role: `observe_limits`, `kObserveCaps`, `kProductionCaps`; per-identity `request_rate`, `pump_requests`, `handlers` (AL4)
-- [x] Network: admission control (per-source caps, first-byte deadline, eviction, `auth_failed.key`), reliable UDP stateless cookie, listening clients authenticate candidates side by side, `insecure_lan` with local peers only, IP-literal `server_name` check, Python client host-name check (AL5)
+- [x] Network: admission control (per-source caps, first-byte deadline, eviction, `auth_failed.key`), reliable UDP stateless cookie, listening clients authenticate candidates side by side, `insecure_lan` with local peers only, IP-literal `server_name` check (a CA-checked dial to an IP address checks the certificate's IP addresses), Python client host-name check (AL5)
 - [x] `set_enabled(false)` as a hard kill switch (AL6)
 - [x] Dev sessions: `host_options::dev_session`, connect files, `rhp-cli connect --dev`, `headless_server --dev-session` (AL7)
 - [x] Owner-only key files on every OS, file and PSK warnings, keygen defaults to patch and keeps the PSK in the file (AL8)
@@ -31,7 +31,14 @@ Done when: *one RHP serves a developer's PC, test phones, QA builds and store ap
 - [ ] Hash-chained, forwarded audit; attestation hooks; a signed, persisted remote disable; hybrid ML-KEM (AL15)
 - [ ] Store tiers and disclosure guidance (AL16)
 
-Stage 13a follow-ups: the host doesn't print `keyring::warnings()` itself (callers show them); a connection that has sent part of a frame holds its handshake slot until `handshake_timeout_ms`; caps bound one identity, not the host.
+Stage 13a follow-ups:
+
+- The host doesn't print `keyring::warnings()` itself (callers show them).
+- A connection that has sent part of a frame holds its handshake slot for a quarter of `handshake_timeout_ms` before a newcomer may take it, and until `handshake_timeout_ms` when no one needs the slot.
+- Caps bound one identity, not the host.
+- `table.sort` without a comparator, `load` of a huge chunk and `<` between long strings run in C without a cancel or limit check ([script README, "Known limits: other work in C"](../Src/rhp/script/README.md#what-untrusted-code-cant-do-stage-13-al3)).
+- `lauxlib`'s `luaL_loadfilex` (file I/O) is still compiled and linked above `dev` (`lauxlib.c` is built whole), though no sandbox can reach it.
+- The OpenSSL path of the IP-address certificate check isn't built on the Windows development machine (no OpenSSL there); Linux CI builds and tests it.
 
 ## Stage 12 — a test engine for Lua scripts
 

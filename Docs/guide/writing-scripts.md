@@ -43,7 +43,7 @@ Non-admin states (and admin ones outside a `dev` build at hardening `dev`) get `
 
 - **No finalizers.** `setmetatable` refuses a metatable with a `__gc` field (`forbidden`: "a metatable with __gc needs role admin at hardening dev"): Lua runs finalizers with its hooks off, where no limit or cancel reaches. Use a `<close>` variable to clean up; it runs under the usual limits.
 - **Addresses are hashed.** `tostring`, `print` and `string.format("%p")` show a value per object that is stable while it lives (a keyed SipHash-2-4 of its address, the key the sandbox's own), not the address. Don't parse it.
-- **Changes to the libraries are yours.** `string`, `table`, `math`, `utf8`, `coroutine`, `os`, `rhp` (with `rhp.buffer`) and the string metatable are shared by every module of the identity. A change to them (`string.upper = f`) lasts until the identity's full revert (`revert_all`, or its last session's end when nothing is pinned), which puts the originals back; unloading one module doesn't.
+- **Changes to the libraries are yours.** `string`, `table`, `math`, `utf8`, `coroutine`, `os`, `rhp` (with `rhp.buffer`) and the string metatable are shared by every module of the identity. A change to them (`string.upper = f`) lasts until the identity's full revert (`revert_all`) or its last session's end, which put the originals back; unloading one module doesn't. That happens at the last session's end even when an admin pinned modules, so a pinned module must not rely on builtins it (or another module) changed.
 
 ## Running code: `exec` versus modules
 
