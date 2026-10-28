@@ -177,10 +177,14 @@ struct outbound {
     value body;
 };
 
+// Roughly what a value costs to keep (and to encode): enough to bound a cache or a queue.
+[[nodiscard]] std::size_t approx_size(const value& v) noexcept;
+
 class engine final : private session::handler, private gateway_sink, private script::detail::event_listener {
-    static constexpr std::size_t kMaxInFlight = 4096;  // requests with an idempotency key, per session
-    static constexpr std::size_t kMaxBacklog = 65'536; // requests held back while pump() is behind
-    static constexpr std::size_t kMaxQueued = 4096;    // requests one identity may have waiting for limits.pump_requests
+    static constexpr std::size_t kMaxInFlight = 4096;                     // requests with an idempotency key, per session
+    static constexpr std::size_t kMaxBacklog = 65'536;                    // requests held back while pump() is behind
+    static constexpr std::size_t kMaxQueued = 4096;                       // requests one identity may have waiting for limits.pump_requests
+    static constexpr std::size_t kMaxQueuedBytes = std::size_t{64} << 20; // and their bytes (approx_size; one request always fits)
     static constexpr std::chrono::milliseconds kEnforceInterval{20};
     static constexpr std::chrono::milliseconds kGoodbyeWait{500};
     static constexpr std::chrono::seconds kIoCallTimeout{10};
@@ -341,7 +345,8 @@ private:
         session_id profiler;               // started the profiler: its end stops it
         // limits.request_rate: when the identity's token bucket is full again (take_token).
         std::chrono::steady_clock::time_point bucket_full{};
-        std::deque<inbound> queued; // limits.pump_requests: admitted, waiting for a pump() with budget left
+        std::deque<inbound> queued;   // limits.pump_requests: admitted, waiting for a pump() with budget left
+        std::size_t queued_bytes = 0; // their bodies' approx_size (kMaxQueuedBytes)
     };
 
     // A blob arriving on one session (one at a time).
@@ -362,8 +367,14 @@ private:
         std::set<std::string, std::less<>> script_subs;  // rhp.publish names of its identity ("*": all)
         std::set<std::string, std::less<>> program_subs; // C++ lua_event names
         std::size_t sent_this_pump = 0;
-        std::uint64_t dropped = 0;        // events not sent since the last one that was
-        std::uint64_t rated_transfer = 0; // limits.request_rate: the blob whose first chunk was admitted (its later chunks are free)
+        std::uint64_t dropped = 0; // events not sent since the last one that was
+        // limits.request_rate: the blob whose first chunk took a token. Its next chunks are free while
+        // each starts where the last admitted one ended, until `total` bytes have come.
+        struct rated_blob {
+            std::uint64_t transfer = 0;
+            std::uint64_t next = 0;
+            std::uint64_t total = 0;
+        } rated;
     };
 
     struct blob_sink {
@@ -693,6 +704,9 @@ private:
 
     // One debug request of `session` against its identity's sandbox.
     result<wire::debug_reply> debug(identity_runtime& rt, script::sandbox& box, session_id session, const wire::debug_request& m);
+
+    // A transfer that can't complete: its later chunks are refused (and take request_rate tokens).
+    static void blob_failed(pump_session& sess, std::uint64_t transfer) noexcept;
 
     // A blob chunk answered before it reached blob() (cancelled, host disabled): its transfer can't
     // complete any more, so it is dropped and its later chunks refused.

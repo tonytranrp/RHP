@@ -119,20 +119,25 @@ namespace {
     return true;
 }
 
-// The transfer a blob chunk belongs to (0 for any other request) and whether it is its first chunk.
+// Where a blob chunk says it belongs (transfer 0 for any other request), unchecked: blob() checks it.
 struct chunk_info {
     std::uint64_t transfer = 0;
-    bool first = true;
+    std::uint64_t offset = 0;
+    std::uint64_t total = 0;
+    std::uint64_t size = 0; // its data's bytes
 };
 
 [[nodiscard]] chunk_info chunk_of(const inbound& in) {
     if (in.code != wire::op::kBlob) {
         return {};
     }
-    const value* transfer = in.body.find("transfer");
-    const value* offset = in.body.find("offset");
-    return {transfer != nullptr ? Rhp::from_value<std::uint64_t>(*transfer).value_or(0) : 0,
-            offset == nullptr || Rhp::from_value<std::uint64_t>(*offset).value_or(0) == 0};
+    const auto number = [&](std::string_view key) -> std::uint64_t {
+        const value* v = in.body.find(value{key});
+        return v != nullptr ? Rhp::from_value<std::uint64_t>(*v).value_or(0) : 0;
+    };
+    const value* data = in.body.find("data");
+    const auto* bytes = data != nullptr ? data->get_if<value::bytes>() : nullptr;
+    return {number("transfer"), number("offset"), number("total"), bytes != nullptr ? bytes->size() : 0};
 }
 
 } // namespace
@@ -314,26 +319,38 @@ void engine::admit(inbound& in) {
     pump_session& sess = ps->second;
     identity_runtime& rt = it->second;
     if (l.request_rate != 0) {
-        // A blob counts once: the chunks after the first of an admitted transfer take no token.
+        // A blob counts once: its first chunk takes a token, the chunks that go on from where the last
+        // admitted one ended (within the total it announced) don't. Any other chunk takes one, whatever
+        // transfer id or offset it claims (they're checked later, in blob()).
         const chunk_info chunk = chunk_of(in);
-        const bool later_chunk = !chunk.first && chunk.transfer != 0 && chunk.transfer == sess.rated_transfer;
-        if (!later_chunk && !take_token(rt.bucket_full, setup_.clock(), l.request_rate)) {
+        pump_session::rated_blob& rated = sess.rated;
+        const bool next_chunk = chunk.transfer != 0 && chunk.transfer == rated.transfer && chunk.offset == rated.next && chunk.size != 0 &&
+                                chunk.size <= rated.total - rated.next;
+        if (next_chunk) {
+            rated.next += chunk.size;
+            if (rated.next == rated.total) {
+                rated = {};
+            }
+        } else if (!take_token(rt.bucket_full, setup_.clock(), l.request_rate)) {
             const error over = make_error(errc::kLimitExceeded, std::format("{} sends more than {} requests a second (limits.request_rate)", rt.name, l.request_rate),
                                           std::string{wire::to_string(in.code)});
             return request(in, &over);
-        }
-        if (chunk.transfer != 0) {
-            sess.rated_transfer = chunk.transfer;
+        } else if (chunk.transfer != 0 && chunk.offset == 0 && chunk.size < chunk.total && chunk.total <= setup_.limits.max_blob) {
+            rated = {chunk.transfer, chunk.size, chunk.total};
         }
     }
     if (l.pump_requests == 0) {
         return request(in);
     }
-    if (rt.queued.size() >= kMaxQueued) {
-        const error full = make_error(errc::kLimitExceeded, std::format("{} has {} requests waiting for pump() (limits.pump_requests)", rt.name, rt.queued.size()),
+    // Bounded in count and in bytes: one identity can't make the host hold gigabytes of requests.
+    const std::size_t bytes = approx_size(in.body);
+    if (rt.queued.size() >= kMaxQueued || (!rt.queued.empty() && bytes > kMaxQueuedBytes - std::min(rt.queued_bytes, kMaxQueuedBytes))) {
+        const error full = make_error(errc::kLimitExceeded,
+                                      std::format("{} has {} requests ({} bytes) waiting for pump() (limits.pump_requests)", rt.name, rt.queued.size(), rt.queued_bytes),
                                       std::string{wire::to_string(in.code)});
         return request(in, &full);
     }
+    rt.queued_bytes += bytes;
     rt.queued.push_back(std::move(in));
 }
 
@@ -369,6 +386,7 @@ void engine::start_queued() {
             }
             const inbound in = std::move(it->second.queued.front());
             it->second.queued.pop_front();
+            it->second.queued_bytes -= std::min(it->second.queued_bytes, approx_size(in.body));
             --t.left;
             request(in);
             started = true;
@@ -380,6 +398,9 @@ void engine::drop_queued(identity_runtime& rt, session_id session) {
     const auto ended = std::ranges::stable_partition(rt.queued, [&](const inbound& in) { return in.session != session; });
     const std::vector<inbound> gone(std::make_move_iterator(ended.begin()), std::make_move_iterator(ended.end()));
     rt.queued.erase(ended.begin(), ended.end());
+    for (const inbound& in : gone) {
+        rt.queued_bytes -= std::min(rt.queued_bytes, approx_size(in.body));
+    }
     for (const inbound& in : gone) {
         request(in); // audited as cancelled, as it would have been had it come before the close
     }
@@ -761,13 +782,20 @@ result<wire::debug_reply> engine::debug(identity_runtime& rt, script::sandbox& b
     }
 }
 
+void engine::blob_failed(pump_session& sess, std::uint64_t transfer) noexcept {
+    sess.failed_transfer = transfer;
+    if (sess.rated.transfer == transfer) { // its chunks still to come take tokens
+        sess.rated = {};
+    }
+}
+
 void engine::abandon_blob(pump_session& sess, const inbound& in) {
     if (in.code != wire::op::kBlob || !sess.blob) {
         return;
     }
     const auto chunk = Rhp::from_value<wire::blob_chunk>(in.body);
     if (chunk && chunk->transfer == sess.blob->id) {
-        sess.failed_transfer = sess.blob->id;
+        blob_failed(sess, sess.blob->id);
         sess.blob.reset();
     }
 }
@@ -790,7 +818,7 @@ void engine::blob(pump_session& sess, const inbound& in) {
         if (sess.blob && sess.blob->id == chunk->transfer) {
             sess.blob.reset();
         }
-        sess.failed_transfer = chunk->transfer;
+        blob_failed(sess, chunk->transfer);
         if (wants<event::blob_received>()) {
             publish(event::blob_received{now(), in.session, sess.identity, chunk->sink, chunk->name, chunk->total, {}, err});
         }
@@ -815,7 +843,7 @@ void engine::blob(pump_session& sess, const inbound& in) {
             // A new transfer replaces one the client gave up on (a chunk timed out or was
             // cancelled): its later chunks are refused.
             log(log_level::kInfo, "blob '{}' from {} abandoned at {} of {} bytes", sess.blob->name, sess.identity, sess.blob->data.size(), sess.blob->total);
-            sess.failed_transfer = sess.blob->id;
+            blob_failed(sess, sess.blob->id);
             sess.blob.reset();
         }
         blob_transfer t;
@@ -858,7 +886,7 @@ void engine::blob(pump_session& sess, const inbound& in) {
     const std::uint64_t id = t.id;
     sess.blob.reset();
     if (!verdict) {
-        sess.failed_transfer = id;
+        blob_failed(sess, id);
         reply_error(in.session, in.req, verdict.error());
         return;
     }
