@@ -76,6 +76,7 @@ rhp_add_test_suite(rhp_client_tests
 if(RHP_ENABLE)
     rhp_add_test_suite(rhp_security_tests
         SOURCES
+            security/device_keys_tests.cpp
             security/key_file_tests.cpp
             security/key_handle_tests.cpp
             security/key_store_tests.cpp

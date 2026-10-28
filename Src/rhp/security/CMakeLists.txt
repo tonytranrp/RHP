@@ -2,10 +2,10 @@
 # .cpp files include monocypher.h. With RHP_ENABLE=OFF keys, the keyring, signing keys, trusted
 # signers, identity and dev session files still build (a disabled host still takes them); the handshake and
 # hashing are not compiled, signing reports kDisabled, and Monocypher is not fetched.
-set(rhp_security_sources key.cpp keyring.cpp signing_keys.cpp identity_file.cpp dev_session.cpp http_auth_common.cpp operator_cert.cpp certified.cpp key_store.cpp identity_revocations.cpp pairing.cpp)
+set(rhp_security_sources key.cpp keyring.cpp signing_keys.cpp identity_file.cpp dev_session.cpp http_auth_common.cpp operator_cert.cpp certified.cpp key_store.cpp identity_revocations.cpp pairing.cpp device_keys.cpp known_hosts.cpp)
 set(rhp_security_private_deps "")
 if(RHP_ENABLE)
-    list(APPEND rhp_security_sources psk_keyring.cpp hash.cpp ed25519.cpp http_auth.cpp key_handle.cpp passphrase.cpp)
+    list(APPEND rhp_security_sources psk_keyring.cpp device_handshake.cpp hash.cpp ed25519.cpp http_auth.cpp key_handle.cpp passphrase.cpp)
     # P-256 runs on the TLS backend's crypto (security/tls/p256.hpp).
     set(rhp_security_private_deps Rhp::monocypher Rhp::tls)
     # Pairing (decision AL10): CPace over X25519.
@@ -15,6 +15,7 @@ else()
     list(APPEND rhp_security_sources pairing_cpace_disabled.cpp)
 endif()
 
+# detail/frame_keys.hpp is private to psk_keyring.cpp and device_handshake.cpp: not in HEADERS, not installed.
 rhp_add_module(security
     HEADERS
         authenticator.hpp
@@ -22,6 +23,7 @@ rhp_add_module(security
         detail/bytes.hpp
         detail/text.hpp
         dev_session.hpp
+        device_keys.hpp
         ed25519.hpp
         hash.hpp
         http_auth.hpp
@@ -31,6 +33,7 @@ rhp_add_module(security
         key_handle.hpp
         key_store.hpp
         keyring.hpp
+        known_hosts.hpp
         operator_cert.hpp
         pairing.hpp
         pairing_cpace.hpp

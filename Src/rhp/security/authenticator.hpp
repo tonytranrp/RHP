@@ -21,6 +21,10 @@ struct auth_grant {
     // What the identity may reach (its keyring entry's scopes; decision AL13). Host side only: a
     // client's grant leaves it at everything.
     scope_set scopes{};
+    // The fingerprint of the host's device key (key_fingerprint) when the handshake proved one
+    // (security::device_keys): the host's welcome carries it, the client's grant names the key it
+    // checked. Empty otherwise.
+    std::string host_key{};
     std::unique_ptr<wire::frame_sealer> outgoing; // seals frames this side sends
     std::unique_ptr<wire::frame_sealer> incoming; // verifies frames this side receives
 };

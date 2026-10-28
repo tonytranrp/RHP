@@ -18,6 +18,7 @@
 #include <rhp/platform/random.hpp>
 #include <rhp/security/authenticator.hpp>
 #include <rhp/security/detail/bytes.hpp>
+#include <rhp/security/detail/frame_keys.hpp>
 #include <rhp/security/hash.hpp>
 #include <rhp/security/key.hpp>
 #include <rhp/security/psk_keyring.hpp>
@@ -93,19 +94,6 @@ private:
     digest256 key_;
     crypto_blake2b_ctx primed_{}; // keyed, the magic absorbed
 };
-
-[[nodiscard]] auth_grant make_grant(std::span<const std::byte> secret, std::span<const std::byte> t, bool host_side) {
-    digest256 c2h = keyed_blake2b_256(secret, "rhp/c2h", t);
-    digest256 h2c = keyed_blake2b_256(secret, "rhp/h2c", t);
-    const utils::scope_guard wipe{[&]() noexcept {
-        crypto_wipe(c2h.data(), c2h.size());
-        crypto_wipe(h2c.data(), h2c.size());
-    }};
-    auth_grant grant;
-    grant.outgoing = std::make_unique<blake2b_sealer>(host_side ? h2c : c2h);
-    grant.incoming = std::make_unique<blake2b_sealer>(host_side ? c2h : h2c);
-    return grant;
-}
 
 [[nodiscard]] std::unexpected<error> auth_failed() {
     return fail(errc::kAuth, "authentication failed", "psk handshake");
@@ -184,7 +172,7 @@ public:
         if (!digests_equal(expected, *proof)) {
             return auth_failed();
         }
-        auth_grant grant = make_grant(secret(), transcript_.view(), true);
+        auth_grant grant = detail::frame_keys(secret(), transcript_.view(), true);
         grant.identity = entry_->name;
         grant.granted = entry_->granted;
         grant.scopes = entry_->scopes;
@@ -253,7 +241,7 @@ public:
         if (transcript_.empty()) {
             return fail(errc::kProtocol, "psk handshake not finished", "psk handshake");
         }
-        auth_grant grant = make_grant(secret_.bytes(), transcript_.view(), false);
+        auth_grant grant = detail::frame_keys(secret_.bytes(), transcript_.view(), false);
         grant.identity = name_;
         return grant;
     }
@@ -267,6 +255,19 @@ private:
 };
 
 } // namespace
+
+auth_grant detail::frame_keys(std::span<const std::byte> key, std::span<const std::byte> t, bool host_side) {
+    digest256 c2h = keyed_blake2b_256(key, "rhp/c2h", t);
+    digest256 h2c = keyed_blake2b_256(key, "rhp/h2c", t);
+    const utils::scope_guard wipe{[&]() noexcept {
+        crypto_wipe(c2h.data(), c2h.size());
+        crypto_wipe(h2c.data(), h2c.size());
+    }};
+    auth_grant grant;
+    grant.outgoing = std::make_unique<blake2b_sealer>(host_side ? h2c : c2h);
+    grant.incoming = std::make_unique<blake2b_sealer>(host_side ? c2h : h2c);
+    return grant;
+}
 
 std::unique_ptr<client_handshake> psk_identity::begin() const {
     return std::make_unique<psk_client_handshake>(*this);
