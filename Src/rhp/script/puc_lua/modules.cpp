@@ -835,6 +835,12 @@ result<revert_report> sandbox_impl::revert_to(std::string_view tag) {
     return report;
 }
 
+void sandbox_impl::restore_shared_tables() {
+    if (!defer_if_running([this] { restore_builtins(); })) {
+        restore_builtins();
+    }
+}
+
 revert_report sandbox_impl::revert_all() {
     const operation_scope operation{*this};
     const auto apply = [this] {

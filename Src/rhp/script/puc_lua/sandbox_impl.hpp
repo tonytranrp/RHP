@@ -451,6 +451,7 @@ public:
     result<void> checkpoint(std::string_view tag);
     result<revert_report> revert_to(std::string_view tag);
     revert_report revert_all();
+    void restore_shared_tables(); // sandbox::restore_builtins: restore_builtins, deferred while a run is active
     [[nodiscard]] result<module_id> find(std::string_view name) const;
     [[nodiscard]] std::optional<module_info> status(module_id mod) const;
     [[nodiscard]] std::vector<module_info> list() const;

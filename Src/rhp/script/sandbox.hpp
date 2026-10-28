@@ -365,6 +365,11 @@ public:
 
     // Panic button: unloads every module and reverts the scratch module.
     revert_report revert_all();
+    // Puts the library tables every module shares (string, table, math, utf8, coroutine, os, rhp,
+    // rhp.buffer, the string metatable) back as they were when the sandbox was made, as revert_all
+    // does after unloading everything: for an owner that reverts an identity but keeps some of its
+    // modules (a host's pinned ones), which must not rely on builtins they changed.
+    void restore_builtins();
 
     [[nodiscard]] result<module_id> find(std::string_view name) const;
     [[nodiscard]] std::optional<module_info> status(module_id mod) const;

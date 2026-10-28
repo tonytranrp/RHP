@@ -46,7 +46,8 @@ concept host_configuration = configuration<C> && signed_unless_dev<C>;
 // every script's signature against its trusted signers, runs each identity's scripts in that
 // identity's own sandbox on the thread that calls pump(), and streams print / rhp.emit / results
 // back. When an identity's last session ends, everything it did is reverted and its sandbox closed
-// - except modules an admin pinned.
+// - except modules an admin pinned (the shared library tables, string, table and the like, are
+// restored all the same: a pinned module must not rely on builtins it changed).
 //
 //   Rhp::host<> host{Rhp::endpoint::listen("127.0.0.1", 7777),
 //                    Rhp::security::keyring{{"dev", *Rhp::security::key::from_env("RHP_KEY_DEV"), Rhp::role::kAdmin}},

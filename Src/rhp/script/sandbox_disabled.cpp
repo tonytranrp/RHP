@@ -110,6 +110,8 @@ revert_report sandbox::revert_all() {
     return {};
 }
 
+void sandbox::restore_builtins() {}
+
 result<module_id> sandbox::find(std::string_view) const {
     return disabled();
 }

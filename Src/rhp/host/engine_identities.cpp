@@ -180,6 +180,7 @@ void engine::release(identity_runtime& rt) {
     if (auto r = rt.box->revert(rt.box->scratch_module())) {
         report += std::move(*r);
     }
+    rt.box->restore_builtins(); // shared by every module (decision AL3): the pinned ones get them as they were made
     log(log_level::kInfo, "identity {} released: {} effects undone, {} pinned modules kept", rt.name, report.undone, rt.pinned.size());
     if (wants<event::identity_reverted>()) {
         publish(event::identity_reverted{now(), rt.name, report.undone, report.irreversible, report.failures.size(), rt.pinned.size()});
