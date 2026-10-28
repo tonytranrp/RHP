@@ -36,7 +36,7 @@ ctest --test-dir build/off-msvc -C Debug
 | `unit/test/` | `Rhp::test` end to end (`rhp_test_tests`): Lua specs in `fixtures/specs` run through the runner against the `arena` fixture lib. A spec's test names end with the outcome they must have, `(ok)` / `(fails)` / `(errors)` (`check_conventions`); `golden/` holds normalized reports (a mismatch writes `<file>.actual` next to it for review); the fixtures are embedded too (list new ones in `rhp_test_fixture_files`), so the suite runs where the source tree isn't reachable; snapshot and fuzz cases work in a temporary copy |
 | `integration/` | `rhp_integration_tests` (needs `RHP_ENABLE=ON`): `Rhp::host` ↔ `Rhp::client` over loopback and TCP on 127.0.0.1, one file per stage (below) |
 | `compile_fail/` | code that must **not** compile: each file compiles as-is and must fail with `RHP_COMPILE_FAIL` defined, proving the guarded line is what breaks (`compile_fail.<name>`), and the failing build's output must name why: the unsatisfied concept (`CONSTRAINT`) or another diagnostic (`EXPECT`), matched in both MSVC's and clang's wording (`rhp_add_compile_fail` in `Tests/CMakeLists.txt`). The as-is builds aren't in the default build: `compile_fail.fixtures_compile` builds them all in one run, and each `compile_fail.<name>` waits for it |
-| `support/rhp_test/` | header-only helpers on every suite's include path: `poll_until` (`net_support.hpp`), `eventually` (`eventually.hpp`: wait for another thread), `stream_roundtrip.hpp` (the shared transport contract), `datagram_relay.hpp`, `tls_fixtures.hpp` (test-only certificates) |
+| `support/rhp_test/` | header-only helpers on every suite's include path: `poll_until` (`net_support.hpp`), `eventually` (`eventually.hpp`: wait for another thread), `stream_roundtrip.hpp` (the shared transport contract), `datagram_relay.hpp`, `tls_fixtures.hpp` (test-only certificates), `hardening.hpp` (`needs(level, what)`: skips a test whose subject the build's `RHP_HARDENING` leaves out) |
 | `tools/` | `rhp_cli_tests` (needs `RHP_BUILD_TOOLS`): the shell in-process over loopback; the `[process]` cases (label `process`, also need `RHP_BUILD_EXAMPLES`) run the real `rhp-cli` and `headless_server` binaries over TCP |
 | `fuzz/` | frame, msgpack, envelope, sandbox_escape, network, release: replay drivers in ctest (`fuzz.<name>`), libFuzzer with `RHP_FUZZ=ON` ([fuzz/README.md](fuzz/README.md)) |
 | `bench/` | `rhp_bench` (`RHP_BUILD_BENCH=ON`): every hot path next to a raw twin; ctest runs a smoke pass (`bench.smoke`) |
@@ -56,6 +56,7 @@ Outside this folder ctest also runs `python.client` (`clients/python`, when Pyth
 | `stage9_tests.cpp` | asynchronous bindings over the wire: completion on a worker thread, cancel, disconnect, revert of a kept result |
 | `stage10_tests.cpp` | releases over the wire (apply, refusals, manual and health confirmation, revocations, restart), rollouts (stages, reruns, failing canaries) |
 | `stage11_tests.cpp` | tunables, the profiler and the debugger of a client's own sandbox; debugging sessions that go away; auditing; truncated profiles |
+| `stage13_hardening_tests.cpp` | hardening levels over the wire: what `lan` and `production` refuse (raised with `host_options::hardening` in every build), the observe and production caps, `observe_limits`, dev sessions (the connect file, a client made from it, refusals) |
 
 ## Writing tests
 

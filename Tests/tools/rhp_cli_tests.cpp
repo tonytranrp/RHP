@@ -48,6 +48,7 @@
 #include <rhp/security/psk_keyring.hpp>
 #include <rhp/utils/scope_guard.hpp>
 #include <rhp_test/eventually.hpp>
+#include <rhp_test/hardening.hpp>
 
 using namespace std::chrono_literals;
 namespace fs = std::filesystem;
@@ -868,6 +869,7 @@ TEST_CASE("rhp-cli: TLS against a headless_server that requires it", "[cli][proc
 }
 
 TEST_CASE("stage6: the CLI discovers separate hosts and broadcasts a signed script", "[cli][process][stage6][multicast]") {
+    rhp_test::needs(Rhp::hardening::kLan, "advertising (headless_server --advertise)");
     std::string listen = "127.0.0.1";
     SECTION("constrained publication") {}
     SECTION("native wildcard publication") {
@@ -990,6 +992,7 @@ TEST_CASE("rhp-cli: releases are built and applied then kept across a restart an
 #endif
 
 TEST_CASE("rhp-cli: the shell tunes profiles and debugs", "[cli][shell]") {
+    rhp_test::needs(Rhp::hardening::kLan, "the remote debugger");
     g_level = 0;
     const auto dev = *Rhp::security::ed25519_secret_key::generate();
     const auto psk = *Rhp::security::key::generate();
@@ -1051,6 +1054,7 @@ TEST_CASE("rhp-cli: the shell tunes profiles and debugs", "[cli][shell]") {
 }
 
 TEST_CASE("rhp-cli: the DAP server drives the debugger", "[cli][dap]") {
+    rhp_test::needs(Rhp::hardening::kLan, "the remote debugger");
     const auto dev = *Rhp::security::ed25519_secret_key::generate();
     const auto psk = *Rhp::security::key::generate();
     const auto at = Rhp::endpoint::listen("cli.dap", 1);

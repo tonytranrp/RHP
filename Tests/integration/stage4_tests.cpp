@@ -19,12 +19,14 @@
 
 #include <catch2/catch_test_macros.hpp>
 #include <rhp_test/eventually.hpp>
+#include <rhp_test/hardening.hpp>
 #include <rhp_test/net_support.hpp>
 
 #include <rhp/audit/sinks.hpp>
 #include <rhp/client/client.hpp>
 #include <rhp/config/config.hpp>
 #include <rhp/core/error.hpp>
+#include <rhp/core/hardening.hpp>
 #include <rhp/core/log.hpp>
 #include <rhp/core/role.hpp>
 #include <rhp/core/value.hpp>
@@ -214,28 +216,35 @@ TEST_CASE("stage4: scripts must be signed by a trusted developer / except from o
     CHECK(forged.error().code == errc::kBadSignature);
 
     Rhp::client<loop_cfg> viewer{host.dial_at(at), k.as("observe")};
-    CHECK(viewer.exec<int>("return 41 + 1") == 42); // observe may run unsigned code
+    if constexpr (Rhp::kBuildHardening == Rhp::hardening::kProduction) {
+        CHECK(viewer.exec("return 1").error().code == errc::kBadSignature); // production: observe signs too
+    } else {
+        CHECK(viewer.exec<int>("return 41 + 1") == 42); // observe may run unsigned code
+    }
     Rhp::client<loop_cfg> bad_viewer{host.dial_at(at), k.as("observe"), Rhp::security::signing_key{"dev", k.stranger}};
     CHECK(bad_viewer.exec("return 1").error().code == errc::kBadSignature); // a signature present must verify
 }
 
-TEST_CASE("stage4: a host with no trusted signers runs only observe code; unsigned_scripts opts out", "[stage4][signing]") {
+TEST_CASE("stage4: a host with no trusted signers runs only observe code", "[stage4][signing]") {
     keys k;
-    {
-        const auto at = Rhp::endpoint::listen("s4.untrusting", 1);
-        pumped_host<loop_cfg> host{at, k.ring()};
-        host.start();
-        Rhp::client<loop_cfg> c{host.dial_at(at), k.as("admin"), k.dev()};
-        CHECK(c.exec("return 1").error().code == errc::kBadSignature);
-    }
-    {
-        using open_cfg = loop_cfg::signer<Rhp::security::unsigned_scripts>;
-        const auto at = Rhp::endpoint::listen("s4.unsigned", 1);
-        pumped_host<open_cfg> host{at, k.ring()};
-        host.start();
-        Rhp::client<open_cfg> c{host.dial_at(at), k.as("patch")};
-        CHECK(c.exec<int>("return 7") == 7);
-    }
+    const auto at = Rhp::endpoint::listen("s4.untrusting", 1);
+    pumped_host<loop_cfg> host{at, k.ring()};
+    host.start();
+    Rhp::client<loop_cfg> c{host.dial_at(at), k.as("admin"), k.dev()};
+    CHECK(c.exec("return 1").error().code == errc::kBadSignature);
+}
+
+TEST_CASE("stage4: unsigned_scripts opts out of signing", "[stage4][signing]") {
+    rhp_test::needs(Rhp::hardening::kDev, "a host with signer<unsigned_scripts>");
+#if RHP_HARDENING == 0 // a lan or production build refuses the config at compile time (Rhp::host_configuration)
+    keys k;
+    using open_cfg = loop_cfg::signer<Rhp::security::unsigned_scripts>;
+    const auto at = Rhp::endpoint::listen("s4.unsigned", 1);
+    pumped_host<open_cfg> host{at, k.ring()};
+    host.start();
+    Rhp::client<open_cfg> c{host.dial_at(at), k.as("patch")};
+    CHECK(c.exec<int>("return 7") == 7);
+#endif
 }
 
 // ---- audit ------------------------------------------------------------------------------------------------
@@ -450,7 +459,7 @@ TEST_CASE("stage4: a pinned module outlives its identity's sessions", "[stage4][
     REQUIRE(eventually([&] { return host->sessions() == 0; }));
     CHECK(eventually([&] { return host->identities() == 1; })); // the patch identity's teardown follows its close
     // Game state is read through a client (the pump thread owns it).
-    Rhp::client<loop_cfg> viewer{host.dial_at(at), k.as("observe")};
+    Rhp::client<loop_cfg> viewer{host.dial_at(at), k.as("observe"), k.dev()};
     CHECK(viewer.exec<int>("return s4.level") == 5);
     {
         Rhp::client<loop_cfg> admin{host.dial_at(at), k.as("admin"), k.dev()};
@@ -809,7 +818,7 @@ TEST_CASE("stage4: a call running in a pinned module outlives the session that s
         CHECK_FALSE(forever.ready());
     } // disconnect: the pinned module and its running call stay
     REQUIRE(eventually([&] { return host->sessions() == 0; }));
-    Rhp::client<loop_cfg> viewer{host.dial_at(at), k.as("observe")};
+    Rhp::client<loop_cfg> viewer{host.dial_at(at), k.as("observe"), k.dev()};
     CHECK(viewer.exec<int>("return s4.level") == 3);
     Rhp::client<loop_cfg> admin{host.dial_at(at), k.as("admin"), k.dev()};
     auto status = admin.status("ticker");

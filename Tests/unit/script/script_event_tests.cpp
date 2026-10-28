@@ -8,6 +8,7 @@
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
+#include <rhp_test/hardening.hpp>
 #include <rhp_test/script_support.hpp>
 
 #include <rhp/core/error.hpp>
@@ -381,6 +382,7 @@ TEST_CASE("an event carries many values to handlers and waiters", "[script][scri
 }
 
 TEST_CASE("finalizers run by a closing sandbox schedule and subscribe nothing", "[script][script_events]") {
+    rhp_test::needs(Rhp::hardening::kDev, "admin's finalizers");
     {
         sandbox box{sandbox_options{.caller_role = Rhp::role::kAdmin, .output = [](std::string_view) {}}}; // __gc needs admin
         REQUIRE(box.exec(R"lua(

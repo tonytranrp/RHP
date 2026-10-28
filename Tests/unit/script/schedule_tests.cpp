@@ -8,6 +8,7 @@
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
+#include <rhp_test/hardening.hpp>
 #include <rhp_test/script_support.hpp>
 
 #include <rhp/core/error.hpp>
@@ -422,6 +423,7 @@ TEST_CASE("pause and resume apply to subscriptions", "[script][schedule]") {
 }
 
 TEST_CASE("rhp.timers skips an entry a finalizer removes while it builds the list", "[script][schedule]") {
+    rhp_test::needs(Rhp::hardening::kDev, "admin's collectgarbage and finalizers");
     manual_clock clock;
     capture out;
     sandbox_options options;

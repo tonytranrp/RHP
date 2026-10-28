@@ -12,6 +12,7 @@
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
+#include <rhp_test/hardening.hpp>
 #include <rhp_test/script_support.hpp>
 
 #include <rhp/core/error.hpp>
@@ -194,6 +195,7 @@ TEST_CASE("sandbox allocator: a memory resource gets every region back", "[scrip
 }
 
 TEST_CASE("sandbox gc: the collector mode is an option", "[script][allocator][gc]") {
+    rhp_test::needs(Rhp::hardening::kDev, "admin's collectgarbage");
     for (const gc_mode mode : {gc_mode::kIncremental, gc_mode::kGenerational}) {
         sandbox_options options;
         options.caller_role = Rhp::role::kAdmin; // collectgarbage() reports the mode it replaces
