@@ -32,6 +32,18 @@ option(RHP_PCH "Precompile the standard headers once for RHP's libraries and onc
 option(RHP_LTO "Link-time optimization (IPO) for RHP's targets in Release / RelWithDebInfo / MinSizeRel" OFF)
 option(RHP_UNITY_BUILD "Compile RHP's libraries, tests and tools as unity files (clean builds)" OFF)
 set(RHP_SANITIZE "" CACHE STRING "Sanitizers to enable: 'address;undefined', 'address' (MSVC) or 'thread'")
+# The most this build allows (Docs/decisions/stage13-security.md, AL1 and AL2), written into
+# <rhp/build_config.hpp> as RHP_HARDENING 0/1/2 and read as Rhp::kBuildHardening. dev: everything
+# (admin's full Lua standard library, dev sessions, insecure_lan, unsigned_scripts). lan: those are
+# refused, and observe identities' limits are capped. production: the dev-only code, unsigned
+# observe code and the remote debugger are compiled out, every role's limits are capped, advertising
+# is refused and the HTTP gateway needs channel binding. A config (config<>::hardening) and a host
+# (host_options::hardening) may only raise it.
+set(RHP_HARDENING "dev" CACHE STRING "The most this build allows: dev (everything), lan or production (Docs/decisions/stage13-security.md, AL1)")
+set_property(CACHE RHP_HARDENING PROPERTY STRINGS dev lan production)
+if(NOT RHP_HARDENING MATCHES "^(dev|lan|production)$")
+    message(FATAL_ERROR "RHP: RHP_HARDENING must be dev, lan or production, not '${RHP_HARDENING}'")
+endif()
 
 # Tools/ (rhp-cli) are clients of the live engine: built, fetched (CLI11, replxx), installed and tested
 # only when it is on. Every place that asks reads this one variable.

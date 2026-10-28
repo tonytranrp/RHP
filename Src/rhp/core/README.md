@@ -13,11 +13,12 @@ The types every other module speaks. Namespace `Rhp` (the logger concept and log
 | `log.hpp` | `log_level`, the `Rhp::core::logger` concept, `null_logger`, `stderr_logger`, `Rhp::log(...)` |
 | `role.hpp` | `Rhp::role` (`kObserve` < `kPatch` < `kAdmin`), `Rhp::allows(have, need)`, `parse_role`, `to_string` |
 | `limits.hpp` | `Rhp::limits` (structural, so it is a template argument: `config<>::limits<Rhp::limits{...}>`), `kDefaultLimits`, `cancel_scope` (`kNone` / `kRequests` / `kEverything`: which runs check for cancels); per identity `request_rate` and `pump_requests` (host) and `handlers` (sandbox) |
+| `hardening.hpp` | `Rhp::hardening` (`kDev` < `kLan` < `kProduction`, decisions AL1 / AL2), `kBuildHardening` (CMake `RHP_HARDENING`), `strictest`, `to_string`; `kObserveCaps` / `kProductionCaps` and `capped(limits, caps)` (decision AL4) |
 | `async.hpp` | `Rhp::async<T>` / `Rhp::promise<T>` / `Rhp::make_async<T>()`: a result a binding delivers later, from any thread; `promise::stop_requested()` once the reader is gone; `is_async_v` |
 | `json.hpp` | `Rhp::json::parse` / `to_text(value, indent)`: JSON for `Rhp::value` (rhp-cli, test reports, API descriptions); integers stay integers, floats keep a decimal point |
 | `subscription.hpp` | `Rhp::subscribable` (hands out ids) and `Rhp::subscription` (RAII, move-only, may outlive its source) |
 | `listener_table.hpp` | `Rhp::core::listener_table<Key, Fn>`: callbacks by key, added and removed from any thread, dispatched outside the lock |
-| `<rhp/build_config.hpp>` | generated (`cmake/RhpBuildConfig.cmake`): `RHP_ENABLE`, `RHP_TLS_HAS_OPENSSL` / `RHP_TLS_HAS_MBEDTLS`, the target's `RHP_PLATFORM_*`; carried and installed with `Rhp::core` |
+| `<rhp/build_config.hpp>` | generated (`cmake/RhpBuildConfig.cmake`): `RHP_ENABLE`, `RHP_HARDENING` (0 dev, 1 lan, 2 production), `RHP_TLS_HAS_OPENSSL` / `RHP_TLS_HAS_MBEDTLS`, the target's `RHP_PLATFORM_*`; carried and installed with `Rhp::core` |
 
 ```cpp
 Rhp::result<int> parse_port(std::string_view text) {
@@ -44,4 +45,5 @@ Rhp::async<std::string> fetch(std::string url) {
 - `errc` values only grow (`kLastErrc` names the highest); the wire sends a code's name.
 - `async<T>`: the first `complete()` wins (the rest return false); the last promise copy dropped without completing gives the reader an error; `abandon()` requests a stop and hands back an outcome that arrived but wasn't taken, so whoever abandons it can undo it (the sandbox does this; see `script/README.md`).
 - `listener_table::remove()` is a barrier: once it returns, that callback neither runs nor starts on another thread. A callback may remove itself. Don't remove from a thread holding a lock the callback takes.
+- `capped()` covers the limits a role can exhaust (`instructions`, `memory`, `wall_ms`, `event_queue`, `async_ms`, `request_rate`, `pump_requests`, `handlers`, `cancel_checks`); network and wire limits are host-wide and never capped. A new `limits` field whose 0 means unlimited and that a script can exhaust belongs in it, with a cap in `kObserveCaps` / `kProductionCaps` when one fits.
 - Each `limits` field's comment in `limits.hpp` says what 0 means (usually unlimited / off; not for `max_frame`, `max_blob`, `revisions`, `pending_handshakes`, `backoff_min_ms` or `cancel_check_instructions`).

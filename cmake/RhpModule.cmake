@@ -58,6 +58,7 @@ function(rhp_add_module name)
     else()
         target_compile_definitions(${target} ${scope} RHP_ENABLE=0)
     endif()
+    target_compile_definitions(${target} ${scope} RHP_HARDENING=${RHP_BUILD_CONFIG_HARDENING})
     # The shared precompiled header is built on Rhp::core: the modules below it compile without.
     # net's Asio translation units compile apart from it (rhp_net_asio, Src/rhp/net/CMakeLists.txt).
     if(arg_SOURCES AND NOT name STREQUAL "utils" AND NOT name STREQUAL "core")

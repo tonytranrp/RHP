@@ -4,6 +4,7 @@ rhp_add_module(core
         convert.hpp
         error.hpp
         errors_mode.hpp
+        hardening.hpp
         ids.hpp
         json.hpp
         limits.hpp
