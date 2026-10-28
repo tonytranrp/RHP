@@ -618,14 +618,17 @@ std::string q(const fs::path& p) {
 
 const std::string kCli = q(std::string{RHP_CLI_EXE});
 const std::string kHost = q(std::string{RHP_HEADLESS_EXE});
+// keygen for identities a headless_server of this build accepts: keygen tags keys env=dev by
+// default, and a production-hardened host refuses those (decision AL11).
+const std::string kHostKeygen = kCli + " keygen" + (Rhp::kBuildHardening == Rhp::hardening::kProduction ? " --env prod" : "");
 
 } // namespace
 
 TEST_CASE("rhp-cli: the full lifecycle against a headless_server process", "[cli][process]") {
     scratch_dir dir;
     const auto id = dir.path / "dev.rhpid";
-    REQUIRE(run(std::format("{} keygen dev --out {} > {}", kCli, q(id), q(dir.path / "keygen.txt"))) == 0);
-    CHECK(run(std::format("{} keygen dev --out {} > {} 2>&1", kCli, q(id), q(dir.path / "again.txt"))) == 1); // never overwrites
+    REQUIRE(run(std::format("{} dev --out {} > {}", kHostKeygen, q(id), q(dir.path / "keygen.txt"))) == 0);
+    CHECK(run(std::format("{} dev --out {} > {} 2>&1", kHostKeygen, q(id), q(dir.path / "again.txt"))) == 1); // never overwrites
     REQUIRE(run(std::format("{} pubkey -i {} --role admin > {}", kCli, q(id), q(dir.path / "lines.txt"))) == 0);
     const std::string lines = dir.read("lines.txt");
     const auto nl = lines.find('\n');
@@ -714,7 +717,7 @@ TEST_CASE("rhp-cli: keygen keeps the PSK in the file and makes patch identities"
 TEST_CASE("rhp-cli: ca init and cert issue make what a certified host takes", "[cli][process][certified]") {
     scratch_dir dir;
     const auto id = dir.path / "alice.rhpid";
-    REQUIRE(run(std::format("{} keygen alice --out {} > {}", kCli, q(id), q(dir.path / "keygen.txt"))) == 0);
+    REQUIRE(run(std::format("{} alice --out {} > {}", kHostKeygen, q(id), q(dir.path / "keygen.txt"))) == 0);
     REQUIRE(run(std::format("{} ca init ops --env prod --out {} > {}", kCli, q(dir.path / "ops.rhpca"), q(dir.path / "ca.txt"))) == 0);
     const std::string ca_out = dir.read("ca.txt");
     constexpr std::string_view kLine = "trusted CA file:   ";
@@ -881,7 +884,7 @@ TEST_CASE("rhp-cli: connect --dev reads a dev session file", "[cli][process]") {
 TEST_CASE("rhp-cli: test runs Lua tests offline and with a host's API faked", "[cli][process]") {
     scratch_dir dir;
     const auto id = dir.path / "dev.rhpid";
-    REQUIRE(run(std::format("{} keygen dev --out {} > {}", kCli, q(id), q(dir.path / "keygen.txt"))) == 0);
+    REQUIRE(run(std::format("{} dev --out {} > {}", kHostKeygen, q(id), q(dir.path / "keygen.txt"))) == 0);
     REQUIRE(run(std::format("{} pubkey -i {} --role admin > {}", kCli, q(id), q(dir.path / "lines.txt"))) == 0);
     const std::string lines = dir.read("lines.txt");
     const auto nl = lines.find('\n');
@@ -920,7 +923,7 @@ TEST_CASE("rhp-cli: test runs Lua tests offline and with a host's API faked", "[
 TEST_CASE("rhp-cli: reverse mode: rhp-cli listens / the server dials in", "[cli][process]") {
     scratch_dir dir;
     const auto id = dir.path / "dev.rhpid";
-    REQUIRE(run(std::format("{} keygen dev --out {} > {}", kCli, q(id), q(dir.path / "keygen.txt"))) == 0);
+    REQUIRE(run(std::format("{} dev --out {} > {}", kHostKeygen, q(id), q(dir.path / "keygen.txt"))) == 0);
     REQUIRE(run(std::format("{} pubkey -i {} --role patch > {}", kCli, q(id), q(dir.path / "lines.txt"))) == 0);
     const std::string lines = dir.read("lines.txt");
     const auto nl = lines.find('\n');
@@ -957,7 +960,7 @@ TEST_CASE("rhp-cli: reverse mode: rhp-cli listens / the server dials in", "[cli]
 TEST_CASE("rhp-cli: TLS against a headless_server that requires it", "[cli][process][tls]") {
     scratch_dir dir;
     const auto id = dir.path / "dev.rhpid";
-    REQUIRE(run(std::format("{} keygen dev --out {} > {}", kCli, q(id), q(dir.path / "keygen.txt"))) == 0);
+    REQUIRE(run(std::format("{} dev --out {} > {}", kHostKeygen, q(id), q(dir.path / "keygen.txt"))) == 0);
     REQUIRE(run(std::format("{} pubkey -i {} --role patch > {}", kCli, q(id), q(dir.path / "lines.txt"))) == 0);
     const std::string lines = dir.read("lines.txt");
     const auto nl = lines.find('\n');
@@ -986,7 +989,7 @@ TEST_CASE("rhp-cli: TLS against a headless_server that requires it", "[cli][proc
 TEST_CASE("rhp-cli: a device-key identity pins the host key in known_hosts", "[cli][process][device]") {
     scratch_dir dir;
     const auto phone = dir.path / "phone.rhpid";
-    REQUIRE(run(std::format("{} keygen phone --device --out {} > {}", kCli, q(phone), q(dir.path / "keygen.txt"))) == 0);
+    REQUIRE(run(std::format("{} phone --device --out {} > {}", kHostKeygen, q(phone), q(dir.path / "keygen.txt"))) == 0);
     const auto identity = Rhp::security::identity_file::load(phone.string());
     REQUIRE(identity);
     REQUIRE(identity->device_line(Rhp::role::kPatch));
@@ -1042,7 +1045,7 @@ TEST_CASE("stage6: the CLI discovers separate hosts and broadcasts a signed scri
     }
     scratch_dir dir;
     const auto id = dir.path / "fleet.rhpid";
-    REQUIRE(run(std::format("{} keygen fleet --out {} > {}", kCli, q(id), q(dir.path / "keygen.txt"))) == 0);
+    REQUIRE(run(std::format("{} fleet --out {} > {}", kHostKeygen, q(id), q(dir.path / "keygen.txt"))) == 0);
     REQUIRE(run(std::format("{} pubkey -i {} --role patch > {}", kCli, q(id), q(dir.path / "lines.txt"))) == 0);
     const auto lines = dir.read("lines.txt");
     const auto nl = lines.find('\n');
@@ -1095,7 +1098,7 @@ TEST_CASE("stage6: the CLI discovers separate hosts and broadcasts a signed scri
 TEST_CASE("rhp-cli: releases are built and applied then kept across a restart and revoked", "[cli][process][releases]") {
     scratch_dir dir;
     const auto id = dir.path / "dev.rhpid";
-    REQUIRE(run(std::format("{} keygen dev --out {} > {}", kCli, q(id), q(dir.path / "keygen.txt"))) == 0);
+    REQUIRE(run(std::format("{} dev --out {} > {}", kHostKeygen, q(id), q(dir.path / "keygen.txt"))) == 0);
     REQUIRE(run(std::format("{} pubkey -i {} --role admin > {}", kCli, q(id), q(dir.path / "lines.txt"))) == 0);
     const std::string lines = dir.read("lines.txt");
     const auto nl = lines.find('\n');
@@ -1157,7 +1160,7 @@ TEST_CASE("rhp-cli: releases are built and applied then kept across a restart an
 TEST_CASE("rhp-cli: roots of trust and identity revocations are made and pushed to a host", "[cli][process][trust]") {
     scratch_dir dir;
     for (const char* name : {"root-a", "root-b", "rel", "rel2", "rev", "ops"}) {
-        REQUIRE(run(std::format("{} keygen {} --out {} > {}", kCli, name, q(dir.path / (std::string{name} + ".rhpid")), q(dir.path / "keygen.txt"))) == 0);
+        REQUIRE(run(std::format("{} {} --out {} > {}", kHostKeygen, name, q(dir.path / (std::string{name} + ".rhpid")), q(dir.path / "keygen.txt"))) == 0);
     }
     const auto id = [&](std::string_view name) { return q(dir.path / (std::string{name} + ".rhpid")); };
 
