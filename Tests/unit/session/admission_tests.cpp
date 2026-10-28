@@ -2,6 +2,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -119,6 +120,39 @@ TEST_CASE("admission: a full cap gives the slot of the oldest silent connection 
     b.admission.release(first->ticket); // twice is harmless
     CHECK(b.admission.pending() == 2);
     CHECK(b.open(std::nullopt) != nullptr);
+}
+
+TEST_CASE("admission: a full cap gives the slot of a stalled handshake to a new one", "[session][admission]") {
+    // A quarter of the handshake deadline: 50 ms.
+    bench b{Rhp::limits{.pending_handshakes = 2, .handshakes_per_source = 0, .handshake_timeout_ms = 200, .first_byte_ms = 0}};
+    conn* first = b.open(kHome);
+    conn* second = b.open(kAway);
+    REQUIRE(first);
+    REQUIRE(second);
+    first->raw->speak();
+    second->raw->speak();
+    // Both are talking and young: handshakes under way keep their slots.
+    Rhp::error why;
+    CHECK(b.open(kHome, &why) == nullptr);
+    CHECK(why.code == errc::kLimitExceeded);
+    std::this_thread::sleep_for(80ms);
+    // Still pending after a quarter of the deadline: stalled. The oldest goes.
+    conn* third = b.open(std::nullopt);
+    REQUIRE(third);
+    CHECK(first->closed);
+    CHECK(first->why.code == errc::kLimitExceeded);
+    CHECK_FALSE(second->closed);
+    // A silent one still goes before a stalled one; then the stalled one, never the young third.
+    conn* fourth = b.open(std::nullopt);
+    REQUIRE(fourth);
+    CHECK(third->closed);
+    CHECK_FALSE(second->closed);
+    fourth->raw->speak();
+    conn* fifth = b.open(kAway);
+    REQUIRE(fifth);
+    CHECK(second->closed);
+    CHECK_FALSE(fourth->closed);
+    CHECK(b.admission.pending() == 2);
 }
 
 TEST_CASE("admission: each source has its own cap", "[session][admission]") {

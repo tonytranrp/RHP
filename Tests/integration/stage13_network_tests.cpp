@@ -324,6 +324,34 @@ TEST_CASE("stage13: a resume gets through slots full of silent connections", "[s
     CHECK_FALSE(raw.closed(b));
 }
 
+TEST_CASE("stage13: a resume gets through slots full of stalled handshakes", "[stage13][admission][resume]") {
+    // Connections that sent a byte and stalled may be pushed out after a quarter of the deadline (500 ms).
+    constexpr Rhp::limits kFull{.pending_handshakes = 2, .handshake_timeout_ms = 2'000, .first_byte_ms = 60'000, .heartbeat_ms = 500, .backoff_min_ms = 5, .backoff_max_ms = 40};
+    using full_cfg = Rhp::config<>::transport<dial_cuttable>::logger<Rhp::core::null_logger>::limits<kFull>;
+    keys k;
+    const auto at = Rhp::endpoint::listen("s13.resume_stalled", 1);
+    pumped_host<full_cfg> host{at, k.ring(), k.trusted()};
+    Rhp::client<full_cfg> c{host.dial_at(at), k.as("patch"), k.dev()};
+    REQUIRE(c.exec<int>("return 1") == 1);
+    const auto session = c.info().session;
+    raw_peers raw;
+    const auto a = raw.open<Rhp::net::loopback>(host.dial_at(at));
+    const auto b = raw.open<Rhp::net::loopback>(host.dial_at(at));
+    raw.speak(a);
+    raw.speak(b);
+    raw.settle(600ms);
+    REQUIRE_FALSE(raw.closed(a));
+    REQUIRE_FALSE(raw.closed(b));
+    // The client's link dies; its redial takes the oldest stalled connection's slot, long before
+    // their handshake deadline frees one.
+    cuts().cut_all();
+    CHECK(c.exec<int>("return 2") == 2);
+    CHECK(c.info().resumes == 1);
+    CHECK(c.info().session == session);
+    REQUIRE(rhp_test::poll_until({&raw.io}, [&] { return raw.closed(a); }));
+    CHECK_FALSE(raw.closed(b));
+}
+
 TEST_CASE("stage13: auth_failed names the key that was tried", "[stage13][admission][audit]") {
     keys k;
     const auto at = Rhp::endpoint::listen("s13.keyname", 1);
