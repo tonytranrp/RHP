@@ -220,6 +220,11 @@ result<void> engine::serve_releases(release_bridge bridge) {
     if (releases_.handle) {
         return fail(errc::kAlreadyLoaded, "this host already serves a release manager", "host.serve");
     }
+    if (bridge.harden) { // its channels run at the host's level at least (decision AL2)
+        if (auto hardened = bridge.harden(setup_.hardening); !hardened) {
+            return hardened;
+        }
+    }
     releases_ = std::move(bridge);
     if (releases_.on_event) {
         release_events_ = releases_.on_event([this](event::release_changed e) {

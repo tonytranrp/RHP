@@ -125,6 +125,8 @@ using installer = result<void> (*)(script::sandbox& box);
 struct release_bridge {
     std::function<result<value>(wire::op code, const value& body)> handle;
     std::function<void()> pump;
+    // Raises the manager's hardening to the host's when the engine starts serving it.
+    std::function<result<void>(Rhp::hardening)> harden;
     // Subscribes to the manager's events when the engine starts serving (publishes release_changed);
     // the engine drops the subscription before it goes.
     std::function<Rhp::subscription(std::function<void(event::release_changed)>)> on_event;

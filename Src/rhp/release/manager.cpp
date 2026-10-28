@@ -14,6 +14,7 @@
 #include <vector>
 
 #include <rhp/core/error.hpp>
+#include <rhp/core/hardening.hpp>
 #include <rhp/core/listener_table.hpp>
 #include <rhp/core/result.hpp>
 #include <rhp/core/role.hpp>
@@ -40,7 +41,7 @@ namespace {
 using steady = std::chrono::steady_clock;
 
 constexpr std::string_view kStateKey = "state";
-constexpr std::string_view kRevocationsKey = "revocations"; // the newest list (stores written before every list was kept)
+constexpr std::string_view kRevocationsKey = "revocations";     // the newest list (stores written before every list was kept)
 constexpr std::string_view kRevocationsPrefix = "revocations/"; // every accepted list, by seq
 constexpr std::uint32_t kDefaultWallMs = 10'000;
 
@@ -117,6 +118,7 @@ struct channel_runtime {
     channel_state state;
     std::unique_ptr<script::sandbox> box;
     role box_role = role::kPatch;
+    hardening box_level = hardening::kDev;  // the level the sandbox was made at
     std::optional<checked_release> running; // what the sandbox runs (the active release or the candidate)
     std::vector<std::pair<std::string, module_id>> modules;
     std::optional<release_info> active_info;
@@ -137,6 +139,7 @@ public:
         if (options_.limits.wall_ms == 0) {
             options_.limits.wall_ms = kDefaultWallMs;
         }
+        options_.hardening = strictest(kBuildHardening, options_.hardening);
     }
 
     // The sandboxes go first, while channels_ is whole: their callbacks (on_handler_error, the health
@@ -395,6 +398,36 @@ public:
         return changed;
     }
 
+    // ---- hardening -----------------------------------------------------------------------------------
+
+    // Running channels move to sandboxes made at the new level; one that can't load there stops.
+    result<void> harden(hardening level) {
+        if (pumping_) {
+            return std::unexpected{from_a_script()};
+        }
+        options_.hardening = strictest(options_.hardening, level);
+        for (auto& [name, c] : channels_) {
+            if (!c.box || c.box_level == options_.hardening) {
+                continue;
+            }
+            if (!c.running) {
+                tear_down(c);
+                continue;
+            }
+            const checked_release running = *c.running;
+            const auto started = c.watch_started;
+            if (auto moved = swap_in(c, running); !moved) { // a fresh sandbox: the old one runs until it loads
+                tear_down(c);
+                emit(release_event{release_event::kind::kRolledBack, name, running.r.id, std::nullopt, running.r.body.seq,
+                                   std::format("hardening {}: {}", options_.hardening, moved.error().message), moved.error()});
+            } else if (watched(c)) {
+                start_watch(c);
+                c.watch_started = started;
+            }
+        }
+        return {};
+    }
+
     // ---- status / pump -------------------------------------------------------------------------------
 
     [[nodiscard]] std::vector<channel_status> status() const {
@@ -604,10 +637,17 @@ private:
 
     // ---- swapping ------------------------------------------------------------------------------------
 
+    // A channel's sandbox at the manager's hardening level (decisions AL2, AL4), as a host makes an
+    // identity's: admin's full standard library only at kDev, limits capped above it.
     std::unique_ptr<script::sandbox> make_box(const std::string& channel, role run_as) {
+        const hardening level = options_.hardening;
         script::sandbox_options o;
         o.caller_role = run_as;
-        o.limits = options_.limits;
+        o.limits = level == hardening::kProduction ? capped(options_.limits, kProductionCaps) : options_.limits;
+        if (level != hardening::kDev && run_as == role::kObserve) {
+            o.limits = capped(o.limits, kObserveCaps);
+        }
+        o.admin_stdlib = level == hardening::kDev;
         o.clock = options_.clock;
         o.identity = std::format("release:{}", channel);
         if (options_.output) {
@@ -629,7 +669,7 @@ private:
     // it can't be put back either, the channel runs nothing (never a mix of the two).
     result<void> swap_in(channel_runtime& c, const checked_release& next) {
         const manifest& m = next.r.body;
-        const bool fresh = !c.box || c.box_role != m.run_as;
+        const bool fresh = !c.box || c.box_role != m.run_as || c.box_level != options_.hardening;
         std::unique_ptr<script::sandbox> made = fresh ? make_box(m.channel, m.run_as) : nullptr;
         script::sandbox& box = fresh ? *made : *c.box;
         std::vector<std::pair<std::string, module_id>> modules;
@@ -695,6 +735,7 @@ private:
             c.watches.clear();
             c.box = std::move(made); // the old sandbox goes, reverting what the old release did
             c.box_role = m.run_as;
+            c.box_level = options_.hardening;
         } else {
             // Modules the new release no longer has, newest first.
             for (auto it = c.modules.rbegin(); it != c.modules.rend(); ++it) {
@@ -1214,6 +1255,10 @@ std::uint64_t manager::revocation_seq() const noexcept {
 
 const std::optional<restore_report>& manager::last_restore() const noexcept {
     return impl_->last_restore();
+}
+
+result<void> manager::harden(hardening level) {
+    return impl_->harden(level);
 }
 
 void manager::pump() {

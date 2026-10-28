@@ -12,6 +12,7 @@
 #include <string_view>
 #include <vector>
 
+#include <rhp/core/hardening.hpp>
 #include <rhp/core/limits.hpp>
 #include <rhp/core/result.hpp>
 #include <rhp/core/role.hpp>
@@ -54,16 +55,21 @@ enum class confirm_mode : std::uint8_t {
 }
 
 struct manager_options {
-    std::string app;                                                               // compared with manifest::app
-    std::string build;                                                             // compared with manifest::builds
-    std::string platform{platform::to_string(platform::kOs)};                      // compared with manifest::platforms
-    role max_role = role::kPatch;                                                  // releases asking to run as more are refused
-    std::chrono::seconds clock_skew{300};                                          // allowance on not_before / not_after (negative: none)
-    bool expire_running = true;                                                    // a running release past not_after is deactivated
-    std::uint32_t max_boot_attempts = 2;                                           // restarts a candidate may run through unconfirmed before it is quarantined (above 1000: never)
-    std::chrono::milliseconds health_window{60'000};                               // kHealth: confirmed after this long without a failure
-    std::uint64_t max_seq_jump = std::uint64_t{1} << 32;                           // how far a seq may move at once (see "Seq caps" below)
-    Rhp::limits limits{};                                                          // the channels' sandboxes (wall_ms 10 s when 0)
+    std::string app;                                          // compared with manifest::app
+    std::string build;                                        // compared with manifest::builds
+    std::string platform{platform::to_string(platform::kOs)}; // compared with manifest::platforms
+    role max_role = role::kPatch;                             // releases asking to run as more are refused
+    std::chrono::seconds clock_skew{300};                     // allowance on not_before / not_after (negative: none)
+    bool expire_running = true;                               // a running release past not_after is deactivated
+    std::uint32_t max_boot_attempts = 2;                      // restarts a candidate may run through unconfirmed before it is quarantined (above 1000: never)
+    std::chrono::milliseconds health_window{60'000};          // kHealth: confirmed after this long without a failure
+    std::uint64_t max_seq_jump = std::uint64_t{1} << 32;      // how far a seq may move at once (see "Seq caps" below)
+    Rhp::limits limits{};                                     // the channels' sandboxes (wall_ms 10 s when 0), capped for `hardening`
+    // The level the channels run at (decisions AL2, AL4; the build's RHP_HARDENING is always a floor):
+    // above kDev an admin channel gets patch's libraries (sandbox_options::admin_stdlib) and an
+    // observe channel's limits are capped by kObserveCaps; at kProduction every channel's are capped
+    // by kProductionCaps. host.serve raises it to the host's level (harden()).
+    Rhp::hardening hardening = Rhp::hardening::kDev;
     std::function<std::chrono::system_clock::time_point()> wall_clock{};           // for validity windows; empty: system_clock::now
     script::clock_fn clock{};                                                      // script time and health windows; empty: steady_clock::now
     std::function<void(std::string_view channel, std::string_view line)> output{}; // print() of the channels' scripts
@@ -78,11 +84,11 @@ struct manager_options {
 
 // The compiled-chunk cache (manager_options::bytecode_key), as manager::bytecode_cache_stats reports it.
 struct bytecode_stats {
-    std::uint64_t loaded = 0;         // modules loaded from cached bytecode (their sources weren't parsed)
-    std::uint64_t compiled = 0;       // modules compiled here for the cache (no entry yet, or one thrown away)
-    std::uint64_t stored = 0;         // entries written
-    std::uint64_t discarded = 0;      // entries thrown away, the sources parsed instead: a MAC that doesn't match (another key, an edit), truncated or malformed, another Lua build, another release's, bytecode Lua refused
-    std::uint64_t store_failures = 0; // entries that couldn't be written (the release runs all the same)
+    std::uint64_t loaded = 0;              // modules loaded from cached bytecode (their sources weren't parsed)
+    std::uint64_t compiled = 0;            // modules compiled here for the cache (no entry yet, or one thrown away)
+    std::uint64_t stored = 0;              // entries written
+    std::uint64_t discarded = 0;           // entries thrown away, the sources parsed instead: a MAC that doesn't match (another key, an edit), truncated or malformed, another Lua build, another release's, bytecode Lua refused
+    std::uint64_t store_failures = 0;      // entries that couldn't be written (the release runs all the same)
     std::optional<error> last_discarded{}; // why the latest entry was thrown away
 };
 
@@ -244,6 +250,12 @@ public:
     [[nodiscard]] std::uint64_t revocation_seq() const noexcept;
     // The report of the restore that ran (explicitly, or by the first change), if one did.
     [[nodiscard]] const std::optional<restore_report>& last_restore() const noexcept;
+
+    // Raises manager_options::hardening to `level` (never lowers it). A channel running in a sandbox
+    // made at a lower level is loaded again into a new one at once; one whose release can't load there
+    // stops (a kRolledBack event says why; its release stays stored). host.serve calls it with the
+    // host's level. Refused from a channel's own scripts.
+    result<void> harden(Rhp::hardening level);
 
     // Pumps every channel's sandbox, watches candidates' health and validity windows.
     void pump();

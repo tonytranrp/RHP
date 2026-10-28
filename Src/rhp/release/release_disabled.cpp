@@ -131,6 +131,10 @@ const std::optional<restore_report>& manager::last_restore() const noexcept {
     return kNone;
 }
 
+result<void> manager::harden(hardening) {
+    return std::unexpected{disabled("release.manager")};
+}
+
 void manager::pump() {}
 
 Rhp::subscription manager::on_event(std::function<void(const release_event&)>) {
