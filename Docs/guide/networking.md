@@ -15,7 +15,7 @@ Both peers use the same transport. The session layer adds TLS on top of any of t
 | Transport | Endpoint | Notes |
 |---|---|---|
 | `websocket` | host + port (0 = any) | RFC 6455 binary tunnel at `/rhp`, for proxies that only pass HTTP. RHP's TLS runs *inside* the frames, so the channel-bound handshake is kept. Not a browser-facing `wss` server: text frames and extensions are refused. |
-| `udp_reliable` | host + port (0 = any) | An ordered stream over UDP: 480-byte fragments, CRC-32C, selective ACKs, fast retransmit, an RTT-based timeout and window backoff. Ten seconds without progress closes the link, and session resume takes over. TLS runs over the stream (not DTLS). |
+| `udp_reliable` | host + port (0 = any) | An ordered stream over UDP: 480-byte fragments, CRC-32C, selective ACKs, fast retransmit, an RTT-based timeout and window backoff. Ten seconds without progress closes the link, and session resume takes over. TLS runs over the stream (not DTLS). A listener answers a first Hello with a stateless cookie (SipHash-2-4 under a secret that changes every 2 minutes, over the dialer's address, port and token and the time) and keeps nothing until the Hello comes back with it, so a spoofed source address costs one reply and no link or handshake slot. Its packet revision is 2 since Stage 13a: older reliable UDP peers can't connect. |
 | `local_ipc` | name, port 0 | Windows: a named pipe `\\.\pipe\rhp.<name>` for the owner and SYSTEM only, remote clients refused. POSIX: an absolute socket path created mode 0600 (only its own inode is ever removed). Linux/Android: `@name` is an abstract socket; both ends check the peer's UID. PSK authentication is still required. |
 
 ```cpp
@@ -34,7 +34,7 @@ if (!advertised) {
 }
 ```
 
-Calling `advertise()` again updates the record (leave `name` empty to keep the current one; on the first call an empty name becomes `rhp-<random>`). Registration finishes on the network thread, so later problems such as a name conflict (`kAlreadyLoaded`) show up in `host.discovery_status()`. Library names are published only with `.include_libs = true`; installing another library then refreshes the record.
+A host at hardening `production` refuses to advertise (`kForbidden`). Calling `advertise()` again updates the record (leave `name` empty to keep the current one; on the first call an empty name becomes `rhp-<random>`). Registration finishes on the network thread, so later problems such as a name conflict (`kAlreadyLoaded`) show up in `host.discovery_status()`. Library names are published only with `.include_libs = true`; installing another library then refreshes the record.
 
 The provider is the `discovery<D>` slot:
 
@@ -101,7 +101,7 @@ for (const auto& entry : group.call<double>("low_grav", "set", 1.6)) { /* host_r
 - Scripts (`exec`, `load`) are signed once with the fleet's signing key; without one, hosts refuse them (`kBadSignature`) except for observe identities. Calling already-loaded code needs no signature.
 - `discover` adds every host a `client<Cfg>` can talk to (this transport, this wire revision) and skips malformed or foreign records. `add(record)` adds one by hand.
 - Members keep their sessions, and so their effects, between broadcasts; `clear()` or destroying the fleet ends them. A member whose client closed for good is replaced on the next broadcast or discovery.
-- TLS and `insecure_lan` come from `fleet_options`, never from a record.
+- TLS and `insecure_lan` come from `fleet_options`, never from a record (`insecure_lan` only when the fleet's config is at hardening `dev`).
 - Every member runs on the fleet's one network reactor: a single I/O thread for the whole fleet with the default `io<owned_io_thread>`, however many hosts it has. Under `io<zero_threads>` there is none: the fleet drives every member while it waits and browses; call `poll()` while idle.
 - `fleet_options::client` applies to every member. Its `on_output` / `on_emit` run on the fleet's network thread (inside the waits and `poll()` with `io<zero_threads>`, and possibly on the destroying thread while a fleet is torn down); never call the fleet from them.
 - One thread uses a fleet at a time.
@@ -124,7 +124,7 @@ options.gateway = Rhp::endpoint::listen("127.0.0.1", 8080); // port 0 works too:
 Rhp::host<> host{Rhp::endpoint::listen("127.0.0.1", 7777), keys, signers, options};
 ```
 
-(`headless_server --http-port 8080` does the same.) The HTTP listener feeds the same host: the same identities, sandboxes, roles, signing checks, module lifecycle and audit events. It needs an authenticator that models `Rhp::security::http_authenticator` (`psk_keyring` does); otherwise `gateway_port()` reports `kDisabled`. Off loopback, HTTPS is required under the normal endpoint rules, with the host's TLS certificate settings.
+(`headless_server --http-port 8080` does the same.) The HTTP listener feeds the same host: the same identities, sandboxes, roles, signing checks, module lifecycle and audit events. It needs an authenticator that models `Rhp::security::http_authenticator` (`psk_keyring` does); otherwise `gateway_port()` reports `kDisabled`. Off loopback, HTTPS is required under the normal endpoint rules, with the host's TLS certificate settings. Its connections share the host's admission limits for unauthenticated connections (`pending_handshakes`, `handshakes_per_source`, `first_byte_ms`) until their proof checks out. Above hardening `dev` a gateway endpoint with `insecure_lan` is refused, and at `production` the gateway opens only with `http_require_binding`; either refusal leaves the native listener running and is reported by `gateway_port()` (`kForbidden`).
 
 | Route | Body | Result |
 |---|---|---|
@@ -138,7 +138,7 @@ Rhp::host<> host{Rhp::endpoint::listen("127.0.0.1", 7777), keys, signers, option
 | `POST /cancel/{token}` | | cancels the request sent with `X-RHP-Request: {token}` |
 | `POST /cancel` | | cancels every request this key has in flight |
 
-Answers are MessagePack: the result, or an RHP error. Status codes: 200, 400 (bad request or arguments), 401 (proof refused or replayed), 403 (role or signature), 404, 408 (the head took longer than `limits.handshake_timeout_ms`), 409 (cancelled), 413 (too large), 422 (the script or module failed), 429 (too many requests), 500, 503 (host disabled), 504 (timed out). A suspended script answers when it finishes. Requests need `Content-Length` (no chunked bodies, no pipelining); `Expect: 100-continue` is answered. Heads are limited to 16 KiB and 64 fields, bodies to `limits.max_frame`. Not routed over HTTP: rollback, checkpoint / revert_to, revert_all, pin / unpin, blob and subscribe; `DELETE` never forces an unload; HTTP exec runs with the chunk name `http.exec`.
+Answers are MessagePack: the result, or an RHP error. Status codes: 200, 400 (bad request or arguments), 401 (proof refused or replayed), 403 (role or signature), 404, 408 (the head took longer than `limits.handshake_timeout_ms`), 409 (cancelled), 413 (too large), 422 (the script or module failed), 429 (too many requests, `limits.request_rate` included), 500, 503 (host disabled), 504 (timed out). A suspended script answers when it finishes. Requests need `Content-Length` (no chunked bodies, no pipelining); `Expect: 100-continue` is answered. Heads are limited to 16 KiB and 64 fields, bodies to `limits.max_frame`. Not routed over HTTP: rollback, checkpoint / revert_to, revert_all, pin / unpin, blob and subscribe; `DELETE` never forces an unload; HTTP exec runs with the chunk name `http.exec`.
 
 Each key has one logical session, kept across connections. It ends after `limits.gateway_idle_ms` (five minutes) with nothing in flight, which reverts its effects like any last session (pinned modules and other live sessions of the identity are kept). A request in flight is never expired while its client is connected; a client that hangs up cancels its request. Idle time is measured on the host's clock (`config<>::clock<>`): `pump()` samples its offset from `steady_clock` for the network thread, so a test clock that jumps ahead expires identities without real waiting, and the clock itself is only called on the pump thread. Proof freshness and the replay window always use the system clock, since clients sign with real time. Audit records (`script_executed`) name the caller of each request in `peer`, not the first caller of the key.
 

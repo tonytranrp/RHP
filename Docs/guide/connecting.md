@@ -10,7 +10,7 @@ An `Rhp::endpoint` says where the peer is and which side waits. There is no defa
 Rhp::endpoint::listen("127.0.0.1", 7777)                       // wait here
 Rhp::endpoint::dial("10.0.0.5", 7777)                          // connect there
 Rhp::endpoint::listen("0.0.0.0", 7777, Rhp::net::require_tls)  // TLS even on loopback
-Rhp::endpoint::listen("0.0.0.0", 7777, Rhp::net::insecure_lan) // plaintext allowed (trusted LAN only)
+Rhp::endpoint::listen("0.0.0.0", 7777, Rhp::net::insecure_lan) // plaintext with local peers only (hardening dev only)
 ```
 
 For a TCP listener, port 0 binds a free port; check and read `host.port()` (or `client.port()` in reverse mode). Dial endpoints need the actual listening port. Loopback uses an in-process channel name and number, and its listener reports port 0 rather than an OS socket port.
@@ -34,7 +34,7 @@ TLS 1.3 comes from `config<>::tls<B>`: the system's **OpenSSL ≥ 3.0** on deskt
 | listen on a non-loopback address | TLS from remote peers; plaintext only when the accepted peer is loopback or the endpoint explicitly permits it |
 | loopback peer or a local transport | plaintext is fine; frames still carry a keyed MAC |
 | `Rhp::net::require_tls` | TLS always, plaintext refused |
-| `Rhp::net::insecure_lan` | plaintext allowed to and from non-loopback addresses |
+| `Rhp::net::insecure_lan` | plaintext allowed with local peers only: loopback, private (RFC 1918, RFC 4193 `fc00::/7`) and link-local addresses. Anyone else must start TLS (or is refused when there is no TLS to offer); a dial to a literal address that isn't local fails at once, one whose name resolved to such an address before a byte is sent (`kForbidden`). CGNAT (`100.64/10`) isn't local. Refused outright above hardening `dev`, by hosts, gateways and clients |
 | no TLS backend built (`tls<Rhp::security::tls::none>` or `RHP_WITH_TLS=OFF`) | non-loopback endpoints are refused (`kForbidden`) unless `insecure_lan` |
 
 **Supplying a certificate is optional; TLS still uses one.** By default the host makes an ephemeral self-signed certificate and the key handshake is bound to the TLS channel (RFC 9266), so a relay that terminates TLS cannot authenticate; the default PSK policy rejects a TLS-terminating relay with a different channel binding. Add certificate checks if you want them:
@@ -49,7 +49,7 @@ co.tls.ca_pem = authority_pem;
 co.tls.server_name = "game.lan";
 ```
 
-The three input variables above contain PEM **text loaded by the application**, not file paths. CLI `--cert`, `--key` and `--ca` instead accept paths and read those files. With a CA and an empty `server_name`, a dialed DNS name is selected automatically; for an IP endpoint, supply the intended certificate DNS name if you want name checking. CA-chain checks and PSK channel authentication are separate checks.
+The three input variables above contain PEM **text loaded by the application**, not file paths. CLI `--cert`, `--key` and `--ca` instead accept paths and read those files. With a CA and an empty `server_name`, a dialed DNS name is selected automatically; for an IP endpoint, supply the intended certificate DNS name if you want name checking. A dialed name counts as an IP address only if it parses as one (`cafe1` and `db1.de` are names and are checked). CA-chain checks and PSK channel authentication are separate checks. The Python client's `ca_file` checks the name too: a DNS name or IP address in the certificate's subject alternative names (`*.` covers one label; the common name doesn't count).
 
 Pick a backend explicitly: `Rhp::config<>::tls<Rhp::security::tls::mbedtls>`.
 
@@ -65,7 +65,7 @@ auto ready = dev.connect();                                                     
 ```
 
 - The dialing host redials whenever the dial fails or the session ends, with capped exponential backoff and full jitter (`limits.backoff_min_ms` 250 ms to `backoff_max_ms` 30 s).
-- A listening client serves one host at a time. When that host's session ends, calls in flight fail and the next call waits for a host to dial in.
+- A listening client serves one host at a time. When that host's session ends, calls in flight fail and the next call waits for a host to dial in. Every connection is a candidate until it authenticates, and candidates handshake side by side under the client's own admission limits (`pending_handshakes`, `handshakes_per_source`, `first_byte_ms`): the first to authenticate becomes the session, so a stalled or silent connection can't keep the real host out.
 - Tooling: `rhp-cli connect 0.0.0.0:7777 -i dev.rhpid --listen` and `headless_server --reverse HOST:PORT`.
 - iOS needs `NSLocalNetworkUsageDescription` (and `NSBonjourServices` containing `_rhp._tcp` or `_rhp._udp` for discovery) in Info.plist.
 
@@ -87,8 +87,9 @@ You do not code any of this; it is how the session layer behaves.
 The REPL and scripting client. Full command list: [`Tools/rhp-cli/README.md`](../../Tools/rhp-cli/README.md).
 
 ```bash
-rhp-cli keygen dev                                            # dev.rhpid + lines for the host
+rhp-cli keygen dev                                            # dev.rhpid (role patch); rhp-cli pubkey -i dev.rhpid prints the host's lines
 rhp-cli connect HOST:PORT -i dev.rhpid                        # REPL, every script signed
+rhp-cli connect --dev my_game                                 # a dev session on this machine: no key files
 rhp-cli run scripts/low_grav.lua -c HOST:PORT -i dev.rhpid --pin --name low_grav
 rhp-cli exec "return game.gravity" -c HOST:PORT -i dev.rhpid
 rhp-cli stubs -c HOST:PORT -i dev.rhpid -o rhp_api.lua
@@ -108,7 +109,8 @@ Other commands have their own guides: `discover` and `fleet` ([networking](netwo
 | `--tls` | TLS even on loopback (non-loopback always uses it) |
 | `--ca pem` + `--server-name` | verify the host's certificate |
 | `--cert` / `--key` | this side's certificate (with `--listen`) |
-| `--insecure-lan` | plaintext to a non-loopback address |
+| `--insecure-lan` | plaintext to a local (private or link-local) address; refused by an `rhp-cli` built above hardening `dev` |
+| `--dev [app]` (`connect` only) | a [dev session](security.md#dev-sessions) of a program on this machine: no address or identity file; with no app, the only one open |
 
 Ctrl+C cancels an executing Lua chunk. In the REPL, Ctrl+C at a continuation prompt drops unfinished input; EOF with unfinished Lua is an error. Temporary link loss is resumed within the session window; permanent session failure requires a new CLI connection. One-shot commands disconnect on exit, so use `run --pin` with an admin key when a loaded module must survive the command. `watch` watches saves after it starts; it does not initially load every existing file. `events` (and `subscribe` / `unsubscribe` in the REPL) print the host's C++ events and your identity's script events ([scheduling and events](scheduling-and-events.md#5-watch-events-from-a-tool)). Exit status is 0 on success, 1 on failure and 2 for usage errors.
 
@@ -141,8 +143,9 @@ A link is a connected byte stream:
 | `send(byte_buffer)` / `close()` | queue bytes / close after writing what is queued |
 | `peer()` | a readable address for logs and audit |
 | `loopback()` / `encrypted()` / `channel_binding()` | security facts the session uses; the defaults say remote, plaintext, unbound |
+| `address()` | the peer's IP address (`std::optional<Rhp::net::ip_address>`); the default says none |
 
-Every transport must declare `network` (Stage 8): `true` for anything another machine can reach (the TLS address rules then apply), `false` for in-process, IPC or a cable. A transport without it doesn't compile, so none is silently treated as local. When wrapping a link, derive from `Rhp::net::link_decorator`: it forwards `loopback()`, `encrypted()` and `channel_binding()`, which the session's security depends on.
+Every transport must declare `network` (Stage 8): `true` for anything another machine can reach (the TLS address rules then apply), `false` for in-process, IPC or a cable. A transport without it doesn't compile, so none is silently treated as local. A network transport should report its peer's IP address in `address()`: hosts and listening clients cap unauthenticated connections per source by it, and `insecure_lan` speaks plaintext only with peers it knows to be local; without one, connections count only toward the total cap and get no plaintext. When wrapping a link, derive from `Rhp::net::link_decorator`: it forwards `loopback()`, `encrypted()`, `channel_binding()` and `address()`, which the session's security depends on.
 
 Link rules: call the handler only on the `io_context`'s thread (use `io_context::post` from elsewhere), report `on_closed` exactly once and never after the link is destroyed, and write queued bytes before closing. See [`Examples/custom_transport`](../../Examples/custom_transport).
 

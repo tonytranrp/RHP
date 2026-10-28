@@ -2,7 +2,9 @@
 
 A task-oriented walkthrough of Stage 7: keeping work going inside the host without a client request held open, letting modules, C++ and tools talk through events, and what happens when a handler fails. The exact contracts are in [writing scripts](writing-scripts.md) (Lua) and [host and client](host-and-client.md) (C++); why it works this way is in the [Stage 7 decisions](../decisions/stage7-scheduling-events.md).
 
-Everything here runs on the thread that calls `pump()`. Nothing runs between pumps.
+Everything here runs on the thread that calls `pump()`. Nothing runs between pumps, and none of it runs while the host is switched off (`host.set_enabled(false)`).
+
+Registering work that outlives a request (frame callbacks, timers, subscriptions, `rhp.on_error`, tasks) needs a patch identity: those builtins raise `forbidden` for observe, which keeps `rhp.wait`, `rhp.sleep`, `rhp.next_frame`, `rhp.wait_event` and `rhp.publish`. `limits.handlers` (0, unlimited, by default) caps how many timers, frame callbacks, subscriptions and unfinished tasks one sandbox keeps.
 
 ## 1. Do something every frame
 
@@ -108,7 +110,7 @@ auto id = client.on("game.round_over", [](const Rhp::remote_event& e) {
 // later: client.off(*id);
 ```
 
-A client hears the host's C++ events (any identity may subscribe, observe included) and its own identity's script events (`"*"` for all of them). Subscriptions live as long as the session, through reconnects. A host sends at most `host_options::remote_events_per_pump` events per session per pump; the rest are dropped and the next delivery's `dropped` says how many.
+A client hears the host's C++ events (any identity may subscribe from a client, observe included: `client.on` isn't a script's `rhp.on`) and its own identity's script events (`"*"` for all of them). Subscriptions live as long as the session, through reconnects. A host sends at most `host_options::remote_events_per_pump` events per session per pump; the rest are dropped and the next delivery's `dropped` says how many.
 
 ## 6. When a handler fails
 

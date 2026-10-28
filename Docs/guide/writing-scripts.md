@@ -7,18 +7,18 @@ Lua 5.5, text only (no binary chunks). Each identity (key) has its own Lua state
 | Function | Role | What |
 |---|---|---|
 | `rhp.patch(id, fn)` | patch | override a C++ patch point; `fn(original, ...)`; undone with the module |
-| `rhp.on(event, fn [, opts])` / `rhp.once(...)` | any | subscribe to a C++ event of that name, else to an `rhp.publish` of this identity; returns an id. `once` is removed after one delivery; `opts.priority` orders handlers (higher first), `opts.on_error` sets its error policy; unknown option keys are errors; names are dotted lowercase |
+| `rhp.on(event, fn [, opts])` / `rhp.once(...)` | patch | subscribe to a C++ event of that name, else to an `rhp.publish` of this identity; returns an id. `once` is removed after one delivery; `opts.priority` orders handlers (higher first), `opts.on_error` sets its error policy; unknown option keys are errors; names are dotted lowercase |
 | `rhp.off(id)` | any | remove this module's timer, frame callback or subscription, or cancel its task |
 | `rhp.publish(event, ...)` | any | deliver copies of the values to this identity's handlers and waiters at the next `pump()`; false if the queue is full. Raises `invalid_argument` for a non-dotted name, `forbidden` for an `rhp.` name or a name a C++ event uses, and a conversion error for functions or userdata |
 | `rhp.wait_event(event [, ms])` | any | suspend until the event fires: `true, ...`, or `false, "timeout"` |
-| `rhp.timer(ms, fn [, repeating])` | any | return a timer id; call `fn` after `ms` (repeat when the third argument is true); undone with its module; no options (the sandbox's error policy) |
-| `rhp.after(ms, fn [, opts])` / `rhp.every(ms, fn [, opts])` | any | one call after `ms` / a call every `ms`; every form takes `opts.on_error`, and `opts.times` (1 … 2³²−1, `rhp.every` and frame callbacks only) limits the calls |
-| `rhp.every_frame(fn [, opts])` / `rhp.every_frames(n, fn [, opts])` | any | a call every `pump()` / every `n` pumps (`n` an integer, 1 … 10¹⁵) |
+| `rhp.timer(ms, fn [, repeating])` | patch | return a timer id; call `fn` after `ms` (repeat when the third argument is true); undone with its module; no options (the sandbox's error policy) |
+| `rhp.after(ms, fn [, opts])` / `rhp.every(ms, fn [, opts])` | patch | one call after `ms` / a call every `ms`; every form takes `opts.on_error`, and `opts.times` (1 … 2³²−1, `rhp.every` and frame callbacks only) limits the calls |
+| `rhp.every_frame(fn [, opts])` / `rhp.every_frames(n, fn [, opts])` | patch | a call every `pump()` / every `n` pumps (`n` an integer, 1 … 10¹⁵) |
 | `rhp.pause(id)` / `rhp.resume(id)` / `rhp.reschedule(id, interval)` / `rhp.timers()` | any | control and list this module's timers and frame callbacks (`pause` / `resume` work on subscriptions too) |
-| `rhp.spawn(fn, ...)` / `rhp.tasks()` | any | start a background task (handle: `status()`, `cancel()`, `join()`, `id`) / this module's unfinished tasks |
+| `rhp.spawn(fn, ...)` / `rhp.tasks()` | patch / any | start a background task (handle: `status()`, `cancel()`, `join()`, `id`) / this module's unfinished tasks |
 | `rhp.tunables([prefix])` | any | the variables the host's libs expose, with value and tags ([tools](tools.md)) |
 | `rhp.buffer.new(size [, fill])` / `rhp.buffer.from(bytes)` | any | a byte buffer this script owns: `b:read_u32(pos [, "be"])` / `write_*`, `pack` / `unpack`, `slice`, typed views `b:view("f32")`; never journaled ([buffers](views-and-buffers.md#buffers-rhpbuffer)) |
-| `rhp.on_error(fn [, opts])` / `rhp.stats()` | any | hear about failed handlers (`opts.priority`, `opts.on_error`) / `{dropped_events, queued_events, timers, subscriptions, tasks, waiting, async_waiting, async_compensated, async_dropped, handler_failures, memory}` |
+| `rhp.on_error(fn [, opts])` / `rhp.stats()` | patch / any | hear about failed handlers (`opts.priority`, `opts.on_error`) / `{dropped_events, queued_events, timers, subscriptions, tasks, waiting, async_waiting, async_compensated, async_dropped, handler_failures, memory}` |
 | `rhp.wait([frames])` / `rhp.next_frame()` | any | suspend for `frames` `pump()` calls (default 1) |
 | `rhp.sleep(ms)` | any | suspend for at least `ms` ms (clock is injectable) |
 | `rhp.emit(value)` | any | stream a value to the client while the script keeps running |
@@ -27,17 +27,23 @@ Lua 5.5, text only (no binary chunks). Each identity (key) has its own Lua state
 | `require(name)` | any | a loaded module of the same identity (read-only live proxy; cycles fail) |
 | `print(...)` | any | streams back to the client as an output line |
 
+Registering something that outlives the request (a timer, frame callback, subscription, error handler or task) changes the host's schedule, so it needs patch: from observe those builtins raise `forbidden` ("needs role patch"), and the stubs an observe identity gets leave them out. Observe keeps what ends with the request (`rhp.wait`, `sleep`, `next_frame`, `wait_event`, `publish`, `emit`). `limits.handlers` caps how many timers, frame callbacks, subscriptions and unfinished tasks one sandbox keeps; one more raises `limit_exceeded`.
+
 Plus whatever libs the host installed (`game.spawn(...)`), and the views their bindings return: typed views of C++ arrays (`v[i]`, `#v`, `pairs(v)`) and struct views (`t.x = 1`), written in place and undone with the module ([views](views-and-buffers.md)).
 
 ## Roles decide what a script can do
 
 | Role | May |
 |---|---|
-| `observe` | run code, read variables, call pure bindings. May send *unsigned* code |
-| `patch` | everything above plus write variables, call `undo` / `irreversible` bindings, patch points, load / reload / revert modules. Code must be signed |
-| `admin` | plus `revert_all`, blobs, admin-tagged bindings, pin / unpin, and the **full Lua standard library** (`io`, `os`, `debug`, `package`). An admin key is fully trusted |
+| `observe` | run code, read variables, call pure bindings. May send *unsigned* code (signed at hardening `production`); no timers, handlers or tasks |
+| `patch` | everything above plus write variables, call `undo` / `irreversible` bindings, patch points, timers, handlers and tasks, load / reload / revert modules. Code must be signed |
+| `admin` | plus `revert_all`, blobs, admin-tagged bindings, pin / unpin, and, in a `dev` build at hardening `dev`, the **full Lua standard library** (`io`, `os`, `debug`, `package`). An admin key is fully trusted there |
 
-Non-admin states get `string`, `table`, `math`, `utf8`, `coroutine`, `os.time`, `os.clock`; no `io`, `package`, `debug`, `dofile`, `loadfile`, `collectgarbage`, `string.dump`; `load` is text-only.
+Non-admin states (and admin ones outside a `dev` build at hardening `dev`) get `string`, `table`, `math`, `utf8`, `coroutine`, `os.time`, `os.clock`; no `io`, `package`, `debug`, `dofile`, `loadfile`, `collectgarbage`, `string.dump`; `load` is text-only.
+
+- **No finalizers.** `setmetatable` refuses a metatable with a `__gc` field (`forbidden`: "a metatable with __gc needs role admin at hardening dev"): Lua runs finalizers with its hooks off, where no limit or cancel reaches. Use a `<close>` variable to clean up; it runs under the usual limits.
+- **Addresses are hashed.** `tostring`, `print` and `string.format("%p")` show a value per object that is stable while it lives (a keyed SipHash-2-4 of its address, the key the sandbox's own), not the address. Don't parse it.
+- **Changes to the libraries are yours.** `string`, `table`, `math`, `utf8`, `coroutine`, `os`, `rhp` (with `rhp.buffer`) and the string metatable are shared by every module of the identity. A change to them (`string.upper = f`) lasts until the identity's full revert (`revert_all`, or its last session's end when nothing is pinned), which puts the originals back; unloading one module doesn't.
 
 ## Running code: `exec` versus modules
 
@@ -101,7 +107,8 @@ end
 
 - **A runaway loop holds the pump thread** unless you opt in to slicing (`limits.slice_us`) or stop it through an instruction/time limit or cancellation. With the default owned I/O thread, `client.cancel()` reaches Lua's count hook even while the host is inside a script. A `zero_threads` host cannot receive that network cancel while blocked. Unexpected link loss does not cancel during the resume grace period; cancellation also cannot interrupt a bound C++ call.
 - Instruction, memory and execution-time stops are sticky, so a script's `pcall` cannot make a stopped request succeed. `slice_us` yields a runnable request rather than failing it. These are separate from the client's end-to-end request timeout; see [configuration](configuration.md#limits).
-- Observe keys can send unsigned code. Correct binding permissions protect application mutations, but default limits still allow code to hold the pump or grow memory until cancelled; set host budgets for less trusted callers.
+- Pattern matching (`string.find`, `match`, `gmatch`, `gsub`) and plain `find` run in C; they charge their steps to `limits.instructions` and check `wall_ms` and cancels every 4096 steps, so a backtracking pattern is stopped like a loop.
+- Observe keys can send unsigned code below hardening `production`. Correct binding permissions protect application mutations, but default limits still allow code to hold the pump or grow memory until cancelled; set host budgets for less trusted callers (`host_options::observe_limits`; capped from `lan` up).
 
 For a local sandbox, use untyped `exec` / `call` when suspension is possible. An early `exec` / `call` result is an empty list; `load` returns an id whose state may be `loading`; a suspended `reload` returns a zero revision. The final outcome arrives in `sandbox_options::on_result` with the request id. The local typed `exec<T>` overload cannot convert an unfinished request's empty list into its eventual `T`.
 

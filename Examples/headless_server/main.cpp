@@ -2,9 +2,10 @@
 // signers from files, writes an audit log, accepts blobs into a folder, and keeps running until
 // told to stop. Try the full lifecycle from another terminal:
 //
-//   rhp-cli keygen dev                        # writes dev.rhpid; prints the two host lines
-//   echo "dev admin <psk>" > keys.txt          # the text after "keyring file:"
-//   echo "dev <public key>" > signers.pub       # the text after "signers file:"
+//   rhp-cli keygen dev                        # writes dev.rhpid (role patch; the PSK stays in the file)
+//   rhp-cli pubkey -i dev.rhpid               # prints the two host lines whole:
+//   echo "dev patch <psk>" > keys.txt          #   the first, the keyring line ("<psk from dev.rhpid>" in keygen's output)
+//   echo "dev <public key>" > signers.pub       #   the second, the signers line
 //   headless_server --port 7777 --keys keys.txt --signers signers.pub --audit audit.log
 //   rhp-cli connect 127.0.0.1:7777 -i dev.rhpid
 //

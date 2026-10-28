@@ -17,11 +17,11 @@ Rhp::host<> observe_only{endpoint, authenticator}; // no signers: only observe s
 | `on<Event>(fn)` / `on_any(fn)` | subscribe to host events; returns a `[[nodiscard]] event::subscription` that unsubscribes when destroyed. Handlers run on the pump thread |
 | `on_script_event(name, fn)` | every `rhp.publish` of `name` (`"*"`: all, `rhp.handler_failed` included) in any identity's sandbox, as an `event::script_event` (`identity`, `module`, `event`, `args`), on the pump thread |
 | `pump()` | **call every frame.** Runs requests that arrived, resumes suspended scripts, fires timers and queued events, hands replies to the network. With `io<zero_threads>` it also polls the network |
-| `port()` | bound network port after port 0, or a setup failure; IPC, dialing hosts and loopback report 0 |
+| `port()` | bound network port after port 0, or a setup failure (a refusal at the host's hardening level included: `kForbidden`); IPC, dialing hosts and loopback report 0 |
 | `gateway_port()` | the optional HTTP listener's bound port or setup error |
 | `advertise(options)` / `discovery_status()` | explicit DNS-SD registration/update and subsequent provider errors; `advertise` on the pump thread, `discovery_status` from any thread with an owned I/O thread (the pump thread with `io<zero_threads>`) |
 | `sessions()` / `identities()` | authenticated sessions, including detached resumable ones and HTTP logical sessions / identities with a live sandbox, including sessionless pinned ones (any thread) |
-| `set_enabled(bool)` / `enabled()` | runtime kill switch: while off, new connections are closed and every request answers `kDisabled` (what already ran stays; send `revert_all` first to undo it) |
+| `set_enabled(bool)` / `enabled()` | runtime kill switch (any thread): off closes every session, native and HTTP, with `kDisabled` (each identity reverts as on a disconnect, except modules an admin pinned), refuses new connections (reported as `auth_failed`), stops a reverse-mode host's dialing and makes `pump()` run no scripts: no requests, handlers, tasks or release channels. On resumes all of it, dialing included. Pinned modules and release channels stay loaded, and a patch they hold still runs when game code hits its point (send `revert_all` and deactivate the channels first to remove them) |
 | `logger()` / `clock()` | references to policy objects; callers must synchronize mutation with their use by RHP |
 
 Destroy the host on its application/pump thread after concurrent calls have stopped. Its destructor sends a goodbye (waiting briefly for delivery), stops and joins the I/O runner, then tears down identity sandboxes and pinned modules. Application objects referenced by bindings and undo callbacks must still be alive during that cleanup. Install libs and sinks before normal pumping; call `pump()` from one application thread.
@@ -50,6 +50,11 @@ auto registered = host.on_blob("configs", [](const Rhp::blob_view& b) -> Rhp::re
 | `handler_errors` | `report` | what a failing timer, frame callback, event handler or task does in every identity's sandbox when the script sets no `on_error` |
 | `remote_events_per_pump` | 256 | subscribed events sent to one session per `pump()`; the rest are dropped and the next event says how many |
 | `ack_delay_ms` | 5 | how long a received frame's ack waits for an outgoing frame to carry it; 0 acks every read at once |
+| `hardening` | `kDev` | raises the host's [hardening level](security.md#hardening-levels) above its config's, never lowers it: the host runs at the strictest of `RHP_HARDENING`, `config<>::hardening` and this |
+| `observe_limits` | empty (the config's limits) | observe identities' own limits; capped by `Rhp::kObserveCaps` from hardening `lan` up, and by `Rhp::kProductionCaps` at `production` |
+| `dev_session` | empty | an app name: in a `dev` build at hardening `dev`, a host listening on loopback or local IPC adds a [dev session](security.md#dev-sessions) identity and writes its connect file for `rhp-cli connect --dev`; anywhere else the host doesn't start (`kForbidden` from `port()`) |
+
+`Rhp::host<Cfg>` needs a config that signs its scripts unless it is at hardening `dev` (`Rhp::host_configuration`): a `signer<unsigned_scripts>` config doesn't compile in a `lan` or `production` build.
 
 ## `Rhp::client<Cfg>`
 
@@ -58,7 +63,7 @@ Rhp::client<> c{endpoint, credential, signing_key, client_options{}}; // signs e
 Rhp::client<> o{endpoint, credential};                                // unsigned: observe sessions only
 ```
 
-Get them from a checked identity-file result: `id->credential()` and `id->signer_key()` (an optional). Validate both before construction; the [complete client example](getting-started.md#first-run-host-plus-rhp-cli) shows this. With the default signing policy, a client without a signing key can send code only to an observe session.
+Get them from a checked identity-file result: `id->credential()` and `id->signer_key()` (an optional). Validate both before construction; the [complete client example](getting-started.md#first-run-host-plus-rhp-cli) shows this. With the default signing policy, a client without a signing key can send code only to an observe session (and not to a host at hardening `production`). A client reads its config's hardening level too: above `dev` it refuses an `insecure_lan` endpoint on its first call (`kForbidden`).
 
 [Networking and fleet](networking.md) shows discovery and `Rhp::fleet<Cfg>` execution, including its per-host result and deadline contracts.
 
@@ -66,7 +71,7 @@ Result-bearing operations return `Rhp::result<T>` by default (see [errors](confi
 
 | Call | Returns | Role |
 |---|---|---|
-| `exec(src [, chunk])` / `exec<T>(src [, chunk])` | all returned values / the first one converted to `T` (`chunk` names the code in tracebacks, default `exec`) | any (signed unless observe) |
+| `exec(src [, chunk])` / `exec<T>(src [, chunk])` | all returned values / the first one converted to `T` (`chunk` names the code in tracebacks, default `exec`) | any (signed unless observe; observe signs too at hardening `production`) |
 | `load(name, src)` | `module_id` | patch |
 | `call(mod, "fn", args...)` | returned values | observe at the request level; called bindings still enforce their own roles |
 | `reload(mod, src)` | new `revision_id` | patch |
@@ -85,7 +90,7 @@ Result-bearing operations return `Rhp::result<T>` by default (see [errors](confi
 | `poll()` | with `io<zero_threads>`: handle whatever the network has ready, without blocking (no-op with an I/O thread) | |
 | `tunables(prefix)` / `tune(path, value)` | list the host's lib variables with their tags / write one as a script would ([tools](tools.md#tunables)) | observe / patch |
 | `profile(action, interval)` | the sampling profiler: `"start"`, `"read"` or `"stop"` ([tools](tools.md#profiler)) | observe |
-| `debug(request)` | the debugger: breakpoints, pause, steps, stacks, variables ([tools](tools.md#over-the-wire)) | patch |
+| `debug(request)` | the debugger: breakpoints, pause, steps, stacks, variables ([tools](tools.md#over-the-wire)); refused by a host at hardening `production` | patch |
 | `release_apply(envelope, confirm)` / `release_confirm(channel)` / `release_deactivate(channel, hold)` | run a signed release on a host that [serves a manager](releases.md) | admin |
 | `release_status()` / `revoke(envelope)` | what the host's channels run / send a signed revocation list | observe |
 

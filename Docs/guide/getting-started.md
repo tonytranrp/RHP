@@ -34,7 +34,7 @@ For a project that already uses CPM, replace `add_subdirectory` with a pinned pa
 CPMAddPackage(NAME rhp GITHUB_REPOSITORY tonytranrp/RHP GIT_TAG stage-12)   # or a commit sha
 ```
 
-Releases are tagged by stage (`stage-0` ... `stage-12`); there are no version numbers. This guide describes Stage 12 (`stage-12`). A host and its clients must use the same protocol revision (Stages 11 and 12 both speak revision 6). RHP's tests, tools, examples and install rules default to OFF when consumed as a subproject, and its warnings aren't errors there; build the CLI from RHP's own checkout as described next.
+Releases are tagged by stage (`stage-0` ... `stage-12`); there are no version numbers. This guide describes Stage 12 (`stage-12`) and the Stage 13a hardening built on top of it (branch `stage-13a-hardening`, not tagged yet). A host and its clients must use the same protocol revision (Stages 11, 12 and 13a all speak revision 6). RHP's tests, tools, examples and install rules default to OFF when consumed as a subproject, and its warnings aren't errors there; build the CLI from RHP's own checkout as described next.
 
 ### Installed package
 
@@ -63,7 +63,7 @@ add_executable(rhp_demo main.cpp)
 target_link_libraries(rhp_demo PRIVATE Rhp::rhp)
 ```
 
-`find_package(rhp)` takes no version: RHP has no release numbers, so a versioned request never matches. A package built for another OS, pointer size, Android ABI or C++ ABI is refused. The package sets `rhp_STAGE`, `rhp_PROTOCOL_REVISION`, `rhp_ENABLE`, `rhp_TLS_HAS_OPENSSL`, `rhp_TLS_HAS_MBEDTLS` and `rhp_PLATFORM`; it brings the archives of the third-party code RHP compiled in (`lib/rhp/`) but none of their headers, and their licenses in `share/doc/rhp/licenses`. With MSVC a configuration only maps to an installed one with the same runtime: a Debug consumer needs a Debug RHP installed. When RHP was built with OpenSSL, the consumer's machine needs OpenSSL 3.0+ too. The generated `<rhp/build_config.hpp>` records how the package was built, so a translation unit that defines `RHP_ENABLE` (or the TLS or platform macros) differently fails to compile instead of disagreeing with the library.
+`find_package(rhp)` takes no version: RHP has no release numbers, so a versioned request never matches. A package built for another OS, pointer size, Android ABI or C++ ABI is refused. The package sets `rhp_STAGE`, `rhp_PROTOCOL_REVISION`, `rhp_ENABLE`, `rhp_HARDENING` (`dev`, `lan` or `production`), `rhp_TLS_HAS_OPENSSL`, `rhp_TLS_HAS_MBEDTLS` and `rhp_PLATFORM`; it brings the archives of the third-party code RHP compiled in (`lib/rhp/`) but none of their headers, and their licenses in `share/doc/rhp/licenses`. With MSVC a configuration only maps to an installed one with the same runtime: a Debug consumer needs a Debug RHP installed. When RHP was built with OpenSSL, the consumer's machine needs OpenSSL 3.0+ too. The generated `<rhp/build_config.hpp>` records how the package was built, so a translation unit that defines `RHP_ENABLE` (or `RHP_HARDENING`, the TLS or platform macros) differently fails to compile instead of disagreeing with the library.
 
 `Rhp::rhp` links everything and provides `<rhp/rhp.hpp>`. For local scripting, link `Rhp::script` and include `<rhp/script/sandbox.hpp>`. A client-only tool can link `Rhp::client` and include `<rhp/client/client.hpp>` without linking Lua. Targets propagate C++23, include paths, platform definitions and `RHP_ENABLE`; use those targets rather than copying include directories and libraries by hand. RHP's public headers are ASCII and survive `<windows.h>` included first without `NOMINMAX`.
 
@@ -103,15 +103,21 @@ Ship and measure Release builds; [performance](performance.md) covers `RHP_LTO` 
 rhp-cli keygen dev --role patch
 ```
 
-This writes `dev.rhpid` (identity name, PSK, signing key) and prints:
+This writes `dev.rhpid` (identity name, PSK, signing key; owner-only on every OS) and prints what the host needs, leaving the PSK in the file:
 
 ```text
 wrote dev.rhpid (keep it private)
-add to the host's keyring file:   dev patch <base64-psk>
+add to the host's keyring file:   dev patch <psk from dev.rhpid>   (rhp-cli pubkey -i dev.rhpid --role patch prints it whole)
 add to the host's signers file:   dev <base64-ed25519-public-key>
 ```
 
-Paste the part after each colon into `keys.txt` (name role key) and `signers.pub` (name public-key); `rhp-cli pubkey -i dev.rhpid --role patch` prints the two bare lines again. The angle-bracket values above are explanatory. `keygen` refuses to replace an existing identity unless you pass `--force`. Its keyring line contains a secret: keep that output, `keys.txt` and `dev.rhpid` out of source control.
+Print the two lines whole and put them into the host's files:
+
+```bash
+rhp-cli pubkey -i dev.rhpid --role patch
+```
+
+The first line it prints goes into `keys.txt` (name role key), the second into `signers.pub` (name public-key). `keygen --show-secret` prints the keyring line whole instead. `keygen` refuses to replace an existing identity unless you pass `--force`. The keyring line contains a secret: keep that output, `keys.txt` and `dev.rhpid` out of source control, and `keys.txt` readable by you alone (the host below warns otherwise).
 
 **2. Start the supplied host in another terminal**, in the directory containing those key files:
 
@@ -147,7 +153,7 @@ rhp> return game.gravity
 rhp> quit
 ```
 
-`unload` removes this module's recorded effects. `revert_all` and `pin` require admin. `keygen` defaults to `--role admin` (this walkthrough passes `--role patch`); the role printed is only a suggestion for the host keyring, and editing an identity file cannot change the role granted by the host.
+`unload` removes this module's recorded effects. `revert_all` and `pin` require admin. `keygen` and `pubkey` default to `--role patch` (`--role admin` makes keygen print a warning); the role printed is only a suggestion for the host keyring, and editing an identity file cannot change the role granted by the host.
 
 **4. Embed a host in your application.** This complete `main.cpp` checks setup failures and runs Lua on the application's frame thread. Ctrl+C exits the loop and destroys the host on that same thread:
 
@@ -156,6 +162,7 @@ rhp> quit
 #include <csignal>
 #include <cstdio>
 #include <print>
+#include <string>
 #include <thread>
 #include <utility>
 
@@ -182,6 +189,9 @@ int main() {
     if (!keys || !signers) {
         std::println(stderr, "{}", !keys ? keys.error() : signers.error());
         return 1;
+    }
+    for (const std::string& warning : keys->warnings()) {
+        std::println(stderr, "warning: {}", warning); // keys.txt can be read by other users
     }
     Rhp::host<host_cfg> host{Rhp::endpoint::listen("127.0.0.1", 7777), std::move(*keys), std::move(*signers)};
     if (auto port = host.port(); !port) {
@@ -260,6 +270,65 @@ Run it while the host keeps pumping. A blocking client call made on the same thr
 
 Destroying a client closes its session gracefully. If it was the identity's last session, cleanup happens when the host processes that closure in `pump()`. Unexpected link loss instead preserves the session during the resume window; cleanup is not necessarily immediate.
 
+## First run shortcut: a dev session
+
+On your own machine, with a `dev` build (`RHP_HARDENING=dev`, the default), you can skip the key files. Start the supplied host with a dev session:
+
+```bash
+headless_server --port 0 --dev-session my_game
+```
+
+```bash
+rhp-cli connect --dev my_game
+```
+
+The host generates an admin identity and a signing key for this run, trusts them, and writes a connect file for `rhp-cli` into your user configuration folder (`%APPDATA%\rhp\dev\my_game.rhpdev` on Windows), readable by you alone; it removes the file when it stops. The handshake and script signatures run as usual. The same in your own program:
+
+```cpp
+#include <chrono>
+#include <csignal>
+#include <cstdio>
+#include <print>
+#include <thread>
+
+#include <rhp/rhp.hpp>
+
+namespace game {
+float g_gravity = -9.8f;
+} // namespace game
+
+volatile std::sig_atomic_t running = 1;
+void stop(int) {
+    running = 0;
+}
+
+using game_lib = Rhp::lib<"game">::var<"gravity", &game::g_gravity>;
+
+int main() {
+    Rhp::host_options options;
+    options.dev_session = "my_game"; // rhp-cli connect --dev my_game
+    // No key files: the dev session brings its own identity and signer.
+    Rhp::host<> host{Rhp::endpoint::listen("127.0.0.1", 0), Rhp::security::keyring{}, Rhp::security::trusted_signers{}, options};
+    const auto port = host.port();
+    if (!port) {
+        std::println(stderr, "{}", port.error()); // forbidden: not a dev build, or not on loopback
+        return 1;
+    }
+    if (auto installed = host.install<game_lib>(); !installed) {
+        std::println(stderr, "{}", installed.error());
+        return 1;
+    }
+    std::println("listening on 127.0.0.1:{}; connect with: rhp-cli connect --dev my_game", *port);
+    std::signal(SIGINT, stop);
+    while (running) {
+        host.pump();
+        std::this_thread::sleep_for(std::chrono::milliseconds{16});
+    }
+} // the host removes the connect file here
+```
+
+A dev session listens on a loopback address or local IPC only; anywhere else, in reverse mode, above hardening `dev` or in a `lan` or `production` build the host doesn't start and `port()` reports `forbidden`. Any process you run can read the connect file, so this is for development machines. Details: [dev sessions](security.md#dev-sessions).
+
 ## Learn from the examples
 
 Build with `RHP_BUILD_EXAMPLES=ON` (default when RHP is the top-level project). When tests are built too (the default top-level build), the four finite programs are ctest tests `example.<name>`, and the `lua_tests` spec files are `example.lua_tests.<file>`; run them all with `ctest --preset windows-msvc -R example`. `headless_server` is a long-running host exercised by the CLI process tests.
@@ -270,7 +339,7 @@ Build with `RHP_BUILD_EXAMPLES=ON` (default when RHP is the top-level project). 
 | [`frame_loop`](../../Examples/frame_loop) | per-frame `pump()`, time slicing, `rhp.wait`, reload keeping state, events, stubs |
 | [`remote_exec`](../../Examples/remote_exec) | host and clients over loopback and TCP: three roles, streamed output, cancel, disconnect = revert |
 | [`custom_transport`](../../Examples/custom_transport) | writing your own transport |
-| [`headless_server`](../../Examples/headless_server) | a standalone host driven by `rhp-cli`: key files, audit log, blob folder, reverse mode, TLS, DNS-SD, HTTP gateway, releases |
+| [`headless_server`](../../Examples/headless_server) | a standalone host driven by `rhp-cli`: key files, audit log, blob folder, reverse mode, TLS, DNS-SD, HTTP gateway, releases, dev sessions |
 | [`lua_tests`](../../Examples/lua_tests) | testing a game's Lua scripts offline with `Rhp::test` and `rhp_add_lua_tests` |
 
 ## Without any network
@@ -316,6 +385,8 @@ The sandbox defaults to patch role and needs no credentials, signatures or trans
 | `auth` | identity name and decoded PSK must match the host keyring |
 | `bad_signature` | the identity needs a signing key; its signer name and public key must be in `signers.pub` |
 | `forbidden` | check the granted role and TLS policy; a patch key cannot call `revert_all` or `pin` |
+| `forbidden` from `host.port()` | the host refused to start at its [hardening level](security.md#hardening-levels): `insecure_lan` or `signer<unsigned_scripts>` above `dev`, or a dev session off loopback, in reverse mode or outside a `dev` build |
+| `warning: ...` lines | a key file other users can read, or a PSK that looks typed by a person: fix the file's permissions or generate a new key |
 | A request keeps waiting | the host must call `pump()`; a `zero_threads` client must also progress its I/O |
 
 The [reference](reference.md#error-codes) lists the remaining codes. Preserve the error's `where` and `traceback` when reporting script failures.

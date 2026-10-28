@@ -188,7 +188,7 @@ look.scope = "locals";
 auto vars = client.debug(look);                 // vars->variables
 ```
 
-Debugging needs `kPatch`, because pausing a script changes what it does. Every session that sets breakpoints or pauses is a debugging session; when the last of them ends, the host resets the debugger and the paused scripts run on. `reset` from any session does it at once.
+Debugging needs `kPatch`, because pausing a script changes what it does. A host at hardening `production` has no remote debugger: `debug` answers `kForbidden`, and a `production` build leaves it out ([hardening levels](security.md#hardening-levels)). Tunables and the profiler stay available. Every session that sets breakpoints or pauses is a debugging session; when the last of them ends, the host resets the debugger and the paused scripts run on. `reset` from any session does it at once.
 
 The actions that change what scripts do (`break`, `pause`, `continue`, the steps, `reset`) are audited like an `exec`: an `event::script_executed` with op `debug`. Reading (`paused`, `stack`, `variables`, `evaluate`), `tunables` and `profile` aren't.
 
@@ -197,5 +197,5 @@ The actions that change what scripts do (`break`, `pause`, `continue`, the steps
 - One debugger per identity sandbox. Every session of the identity sees and drives the same breakpoints; they stay until the last debugging session ends.
 - At most 32 requests paused at once, 10 000 breakpoint lines per source.
 - No conditional breakpoints, no expression evaluation beyond paths, no setting variables from the debugger (use `tune` or `exec`).
-- The profiler counts VM instructions, not time. A slow C++ binding is invisible to it.
+- The profiler counts VM instructions, not time. A slow C++ binding is invisible to it, and so are the steps of pattern matching and plain `find` (they count toward `limits.instructions` only).
 - Release channels (`Rhp::release::manager`) have no debugger or profiler over the wire. In C++, `manager.sandbox(channel)` gives the channel's sandbox.

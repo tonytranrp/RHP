@@ -18,7 +18,7 @@ How to use RHP, what it supports, and how to configure and connect it. For *why*
 | [Tools](tools.md) | tunables, the sampling profiler and the debugger (rhp-cli, DAP for editors, C++) |
 | [Configuration](configuration.md) | `Rhp::config<>` slots, `Rhp::limits`, options, CMake switches |
 | [Performance](performance.md) | what RHP costs, `cancel_checks`, Release and `RHP_LTO`, yields, signing cache, network batching, build speed |
-| [Security](security.md) | keys, roles, signing, setting up a host safely |
+| [Security](security.md) | keys, roles, signing, hardening levels, dev sessions, setting up a host safely |
 | [Reference](reference.md) | error codes, host events, operations, wire protocol, Lua sandbox contents, threads |
 | [Limitations](limitations.md) | what RHP doesn't do, or does only partly |
 | [Status and TODO](../TODO.md) | what is built, what is next, recorded validation |
@@ -39,7 +39,7 @@ A running C++ program (the **host**) accepts Lua scripts from a **client** (your
                                          └─────────────────────────────┘
 ```
 
-## What is available today (Stages 0–12)
+## What is available today (Stages 0–12 and 13a)
 
 | Area | Supported |
 |---|---|
@@ -48,16 +48,16 @@ A running C++ program (the **host**) accepts Lua scripts from a **client** (your
 | Transports | in-process loopback, TCP, WebSocket binary tunnel, reliable UDP, local IPC; custom transports through `net::transport` |
 | Network tooling | authenticated HTTP/1.1 gateway with signed answers and optional channel binding; opt-in DNS-SD discovery; `Rhp::fleet<Cfg>` `exec`/`load`/`call` broadcasts with one outcome per host, on one shared network thread |
 | Directions | normal (client dials host) and **reverse** (host dials a listening client: phones, NAT) |
-| Security | pre-shared-key mutual authentication, 3 roles, Ed25519 script signing, TLS 1.3 (OpenSSL or Mbed TLS), TLS channel binding, per-frame MAC |
+| Security | pre-shared-key mutual authentication, 3 roles, Ed25519 script signing, TLS 1.3 (OpenSSL or Mbed TLS), TLS channel binding, per-frame MAC; hardening levels (`RHP_HARDENING=dev\|lan\|production`, raised per config or host) that compile out what a build doesn't allow and cap limits per role; per-identity request rates, pump budgets and handler caps; admission control for unauthenticated connections (per-source caps, first-byte deadline, eviction; a stateless cookie on reliable UDP); a sandbox without finalizers, address leaks or lasting changes to the shared libraries; owner-only key files; dev sessions without key files |
 | Reliability | CRC32C, seq / ack / nack / resend, heartbeat, **resume** after a lost link with exactly-once calls |
 | Client | blocking, `then` callbacks, `std::future`, `co_await`; cancel; blobs; output and `rhp.emit` callbacks; `client.on` subscriptions to host events |
 | Releases | signed release manifests (`Rhp::release`): channels, anti-rollback floors, validity windows, scope (app / build / platform), health-watched candidates, persistence across restarts with boot-attempt quarantine, revocation lists, staged fleet rollout with rollback |
 | Tools | tunables (`Rhp::range` / `step` / `unit` / `doc` tags on lib variables, `tune` journaled), a sampling profiler with folded-stack output, a debugger (breakpoints, pause, step, stacks, variables) that pauses one script while the program runs, `rhp-cli dap` for editors |
 | Testing scripts | `Rhp::test`: Lua specs run offline in real sandboxes (your libs, or `fake<L>` / fakes from an API description); `describe` / `it`, luassert-compatible `assert`, Jest-style `expect`, spies / stubs / mocks; a fake clock; exact instruction and memory costs, budgets, benches; leak checks; snapshots, property tests, fuzzing; text / TAP / JUnit / JSON / GitHub reports, LCOV / Cobertura coverage; `Rhp::test::main`, `rhp-cli test`, `rhp_add_lua_tests`, a VS Code extension |
-| Operations | audit events and JSON-lines log (`handler_failed` included), `host.on_script_event`, runtime kill switch (`set_enabled`), compile-time kill switch (`RHP_ENABLE=OFF`) |
+| Operations | audit events and JSON-lines log (`handler_failed` included), `host.on_script_event`, runtime kill switch (`set_enabled`: closes every session and runs no scripts until switched on), compile-time kill switch (`RHP_ENABLE=OFF`) |
 | Tooling | the pure-Python client `rhp_client` (`clients/python`); `rhp-cli` (REPL, `run`, `exec`, `stubs`, `blob`, `watch`, `events`, `keygen`, `pubkey`, `sign`, `discover`, `fleet`, `release`, `revoke`, `rollout`, `tune`, `profile`, `dap`, `test`), `headless_server`, six examples; the VS Code extension for Lua tests (`clients/vscode`) |
 | Packaging | `find_package(rhp)` from an installed prefix (Debug and Release side by side), `add_subdirectory` or CPM; a generated `<rhp/build_config.hpp>`; dependency pins checked by commit and hash; third-party licenses installed |
 | Performance | `rhp_bench` benchmarks every hot path against raw Lua ([benchmarks](../benchmarks.md)); the cancel hook counted at safe points (loop back-edges and calls) and armed only where a cancel can come from (`limits.cancel_checks`); a small-object allocator for Lua; plain binding trampolines; idle GC steps (`collect_idle`); a MAC'd compiled-chunk cache for releases; coroutine yields as jumps; cached script signatures; gathered TCP / IPC writes and delayed acks; opt-in `RHP_LTO`; shared precompiled headers and unity builds ([performance](performance.md)) |
 | Platforms | target presets for Windows, Linux, macOS, iOS and Android; verified builds and remaining platform checks are recorded in [platform decisions](../decisions/platforms-and-toolchains.md) |
 
-Start with the [runnable CLI walkthrough](getting-started.md#first-run-host-plus-rhp-cli), then the [complete local sandbox example](getting-started.md#without-any-network). The guide describes the current Stage 12 API; historical architecture decisions retain their stage context. Open items and platform checks are in [Status and TODO](../TODO.md).
+Start with the [runnable CLI walkthrough](getting-started.md#first-run-host-plus-rhp-cli), then the [complete local sandbox example](getting-started.md#without-any-network). The guide describes the current Stage 12 API and the Stage 13a hardening on top of it (Stages 13b and 13c are planned); historical architecture decisions retain their stage context. Open items and platform checks are in [Status and TODO](../TODO.md).

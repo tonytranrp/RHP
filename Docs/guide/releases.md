@@ -75,14 +75,14 @@ ops     9QdK2pA...=                                    *
 | `expire_running` | true | a running release past `not_after` stops |
 | `max_boot_attempts` | 2 | restarts a candidate may run through unconfirmed before it is quarantined |
 | `health_window` | 60 s | a `health` candidate is confirmed after this long without a failure |
-| `max_seq_jump` | 2^32 | how far `seq` may jump past the floor at once |
+| `max_seq_jump` | 2^32 | how far a seq may move at once: a release past its channel's floor, a revocation list past the last list, a floor a list raises past the highest seq its channel has seen; where nothing was seen yet, past the host's clock in Unix seconds |
 | `limits` | host-like (`wall_ms` 10 s) | the channels' sandboxes |
 | `wall_clock`, `clock` | system / steady | injectable for tests |
 | `output` | none | `print()` of the channels' scripts, with the channel |
 
 ## What a host checks
 
-In order, before anything runs: the envelope decodes, its body is canonical and every source matches its hash (`kIntegrity`); the release isn't revoked and its `seq` isn't at or below a revoked floor (`kRevoked`); enough trusted, unrevoked keys signed it for its channel (`kBadSignature`); it is meant for this app, build and platform (`kOutOfScope`); now is inside its validity window (`kExpired`); its role is allowed (`kForbidden`); every lib it needs is installed (`kNotFound`). Then, for the channel: the exact release that runs is `already`; one quarantined here is refused (`kRevoked`); its `seq` must be above the channel's floor (`kSuperseded`) and not too far above (`kOutOfRange`). The same release checks run again on every release a restart brings back.
+In order, before anything runs: the envelope decodes, its body is canonical and every source matches its hash (`kIntegrity`); the release isn't revoked and its `seq` isn't at or below a revoked floor (`kRevoked`); enough trusted, unrevoked keys signed it for its channel (`kBadSignature`); it is meant for this app, build and platform (`kOutOfScope`); now is inside its validity window (`kExpired`); its role is allowed (`kForbidden`); every lib it needs is installed (`kNotFound`). Then, for the channel: the exact release that runs is `already`; one quarantined here is refused (`kRevoked`); its `seq` must be above the channel's floor (`kSuperseded`) and at most `max_seq_jump` above it, or, for a channel's first release, at most `max_seq_jump` past the host's clock in Unix seconds (`kOutOfRange`). The same release checks run again on every release a restart brings back.
 
 ## Swapping without a gap
 
@@ -103,6 +103,8 @@ A new release's modules load into the channel's sandbox in manifest order: a mod
 A revocation list (signed by keys trusted for `*`) stops what it names: revoked releases fall back like a deactivate, releases at or below a floor it lists are revoked (running ones stop, and none of them is fallen back to), releases whose only valid signatures were by revoked keys stop too, and channel floors rise (also for channels that never ran anything). It reaches a host through `kRevoke` (any identity may send one: it carries its own signatures), inside a release envelope, or `manager.revoke(bytes)` locally.
 
 Revocations only add up. A host keeps the union of every list it accepted in its state and every list in its store (each under its own key); it takes a list into effect even when it can't be saved (the error says so, and the save is retried); a newer list can't un-revoke anything, and a key any list revoked can't sign a later list (so a stolen key can't forgive itself). Repeating older entries in a new list is harmless. On restore the stored list counts even if its signer has since been removed from the trust: it only ever withdraws trust.
+
+Seqs can't be fast-forwarded. A list's seq may move at most `max_seq_jump` past the last list's (past the host's clock in Unix seconds for its first list), and each floor it raises at most `max_seq_jump` past the highest seq its channel has seen (past the clock when the channel has seen none). A list past a cap is refused whole (`kOutOfRange`, a `refused` event) and applies nothing, so one stolen `*` key can't set a seq or floor near 2^63 and lock out every later list. A refused list isn't remembered: send the real one with a seq inside the cap (`rhp-cli revoke build --seq N`). Recovering from a compromised release key over the air needs the root of trust planned for Stage 13b ([decisions](../decisions/stage13-security.md)).
 
 ## rhp-cli
 
@@ -164,12 +166,13 @@ options.bytecode_key = *Rhp::security::key::from_file("config/rhp_bytecode.key")
 
 ## What the store protects against
 
-The state document is checksummed (BLAKE2b-256) and every write goes through a temporary file and a rename, so a torn or corrupted write is noticed instead of trusted. It is not authenticated: someone who can write the store can lower floors, point a channel at an older signed release or delete revocations. Signatures are still checked on every restore, so only signed releases ever run. Keep the store where only the program can write.
+The state document is checksummed (BLAKE2b-256) and every write goes through a temporary file and a rename, so a torn or corrupted write is noticed instead of trusted. It is not authenticated: someone who can write the store can lower floors, point a channel at an older signed release or delete revocations. Signatures are still checked on every restore, so only signed releases ever run. Keep the store where only the program can write. A restore takes the stored state and lists as they are, even past the seq caps (an older build may have accepted them): lowering them would undo revocations, refusing them would leave the store unusable.
 
 ## Limits
 
 - Release ops need an admin identity (`kReleaseApply`, `kReleaseConfirm`, `kReleaseDeactivate`); `kReleaseStatus` and `kRevoke` need observe. They are not on the HTTP gateway yet. They run on the pump thread inside `host.pump()`: a large release delays the other sessions' requests while it loads, and `kCancel` doesn't reach it.
-- `--seq auto` is the Unix time in seconds: two builds of one channel in the same second share a seq (pass `--seq`).
+- `--seq auto` is the Unix time in seconds: two builds of one channel in the same second share a seq (pass `--seq`). Counters (1, 2, 3) and Unix-time seqs pass the `max_seq_jump` caps; seqs that are neither (milliseconds, a date with the time) need a larger `max_seq_jump` for a channel's first release and a host's first revocation list. A host whose clock is far behind refuses a first Unix-time seq until its clock is right.
+- A release channel's sandbox follows the build's hardening level only: in a `dev` build an admin channel gets Lua's full standard library, whatever the serving host's level.
 - A module's top level must finish while loading: a release whose module suspends (`rhp.wait`) is refused.
 - `directory_store` syncs files and directories on POSIX and flushes with `_commit` on Windows; a store on a network share is only as durable as the share.
 - The Python client doesn't speak releases yet.
