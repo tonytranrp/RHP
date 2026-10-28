@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <deque>
 #include <exception>
+#include <filesystem>
 #include <format>
 #include <functional>
 #include <limits>
@@ -243,8 +244,8 @@ private:
 
     // ---- hardening (host.cpp) --------------------------------------------------------------------------
 
-    // Why the host can't start at its hardening level: unsigned_scripts or an insecure_lan endpoint
-    // above kDev. Nothing when it can.
+    // Why the host can't start at its hardening level: unsigned_scripts above kDev, an insecure_lan
+    // endpoint above kDev, a dev session it can't have. Nothing when it can.
     [[nodiscard]] std::optional<error> refusal() const;
 
     // An identity's limits, by its role: observe identities have their own (host_options::
@@ -253,6 +254,10 @@ private:
     [[nodiscard]] const Rhp::limits& limits_for(role granted) const noexcept {
         return granted == role::kObserve ? *setup_.options.observe_limits : setup_.limits;
     }
+
+    // host_options::dev_session, once the listener has its port: writes the connect file (removed by
+    // the destructor). A file that can't be written stops the listener (port() says why).
+    void open_dev_session();
 
     // Runs `fn` on the I/O thread and returns its result; under zero_threads the caller runs the
     // context itself. A context that stopped answering reports kTimeout instead of blocking forever.
@@ -730,6 +735,7 @@ private:
     std::unique_ptr<net::advertisement> advertisement_;
     std::optional<net::advertise_options> advertise_options_; // pump-thread metadata
     std::uint16_t listen_port_ = 0;                           // fixed once the constructor returns (listener_ belongs to the network thread)
+    std::filesystem::path dev_session_file_;                  // the dev session's connect file, removed by the destructor
     std::map<session_id, io_session> sessions_;
     std::atomic<std::size_t> open_sessions_{0};
     bool stopping_ = false;                 // goodbye(): no new connections or dials

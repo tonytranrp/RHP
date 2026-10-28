@@ -10,7 +10,8 @@
 //
 // Options:
 //   --host H --port N        listen address (default 127.0.0.1, port required; 0 = any free port)
-//   --keys FILE              keyring: `name role base64-psk` per line (required)
+//   --keys FILE              keyring: `name role base64-psk` per line (required without --dev-session)
+//   --dev-session APP        a dev session: `rhp-cli connect --dev APP` needs no key files (dev builds, loopback)
 //   --signers FILE           trusted signers: `name base64-public-key` per line
 //   --audit FILE             append every host event as a JSON line
 //   --blobs DIR              blob sink "files": admins push files into DIR
@@ -98,6 +99,7 @@ struct options {
     std::string host = "127.0.0.1";
     std::optional<std::uint16_t> port;
     std::string keys;
+    std::string dev_session;
     std::string signers;
     std::string audit;
     std::string blobs;
@@ -166,6 +168,8 @@ template <std::integral T>
             o.port = p;
         } else if (arg == "--keys") {
             o.keys = *v;
+        } else if (arg == "--dev-session") {
+            o.dev_session = *v;
         } else if (arg == "--signers") {
             o.signers = *v;
         } else if (arg == "--audit") {
@@ -211,8 +215,8 @@ template <std::integral T>
             return std::nullopt;
         }
     }
-    if (o.keys.empty() || (!o.port && o.reverse.empty())) {
-        std::println(stderr, "usage: headless_server --port N --keys FILE [--signers FILE] [--audit FILE] [--blobs DIR] [--reverse H:N] [--port-file FILE] [--stop-file FILE] [--seconds N] [--insecure-lan] [--tls] [--cert FILE --key FILE] [--ca FILE] [--advertise [--name N] [--app A] [--build B] [--advertise-libs]] [--http-port N] [--releases DIR --release-signers FILE]");
+    if ((o.keys.empty() && o.dev_session.empty()) || (!o.port && o.reverse.empty())) {
+        std::println(stderr, "usage: headless_server --port N (--keys FILE | --dev-session APP) [--signers FILE] [--audit FILE] [--blobs DIR] [--reverse H:N] [--port-file FILE] [--stop-file FILE] [--seconds N] [--insecure-lan] [--tls] [--cert FILE --key FILE] [--ca FILE] [--advertise [--name N] [--app A] [--build B] [--advertise-libs]] [--http-port N] [--releases DIR --release-signers FILE]");
         return std::nullopt;
     }
     if (o.discovery.include_libs && !o.advertise) {
@@ -282,7 +286,7 @@ int main(int argc, char** argv) {
     if (!o) {
         return 2;
     }
-    auto keys = Rhp::security::keyring::from_file(o->keys);
+    auto keys = o->keys.empty() ? Rhp::result<Rhp::security::keyring>{} : Rhp::security::keyring::from_file(o->keys);
     if (!keys) {
         std::println(stderr, "{}", keys.error());
         return 1;
@@ -305,6 +309,7 @@ int main(int argc, char** argv) {
     }
 
     Rhp::host_options host_opts;
+    host_opts.dev_session = o->dev_session; // writes the connect file once listening
     if (o->http_port) {
         host_opts.gateway = Rhp::endpoint::listen(o->host, *o->http_port);
         host_opts.gateway->tls = o->tls ? Rhp::net::tls_mode::kRequire : Rhp::net::tls_mode::kAuto;

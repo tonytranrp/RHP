@@ -25,6 +25,7 @@
 #include <rhp/script/sandbox.hpp>
 #include <rhp/security/authenticator.hpp>
 #include <rhp/security/http_auth.hpp>
+#include <rhp/security/identity_file.hpp>
 #include <rhp/security/tls/tls.hpp>
 #include <rhp/wire/codec.hpp>
 #include <rhp/wire/ops.hpp>
@@ -64,6 +65,13 @@ struct host_options {
     // Observe identities' limits (empty: the config's). From hardening kLan up they are capped by
     // Rhp::kObserveCaps; in kProduction every identity's are capped by Rhp::kProductionCaps too.
     std::optional<Rhp::limits> observe_limits{};
+    // A dev session (decision AL7) for this app name; empty = none. In a dev build at hardening
+    // kDev, a host listening on a loopback address or local IPC adds an admin identity of its own
+    // (a fresh PSK and Ed25519 signer) and writes how to reach it to
+    // security::dev_session_path(app), owner-only, for `rhp-cli connect --dev app`; the file goes
+    // when the host does. Needs config<>::auth<psk_keyring> and signer<ed25519> (the defaults).
+    // Anywhere else the host doesn't start (kForbidden from port()).
+    std::string dev_session{};
 };
 
 // A whole blob as a sink sees it (host.on_blob). Views are valid during the sink call only.
@@ -105,6 +113,9 @@ struct setup {
     // The strictest of the config's hardening and host_options::hardening (the engine adds the build's).
     Rhp::hardening hardening = kBuildHardening;
     bool unsigned_scripts = false; // the config's signer is security::unsigned_scripts
+    // host_options::dev_session's identity, already in the authenticator (admin) and the trusted
+    // signers, or why the config can't have one. Set by host<Cfg> in a dev build only.
+    result<security::identity_file> dev_identity{};
 };
 
 using installer = result<void> (*)(script::sandbox& box);
@@ -136,6 +147,10 @@ using engine_ptr = std::unique_ptr<engine, engine_deleter>;
 [[nodiscard]] inline std::unexpected<error> compiled_out(std::string_view where) {
     return fail(errc::kDisabled, "RHP is compiled out (RHP_ENABLE=0)", std::string{where});
 }
+
+// The name of a dev session's identity and signer (host_options::dev_session): host<Cfg> generates
+// both for the run and adds them to its authenticator and trusted signers.
+inline constexpr std::string_view kDevSessionIdentity = "dev-session";
 
 // Starts listening (or, in reverse mode, dialing); errors are kept and reported by port().
 [[nodiscard]] engine_ptr make_engine(setup s);

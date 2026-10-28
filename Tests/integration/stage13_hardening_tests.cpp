@@ -1,8 +1,9 @@
 // Stage 13a hardening over the wire (decisions AL1, AL2, AL4, AL7): what each level refuses, the
-// limits it caps. host_options::hardening raises a host's level in any build, so
+// limits it caps, and dev sessions. host_options::hardening raises a host's level in any build, so
 // the refusals of lan and production are checked everywhere; what a build leaves out is checked in
 // that build.
 #include <chrono>
+#include <filesystem>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -23,6 +24,7 @@
 #include <rhp/net/endpoint.hpp>
 #include <rhp/net/loopback/loopback.hpp>
 #include <rhp/net/tcp/tcp.hpp>
+#include <rhp/security/dev_session.hpp>
 #include <rhp/security/ed25519.hpp>
 #include <rhp/security/key.hpp>
 #include <rhp/security/keyring.hpp>
@@ -233,4 +235,83 @@ TEST_CASE("stage13: unsigned_scripts doesn't start above hardening dev", "[stage
     CHECK(port.error().code == errc::kForbidden);
     CHECK(contains(port.error().message, "unsigned_scripts"));
 #endif
+}
+
+// ---- dev sessions -------------------------------------------------------------------------------------
+
+TEST_CASE("stage13: a dev session writes a connect file a client can use", "[stage13][hardening][dev_session]") {
+    rhp_test::needs(hardening::kDev, "dev sessions");
+    if (!Rhp::security::dev_session_directory()) {
+        SKIP("this platform has no user configuration folder for the connect file");
+    }
+    const std::string app = "rhp_stage13_dev_session";
+    const auto path = Rhp::security::dev_session_path(app);
+    REQUIRE(path);
+    keys k;
+    {
+        running_host<tcp_cfg> host{Rhp::endpoint::listen("127.0.0.1", 0), k, {.dev_session = app}};
+        const auto port = host->port();
+        REQUIRE(port);
+        auto session = Rhp::security::read_dev_session(*path);
+        REQUIRE(session);
+        CHECK(session->app == app);
+        CHECK(session->transport == "tcp");
+        CHECK(session->host == "127.0.0.1");
+        CHECK(session->port == *port);
+        CHECK(session->identity.warnings.empty()); // owner-only, a generated PSK
+        const auto signer = session->identity.signer_key();
+        REQUIRE(signer);
+
+        // What `rhp-cli connect --dev` does: no key files, a signed exec as admin.
+        Rhp::client<tcp_cfg> dev{Rhp::endpoint::dial(session->host, session->port), session->identity.credential(), *signer};
+        CHECK(dev.exec<int>("return 6 * 7") == 42);
+        CHECK(dev.info().granted == Rhp::role::kAdmin);
+        // The host's own keys and signers still work beside it.
+        Rhp::client<tcp_cfg> patch{Rhp::endpoint::dial("127.0.0.1", *port), k.as("patch"), k.signer()};
+        CHECK(patch.exec<int>("return 1") == 1);
+    }
+    CHECK_FALSE(std::filesystem::exists(*path)); // gone with the host
+}
+
+TEST_CASE("stage13: a dev session listens on loopback or local IPC only", "[stage13][hardening][dev_session]") {
+    rhp_test::needs(hardening::kDev, "dev sessions");
+    keys k;
+    const std::string app = "rhp_stage13_dev_refused";
+    const auto refused = [](const auto& host) {
+        const auto port = host.port();
+        return !port && port.error().code == errc::kForbidden;
+    };
+    {
+        Rhp::host<tcp_cfg> anywhere{Rhp::endpoint::listen("0.0.0.0", 0), k.ring(), k.trusted(), {.dev_session = app}};
+        CHECK(refused(anywhere));
+    }
+    {
+        Rhp::host<loop_cfg> in_process{Rhp::endpoint::listen("s13h.dev_loopback", 1), k.ring(), k.trusted(), {.dev_session = app}};
+        CHECK(refused(in_process)); // no other process can dial it
+    }
+    {
+        Rhp::host<tcp_cfg> reverse{Rhp::endpoint::dial("127.0.0.1", 9), k.ring(), k.trusted(), {.dev_session = app}};
+        CHECK(refused(reverse));
+    }
+    if (const auto path = Rhp::security::dev_session_path(app)) {
+        CHECK_FALSE(std::filesystem::exists(*path));
+    }
+}
+
+TEST_CASE("stage13: a dev session is refused above hardening dev", "[stage13][hardening][dev_session]") {
+    keys k;
+    const std::string app = "rhp_stage13_dev_lan";
+    Rhp::host<tcp_cfg> lan{Rhp::endpoint::listen("127.0.0.1", 0), k.ring(), k.trusted(), {.hardening = hardening::kLan, .dev_session = app}};
+    const auto port = lan.port();
+    REQUIRE_FALSE(port);
+    CHECK(port.error().code == errc::kForbidden);
+    if constexpr (Rhp::kBuildHardening != hardening::kDev) {
+        // Not in the binary at all: the default options are refused the same way.
+        CHECK(contains(port.error().message, "compiled out"));
+        Rhp::host<tcp_cfg> plain{Rhp::endpoint::listen("127.0.0.1", 0), k.ring(), k.trusted(), {.dev_session = app}};
+        CHECK(plain.port().error().code == errc::kForbidden);
+    }
+    if (const auto path = Rhp::security::dev_session_path(app)) {
+        CHECK_FALSE(std::filesystem::exists(*path));
+    }
 }

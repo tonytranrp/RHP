@@ -25,6 +25,9 @@
 #include <rhp/release/manager.hpp>
 #include <rhp/script/lib.hpp>
 #include <rhp/script/sandbox.hpp>
+#include <rhp/security/ed25519.hpp>
+#include <rhp/security/identity_file.hpp>
+#include <rhp/security/psk_keyring.hpp>
 #include <rhp/security/signer.hpp>
 
 namespace Rhp {
@@ -62,8 +65,8 @@ concept host_configuration = configuration<C> && signed_unless_dev<C>;
 // that fails or the session ends.
 //
 // Hardening (decisions AL1 and AL2): the host runs at the strictest of RHP_HARDENING,
-// config<>::hardening and host_options::hardening. Above kDev it refuses insecure_lan endpoints, gives
-// admin patch's libraries and caps observe limits; at kProduction it also refuses
+// config<>::hardening and host_options::hardening. Above kDev it refuses insecure_lan endpoints and
+// dev sessions, gives admin patch's libraries and caps observe limits; at kProduction it also refuses
 // unsigned observe code, the remote debugger and advertise(), caps every role's limits and opens the
 // HTTP gateway only with http_require_binding. A refused endpoint or setting is reported by port().
 //
@@ -79,6 +82,11 @@ public:
         host_detail::setup s;
         s.hardening = strictest(Cfg::hardening_v, options.hardening);
         s.unsigned_scripts = std::same_as<typename Cfg::signer_t, security::unsigned_scripts>;
+        if constexpr (kBuildHardening == hardening::kDev) {
+            if (!options.dev_session.empty()) {
+                s.dev_identity = add_dev_identity(auth, trust);
+            }
+        }
         s.ep = std::move(ep);
         s.transport = net::transport_ops_for<typename Cfg::transport_t>;
         s.tls = security::tls::backend_ops_for<typename Cfg::tls_t>;
@@ -286,6 +294,34 @@ public:
     [[nodiscard]] typename Cfg::clock_t& clock() noexcept { return clock_; }
 
 private:
+#if RHP_ENABLE
+    // A dev session's identity (host_options::dev_session): generated for this run, accepted by
+    // `auth` as admin (on the developer's own machine it may do what the developer can) and trusted
+    // as a signer by `trust`. Only these policies can take it in.
+    static result<security::identity_file> add_dev_identity(typename Cfg::auth_t& auth, typename Cfg::trust_t& trust) {
+        if constexpr (std::same_as<typename Cfg::auth_t, security::psk_keyring> && std::same_as<typename Cfg::signer_t, security::ed25519>) {
+            auto id = security::identity_file::generate(std::string{host_detail::kDevSessionIdentity});
+            if (!id) {
+                return id;
+            }
+            auto keys = auth.with({id->name, id->psk, role::kAdmin});
+            if (!keys) {
+                return std::unexpected{std::move(keys).error()};
+            }
+            if (auto trusted = trust.add(id->name, id->signing->public_key()); !trusted) {
+                return std::unexpected{std::move(trusted).error()};
+            }
+            auth = std::move(*keys);
+            return id;
+        } else {
+            (void)auth;
+            (void)trust;
+            return fail(errc::kForbidden, "a dev session needs config<>::auth<Rhp::security::psk_keyring> and signer<Rhp::security::ed25519> (the defaults)",
+                        "host.dev_session");
+        }
+    }
+#endif
+
     typename Cfg::logger_t logger_{};
     typename Cfg::clock_t clock_{};
     std::shared_ptr<event::hub> events_ = std::make_shared<event::hub>();

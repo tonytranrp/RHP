@@ -6,7 +6,7 @@ Who may connect, what each frame proves, and who signed a script. Namespace `Rhp
 |---|---|
 | `authenticator.hpp` | the `authenticator` / `credential` concepts (`config<>::auth<A>`, clients use `A::credential`); `host_handshake` / `client_handshake` (one per connection); `auth_grant` (identity, role, per-direction frame sealers) |
 | `keyring.hpp` | `keyring`: name → key → role; `parse` / `from_file` read one `name role base64-key` per line (`#` comments); `warnings()` (a file other users can read) |
-| `psk_keyring.hpp` | `psk_identity` (a client's name + key), `psk_keyring` (the default authenticator, made from a `keyring`) |
+| `psk_keyring.hpp` | `psk_identity` (a client's name + key), `psk_keyring` (the default authenticator, made from a `keyring`; `with(entry)`: a copy that also accepts one more key, as a host's dev session adds its own) |
 | `key.hpp` | `key` (16..64-byte secret, wiped on destruction): `from_base64` / `from_bytes` / `from_env` / `from_file` / `generate`, `to_base64`, `looks_weak` (printable or patterned bytes: a warning, never a refusal); `secure_wipe`, `base64_encode`, `base64_decode` |
 | `signer.hpp` | the `signer` concept (`config<>::signer<S>`: `S::key` signs, `S::trust` verifies), `kScriptSignatureDomain`, `unsigned_scripts` (the typed opt-out) |
 | `ed25519.hpp` | `ed25519` (the default signer): `ed25519_secret_key` / `ed25519_public_key`, `signing_key` (client: name + secret, `sign(source)`), `trusted_signers` (host: `parse` / `from_file` of `name base64-public-key` lines, `verify(source, signature)` → signer name) |
