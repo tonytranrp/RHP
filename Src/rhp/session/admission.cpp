@@ -16,6 +16,13 @@ namespace {
 
 constexpr const char* kWhere = "admission";
 
+// How long a connection that has sent something waits before a newer one may take its slot: a quarter
+// of the handshake deadline (that of the default deadline when there is none).
+std::chrono::milliseconds stalled_after(const Rhp::limits& limits) {
+    const std::uint32_t deadline = limits.handshake_timeout_ms != 0 ? limits.handshake_timeout_ms : kDefaultLimits.handshake_timeout_ms;
+    return std::chrono::milliseconds{deadline / 4};
+}
+
 // Notes the first byte the peer sends (before TLS: a ClientHello counts) and passes everything on.
 class watched_link final : public net::link_decorator, private net::link_handler {
 public:
@@ -47,6 +54,7 @@ admission::admission(net::io_context& io, const Rhp::limits& limits)
     : total_cap_(limits.pending_handshakes),
       source_cap_(limits.handshakes_per_source),
       first_byte_(limits.first_byte_ms),
+      stalled_after_(stalled_after(limits)),
       timer_(io) {}
 
 admission::~admission() {
@@ -64,18 +72,19 @@ result<admission::ticket> admission::admit(std::unique_ptr<net::link>& link, clo
     if (source && source_cap_ != 0) {
         const auto count = per_source_.find(*source);
         if (count != per_source_.end() && count->second >= source_cap_ &&
-            !make_room(source, make_error(errc::kLimitExceeded, std::format("closed to make room: it sent nothing while {} connections from its source were waiting", source_cap_), kWhere))) {
+            !make_room(source, make_error(errc::kLimitExceeded, std::format("closed to make room: {} connections from its source were waiting", source_cap_), kWhere))) {
             return fail(errc::kLimitExceeded, std::format("{} connections from the source of {} (its IPv4 address or IPv6 /64) are already authenticating", source_cap_, link->peer()), kWhere);
         }
     }
     if (pending_.size() >= total_cap_ &&
-        !make_room(std::nullopt, make_error(errc::kLimitExceeded, std::format("closed to make room: it sent nothing while {} connections were waiting", total_cap_), kWhere))) {
+        !make_room(std::nullopt, make_error(errc::kLimitExceeded, std::format("closed to make room: {} connections were waiting", total_cap_), kWhere))) {
         return fail(errc::kLimitExceeded, std::format("{} connections are already authenticating", pending_.size()), kWhere);
     }
     auto heard = std::make_shared<bool>(false);
     link = std::make_unique<watched_link>(std::move(link), heard);
     const ticket t = ++last_;
-    pending_.emplace(t, entry{source, std::move(heard), clock::now() + first_byte_, std::move(close)});
+    const auto now = clock::now();
+    pending_.emplace(t, entry{source, std::move(heard), now, now + first_byte_, std::move(close)});
     if (source) {
         ++per_source_[*source];
     }
@@ -92,15 +101,28 @@ void admission::release(ticket t) noexcept {
 }
 
 bool admission::make_room(const std::optional<net::ip_address>& source, const error& why) {
+    // Oldest first: the first silent one, else the first that talked if it is old enough (the ones
+    // after it are younger still).
+    auto victim = pending_.end();
     for (auto it = pending_.begin(); it != pending_.end(); ++it) {
-        if (!*it->second.heard && (!source || it->second.source == source)) {
-            if (const close_fn close = take(it)) {
-                close(why);
-            }
-            return true;
+        if (source && it->second.source != source) {
+            continue;
+        }
+        if (!*it->second.heard) {
+            victim = it;
+            break;
+        }
+        if (victim == pending_.end()) {
+            victim = it;
         }
     }
-    return false;
+    if (victim == pending_.end() || (*victim->second.heard && clock::now() - victim->second.arrived < stalled_after_)) {
+        return false;
+    }
+    if (const close_fn close = take(victim)) {
+        close(why);
+    }
+    return true;
 }
 
 admission::close_fn admission::take(std::map<ticket, entry>::iterator it) {

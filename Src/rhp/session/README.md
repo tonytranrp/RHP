@@ -37,9 +37,9 @@ Every accepted connection takes a slot until it authenticates, is handed to the 
 
 - at most `limits.pending_handshakes` at once, and at most `limits.handshakes_per_source` from one source (`net::ip_address::source()`: an IPv4 address or an IPv6 /64; a link without an address counts toward the total only);
 - a connection that has sent nothing within `limits.first_byte_ms` is closed (its first byte is seen below TLS: a ClientHello counts);
-- a new connection that finds a cap full takes the place of the oldest connection under that cap that has sent nothing; when every one has sent something, it is refused (`kLimitExceeded`).
+- a new connection that finds a cap full takes the place of the oldest connection under that cap that has sent nothing, else of the oldest one that has waited a quarter of `limits.handshake_timeout_ms` (1.25 s by default, and when there is no deadline): a real handshake takes milliseconds, so one still pending then is stalled. When every one is younger, the new one is refused (`kLimitExceeded`).
 
-So silent connections can't keep a real client out, nor a client resuming its session (a resume is a connection whose first frame is `kResume`: it needs its slot only until that frame arrives).
+So neither silent nor stalled connections can keep a real client out, nor a client resuming its session (a resume is a connection whose first frame is `kResume`: it needs its slot only until that frame arrives), and a flood of new connections can't push out a handshake under way.
 
 ## TLS policy (`channel_policy`)
 

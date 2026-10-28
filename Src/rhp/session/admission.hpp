@@ -24,8 +24,12 @@ namespace Rhp::session {
 //     counts toward the first only);
 //   - a connection that has sent nothing within limits.first_byte_ms is closed;
 //   - a new connection that finds a cap full takes the place of the oldest connection under that cap
-//     that has sent nothing; when every one of them has sent something, the new one is refused.
-// So silent connections can't hold the slots a real client (or a client resuming its session) needs.
+//     that has sent nothing, else of the oldest one that has been waiting a quarter of
+//     limits.handshake_timeout_ms (1.25 s by default; 1.25 s too when there is no handshake deadline):
+//     a real handshake takes milliseconds, so one still pending then is almost certainly stalled.
+//     When every one is younger, the new one is refused.
+// So neither silent nor stalled connections can hold the slots a real client (or a client resuming
+// its session) needs, and a flood can't push out a handshake that is under way.
 // Everything happens on the io_context's thread.
 class admission {
 public:
@@ -58,11 +62,13 @@ private:
     struct entry {
         std::optional<net::ip_address> source;
         std::shared_ptr<bool> heard; // set by the watched link's first byte
-        clock::time_point deadline;  // first_byte_ms after it arrived
+        clock::time_point arrived;
+        clock::time_point deadline; // first_byte_ms after it arrived
         close_fn close;
     };
 
-    // The oldest connection that has sent nothing (from `source`, when given) gives up its slot.
+    // The oldest connection (from `source`, when given) that has sent nothing, else the oldest that
+    // has waited at least stalled_after_, gives up its slot.
     [[nodiscard]] bool make_room(const std::optional<net::ip_address>& source, const error& why);
     // Removes an entry; its close function is returned to be called once the books are straight.
     close_fn take(std::map<ticket, entry>::iterator it);
@@ -72,6 +78,7 @@ private:
     std::uint32_t total_cap_ = 0;
     std::uint32_t source_cap_ = 0;
     std::chrono::milliseconds first_byte_{};
+    std::chrono::milliseconds stalled_after_{};
     std::map<ticket, entry> pending_; // oldest first
     std::map<net::ip_address, std::uint32_t> per_source_;
     ticket last_ = 0;
