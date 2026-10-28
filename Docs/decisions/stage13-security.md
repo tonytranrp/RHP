@@ -15,7 +15,7 @@ Threat model (decided): remote attackers (LAN, internet), stolen operator keys, 
 
   | | dev | lan | production |
   |---|---|---|---|
-  | admin full standard library (io, os, package, debug) | yes | no (admin = patch libraries + admin ops) | compiled out |
+  | admin full standard library (io, os, package, debug) | yes | compiled out (admin = patch libraries + admin ops) | compiled out |
   | unsigned observe code | yes | yes (observe limits forced) | compiled out |
   | remote debugger (`kDebug`) | yes | yes | compiled out |
   | `insecure_lan`, `signer<unsigned_scripts>` | yes | refused | refused / compiled out |
