@@ -18,7 +18,9 @@ namespace Rhp::security::tls {
 // makes an ephemeral self-signed P-256 certificate when it starts.
 // Client: without `ca_pem` the host's certificate is not checked - the PSK handshake is bound to
 // the TLS channel (RFC 9266 tls-exporter), so a relay that terminates TLS on both sides fails
-// authentication. With `ca_pem` the chain must verify against it, and against `server_name` if set.
+// authentication. With `ca_pem` the chain must verify against it, and against `server_name` if set: a
+// DNS name, or an IP address in text ("192.0.2.7", "2001:db8::7"), checked against the certificate's
+// IP addresses.
 struct settings {
     std::string cert_pem;
     std::string key_pem;

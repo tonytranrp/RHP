@@ -3,8 +3,9 @@
 #include <string_view>
 
 // Test-only certificates (P-256, valid 2025 to 2125): a CA, a host certificate it signed for
-// "game.test" with its PKCS#8 key, and an unrelated self-signed CA. Never use these keys for
-// anything real.
+// "game.test" with its PKCS#8 key, and an unrelated self-signed CA; another CA and a host certificate
+// it signed for the IP addresses 127.0.0.1 and ::1 (IP subject alternative names only). Never use
+// these keys for anything real.
 namespace rhp_test::tls {
 
 inline constexpr std::string_view kCaPem = R"pem(-----BEGIN CERTIFICATE-----
@@ -51,6 +52,40 @@ sZa9RUWgZAw5MB8GA1UdIwQYMBaAFHFH5ZjyfUPyjyP1sZa9RUWgZAw5MA8GA1Ud
 EwEB/wQFMAMBAf8wCgYIKoZIzj0EAwIDRwAwRAIgAVw9la8Py3asDLM1sDL7hiwc
 VDwbtqcUzIIrBskiZJgCIDySTIEYKuv2D/MtgDJhbq9HKKRkD0fjsO+3SsnqeEqm
 -----END CERTIFICATE-----
+)pem";
+
+inline constexpr std::string_view kIpCaPem = R"pem(-----BEGIN CERTIFICATE-----
+MIIBmDCCAT+gAwIBAgIUEVPCAcbbgUZGa3aFdtX3AHkpPs4wCgYIKoZIzj0EAwIw
+GTEXMBUGA1UEAwwOcmhwIHRlc3QgaXAgY2EwIBcNMjUwMTAxMDAwMDAwWhgPMjEy
+NTAxMDEwMDAwMDBaMBkxFzAVBgNVBAMMDnJocCB0ZXN0IGlwIGNhMFkwEwYHKoZI
+zj0CAQYIKoZIzj0DAQcDQgAETLo/w6sQuoKRW1gO0LPZ6Pe16Luc4MyfwVt7LAen
+2FhWtS9gh2huXNyLwzgs1dsBujBf/ZhxbcsXYfE0fqBDlqNjMGEwHQYDVR0OBBYE
+FLs8sc82vguxI5Xgk+AIwmSD9lCCMB8GA1UdIwQYMBaAFLs8sc82vguxI5Xgk+AI
+wmSD9lCCMA8GA1UdEwEB/wQFMAMBAf8wDgYDVR0PAQH/BAQDAgIEMAoGCCqGSM49
+BAMCA0cAMEQCIBX68nHdzOVwrpgfd845/32iBGjRqrn8HsUqvz7OAkNyAiA/+7cb
+eMnubHuHZI5Od6FA/G5DH2UPUik3GlhSATFDaw==
+-----END CERTIFICATE-----
+)pem";
+
+inline constexpr std::string_view kIpHostCertPem = R"pem(-----BEGIN CERTIFICATE-----
+MIIBxTCCAWugAwIBAgIUJJ2zX4pUw4u4+Q3EHMhnaUxMhYswCgYIKoZIzj0EAwIw
+GTEXMBUGA1UEAwwOcmhwIHRlc3QgaXAgY2EwIBcNMjUwMTAxMDAwMDAwWhgPMjEy
+NTAxMDEwMDAwMDBaMBQxEjAQBgNVBAMMCTEyNy4wLjAuMTBZMBMGByqGSM49AgEG
+CCqGSM49AwEHA0IABFNxRC4cM1ZOwoJkuAbV28mP3RAMMfwFEwU1cBjr8PxNmlxc
+yf7LCQfwOjp5eSB3E7YkAy1JJ2jDarGFe4qwzfGjgZMwgZAwIQYDVR0RBBowGIcE
+fwAAAYcQAAAAAAAAAAAAAAAAAAAAATAJBgNVHRMEAjAAMAsGA1UdDwQEAwIHgDAT
+BgNVHSUEDDAKBggrBgEFBQcDATAdBgNVHQ4EFgQUAXRrcFUXEPVaw0loUJrD47XK
+D8QwHwYDVR0jBBgwFoAUuzyxzza+C7EjleCT4AjCZIP2UIIwCgYIKoZIzj0EAwID
+SAAwRQIhAM6C49g5OtzPpwFqV33mL52W678b110CDPmmyIZEU9QFAiAYXrIEhamh
+7l1I3UATDEgulsLk/hjkYB0je+aJ2zioZg==
+-----END CERTIFICATE-----
+)pem";
+
+inline constexpr std::string_view kIpHostKeyPem = R"pem(-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgbjCsjo/LujxLiQO9
+xiaMT2TU5J7VRLSaBpXaGaKCJ0yhRANCAARTcUQuHDNWTsKCZLgG1dvJj90QDDH8
+BRMFNXAY6/D8TZpcXMn+ywkH8Do6eXkgdxO2JAMtSSdow2qxhXuKsM3x
+-----END PRIVATE KEY-----
 )pem";
 
 } // namespace rhp_test::tls

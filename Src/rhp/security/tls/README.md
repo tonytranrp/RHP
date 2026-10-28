@@ -23,6 +23,7 @@ c.tls.server_name = "game.lan";                                 // the PSK hands
 
 - Engines never touch sockets: ciphertext in, ciphertext and plaintext out (`session::tls_client` / `tls_server` drive them over any link).
 - TLS 1.3 only; no session tickets (a reconnect resumes RHP's session, not TLS's).
+- A client's `server_name` is a DNS name (checked against the certificate's DNS names and sent as SNI) or an IP address in text (checked against its IP addresses; OpenSSL sends no SNI for it, Mbed TLS can't leave it out).
 - `binding()` is RFC 9266 tls-exporter (`"EXPORTER-Channel-Binding"`, 32 bytes, empty context); authenticators mix it into their proofs.
 - OpenSSL / Mbed TLS headers only in `openssl.cpp` / `mbedtls.cpp`. Every Mbed TLS call takes one process-wide lock (its PSA core isn't thread-safe in the default configuration).
 - A backend this build doesn't have still links: its factories report `kDisabled` (`unavailable.cpp`). `RHP_TLS_HAS_OPENSSL` / `RHP_TLS_HAS_MBEDTLS` say which exist.

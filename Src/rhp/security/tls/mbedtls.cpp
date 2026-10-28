@@ -269,7 +269,9 @@ public:
             return failure(errc::kTransport, "can't start a TLS connection", ret);
         }
         if (config_->client) {
-            // NULL says "no name check" on purpose (Mbed TLS refuses to verify without a decision).
+            // NULL says "no name check" on purpose (Mbed TLS refuses to verify without a decision). An
+            // IP address is checked against the certificate's IP addresses (and, unlike with OpenSSL,
+            // also sent as the SNI name: Mbed TLS has no way to leave it out).
             const int ret = mbedtls_ssl_set_hostname(&ssl_, config_->server_name.empty() ? nullptr : config_->server_name.c_str());
             if (ret != 0) {
                 return failure(errc::kInvalidArgument, "bad server_name", ret);

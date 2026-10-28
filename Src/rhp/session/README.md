@@ -47,7 +47,7 @@ So neither silent nor stalled connections can keep a real client out, nor a clie
 - Listening: TLS is accepted from anyone who starts it (when a backend exists); plaintext only from loopback peers, over local transports, or with `insecure_lan`, never with `require_tls`.
 - `insecure_lan` over a network transport means plaintext with local peers only: loopback, private (RFC 1918, RFC 4193 `fc00::/7`) and link-local (`169.254/16`, `fe80::/10`) addresses (`net::ip_address::is_local`, from the link's `address()`; CGNAT's `100.64/10` and a link without an address don't count). A listener refuses plaintext from anyone else (at once when it has no TLS to offer); a dial to a literal address that isn't local fails in `make`, and one whose name resolved to such an address in `wrap` (`kForbidden`, saying so). TLS is the only way past it.
 - `make` fails with `kForbidden` when the endpoint needs TLS and the backend (`tls::none`) can't provide it.
-- A dial with a CA (`settings::ca_pem`) and no `server_name` checks the certificate against the name it dialed, unless that name parses as an IPv4 or IPv6 address (`net::ip_address::parse`: `cafe1` or `db1.de` are names and are checked).
+- A dial with a CA (`settings::ca_pem`) and no `server_name` checks the certificate against the name it dialed: its DNS names, or, when the name parses as an IPv4 or IPv6 address (`net::ip_address::parse`: `cafe1` or `db1.de` are names), its IP addresses (the address goes to the TLS backend written plainly, without brackets or a zone).
 
 ## Rules
 

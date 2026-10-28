@@ -86,7 +86,7 @@ struct tls_pair {
 };
 
 tls_pair make_tls_pair(const tls::backend_ops& client_backend, const tls::backend_ops& server_backend, const tls::settings& client_settings = {},
-               const tls::settings& server_settings = {}) {
+                       const tls::settings& server_settings = {}) {
     auto server_ctx = server_backend.server(server_settings);
     REQUIRE(server_ctx);
     auto client_ctx = client_backend.client(client_settings);
@@ -210,6 +210,33 @@ TEST_CASE("a CA-signed host certificate verifies with and without the name", "[t
     {
         // The ephemeral certificate fails a client that insists on a CA.
         tls_pair p = make_tls_pair(client_backend, server_backend, tls::settings{{}, {}, std::string{rhp_test::tls::kCaPem}, {}}, {});
+        CHECK_FALSE(p.handshake());
+    }
+}
+
+TEST_CASE("a server_name that is an IP address is checked against the certificate's IP addresses", "[tls]") {
+    const auto all = backends();
+    const tls::backend_ops client_backend = GENERATE_REF(Catch::Generators::from_range(all));
+    const tls::backend_ops server_backend = GENERATE_REF(Catch::Generators::from_range(all));
+    CAPTURE(client_backend.name, server_backend.name);
+    const tls::settings ip_host{std::string{rhp_test::tls::kIpHostCertPem}, std::string{rhp_test::tls::kIpHostKeyPem}, {}, {}}; // 127.0.0.1, ::1
+    const tls::settings name_host{std::string{rhp_test::tls::kHostCertPem}, std::string{rhp_test::tls::kHostKeyPem}, {}, {}};   // game.test
+    const auto checked = [](std::string_view ca, std::string_view name) { return tls::settings{{}, {}, std::string{ca}, std::string{name}}; };
+
+    for (const std::string_view address : {"127.0.0.1", "0:0:0:0:0:0:0:1", "::1"}) {
+        INFO(address);
+        tls_pair p = make_tls_pair(client_backend, server_backend, checked(rhp_test::tls::kIpCaPem, address), ip_host);
+        CHECK(p.handshake());
+        INFO(p.error);
+    }
+    for (const std::string_view other : {"127.0.0.2", "0:0:0:0:0:0:0:2", "game.test"}) {
+        INFO(other);
+        tls_pair p = make_tls_pair(client_backend, server_backend, checked(rhp_test::tls::kIpCaPem, other), ip_host);
+        CHECK_FALSE(p.handshake());
+    }
+    {
+        // A certificate for a name, however good its chain, isn't one for an address.
+        tls_pair p = make_tls_pair(client_backend, server_backend, checked(rhp_test::tls::kCaPem, "127.0.0.1"), name_host);
         CHECK_FALSE(p.handshake());
     }
 }
