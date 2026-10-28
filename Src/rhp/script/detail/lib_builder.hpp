@@ -20,7 +20,9 @@
 #include <rhp/core/async.hpp>
 #include <rhp/core/result.hpp>
 #include <rhp/core/role.hpp>
+#include <rhp/core/scopes.hpp>
 #include <rhp/script/detail/call_guard.hpp>
+#include <rhp/script/detail/caps.hpp>
 #include <rhp/script/detail/context.hpp>
 #include <rhp/script/detail/lib_traits.hpp>
 #include <rhp/script/detail/var_layers.hpp>
@@ -191,6 +193,35 @@ void check_role(stack& s, const Label& label) {
         if (!allows(s.context().caller_role(), R)) {
             s.raise(forbidden(label, R));
         }
+    }
+}
+
+// A capability bit the sandbox denies was hit: raises kForbidden, unless the bit is the one names
+// after the 63rd share and the sandbox's scopes allow this name.
+inline void refuse_cap(stack& s, std::uint64_t bit, std::string_view cap, std::string_view label) {
+    if (bit == kCapOverflowBit && s.context().scope_allows(scope_kind::kCap, cap)) {
+        return;
+    }
+    s.raise(make_error(errc::kForbidden, std::format("needs capability {}", cap), std::string{label}));
+}
+
+// check_role for Entry, plus its Rhp::cap<> when it has one: one bit test against the sandbox's
+// denied capabilities (caps.hpp). Untagged bindings compile to check_role alone.
+template <class Entry, class Label>
+void check_access(stack& s, const Label& label) {
+    if constexpr (Entry::has_cap) {
+        const context& ctx = s.context();
+        if constexpr (Entry::required != role::kObserve) {
+            if (!allows(ctx.caller_role(), Entry::required)) {
+                s.raise(forbidden(label, Entry::required));
+            }
+        }
+        const std::uint64_t bit = cap_bit_v<typename Entry::cap_tag>.load(std::memory_order_relaxed);
+        if ((ctx.denied_caps() & bit) != 0) [[unlikely]] {
+            refuse_cap(s, bit, Entry::cap_tag::name.view(), label);
+        }
+    } else {
+        check_role<Entry::required>(s, label);
     }
 }
 
@@ -821,7 +852,7 @@ int start_async(stack& s, context& ctx, std::string_view label, std::index_seque
 template <utils::type_list_like Handles, class Entry>
 int call_fn(lua_State* L) {
     stack s{L};
-    check_role<Entry::required>(s, binding_label{s});
+    check_access<Entry>(s, binding_label{s});
     if constexpr (Entry::is_async) {
         context& ctx = s.context();
         const std::string_view label = s.upvalue_string(1);
@@ -848,7 +879,7 @@ int get_property(lua_State* L) {
     using H = find_handle_t<Handles, typename M::self_type>;
     using label = static_label<concat_fixed<concat_fixed<H::fixed_name, utils::fixed_string{"."}>(), M::fixed_name>()>;
     stack s{L};
-    check_role<M::required>(s, label{});
+    check_access<M>(s, label{});
     if constexpr (returns_view_v<Handles, M>) {
         return call_view<Handles, M>(s, label{}, std::make_index_sequence<M::traits::arity>{});
     } else {
@@ -933,6 +964,10 @@ private:
             s.push_function(&get_var<Handles, Entry>, 0); // no upvalues: lib_var_index calls it in place
             s.set_field(getters, Entry::name);
         } else if constexpr (Entry::kind == entry_kind::kSub) {
+            // A sub-lib the sandbox's scopes deny (`!lib:game.debug`) isn't there at all.
+            if (s.context().scope_denies(scope_kind::kLib, path)) {
+                return;
+            }
             lib_builder<typename Entry::lib, Handles>::push(s, path);
             s.set_field(members, Entry::name);
         }

@@ -122,6 +122,11 @@ Rhp::subscription sandbox_impl::on_script_event(std::string_view name, script_ev
 // ---- interest ------------------------------------------------------------------------------------
 
 event_state* sandbox_impl::resolve_event(lua_State* L, std::string_view event, std::string_view where) {
+    // The identity's scopes (decision AL13) for rhp.on / once / wait_event; rhp.on_error (the
+    // identity's own failed handlers) isn't an outside event.
+    if (event != kHandlerFailedEvent && !options_.scopes.allows(scope_kind::kEvent, event)) {
+        stack{L}.raise(make_error(errc::kForbidden, std::format("needs scope event:{}", event), std::string{where}));
+    }
     std::optional<error> failure;
     event_state* state = nullptr;
     {

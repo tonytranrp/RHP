@@ -368,6 +368,23 @@ public:
 
     // ---- context ----------------------------------------------------------------------------
     [[nodiscard]] role caller_role() const noexcept override { return options_.caller_role; }
+    [[nodiscard]] bool scope_allows(scope_kind kind, std::string_view name) const noexcept override { return options_.scopes.allows(kind, name); }
+    [[nodiscard]] bool scope_denies(scope_kind kind, std::string_view name) const noexcept override { return options_.scopes.denies(kind, name); }
+    // Whether `path` (a member of an installed lib, "game.debug.speed") lies in a sub-lib the scopes
+    // deny, which lib_builder left out ("!lib:game.debug").
+    [[nodiscard]] bool sub_lib_denied(std::string_view path) const noexcept {
+        for (auto dot = path.find('.'); dot != std::string_view::npos;) {
+            const auto next = path.find('.', dot + 1);
+            if (next == std::string_view::npos) {
+                return false; // the last segment is the member itself
+            }
+            if (options_.scopes.denies(scope_kind::kLib, path.substr(0, next))) {
+                return true;
+            }
+            dot = next;
+        }
+        return false;
+    }
     [[nodiscard]] effect_owner current_owner() const noexcept override { return current_; }
     std::uint64_t record_effect(std::string label, std::unique_ptr<effect> e) override;
     result<void> run_handler(const effect_owner& owner, c_function fn, void* data) override;
@@ -383,7 +400,8 @@ public:
     void enqueue(std::string_view event, const event_args& args) noexcept override;
 
     // ---- sandbox operations ------------------------------------------------------------------
-    result<void> install_lib(std::string_view name, c_function build, std::string (*describe)(role), tunables_fn collect, value (*api)(role));
+    result<void> install_lib(std::string_view name, c_function build, std::string (*describe)(role), tunables_fn collect, value (*api)(role),
+                             std::span<const cap_ref> caps);
     [[nodiscard]] value api() const;
     result<value_list> exec(std::string_view source, std::string_view chunk_name, bool cached = false);
     result<std::vector<tunable_info>> tunables(std::string_view prefix);

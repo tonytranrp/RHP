@@ -640,13 +640,47 @@ int lua_coroutine_wrap(lua_State* L) {
 
 // ---- the API description ---------------------------------------------------------------------------
 
+namespace {
+
+// Takes the sub-libs the scopes deny out of a lib's description (api::describe): lib_builder left
+// them out of the sandbox.
+void prune_denied_libs(value& lib, const scope_set& scopes) {
+    auto* fields = lib.get_if<value::map>();
+    if (fields == nullptr) {
+        return;
+    }
+    for (auto& [key, field] : *fields) {
+        const auto* name = key.get_if<std::string>();
+        auto* subs = field.get_if<value::array>();
+        if (name == nullptr || *name != "libs" || subs == nullptr) {
+            continue;
+        }
+        std::erase_if(*subs, [&](const value& sub) {
+            const value* path = sub.find("path");
+            const auto* text = path != nullptr ? path->get_if<std::string>() : nullptr;
+            return text != nullptr && scopes.denies(scope_kind::kLib, *text);
+        });
+        for (value& sub : *subs) {
+            prune_denied_libs(sub, scopes);
+        }
+    }
+}
+
+} // namespace
+
 value sandbox_impl::api() const {
     value::array libs;
     for (const auto describe : api_describers_) {
         libs.push_back(describe(options_.caller_role));
+        if (!options_.scopes.unrestricted(scope_kind::kLib)) {
+            prune_denied_libs(libs.back(), options_.scopes);
+        }
     }
     value::array events;
     for (const event_descriptor* e : registered_events()) {
+        if (!options_.scopes.allows(scope_kind::kEvent, e->name)) {
+            continue;
+        }
         value::map m;
         m.emplace_back(value{"name"}, value{std::string{e->name}});
         m.emplace_back(value{"arity"}, value{static_cast<std::int64_t>(e->arity)});
@@ -655,6 +689,9 @@ value sandbox_impl::api() const {
     value::array points;
     if (allows(options_.caller_role, role::kPatch)) {
         for (const point_descriptor* p : registered_points()) {
+            if (!options_.scopes.allows(scope_kind::kPatch, p->id)) {
+                continue;
+            }
             value::map m;
             m.emplace_back(value{"id"}, value{std::string{p->id}});
             m.emplace_back(value{"arity"}, value{static_cast<std::int64_t>(p->arity)});

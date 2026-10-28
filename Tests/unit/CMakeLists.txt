@@ -171,6 +171,7 @@ if(RHP_ENABLE)
             script/require_tests.cpp
             script/sandbox_tests.cpp
             script/schedule_tests.cpp
+            script/scope_tests.cpp
             script/scheduler_tests.cpp
             script/script_event_tests.cpp
             script/stubs_tests.cpp

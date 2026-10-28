@@ -23,9 +23,9 @@ namespace Rhp::script::api {
 // Needs no Lua, so it also works with RHP_ENABLE=OFF.
 //
 //   {name = "game", path = "game",
-//    functions = {{name, params = {"integer", ...}, returns = {"entity"}, async, role, undo, irreversible}},
+//    functions = {{name, params = {"integer", ...}, returns = {"entity"}, async, role, undo, irreversible, cap?}},
 //    variables = {{name, type, writable, min?, max?, step?, unit?, doc?}},
-//    handles = {{name, methods = {<function>...}, properties = {{name, type, role}}}},
+//    handles = {{name, methods = {<function>...}, properties = {{name, type, role, cap?}}}},
 //    views = {{name, fields = {{name, type, writable, min?, max?, step?, unit?, doc?}}}}, (only when the lib declares one)
 //    libs = {<sub-lib>...}}
 //
@@ -67,6 +67,9 @@ value function() {
         .set("role", value{std::string{to_string(Entry::required)}})
         .set("undo", value{Entry::feed != script::detail::undo_feed::kNone})
         .set("irreversible", value{Entry::is_irreversible});
+    if constexpr (Entry::has_cap) {
+        o.set("cap", value{std::string{Entry::cap_tag::name.view()}});
+    }
     return o.done();
 }
 
@@ -103,6 +106,9 @@ value handle(role caller, utils::type_list<Ms...>) {
                 p.set("name", value{std::string{M::name}})
                     .set("type", value{stubs::detail::result_types<Handles, typename M::traits::return_type>()})
                     .set("role", value{std::string{to_string(M::required)}});
+                if constexpr (M::has_cap) {
+                    p.set("cap", value{std::string{M::cap_tag::name.view()}});
+                }
                 properties.push_back(p.done());
             } else {
                 methods.push_back(function<Handles, M, 1>());

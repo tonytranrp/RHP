@@ -20,10 +20,12 @@
 #include <rhp/core/limits.hpp>
 #include <rhp/core/result.hpp>
 #include <rhp/core/role.hpp>
+#include <rhp/core/scopes.hpp>
 #include <rhp/core/subscription.hpp>
 #include <rhp/core/value.hpp>
 #include <rhp/script/api.hpp>
 #include <rhp/script/debug.hpp>
+#include <rhp/script/detail/caps.hpp>
 #include <rhp/script/detail/lib_traits.hpp>
 #include <rhp/script/ledger.hpp>
 #include <rhp/script/lib.hpp>
@@ -219,6 +221,12 @@ using clock_fn = std::function<std::chrono::steady_clock::time_point()>;
 struct sandbox_options {
     // Role of the identity this sandbox runs for. Local C++ callers default to kPatch.
     role caller_role = role::kPatch;
+    // What the identity may reach (decision AL13; a host passes its keyring entry's scopes). A lib
+    // `lib:` patterns don't allow isn't installed (install<L> succeeds, nothing is there: not in
+    // rhp.api(), stubs or tunables; a sub-lib a deny pattern names is left out of its lib); a
+    // binding whose Rhp::cap<> they deny raises kForbidden; rhp.patch refuses a point `patch:`
+    // doesn't allow, and rhp.on / once / wait_event an event `event:` doesn't. Default: everything.
+    scope_set scopes{};
     // An admin sandbox opens Lua's whole standard library (io, os, package, debug, collectgarbage,
     // string.dump, dofile, loadfile, __gc finalizers) while this is true - in a dev build only
     // (RHP_HARDENING=dev: the others leave that code out). false, or another build: admin gets
@@ -285,10 +293,10 @@ public:
     result<void> install() {
 #if RHP_ENABLE
         return install_lib(L::name, &detail::install_lib_tree<L>, &::Rhp::script::stubs::generate<L>, &detail::collect_tunables<L>,
-                           &::Rhp::script::api::describe<L>);
+                           &::Rhp::script::api::describe<L>, detail::cap_refs_v<L>);
 #else
         // Refused (kDisabled), but the lib is still described by api() (api::describe needs no Lua).
-        return install_lib(L::name, nullptr, nullptr, nullptr, &::Rhp::script::api::describe<L>);
+        return install_lib(L::name, nullptr, nullptr, nullptr, &::Rhp::script::api::describe<L>, {});
 #endif
     }
 
@@ -506,7 +514,8 @@ private:
     using stub_fn = std::string (*)(role);
     using api_fn = value (*)(role);
 
-    result<void> install_lib(std::string_view name, c_function build, stub_fn describe, detail::tunables_fn collect, api_fn api);
+    result<void> install_lib(std::string_view name, c_function build, stub_fn describe, detail::tunables_fn collect, api_fn api,
+                             std::span<const detail::cap_ref> caps);
 
     std::unique_ptr<detail::sandbox_impl> impl_;
 };

@@ -320,7 +320,12 @@ void sandbox_impl::release(module_instance& instance) noexcept {
 
 // ---- operations ----------------------------------------------------------------------------------
 
-result<void> sandbox_impl::install_lib(std::string_view name, c_function build, std::string (*describe)(role), tunables_fn collect, value (*api)(role)) {
+result<void> sandbox_impl::install_lib(std::string_view name, c_function build, std::string (*describe)(role), tunables_fn collect, value (*api)(role),
+                                       std::span<const cap_ref> caps) {
+    // A lib the identity's scopes don't allow isn't there at all (decision AL13).
+    if (!options_.scopes.allows(scope_kind::kLib, name)) {
+        return {};
+    }
     drain();
     result<void> out{};
     auto glue = protect(state_, [&] {
@@ -344,7 +349,21 @@ result<void> sandbox_impl::install_lib(std::string_view name, c_function build, 
     if (out) {
         describers_.push_back(describe);
         api_describers_.push_back(api);
+        const std::size_t first = tunables_.size();
         collect(tunables_);
+        if (!options_.scopes.unrestricted(scope_kind::kLib)) {
+            // The variables of sub-libs left out (lib_builder) aren't tunable either.
+            const auto gone = std::ranges::remove_if(tunables_.begin() + static_cast<std::ptrdiff_t>(first), tunables_.end(),
+                                                     [&](const tunable_info& t) { return sub_lib_denied(t.path); });
+            tunables_.erase(gone.begin(), gone.end());
+        }
+        // Every capability its bindings carry gets its bit; the ones the scopes deny go in the mask.
+        for (const cap_ref& c : caps) {
+            const std::uint64_t bit = assign_cap_bit(c);
+            if (!options_.scopes.allows(scope_kind::kCap, c.name)) {
+                denied_caps_ |= bit;
+            }
+        }
     }
     return out;
 }

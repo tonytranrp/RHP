@@ -42,6 +42,16 @@ struct requires_role {
     static constexpr role value = R;
 };
 
+// The binding needs capability Name (decision AL13): called in a sandbox whose scopes deny
+// `cap:<Name>` (sandbox_options::scopes, a host identity's keyring column) it raises kForbidden, as a
+// missing role does. A dotted lowercase name ("economy.write"). Checking it costs a tagged binding
+// one bit test per call; untagged bindings pay nothing.
+template <utils::fixed_string Name>
+    requires utils::dotted_name<Name>
+struct cap {
+    static constexpr utils::fixed_string name = Name;
+};
+
 // ---- variable tags (tunables) --------------------------------------------------------------------
 
 // Every write to the variable (a script's, or a tune over the wire) lies in [Min, Max]; anything
@@ -260,7 +270,13 @@ template <role R>
 inline constexpr bool is_requires_role_v<requires_role<R>> = true;
 
 template <class T>
-concept fn_tag = is_undo_v<T> || std::same_as<T, irreversible> || is_requires_role_v<T>;
+inline constexpr bool is_cap_v = false;
+
+template <utils::fixed_string N>
+inline constexpr bool is_cap_v<cap<N>> = true;
+
+template <class T>
+concept fn_tag = is_undo_v<T> || std::same_as<T, irreversible> || is_requires_role_v<T> || is_cap_v<T>;
 
 enum class entry_kind : std::uint8_t {
     kFn,
@@ -291,6 +307,9 @@ inline constexpr std::size_t journal_tag_count_v = undo_count_v<Tags...> + count
 
 template <class... Tags>
 inline constexpr std::size_t role_count_v = (std::size_t{0} + ... + (is_requires_role_v<Tags> ? 1u : 0u));
+
+template <class... Tags>
+inline constexpr std::size_t cap_count_v = (std::size_t{0} + ... + (is_cap_v<Tags> ? 1u : 0u));
 
 // The undo<G> among Tags (void when none).
 template <class... Tags>
@@ -394,7 +413,7 @@ consteval undo_feed undo_feed_of() {
 }
 
 template <auto F, class... Tags>
-concept valid_fn_tags = (journal_tag_count_v<Tags...> <= 1) && (role_count_v<Tags...> <= 1) &&
+concept valid_fn_tags = (journal_tag_count_v<Tags...> <= 1) && (role_count_v<Tags...> <= 1) && (cap_count_v<Tags...> <= 1) &&
                         (undo_feed_of<F, undo_of_t<Tags...>>() != undo_feed::kInvalid);
 
 // ---- spans -------------------------------------------------------------------------------------------
@@ -468,6 +487,9 @@ struct fn_entry {
         ((is_requires_role_v<Tags> ? void(r = role_value<Tags>::value) : void()), ...);
         return r;
     }();
+    // Its Rhp::cap<> (void when none).
+    using cap_tag = first_match_t<utils::type_list<Tags...>, is_cap_v<Tags>...>;
+    static constexpr bool has_cap = !std::is_void_v<cap_tag>;
 };
 
 // ---- variables -------------------------------------------------------------------------------------
@@ -579,7 +601,7 @@ consteval bool one_value_result() {
 
 template <auto F, class... Tags>
 concept property_function = method_function<F> && (utils::function_traits<decltype(F)>::arity == 1) && one_value_result<F>() &&
-                            (journal_tag_count_v<Tags...> == 0) && (role_count_v<Tags...> <= 1);
+                            (journal_tag_count_v<Tags...> == 0) && (role_count_v<Tags...> <= 1) && (cap_count_v<Tags...> <= 1);
 
 template <utils::fixed_string Name, auto F, class... Tags>
 struct method_entry : fn_entry<Name, F, Tags...> {
@@ -740,6 +762,7 @@ concept lib_type = detail::is_lib_v<T>;
 //       ::fn <"find",    &game::find>                                  // pure, kObserve
 //       ::fn <"explode", &game::explode, Rhp::irreversible>            // allowed, reported by revert
 //       ::fn <"wipe",    &game::wipe,    Rhp::requires_role<Rhp::role::kAdmin>>
+//       ::fn <"buy",     &game::buy,     Rhp::cap<"economy.write">>   // needs a scope allowing cap:economy.write
 //       ::fn <"load",    &game::load_texture>                          // returns Rhp::async<T>: the script waits
 //       ::var<"gravity", &game::g_gravity>                             // read kObserve, write kPatch (journaled)
 //       ::var<"speed", &game::g_speed, Rhp::range<0.0, 10.0>, Rhp::unit<"m/s">> // a tunable: writes outside raise kOutOfRange
@@ -802,7 +825,7 @@ struct lib {
     using method = lib<Name, Entries..., detail::method_entry<N, F, Tags...>>;
 
     // A read-only value of a handle (e.hp, label "entity.hp"): F(handle) -> value. Only
-    // requires_role<> applies.
+    // requires_role<> and cap<> apply.
     template <utils::fixed_string N, auto F, detail::fn_tag... Tags>
         requires utils::identifier_name<N> && detail::member_free<N, detail::self_t<F>, Entries...> &&
                      detail::property_function<F, Tags...> && detail::span_binding_ok<F, Tags...>
@@ -842,6 +865,7 @@ inline constexpr bool is_lib_v<lib<Name, Entries...>> = true;
 
 namespace Rhp {
 
+using script::cap;
 using script::doc;
 using script::irreversible;
 using script::lib;

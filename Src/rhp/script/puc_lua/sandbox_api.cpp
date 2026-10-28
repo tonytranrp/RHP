@@ -82,8 +82,9 @@ sandbox::~sandbox() = default;
 sandbox::sandbox(sandbox&&) noexcept = default;
 sandbox& sandbox::operator=(sandbox&&) noexcept = default;
 
-result<void> sandbox::install_lib(std::string_view name, c_function build, stub_fn describe, detail::tunables_fn collect, api_fn api) {
-    return impl_->install_lib(name, build, describe, collect, api);
+result<void> sandbox::install_lib(std::string_view name, c_function build, stub_fn describe, detail::tunables_fn collect, api_fn api,
+                                  std::span<const detail::cap_ref> caps) {
+    return impl_->install_lib(name, build, describe, collect, api, caps);
 }
 
 result<std::vector<tunable_info>> sandbox::tunables(std::string_view prefix) {

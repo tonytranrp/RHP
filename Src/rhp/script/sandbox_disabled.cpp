@@ -39,8 +39,8 @@ sandbox::~sandbox() = default;
 sandbox::sandbox(sandbox&&) noexcept = default;
 sandbox& sandbox::operator=(sandbox&&) noexcept = default;
 
-result<void> sandbox::install_lib(std::string_view, c_function, stub_fn, detail::tunables_fn, api_fn api) {
-    if (api != nullptr) {
+result<void> sandbox::install_lib(std::string_view name, c_function, stub_fn, detail::tunables_fn, api_fn api, std::span<const detail::cap_ref>) {
+    if (api != nullptr && impl_->options_.scopes.allows(scope_kind::kLib, name)) {
         impl_->apis_.push_back(api);
     }
     return disabled();

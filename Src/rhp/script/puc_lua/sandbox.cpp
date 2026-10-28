@@ -207,6 +207,10 @@ int lua_rhp_patch(lua_State* L) {
     if (!id) {
         s.raise(make_error(errc::kTypeMismatch, std::format("expected a patch point id, got {}", s.type_name(1)), "rhp.patch"));
     }
+    // The identity's scopes (decision AL13): checked once, here, not at every hit of the point.
+    if (!impl.scope_allows(scope_kind::kPatch, *id)) {
+        s.raise(make_error(errc::kForbidden, std::format("needs scope patch:{}", *id), "rhp.patch"));
+    }
     std::optional<error> failure;
     {
         auto point = find_point(*id);

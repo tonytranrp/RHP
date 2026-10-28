@@ -10,6 +10,7 @@
 #include <rhp/core/ids.hpp>
 #include <rhp/core/result.hpp>
 #include <rhp/core/role.hpp>
+#include <rhp/core/scopes.hpp>
 #include <rhp/script/ledger.hpp>
 #include <rhp/script/stack.hpp>
 
@@ -61,6 +62,12 @@ public:
     // Role of the identity this state belongs to.
     [[nodiscard]] virtual role caller_role() const noexcept = 0;
 
+    // The capability bits (caps.hpp) this sandbox's scopes deny: a tagged binding tests its bit.
+    [[nodiscard]] std::uint64_t denied_caps() const noexcept { return denied_caps_; }
+    // The sandbox's scopes (sandbox_options::scopes): what an allow / deny pattern says of a name.
+    [[nodiscard]] virtual bool scope_allows(scope_kind kind, std::string_view name) const noexcept = 0;
+    [[nodiscard]] virtual bool scope_denies(scope_kind kind, std::string_view name) const noexcept = 0;
+
     // Module (revision, request) whose code is running right now; the scratch module for exec.
     [[nodiscard]] virtual effect_owner current_owner() const noexcept = 0;
 
@@ -91,6 +98,8 @@ protected:
     ~context() = default;
     context(const context&) = default;
     context& operator=(const context&) = default;
+
+    std::uint64_t denied_caps_ = 0; // set by the sandbox as it installs libs
 };
 
 // Suspends the running request until the call it handed to context::await_async completes; the
