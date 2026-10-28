@@ -50,7 +50,8 @@ constexpr std::string_view kCertifiedWhere = "security.certified";
     return std::unexpected{make_error(code, std::move(message), std::string{kCertifiedWhere})};
 }
 
-[[nodiscard]] std::uint64_t claim_seconds(std::chrono::system_clock::time_point t) {
+// Here and below: only signing and verifying use these, and an RHP_ENABLE=OFF build leaves those out.
+[[nodiscard, maybe_unused]] std::uint64_t claim_seconds(std::chrono::system_clock::time_point t) {
     const auto s = std::chrono::duration_cast<std::chrono::seconds>(t.time_since_epoch()).count();
     return s < 0 ? 0 : static_cast<std::uint64_t>(s);
 }
@@ -67,7 +68,7 @@ constexpr std::string_view kCertifiedWhere = "security.certified";
 }
 
 // kScriptClaimsDomain || claims || source.
-[[nodiscard]] std::vector<std::byte> claims_message(std::span<const std::byte> claims, std::string_view source) {
+[[nodiscard, maybe_unused]] std::vector<std::byte> claims_message(std::span<const std::byte> claims, std::string_view source) {
     std::vector<std::byte> out;
     out.reserve(kScriptClaimsDomain.size() + claims.size() + source.size());
     for (const char c : kScriptClaimsDomain) {
@@ -80,12 +81,12 @@ constexpr std::string_view kCertifiedWhere = "security.certified";
     return out;
 }
 
-[[nodiscard]] const value::bytes* bytes_field(const value& v, std::string_view key) {
+[[nodiscard, maybe_unused]] const value::bytes* bytes_field(const value& v, std::string_view key) {
     const value* field = v.find(key);
     return field != nullptr ? field->get_if<value::bytes>() : nullptr;
 }
 
-[[nodiscard]] bool listed(const std::vector<std::string>& list, std::string_view item) {
+[[nodiscard, maybe_unused]] bool listed(const std::vector<std::string>& list, std::string_view item) {
     return std::ranges::find(list, item) != list.end();
 }
 
