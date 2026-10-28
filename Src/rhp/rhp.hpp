@@ -42,6 +42,7 @@
 #include <rhp/platform/random.hpp>
 #include <rhp/release/manager.hpp>
 #include <rhp/release/manifest.hpp>
+#include <rhp/release/identity_revocations.hpp>
 #include <rhp/release/release.hpp>
 #include <rhp/release/root_of_trust.hpp>
 #include <rhp/release/store.hpp>
@@ -61,6 +62,7 @@
 #include <rhp/security/hash.hpp>
 #include <rhp/security/http_auth.hpp>
 #include <rhp/security/identity_file.hpp>
+#include <rhp/security/identity_revocations.hpp>
 #include <rhp/security/key.hpp>
 #include <rhp/security/keyring.hpp>
 #include <rhp/security/psk_keyring.hpp>
