@@ -52,18 +52,23 @@ _rhp_lua_patch(lvm.c " startfunc:\n  trap = L->hookmask;\n"
                      " startfunc:\n  trap = L->hookmask;\n  rhp_lua_charge(1);\n")
 _rhp_lua_write(lvm.c)
 
-# Steps in C: pattern matching (each match call, each character an expansion or %b scans, the bytes a
-# back-reference compares) and plain find (the bytes each candidate compares) count down a step budget
-# that calls the state's step function when it runs out (rhp_lua_step).
+# Steps in C: pattern matching (each pattern item match visits, a call or a tail call to `init`, each
+# character an expansion or %b scans, the bytes a bracket class scans for each character it tests and
+# a back-reference compares) and plain find (the bytes each candidate compares) count down a step
+# budget that calls the state's step function when it runs out (rhp_lua_step).
 _rhp_lua_read(lstrlib.c)
 _rhp_lua_patch(lstrlib.c "  int matchdepth;  /* control for recursive depth (to avoid C stack overflow) */\n"
                          "  int matchdepth;  /* control for recursive depth (to avoid C stack overflow) */\n  ptrdiff_t rhp_steps;  /* RHP: steps left until the next charge */\n")
 _rhp_lua_patch(lstrlib.c "  ms->p_end = p + lp;\n}\n"
                          "  ms->p_end = p + lp;\n  ms->rhp_steps = RHP_LUA_STEPS;\n}\n")
-_rhp_lua_patch(lstrlib.c "  if (l_unlikely(ms->matchdepth-- == 0))\n"
-                         "  rhp_lua_step(ms->L, ms->rhp_steps, 1);\n  if (l_unlikely(ms->matchdepth-- == 0))\n")
+_rhp_lua_patch(lstrlib.c "  init: /* using goto to optimize tail recursion */\n"
+                         "  init: /* using goto to optimize tail recursion */\n  rhp_lua_step(ms->L, ms->rhp_steps, 1);\n")
 _rhp_lua_patch(lstrlib.c "  while (singlematch(ms, s + i, p, ep))\n    i++;\n"
-                         "  while (singlematch(ms, s + i, p, ep))\n    i++;\n  rhp_lua_step(ms->L, ms->rhp_steps, i);\n")
+                         "  while (singlematch(ms, s + i, p, ep)) {\n    i++;\n    rhp_lua_step(ms->L, ms->rhp_steps, 1);\n  }\n")
+_rhp_lua_patch(lstrlib.c "      case '[': return matchbracketclass(c, p, ep-1);\n"
+                         "      case '[':\n        rhp_lua_step(ms->L, ms->rhp_steps, (ep - p) / RHP_LUA_BYTES_PER_STEP);\n        return matchbracketclass(c, p, ep-1);\n")
+_rhp_lua_patch(lstrlib.c "            if (!matchbracketclass(cast_uchar(previous), p, ep - 1) &&\n"
+                         "            rhp_lua_step(ms->L, ms->rhp_steps, (ep - p) / RHP_LUA_BYTES_PER_STEP);\n            if (!matchbracketclass(cast_uchar(previous), p, ep - 1) &&\n")
 _rhp_lua_patch(lstrlib.c "    while (++s < ms->src_end) {\n"
                          "    while (++s < ms->src_end) {\n      rhp_lua_step(ms->L, ms->rhp_steps, 1);\n")
 _rhp_lua_patch(lstrlib.c "  len = cast_sizet(ms->capture[l].len);\n"

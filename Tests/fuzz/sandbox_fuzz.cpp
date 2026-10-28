@@ -67,6 +67,8 @@ std::vector<std::string> rhp_fuzz_seeds() {
         R"lua(for m in ("a"):rep(5000):gmatch(("a-"):rep(10) .. "b") do end)lua",
         R"lua(return string.find(("("):rep(1 << 16), "%b()"))lua",
         R"lua(return string.find(("a"):rep(1 << 20), ("a"):rep(1 << 16) .. "b", 1, true))lua",
+        R"lua(return string.find(("a"):rep(1 << 17), "[" .. ("b"):rep(1 << 17) .. "a]*"))lua",
+        R"lua(return ("a"):rep(1 << 20):find(("a"):rep(1 << 20) .. "."))lua",
         R"(rhp.every_frame(function() while true do end end))",
         R"(rhp.on('a.b', function() while true do end end) rhp.publish('a.b'))",
         R"(rhp.spawn(function() while true do string.find(('a'):rep(5000), ('a*'):rep(10) .. 'b') end end))",

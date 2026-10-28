@@ -232,8 +232,9 @@ int rhp_lua_hook_at_safepoints(lua_State* L) {
 
 // Steps. Pattern matching and plain find run in C, where no hook fires: a pattern that backtracks
 // (string.find(s, ("a*"):rep(10) .. "b")) or a plain find with many near misses could run for
-// minutes. The patched lstrlib.c (cmake/RhpLua.cmake) counts that work in steps (a match call, a
-// character an expansion or %b scans, RHP_LUA_BYTES_PER_STEP bytes a back-reference or a find
+// minutes. The patched lstrlib.c (cmake/RhpLua.cmake) counts that work in steps (a pattern item
+// match visits, called or through its tail-call goto, a character an expansion or %b scans,
+// RHP_LUA_BYTES_PER_STEP bytes a bracket class scans for one character, a back-reference or a find
 // candidate compares) and every RHP_LUA_STEPS hands them to the state's step function
 // (rhp_lua_set_step_function), on a thread that has a hook (one RHP checks) outside hooks and
 // finalizers. It is called directly, not through lua_call (no call hook, no C stack level), with the
