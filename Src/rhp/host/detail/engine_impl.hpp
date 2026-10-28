@@ -559,6 +559,9 @@ private:
     // kBadSignature. Records the source's hash and signer in the audit record.
     [[nodiscard]] result<std::string> check_signature(const pump_session& sess, const inbound& in, std::string_view module, std::string_view source,
                                                       const value& signature);
+    // What setup_.verify checks a script against for a session (host.cpp): its identity and role,
+    // host_options' app / env / host_id, the wall clock and the host's hardening. Any thread.
+    [[nodiscard]] security::signature_context signature_context_for(std::string_view identity, role granted) const;
 
     // One network request while request() handles it: the request, its session and its identity.
     struct request_ctx {

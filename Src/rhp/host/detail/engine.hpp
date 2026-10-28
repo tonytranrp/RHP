@@ -26,6 +26,7 @@
 #include <rhp/security/authenticator.hpp>
 #include <rhp/security/http_auth.hpp>
 #include <rhp/security/identity_file.hpp>
+#include <rhp/security/signer.hpp>
 #include <rhp/security/tls/tls.hpp>
 #include <rhp/wire/codec.hpp>
 #include <rhp/wire/ops.hpp>
@@ -74,6 +75,13 @@ struct host_options {
     // Anywhere else the host doesn't start (kForbidden from port()); nor, gateway included, when the
     // file can't be written.
     std::string dev_session{};
+    // What signatures that carry claims (security::certified) are checked against
+    // (security::signature_context): the app this host runs, its environment ("dev" or "prod";
+    // empty: "prod" at hardening production, "dev" below) and an id naming this host (a claim's
+    // audience). Empty app / host_id: claims naming one are refused.
+    std::string app{};
+    std::string env{};
+    std::string host_id{};
 };
 
 // A whole blob as a sink sees it (host.on_blob). Views are valid during the sink call only.
@@ -98,8 +106,9 @@ struct setup {
     security::tls::backend_ops tls;
     wire::codec_ops codec;
     std::function<std::unique_ptr<security::host_handshake>()> begin_handshake;
-    // The signer policy's check of a script: who signed it, or kBadSignature.
-    std::function<result<std::string>(std::string_view source, const value& signature)> verify;
+    // The signer policy's check of a script (with where it is about to run, for a trust that takes
+    // it: security::verify_in_context): who signed it, or why not.
+    std::function<result<std::string>(std::string_view source, const value& signature, const security::signature_context& context)> verify;
     std::shared_ptr<event::hub> events;
     std::shared_ptr<event::script_hub> script_events;
     Rhp::limits limits{};

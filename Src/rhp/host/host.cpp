@@ -22,10 +22,25 @@ namespace {
         observe = capped(observe, kObserveCaps);
     }
     s.options.observe_limits = observe;
+    if (s.options.env.empty()) { // what certified claims and certificates name (decision AL11)
+        s.options.env = s.hardening == hardening::kProduction ? "prod" : "dev";
+    }
     return s;
 }
 
 } // namespace
+
+security::signature_context engine::signature_context_for(std::string_view identity, role granted) const {
+    security::signature_context c;
+    c.identity = identity;
+    c.granted = granted;
+    c.app = setup_.options.app;
+    c.env = setup_.options.env;
+    c.host_id = setup_.options.host_id;
+    c.now = std::chrono::system_clock::now();
+    c.level = setup_.hardening;
+    return c;
+}
 
 engine::engine(setup s)
     : setup_(hardened(std::move(s))),

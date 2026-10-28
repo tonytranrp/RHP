@@ -179,7 +179,7 @@ result<std::string> engine::check_signature(const pump_session& sess, const inbo
         audit_->module = module;
         audit_->hash = security::to_hex(security::blake2b_256(source));
     }
-    auto who = in.signer ? *in.signer : setup_.verify ? setup_.verify(source, signature)
+    auto who = in.signer ? *in.signer : setup_.verify ? setup_.verify(source, signature, signature_context_for(sess.identity, sess.granted))
                                                       : result<std::string>{std::string{}};
     if constexpr (kBuildHardening != hardening::kProduction) { // production: observe signs too
         if (!who && signature.is_nil() && sess.granted == role::kObserve && setup_.hardening != hardening::kProduction) {

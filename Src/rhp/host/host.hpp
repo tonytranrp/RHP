@@ -97,7 +97,9 @@ public:
             s.http_auth = [auth](const security::http_proof& request, std::chrono::system_clock::time_point now) { return auth.verify_http(request, now); };
         }
         s.begin_handshake = [auth = std::move(auth)] { return auth.begin(); };
-        s.verify = [trust = std::move(trust)](std::string_view source, const value& signature) { return trust.verify(source, signature); };
+        s.verify = [trust = std::move(trust)](std::string_view source, const value& signature, const security::signature_context& context) {
+            return security::verify_in_context(trust, source, signature, context);
+        };
         s.events = events_;
         s.script_events = script_events_;
         s.limits = Cfg::limits_v;

@@ -5,6 +5,7 @@
 
 #include <rhp/core/error.hpp>
 #include <rhp/core/value.hpp>
+#include <rhp/security/certified.hpp>
 #include <rhp/security/ed25519.hpp>
 #include <rhp/security/identity_file.hpp>
 #include <rhp/security/operator_cert.hpp>
@@ -30,7 +31,7 @@ TEST_CASE("disabled signing: keys load while signing and checking report kDisabl
     CHECK(identity_file::parse(id->to_text())->name == "dev");
 }
 
-TEST_CASE("disabled signing: operator certificates report kDisabled", "[security][disabled]") {
+TEST_CASE("disabled signing: operator certificates and certified signatures report kDisabled", "[security][disabled]") {
     auto ca = operator_ca_key::generate("ops");
     REQUIRE(ca);
     CHECK(operator_ca_key::parse(ca->to_text())->name == "ops");
@@ -43,4 +44,7 @@ TEST_CASE("disabled signing: operator certificates report kDisabled", "[security
     f.not_before = 1;
     f.not_after = 2;
     CHECK(issue_operator_cert(ca->secret, f).error().code == errc::kDisabled);
+    const certified::trust trust{*cas};
+    CHECK(trust.verify("return 1", Rhp::value{}).error().code == errc::kDisabled);
+    CHECK(certified::key{}.sign("return 1").error().code == errc::kDisabled);
 }

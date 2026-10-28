@@ -80,6 +80,7 @@ if(RHP_ENABLE)
             security/psk_tests.cpp
             security/signing_tests.cpp
             security/operator_cert_tests.cpp
+            security/certified_tests.cpp
             security/tls_tests.cpp
             security/http_auth_tests.cpp
         LINKS

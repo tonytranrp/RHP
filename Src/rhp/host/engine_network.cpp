@@ -364,7 +364,7 @@ void engine::on_message(session::session& s, wire::op code, value body) {
         const value* source = in.body.find("source");
         if (const std::string* text = source != nullptr ? source->get_if<std::string>() : nullptr) {
             const value* signature = in.body.find("signature");
-            in.signer = setup_.verify(*text, signature != nullptr ? *signature : value{});
+            in.signer = setup_.verify(*text, signature != nullptr ? *signature : value{}, signature_context_for(s.identity(), s.granted()));
         }
     }
     if (!to_pump(std::move(in))) {
