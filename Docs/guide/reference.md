@@ -25,7 +25,7 @@ Result-bearing operations report `Rhp::error { code, message, where, traceback }
 | `revert_partial` | some effects could not be undone |
 | `irreversible` | reported effect that cannot be undone |
 | `cancelled` | stopped by `cancel` |
-| `limit_exceeded` | a size, count or rate limit was hit: a frame or reply over `max_frame`, a peer leaving 64 MiB unacknowledged, MessagePack depth / element limits, too many pending handshakes (in total or from one source), requests in flight or backlog, an identity over `request_rate` (HTTP 429) or with 4096 requests waiting for `pump_requests`, a sandbox at its `handlers` cap, a blob over `max_blob`, a reply too large to cache, HTTP header / replay limits, too many arguments for a coroutine or `rhp.spawn` |
+| `limit_exceeded` | a size, count or rate limit was hit: a frame or reply over `max_frame`, a peer leaving 64 MiB unacknowledged, MessagePack depth / element limits, too many pending handshakes (in total or from one source), requests in flight or backlog, an identity over `request_rate` (HTTP 429) or with 4096 requests or 64 MiB waiting for `pump_requests`, a sandbox at its `handlers` cap, a blob over `max_blob`, a reply too large to cache, HTTP header / replay limits, too many arguments for a coroutine or `rhp.spawn` |
 | `disabled` | `RHP_ENABLE=OFF`, or `set_enabled(false)` (the reason a closed session reports, and every call's answer while the host is off) |
 | `invalid_argument` | bad call arguments, or writing a read-only member |
 | `type_mismatch` | value cannot convert to the requested type |
@@ -87,7 +87,7 @@ The admin column applies in a `dev` build at hardening `dev` (`sandbox_options::
 | Finalizers | `setmetatable` refuses a metatable with `__gc` (`forbidden`); `<close>` variables work | available |
 | `tostring`, `print`, `%p` of tables, functions, userdata | a SipHash-2-4 of the address under the sandbox's own key, not the address | same |
 | Pattern matching, plain `find` | steps charged to `limits.instructions`; `wall_ms` and cancels stop them | same |
-| Changes to `string`, `table`, `math`, `utf8`, `coroutine`, `os`, `rhp` (and `rhp.buffer`) and the string metatable | undone by the identity's full revert (`revert_all`, or its last session's end when it pinned nothing); unloading one module doesn't undo them | same |
+| Changes to `string`, `table`, `math`, `utf8`, `coroutine`, `os`, `rhp` (and `rhp.buffer`) and the string metatable | undone by the identity's full revert (`revert_all`) and by its last session's end, pinned modules or not (a pinned module must not rely on them); unloading one module doesn't undo them | same |
 | Handlers (`rhp.timer`, `after`, `every`, `every_frame(s)`, `on`, `once`, `on_error`, `spawn`) | observe: refused (`forbidden`); patch: allowed | allowed |
 | `require` | host loader: only loaded modules of the same identity | same |
 | `rhp.api()` | the installed libs, events and patch points as a value tree (the `rhp-cli test --api-from` source) | same |

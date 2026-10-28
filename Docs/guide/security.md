@@ -8,7 +8,7 @@ RHP deliberately accepts remote code. Authentication, roles, signatures and TLS 
 |---|---|
 | Hardening | `RHP_HARDENING=dev\|lan\|production` is the most a build allows; a config or a host may only raise it ([hardening levels](#hardening-levels)) |
 | Bind rules | the application chooses the endpoint; tutorials use loopback. A non-loopback endpoint needs a keyring **and** TLS, or an explicit `Rhp::net::insecure_lan` (plaintext with local peers only, `dev` only) |
-| Admission | unauthenticated connections: a total cap, a per-source cap, a first-byte deadline, and the oldest silent connection gives its slot to a newcomer |
+| Admission | unauthenticated connections: a total cap, a per-source cap, a first-byte deadline, and a newcomer takes the slot of the oldest silent connection, else of one stalled for a quarter of `handshake_timeout_ms` |
 | Authentication | pre-shared keys; mutual keyed-BLAKE2b challenge-response. The client verifies the host's proof before sending its own. Unknown key names receive the same challenge shape as known ones, rather than an explicit unknown-name response |
 | Identity and role | each key is an **identity** (its own Lua state) with a **role**: `observe`, `patch`, `admin` |
 | Script signing | `patch` and `admin` code must be Ed25519-signed by a key in the host's trusted signers. `observe` may send unsigned code, except at hardening `production`. A signature that is present must verify for every role |
@@ -85,7 +85,7 @@ A build's `RHP_HARDENING` (CMake: `dev`, the default, `lan` or `production`; `Rh
 | unsigned observe code | yes | yes | refused (`kBadSignature`) |
 | remote debugger (`client.debug`) | yes | yes | refused (`kForbidden`) |
 | `insecure_lan` (host, gateway, client), `signer<unsigned_scripts>` | yes | refused | refused |
-| [dev sessions](#dev-sessions) | on loopback or local IPC | refused | refused |
+| [dev sessions](#dev-sessions) | on loopback or local IPC (an HTTP gateway on loopback too) | refused | refused |
 | observe limits | `host_options::observe_limits` as set | capped by `kObserveCaps` | capped by `kObserveCaps` and `kProductionCaps` |
 | patch and admin limits | as configured | as configured | capped by `kProductionCaps` |
 | `host.advertise()` | yes | yes | refused (`kForbidden`) |
@@ -101,12 +101,13 @@ The caps (`<rhp/core/hardening.hpp>`):
 | `memory` | 64 MiB | 512 MiB |
 | `wall_ms` | 20 | 1000 |
 | `cancel_checks` | `kEverything` | `kEverything` |
+| `cancel_check_instructions` | 10,000 | 10,000 |
 | `event_queue` | 1024 | 65,536 |
 | `request_rate` | 10 | none |
 | `pump_requests` | 2 | none |
 | `handlers` | none (observe can't register any) | none |
 
-`Rhp::capped(limits, caps)` turns 0 (unlimited) and any value above a cap into the cap and keeps a smaller value you set; `cancel_checks` becomes the stricter scope. It covers `instructions`, `memory`, `wall_ms`, `event_queue`, `async_ms`, `request_rate`, `pump_requests` and `handlers`; network and wire limits (`max_frame`, the handshake limits, heartbeats) are host-wide and never capped.
+`Rhp::capped(limits, caps)` turns 0 (unlimited) and any value above a cap into the cap and keeps a smaller value you set; `cancel_checks` becomes the stricter scope. It covers `instructions`, `memory`, `wall_ms`, `event_queue`, `async_ms`, `request_rate`, `pump_requests`, `handlers` and `cancel_check_instructions` (whose 0 means the default 1000, not unlimited: the cap bounds what a value comes to, so 0 stays 0); network and wire limits (`max_frame`, the handshake limits, heartbeats) are host-wide and never capped.
 
 ```cpp
 using lan_cfg = Rhp::config<>::hardening<Rhp::hardening::kLan>; // a host or client of this config is lan at least
@@ -116,7 +117,7 @@ options.hardening = Rhp::hardening::kLan; // raises the config's level, never lo
 options.observe_limits = Rhp::limits{.instructions = 1'000'000, .wall_ms = 10, .request_rate = 5};
 ```
 
-A refusal shows where it happens: a host that can't start at its level (an `insecure_lan` endpoint, `unsigned_scripts`, a dev session) listens on nothing and `port()` says why (`kForbidden`); a refused gateway is reported by `gateway_port()`, a refused advertisement by `advertise()`; a client above `dev` refuses an `insecure_lan` endpoint on its first call (an `rhp-cli` built at `lan` or `production` refuses `--insecure-lan`). Release channels (`release::manager`) follow the build's level only: a `dev` build gives an admin channel the full standard library.
+A refusal shows where it happens: a host that can't start at its level (an `insecure_lan` endpoint, `unsigned_scripts`, a dev session) listens on nothing and `port()` says why (`kForbidden`); a refused gateway is reported by `gateway_port()`, a refused advertisement by `advertise()`; a client above `dev` refuses an `insecure_lan` endpoint on its first call (an `rhp-cli` built at `lan` or `production` refuses `--insecure-lan`). Release channels (`release::manager`) run at `manager_options::hardening` (the build's level at least), which `host.serve` raises to the host's: above `dev` an admin channel gets patch's libraries, and at `production` every channel is capped by `kProductionCaps` ([releases](releases.md#hardening)).
 
 ## Dev sessions
 
@@ -135,7 +136,7 @@ rhp-cli connect --dev my_game     # or --dev alone while one program has a sessi
 - The host generates an identity named `dev-session` (a fresh PSK, role admin) and an Ed25519 signer of the same name for this run, and accepts them next to the keys and signers you passed. Once it listens it writes the connect file `<config>/rhp/dev/my_game.rhpdev` (`%APPDATA%`, `~/Library/Application Support`, `$XDG_CONFIG_HOME` or `~/.config`), atomically and owner-only; the host's destructor removes it. `Rhp::security::dev_session_path(app)` says where and `read_dev_session` reads one (`<rhp/security/dev_session.hpp>`, not in `<rhp/rhp.hpp>`). App names are 1–64 letters, digits, `.`, `_` or `-`, starting with a letter or digit.
 - `rhp-cli connect --dev` reads that file and runs the usual handshake and script signatures. It connects only to TCP on a loopback address or local IPC, takes the only file when no app is named and lists them when there are several; `--timeout` applies, the other connection options don't.
 - The identity is admin because the file is the developer's own: any process that can read it runs as the same user and could change the program anyway. It also means any process of that user can connect: dev machines only.
-- Refused, with `kForbidden` from `port()` and no file written: a non-loopback address, the in-process `loopback` transport (no other process can reach it), reverse mode, an authenticator other than `psk_keyring` or a signer other than `ed25519` (the defaults), and a host above hardening `dev`. A `lan` or `production` build leaves dev sessions out. iOS and Android have no user configuration folder: the host stops listening and `port()` reports why.
+- Refused, with `kForbidden` from `port()` and no file written: a non-loopback address, an HTTP gateway (`host_options::gateway`) on a non-loopback address (it accepts the same identities, the dev session's admin one included; `gateway_port()` reports it too), the in-process `loopback` transport (no other process can reach it), reverse mode, an authenticator other than `psk_keyring` or a signer other than `ed25519` (the defaults), and a host above hardening `dev`. A `lan` or `production` build leaves dev sessions out. iOS and Android have no user configuration folder: the host stops listening, its gateway too, and `port()` reports why.
 - `headless_server --port 0 --dev-session my_game` opens one too.
 
 The [getting started](getting-started.md#first-run-shortcut-a-dev-session) page has a complete program.
@@ -152,12 +153,12 @@ The [getting started](getting-started.md#first-run-shortcut-a-dev-session) page 
 - Run `host.on_any(Rhp::audit::file_sink{...})` in anything shared.
 - Use `RHP_ENABLE=OFF` for builds that must not accept remote code; an enabled release build remains an execution endpoint. The runtime switch, `set_enabled(false)`, closes every session (each identity reverts as on a disconnect, except modules an admin pinned), refuses new connections, stops a reverse-mode host's dialing and runs no requests, handlers, tasks or release channels until `set_enabled(true)`. Patches held by pinned modules and release channels still run when game code hits them: send `revert_all` and deactivate the channels first to remove them.
 - Never use `signer<Rhp::security::unsigned_scripts>` outside tests and fully trusted setups; a host refuses it above `dev`.
-- Handshake DoS: at most `limits.pending_handshakes` (64) unauthenticated connections at once and `handshakes_per_source` (8) from one IPv4 address or IPv6 /64, native and HTTP together. A connection that sends nothing within `first_byte_ms` (2 s) is closed, a newcomer takes the slot of the oldest silent one, and any connection not authenticated after `handshake_timeout_ms` (5 s) is closed. Reliable UDP answers a first Hello with a stateless cookie, so a spoofed source address gets no slot.
+- Handshake DoS: at most `limits.pending_handshakes` (64) unauthenticated connections at once and `handshakes_per_source` (8) from one IPv4 address or IPv6 /64, native and HTTP together. A connection that sends nothing within `first_byte_ms` (2 s) is closed; a newcomer that finds a cap full takes the slot of the oldest silent connection, else of the oldest one stalled for a quarter of `handshake_timeout_ms` (1.25 s; a real handshake takes milliseconds), else it is refused; and any connection not authenticated after `handshake_timeout_ms` (5 s) is closed. Reliable UDP answers a first Hello with a stateless cookie, so a spoofed source address gets no slot.
 - Keep key files owner-only and read the `warning:` lines rhp-cli and your loaders print.
 
 ## Known limits
 
-- A connection that has sent something keeps its slot until it authenticates or `handshake_timeout_ms` closes it. When every slot under a cap is held that way, new connections (a resume included) are refused until one times out.
+- A connection that has sent something keeps its slot for a quarter of `handshake_timeout_ms` (1.25 s by default) before a newcomer may take it. When every slot under a cap is held by connections younger than that, new connections (a resume included) are refused until one ages or authenticates.
 - A probe can tell a known session id from an unknown one.
 - Without `ca_pem`, the host's certificate is not validated; protection comes from binding the PSK handshake to the TLS channel. That is sound for PSK users but is not a PKI.
 - Mbed TLS calls are serialized by a process-wide lock.

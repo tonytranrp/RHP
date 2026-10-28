@@ -49,7 +49,7 @@ co.tls.ca_pem = authority_pem;
 co.tls.server_name = "game.lan";
 ```
 
-The three input variables above contain PEM **text loaded by the application**, not file paths. CLI `--cert`, `--key` and `--ca` instead accept paths and read those files. With a CA and an empty `server_name`, a dialed DNS name is selected automatically; for an IP endpoint, supply the intended certificate DNS name if you want name checking. A dialed name counts as an IP address only if it parses as one (`cafe1` and `db1.de` are names and are checked). CA-chain checks and PSK channel authentication are separate checks. The Python client's `ca_file` checks the name too: a DNS name or IP address in the certificate's subject alternative names (`*.` covers one label; the common name doesn't count).
+The three input variables above contain PEM **text loaded by the application**, not file paths. CLI `--cert`, `--key` and `--ca` instead accept paths and read those files. With a CA and an empty `server_name`, the certificate is checked against what was dialed: a DNS name against its DNS names, an IP endpoint against its IP subject alternative names. So dialing by IP needs a certificate that carries that IP address, or a `server_name` set to a DNS name the certificate carries. A dialed name counts as an IP address only if it parses as one (`cafe1` and `db1.de` are names). With an IP address, Mbed TLS also sends it as SNI; OpenSSL sends none. CA-chain checks and PSK channel authentication are separate checks. The Python client's `ca_file` checks the name too: a DNS name or IP address in the certificate's subject alternative names (`*.` covers one label; the common name doesn't count).
 
 Pick a backend explicitly: `Rhp::config<>::tls<Rhp::security::tls::mbedtls>`.
 

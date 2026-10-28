@@ -13,10 +13,10 @@ Rhp::host<> observe_only{endpoint, authenticator}; // no signers: only observe s
 |---|---|
 | `install<Lib>()` | make a lib visible to every identity (call from the pump thread). `kAlreadyLoaded` on a duplicate name |
 | `on_blob(sink, fn, role = admin)` | register a blob sink: `fn(const blob_view&) -> result<void>` runs on the pump thread once a whole blob (≤ `limits.max_blob`) has arrived. The role is checked before a byte is buffered |
-| `serve(manager)` | serve a [`release::manager`](releases.md): clients may apply, confirm, deactivate and inspect releases, and `pump()` pumps it. The manager must outlive the host; `kAlreadyLoaded` if one is served already |
+| `serve(manager)` | serve a [`release::manager`](releases.md): clients may apply, confirm, deactivate and inspect releases, and `pump()` pumps it. Raises the manager to the host's hardening level ([`manager::harden`](releases.md#hardening)). The manager must outlive the host; `kAlreadyLoaded` if one is served already |
 | `on<Event>(fn)` / `on_any(fn)` | subscribe to host events; returns a `[[nodiscard]] event::subscription` that unsubscribes when destroyed. Handlers run on the pump thread |
 | `on_script_event(name, fn)` | every `rhp.publish` of `name` (`"*"`: all, `rhp.handler_failed` included) in any identity's sandbox, as an `event::script_event` (`identity`, `module`, `event`, `args`), on the pump thread |
-| `pump()` | **call every frame.** Runs requests that arrived, resumes suspended scripts, fires timers and queued events, hands replies to the network. With `io<zero_threads>` it also polls the network |
+| `pump()` | **call every frame.** Runs requests that arrived, resumes suspended scripts, fires timers and queued events, hands replies to the network. With `io<zero_threads>` it also polls the network. With `limits.pump_requests` set it starts at most that many of each identity's requests, taking turns; the rest wait in the identity's queue, bounded at 4096 requests and 64 MiB (past that a request is answered `kLimitExceeded`) |
 | `port()` | bound network port after port 0, or a setup failure (a refusal at the host's hardening level included: `kForbidden`); IPC, dialing hosts and loopback report 0 |
 | `gateway_port()` | the optional HTTP listener's bound port or setup error |
 | `advertise(options)` / `discovery_status()` | explicit DNS-SD registration/update and subsequent provider errors; `advertise` on the pump thread, `discovery_status` from any thread with an owned I/O thread (the pump thread with `io<zero_threads>`) |
@@ -52,7 +52,7 @@ auto registered = host.on_blob("configs", [](const Rhp::blob_view& b) -> Rhp::re
 | `ack_delay_ms` | 5 | how long a received frame's ack waits for an outgoing frame to carry it; 0 acks every read at once |
 | `hardening` | `kDev` | raises the host's [hardening level](security.md#hardening-levels) above its config's, never lowers it: the host runs at the strictest of `RHP_HARDENING`, `config<>::hardening` and this |
 | `observe_limits` | empty (the config's limits) | observe identities' own limits; capped by `Rhp::kObserveCaps` from hardening `lan` up, and by `Rhp::kProductionCaps` at `production` |
-| `dev_session` | empty | an app name: in a `dev` build at hardening `dev`, a host listening on loopback or local IPC adds a [dev session](security.md#dev-sessions) identity and writes its connect file for `rhp-cli connect --dev`; anywhere else the host doesn't start (`kForbidden` from `port()`) |
+| `dev_session` | empty | an app name: in a `dev` build at hardening `dev`, a host listening on loopback or local IPC (and its HTTP gateway, if any, on loopback) adds a [dev session](security.md#dev-sessions) identity and writes its connect file for `rhp-cli connect --dev`; anywhere else the host doesn't start (`kForbidden` from `port()`) |
 
 `Rhp::host<Cfg>` needs a config that signs its scripts unless it is at hardening `dev` (`Rhp::host_configuration`): a `signer<unsigned_scripts>` config doesn't compile in a `lan` or `production` build.
 

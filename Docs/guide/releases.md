@@ -76,7 +76,8 @@ ops     9QdK2pA...=                                    *
 | `max_boot_attempts` | 2 | restarts a candidate may run through unconfirmed before it is quarantined |
 | `health_window` | 60 s | a `health` candidate is confirmed after this long without a failure |
 | `max_seq_jump` | 2^32 | how far a seq may move at once: a release past its channel's floor, a revocation list past the last list, a floor a list raises past the highest seq its channel has seen; where nothing was seen yet, past the host's clock in Unix seconds |
-| `limits` | host-like (`wall_ms` 10 s) | the channels' sandboxes |
+| `limits` | host-like (`wall_ms` 10 s) | the channels' sandboxes, capped for `hardening` |
+| `hardening` | `dev` | the level the channels run at; the build's `RHP_HARDENING` is always the floor ([below](#hardening)) |
 | `wall_clock`, `clock` | system / steady | injectable for tests |
 | `output` | none | `print()` of the channels' scripts, with the channel |
 
@@ -97,6 +98,17 @@ A new release's modules load into the channel's sandbox in manifest order: a mod
 | `manual` | runs as a candidate until `confirm(channel)`, or `deactivate(channel)` rolls it back |
 
 `deactivate(channel)` falls back (candidate → active, then the previous one; active → previous); with `hold` the channel runs nothing until a new release arrives, and the release it would have fallen back to stays as the previous one. `confirm` and `deactivate` return the id of the release they confirmed or stopped, and take an optional expected id: with one, they fail with `kSuperseded` unless that release is the one running (a rollout uses this so it never stops a release a host already replaced). The floor never goes down: a release that was rolled back can't be applied again (build a new one with a higher `seq`). A candidate that keeps crashing the program never gets confirmed: after `max_boot_attempts` restarts it is quarantined and the active release runs instead.
+
+## Hardening
+
+Channels run at a [hardening level](security.md#hardening-levels) as a host's identities do. `manager_options::hardening` sets it, and the build's `RHP_HARDENING` is always the floor: a lower value counts as the build's level.
+
+| | `dev` | `lan` | `production` |
+|---|---|---|---|
+| an admin channel's libraries | Lua's full standard library | patch's libraries (it keeps its admin rights) | patch's libraries |
+| a channel's limits | `manager_options::limits` | as at `dev` | capped by `kProductionCaps`: 1 s wall time per run, 512 MiB, cancel checks on every run, `cancel_check_instructions` at most 10,000 |
+
+`manager::harden(level)` raises the level and never lowers it (a lower `level` changes nothing); `host.serve(manager)` calls it with the host's level, so a manager served by a `production` host runs at `production` even in a `dev` build. Raising it moves each running channel into a fresh sandbox made at the new level, as a role change does: the release loads there from scratch (no `on_save` / `on_restore`: module state doesn't carry over), then the old sandbox goes, undoing what it did; a `health` candidate keeps its health window. A channel whose release can't load at the new level (it needs `io`, say) stops, with a `kRolledBack` event that says why; its stored state is kept (the release stays in the store, the channel's floor and active release unchanged), so nothing is lost but nothing runs there until a release that loads at that level. Call `harden` before `restore()` (or set `manager_options::hardening`) to load releases only once. `harden` is refused from a channel's own scripts.
 
 ## Revocation
 
@@ -172,7 +184,6 @@ The state document is checksummed (BLAKE2b-256) and every write goes through a t
 
 - Release ops need an admin identity (`kReleaseApply`, `kReleaseConfirm`, `kReleaseDeactivate`); `kReleaseStatus` and `kRevoke` need observe. They are not on the HTTP gateway yet. They run on the pump thread inside `host.pump()`: a large release delays the other sessions' requests while it loads, and `kCancel` doesn't reach it.
 - `--seq auto` is the Unix time in seconds: two builds of one channel in the same second share a seq (pass `--seq`). Counters (1, 2, 3) and Unix-time seqs pass the `max_seq_jump` caps; seqs that are neither (milliseconds, a date with the time) need a larger `max_seq_jump` for a channel's first release and a host's first revocation list. A host whose clock is far behind refuses a first Unix-time seq until its clock is right.
-- A release channel's sandbox follows the build's hardening level only: in a `dev` build an admin channel gets Lua's full standard library, whatever the serving host's level.
 - A module's top level must finish while loading: a release whose module suspends (`rhp.wait`) is refused.
 - `directory_store` syncs files and directories on POSIX and flushes with `_commit` on Windows; a store on a network share is only as durable as the share.
 - The Python client doesn't speak releases yet.
