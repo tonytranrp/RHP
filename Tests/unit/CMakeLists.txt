@@ -24,6 +24,7 @@ rhp_add_test_suite(rhp_core_tests
         core/ids_tests.cpp
         core/listener_table_tests.cpp
         core/log_tests.cpp
+        core/scopes_tests.cpp
         core/value_tests.cpp
     LINKS
         Rhp::core

@@ -9,6 +9,7 @@
 
 #include <rhp/core/error.hpp>
 #include <rhp/core/result.hpp>
+#include <rhp/core/scopes.hpp>
 #include <rhp/release/detail/codec.hpp>
 #include <rhp/release/release.hpp>
 #include <rhp/release/trust.hpp>
@@ -50,14 +51,7 @@ std::vector<std::string> split_patterns(std::string_view text) {
 } // namespace
 
 bool channel_matches(std::string_view pattern, std::string_view channel) noexcept {
-    if (pattern == "*" || pattern == channel) {
-        return true;
-    }
-    if (pattern.ends_with(".*")) {
-        pattern.remove_suffix(1); // keep the dot: "game." matches "game.balance", not "gameplay"
-        return channel.starts_with(pattern) && channel.size() > pattern.size();
-    }
-    return false;
+    return Rhp::name_matches(pattern, channel); // scope patterns match the same way (core/scopes.hpp)
 }
 
 result<void> trust::add(std::string name, security::ed25519_public_key key, std::vector<std::string> channels) {

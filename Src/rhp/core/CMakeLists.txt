@@ -12,6 +12,7 @@ rhp_add_module(core
         log.hpp
         result.hpp
         role.hpp
+        scopes.hpp
         subscription.hpp
         value.hpp
     GENERATED_HEADERS
@@ -19,6 +20,7 @@ rhp_add_module(core
     SOURCES
         json.cpp
         log.cpp
+        scopes.cpp
         value.cpp
     DEPS
         Rhp::utils
