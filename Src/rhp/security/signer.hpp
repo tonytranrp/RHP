@@ -48,11 +48,11 @@ inline constexpr std::string_view kScriptSignatureDomain{"rhp/script\0", 11};
 // host's app, environment and id (host_options), the wall clock, and its effective hardening level.
 // Views are valid during the verify call only.
 struct signature_context {
-    std::string_view identity; // the session's identity (key name)
+    std::string_view identity{}; // the session's identity (key name)
     role granted = role::kAdmin;
-    std::string_view app;     // host_options::app (empty: not set)
-    std::string_view env;     // "dev" or "prod": host_options::env, else from the hardening level
-    std::string_view host_id; // host_options::host_id (empty: not set)
+    std::string_view app{};     // host_options::app (empty: not set)
+    std::string_view env{};     // "dev" or "prod": host_options::env, else from the hardening level
+    std::string_view host_id{}; // host_options::host_id (empty: not set)
     std::chrono::system_clock::time_point now{};
     hardening level = kBuildHardening;
 };
@@ -60,10 +60,10 @@ struct signature_context {
 // What a client knows when it signs, for a key that puts claims in its signature
 // (security::certified): its identity name and client_options' app, env and audience (empty: not set).
 struct signing_context {
-    std::string_view identity;
-    std::string_view app;
-    std::string_view env;
-    std::string_view audience;
+    std::string_view identity{};
+    std::string_view app{};
+    std::string_view env{};
+    std::string_view audience{};
 };
 
 // A trust that checks signatures against a signature_context. The host calls this overload when a

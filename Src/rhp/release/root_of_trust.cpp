@@ -22,7 +22,7 @@ namespace Rhp::release {
 
 namespace {
 
-constexpr std::string_view kEnvelopeTag = "root-envelope";
+constexpr std::string_view kRootEnvelopeTag = "root-envelope";
 
 error bad_root(std::string message) {
     return make_error(errc::kInvalidArgument, std::move(message), "release.root");
@@ -37,7 +37,7 @@ bool valid_alg(std::string_view alg) {
     return !alg.empty() && alg.size() <= 16 && std::ranges::all_of(alg, [](char c) { return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-'; });
 }
 
-bool valid_pattern(std::string_view pattern) {
+bool valid_key_channel(std::string_view pattern) {
     if (pattern == "*") {
         return true;
     }
@@ -159,7 +159,7 @@ result<void> validate(const root_document& doc) {
         if (k.pub.empty() || k.pub.size() > kMaxPublicKey || (k.alg == kEd25519Alg && k.pub.size() != security::ed25519_public_key::kSize)) {
             return std::unexpected{bad_root(std::format("key '{}': a {} public key of {} bytes", id, k.alg, k.pub.size()))};
         }
-        if (k.channels.size() > kMaxListEntries || !std::ranges::all_of(k.channels, [](const std::string& p) { return valid_pattern(p); })) {
+        if (k.channels.size() > kMaxListEntries || !std::ranges::all_of(k.channels, [](const std::string& p) { return valid_key_channel(p); })) {
             return std::unexpected{bad_root(std::format("key '{}': channels are patterns (\"*\", \"game.balance\" or \"game.*\")", id))};
         }
     }
@@ -291,11 +291,11 @@ result<void> sign(signed_root& r, const security::signing_key& key) {
 }
 
 result<std::vector<std::byte>> encode_root(const signed_root& r) {
-    return detail::encode_signed(kEnvelopeTag, r.body_bytes, r.signatures);
+    return detail::encode_signed(kRootEnvelopeTag, r.body_bytes, r.signatures);
 }
 
 result<signed_root> decode_root(std::span<const std::byte> envelope) {
-    auto parts = detail::decode_signed(envelope, kEnvelopeTag);
+    auto parts = detail::decode_signed(envelope, kRootEnvelopeTag);
     if (!parts) {
         return std::unexpected{std::move(parts).error()};
     }

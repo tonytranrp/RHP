@@ -27,15 +27,15 @@ namespace root_manager_fixture {
 inline int g_level = 0;
 using level_lib = Rhp::lib<"rootlevel">::var<"value", &g_level>;
 
-constexpr std::uint64_t kNow = 1'760'000'000;
-constexpr std::uint64_t kJump = std::uint64_t{1} << 32;
+constexpr std::uint64_t kRootNow = 1'760'000'000;
+constexpr std::uint64_t kRootJump = std::uint64_t{1} << 32;
 
 struct world {
     signer root_a{"root-a"}, root_b{"root-b"};
     signer rel{"release-1"}, rel2{"release-2"};
     signer rev{"revocation-1"}, rev2{"revocation-2"};
     Rhp::release::memory_store store;
-    std::chrono::system_clock::time_point wall = std::chrono::system_clock::time_point{} + std::chrono::seconds{kNow};
+    std::chrono::system_clock::time_point wall = std::chrono::system_clock::time_point{} + std::chrono::seconds{kRootNow};
 
     world() { g_level = 0; }
 
@@ -48,7 +48,7 @@ struct world {
     Rhp::release::root_document doc(std::uint64_t v, const signer& release, const signer& revocation) const {
         Rhp::release::root_document d;
         d.version = v;
-        d.expires = kNow + 86'400;
+        d.expires = kRootNow + 86'400;
         for (const signer* s : {&root_a, &root_b}) {
             d.keys[s->name] = key(*s);
             d.role(root_role::kRoot).keys.push_back(s->name);
@@ -209,7 +209,7 @@ TEST_CASE("a root update that doesn't verify changes nothing", "[release][root][
     CHECK(refused({by_new}) == errc::kBadSignature);
     // Expired: refused as an update.
     auto stale = w.doc(2, w.rel2, w.rev);
-    stale.expires = kNow - 3600;
+    stale.expires = kRootNow - 3600;
     CHECK(refused({w.sealed(stale)}) == errc::kExpired);
     CHECK(refused({w.genesis(), w.sealed(w.doc(1, w.rel2, w.rev))}) == errc::kSuperseded); // another version 1
 }
@@ -217,7 +217,7 @@ TEST_CASE("a root update that doesn't verify changes nothing", "[release][root][
 TEST_CASE("a held root that expired still verifies releases", "[release][root][manager]") {
     world w;
     auto d = w.doc(1, w.rel, w.rev);
-    d.expires = kNow - 10;
+    d.expires = kRootNow - 10;
     auto m = w.make(w.sealed(d));
     REQUIRE(m.restore());
     REQUIRE(m.apply(w.level_release(1, 4, w.rel)));
@@ -240,15 +240,15 @@ TEST_CASE("a compromised revocation key's lists are dropped and its fast-forward
         REQUIRE(m.revoke(revocations(honest, {&w.rev2})));
         // The stolen key: as far as AL9 lets it go, locking game.level and revoking the release key.
         Rhp::release::revocation_list stolen;
-        stolen.seq = 1 + kJump;
-        stolen.floors = {{"game.level", 1 + kJump}};
+        stolen.seq = 1 + kRootJump;
+        stolen.floors = {{"game.level", 1 + kRootJump}};
         stolen.keys = {w.rel.secret.public_key()};
         REQUIRE(m.revoke(revocations(stolen, {&w.rev})));
         CHECK(g_level == 0); // the running release stopped
-        CHECK(floor_of(m, "game.level") == 1 + kJump);
+        CHECK(floor_of(m, "game.level") == 1 + kRootJump);
         CHECK(m.apply(w.level_release(2, 6, w.rel)).error().code == errc::kRevoked);
         // Past the cap it couldn't go at all.
-        stolen.seq = 1 + kJump + kJump + 1;
+        stolen.seq = 1 + kRootJump + kRootJump + 1;
         CHECK(m.revoke(revocations(stolen, {&w.rev})).error().code == errc::kOutOfRange);
     }
     // The operators mark revocation-1 compromised in version 2, which the app's next build embeds.
@@ -276,10 +276,10 @@ TEST_CASE("a root update that marks a key compromised recovers at once", "[relea
     auto m = w.make(w.genesis());
     REQUIRE(m.apply(w.level_release(1, 5, w.rel)));
     Rhp::release::revocation_list stolen;
-    stolen.seq = kNow + kJump;
-    stolen.floors = {{"game.level", 1 + kJump}};
+    stolen.seq = kRootNow + kRootJump;
+    stolen.floors = {{"game.level", 1 + kRootJump}};
     REQUIRE(m.revoke(revocations(stolen, {&w.rev})));
-    CHECK(floor_of(m, "game.level") == 1 + kJump);
+    CHECK(floor_of(m, "game.level") == 1 + kRootJump);
     auto d2 = w.doc(2, w.rel, w.rev2);
     d2.keys[w.rev.name] = world::key(w.rev);
     d2.compromised = {w.rev.name};
@@ -304,7 +304,7 @@ TEST_CASE("releases signed only by a compromised key stop and their floor comes 
     d1.role(root_role::kRelease).keys.push_back(w.rel2.name);
     auto m = w.make(w.sealed(d1));
     REQUIRE(m.apply(w.level_release(1, 5, w.rel)));
-    REQUIRE(m.apply(w.level_release(1 + kJump, 9, w.rel2)));
+    REQUIRE(m.apply(w.level_release(1 + kRootJump, 9, w.rel2)));
     CHECK(g_level == 9);
     auto d2 = w.doc(2, w.rel, w.rev);
     d2.keys[w.rel2.name] = world::key(w.rel2);

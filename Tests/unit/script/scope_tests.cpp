@@ -182,6 +182,7 @@ TEST_CASE("scopes: the default allows every lib cap point and event", "[script][
     REQUIRE(box.exec("rhp.patch('tests.scopes.price', function(original, n) return original(n) + 1 end)"));
     CHECK(fx::price_point(1) == 2);
     REQUIRE(box.exec("rhp.on('tests.scopes.secret', function() end) rhp.on('anything.at.all', function() end)"));
+    fx::secret.fire(0); // an event registers itself where the program fires it (api() lists registered events)
     const value api = box.api();
     std::vector<std::string> libs;
     lib_paths(*api.find("libs"), libs);

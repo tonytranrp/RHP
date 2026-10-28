@@ -24,14 +24,14 @@ using namespace release_test;
 
 namespace identity_revocation_fixture {
 
-constexpr std::uint64_t kNow = 1'760'000'000;
-constexpr std::uint64_t kJump = std::uint64_t{1} << 32;
+constexpr std::uint64_t kIdNow = 1'760'000'000;
+constexpr std::uint64_t kIdJump = std::uint64_t{1} << 32;
 
 Rhp::security::identity_revocation_list list_of(std::uint64_t seq, std::vector<std::string> serials, std::vector<Rhp::security::public_key_ref> signers = {},
                                                 std::vector<Rhp::security::public_key_ref> devices = {}) {
     Rhp::security::identity_revocation_list l;
     l.seq = seq;
-    l.issued_at = kNow;
+    l.issued_at = kIdNow;
     l.cert_serials = std::move(serials);
     l.signer_keys = std::move(signers);
     l.device_keys = std::move(devices);
@@ -89,7 +89,7 @@ TEST_CASE("a manager keeps the union of identity revocations and restores it", "
     Rhp::release::memory_store store;
     const auto signer_key = Rhp::security::key_ref(other.secret.public_key());
     {
-        Rhp::release::manager m{trust_of({{&dev, {"*"}}}), options_at(kNow), store};
+        Rhp::release::manager m{trust_of({{&dev, {"*"}}}), options_at(kIdNow), store};
         REQUIRE(m.revoke_identities(identity_envelope(list_of(1, {"s1"}), {&dev})));
         REQUIRE(m.revoke_identities(identity_envelope(list_of(2, {"s2"}, {signer_key}), {&dev})));
         const auto ids = m.identities();
@@ -105,7 +105,7 @@ TEST_CASE("a manager keeps the union of identity revocations and restores it", "
         CHECK(m.revoke_identities(identity_envelope(list_of(3, {"s9"}), {&other})).error().code == errc::kBadSignature);
         CHECK_FALSE(ids->is_revoked_serial("s9"));
     }
-    Rhp::release::manager m{trust_of({{&dev, {"*"}}}), options_at(kNow), store};
+    Rhp::release::manager m{trust_of({{&dev, {"*"}}}), options_at(kIdNow), store};
     REQUIRE(m.restore());
     CHECK(m.identities()->is_revoked_serial("s1"));
     CHECK(m.identities()->is_revoked_signer(other.secret.public_key()));
@@ -114,18 +114,18 @@ TEST_CASE("a manager keeps the union of identity revocations and restores it", "
 
 TEST_CASE("identity revocation seqs are capped like release revocation lists", "[release][identities]") {
     signer dev{"dev"};
-    Rhp::release::manager m{trust_of({{&dev, {"*"}}}), options_at(kNow)};
+    Rhp::release::manager m{trust_of({{&dev, {"*"}}}), options_at(kIdNow)};
     std::vector<Rhp::release::release_event> events;
     const auto sub = m.on_event([&](const Rhp::release::release_event& e) { events.push_back(e); });
     // The first counts from the host's clock, later ones from the last.
-    CHECK(m.revoke_identities(identity_envelope(list_of(kNow + kJump + 1, {"a"}), {&dev})).error().code == errc::kOutOfRange);
+    CHECK(m.revoke_identities(identity_envelope(list_of(kIdNow + kIdJump + 1, {"a"}), {&dev})).error().code == errc::kOutOfRange);
     REQUIRE_FALSE(events.empty());
     CHECK(events.back().what == Rhp::release::release_event::kind::kRefused);
     CHECK(m.identities()->seq() == 0);
     REQUIRE(m.revoke_identities(identity_envelope(list_of(7, {"a"}), {&dev})));
     CHECK(events.back().what == Rhp::release::release_event::kind::kTrust);
-    CHECK(m.revoke_identities(identity_envelope(list_of(7 + kJump + 1, {"b"}), {&dev})).error().code == errc::kOutOfRange);
-    REQUIRE(m.revoke_identities(identity_envelope(list_of(7 + kJump, {"b"}), {&dev})));
+    CHECK(m.revoke_identities(identity_envelope(list_of(7 + kIdJump + 1, {"b"}), {&dev})).error().code == errc::kOutOfRange);
+    REQUIRE(m.revoke_identities(identity_envelope(list_of(7 + kIdJump, {"b"}), {&dev})));
     CHECK(m.identities()->is_revoked_serial("a"));
     CHECK(m.identities()->is_revoked_serial("b"));
 }
@@ -149,10 +149,10 @@ TEST_CASE("identity revocations from the root's revocation role and their recove
         return r;
     };
     Rhp::release::memory_store store;
-    Rhp::release::manager m{sealed(doc(1)), options_at(kNow), store};
+    Rhp::release::manager m{sealed(doc(1)), options_at(kIdNow), store};
     CHECK(m.revoke_identities(identity_envelope(list_of(1, {"x"}), {&rel})).error().code == errc::kBadSignature); // the release role signs no revocations
     REQUIRE(m.revoke_identities(identity_envelope(list_of(1, {"honest"}), {&rev2})));
-    REQUIRE(m.revoke_identities(identity_envelope(list_of(kNow, {"stolen"}), {&rev})));
+    REQUIRE(m.revoke_identities(identity_envelope(list_of(kIdNow, {"stolen"}), {&rev})));
     CHECK(m.identities()->is_revoked_serial("stolen"));
     // Through kTrust's path: version 2 marks revocation-1 compromised.
     auto d2 = doc(2);

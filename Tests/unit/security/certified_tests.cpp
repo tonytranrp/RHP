@@ -29,7 +29,7 @@ namespace certified_fixtures {
 
 constexpr std::string_view kSource = "return 1 + 1";
 
-struct pki {
+struct claims_pki {
     ed25519_secret_key ca = *ed25519_secret_key::generate();
     ed25519_secret_key op = *ed25519_secret_key::generate();
     std::string ca_env;
@@ -75,7 +75,7 @@ struct pki {
 using namespace certified_fixtures;
 
 TEST_CASE("certified: a signature verifies once and names the certificate", "[security][certified]") {
-    pki k;
+    claims_pki k;
     const auto key = k.key(k.cert());
     const auto trust = k.trust();
     auto sig = key.sign(kSource, {.identity = "alice-session", .app = "game", .env = "dev", .audience = "host-1"});
@@ -96,7 +96,7 @@ TEST_CASE("certified: a signature verifies once and names the certificate", "[se
 }
 
 TEST_CASE("certified: a replayed nonce is refused", "[security][certified]") {
-    pki k;
+    claims_pki k;
     const auto key = k.key(k.cert());
     const auto trust = k.trust();
     auto sig = key.sign(kSource);
@@ -110,7 +110,7 @@ TEST_CASE("certified: a replayed nonce is refused", "[security][certified]") {
 }
 
 TEST_CASE("certified: the replay cache refuses once full of live nonces", "[security][certified]") {
-    pki k;
+    claims_pki k;
     const auto key = k.key(k.cert());
     const auto trust = k.trust({.max_lifetime = 3600s, .replay_entries = 2});
     CHECK(trust.verify(kSource, *key.sign(kSource), here()));
@@ -125,7 +125,7 @@ TEST_CASE("certified: the replay cache refuses once full of live nonces", "[secu
 }
 
 TEST_CASE("certified: claims must match the host", "[security][certified]") {
-    pki k;
+    claims_pki k;
     const auto key = k.key(k.cert());
     const auto trust = k.trust();
     const auto refused = [&](const signing_context& c) { return trust.verify(kSource, *key.sign(kSource, c), here()).error().code; };
@@ -142,7 +142,7 @@ TEST_CASE("certified: claims must match the host", "[security][certified]") {
 }
 
 TEST_CASE("certified: the key's own claim options apply when the client says nothing", "[security][certified]") {
-    pki k;
+    claims_pki k;
     certified::claim_options claims;
     claims.app = "editor";
     const auto key = k.key(k.cert(), claims);
@@ -152,7 +152,7 @@ TEST_CASE("certified: the key's own claim options apply when the client says not
 }
 
 TEST_CASE("certified: expired claims are refused", "[security][certified]") {
-    pki k;
+    claims_pki k;
     const auto key = k.key(k.cert());
     const auto trust = k.trust();
     auto sig = key.sign(kSource);
@@ -168,7 +168,7 @@ TEST_CASE("certified: expired claims are refused", "[security][certified]") {
 }
 
 TEST_CASE("certified: the certificate's apps and envs must list the host's", "[security][certified]") {
-    pki k;
+    claims_pki k;
     const auto trust = k.trust();
     CHECK(trust.verify(kSource, *k.key(k.cert(role::kPatch, {"editor"})).sign(kSource), here()).error().code == errc::kOutOfScope);
     CHECK(trust.verify(kSource, *k.key(k.cert(role::kPatch, {"game"}, {"prod"})).sign(kSource), here()).error().code == errc::kOutOfScope);
@@ -176,7 +176,7 @@ TEST_CASE("certified: the certificate's apps and envs must list the host's", "[s
 }
 
 TEST_CASE("certified: max_role below the session's role is refused", "[security][certified]") {
-    pki k;
+    claims_pki k;
     const auto trust = k.trust();
     const auto key = k.key(k.cert(role::kPatch));
     CHECK(trust.verify(kSource, *key.sign(kSource), here(role::kAdmin)).error().code == errc::kForbidden);
@@ -185,7 +185,7 @@ TEST_CASE("certified: max_role below the session's role is refused", "[security]
 }
 
 TEST_CASE("certified: tampering with the source or claims breaks the signature", "[security][certified]") {
-    pki k;
+    claims_pki k;
     const auto key = k.key(k.cert());
     const auto trust = k.trust();
     auto sig = key.sign(kSource);
@@ -204,8 +204,8 @@ TEST_CASE("certified: tampering with the source or claims breaks the signature",
 }
 
 TEST_CASE("certified: a CA the trust doesn't have is refused", "[security][certified]") {
-    pki k;
-    pki other;
+    claims_pki k;
+    claims_pki other;
     CHECK(other.trust().verify(kSource, *k.key(k.cert()).sign(kSource), here()).error().code == errc::kBadSignature);
     // A key that isn't the certificate's can't sign.
     const certified::key wrong{other.op, k.cert()};
@@ -213,7 +213,7 @@ TEST_CASE("certified: a CA the trust doesn't have is refused", "[security][certi
 }
 
 TEST_CASE("certified: production refuses dev-tagged CAs and certificates", "[security][certified]") {
-    pki k;
+    claims_pki k;
     auto prod = here();
     prod.level = Rhp::hardening::kProduction;
     prod.env = "prod";
@@ -227,7 +227,7 @@ TEST_CASE("certified: production refuses dev-tagged CAs and certificates", "[sec
 }
 
 TEST_CASE("certified: revoked serials are refused", "[security][certified]") {
-    pki k;
+    claims_pki k;
     auto trust = k.trust();
     const auto copy = trust; // handed to a host before the revocation
     const auto key = k.key(k.cert(role::kPatch, {}, {}, 41));
@@ -240,7 +240,7 @@ TEST_CASE("certified: revoked serials are refused", "[security][certified]") {
 }
 
 TEST_CASE("certified: without a context the strictest defaults apply", "[security][certified]") {
-    pki k;
+    claims_pki k;
     const auto trust = k.trust();
     // No context: role admin, no app or env, so a patch certificate or an app claim doesn't pass.
     CHECK(trust.verify(kSource, *k.key(k.cert()).sign(kSource)).error().code == errc::kForbidden);

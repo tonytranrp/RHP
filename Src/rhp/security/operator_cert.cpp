@@ -30,13 +30,13 @@ namespace Rhp::security {
 
 namespace {
 
-constexpr bool kSigning = RHP_ENABLE != 0;
-constexpr std::string_view kWhere = "security.operator_cert";
+constexpr bool kCertSigning = RHP_ENABLE != 0;
+constexpr std::string_view kOpCertWhere = "security.operator_cert";
 constexpr std::string_view kBegin = "-----BEGIN RHP OPERATOR CERTIFICATE-----";
 constexpr std::string_view kEnd = "-----END RHP OPERATOR CERTIFICATE-----";
 
 [[nodiscard]] std::unexpected<error> invalid(std::string message) {
-    return std::unexpected{make_error(errc::kInvalidArgument, std::move(message), std::string{kWhere})};
+    return std::unexpected{make_error(errc::kInvalidArgument, std::move(message), std::string{kOpCertWhere})};
 }
 
 [[nodiscard]] bool fits(std::uint64_t n) {
@@ -47,7 +47,7 @@ constexpr std::string_view kEnd = "-----END RHP OPERATOR CERTIFICATE-----";
     return env == kEnvDev || env == kEnvProd;
 }
 
-[[nodiscard]] std::uint64_t unix_seconds(std::chrono::system_clock::time_point t) {
+[[nodiscard]] std::uint64_t cert_seconds(std::chrono::system_clock::time_point t) {
     const auto s = std::chrono::duration_cast<std::chrono::seconds>(t.time_since_epoch()).count();
     return s < 0 ? 0 : static_cast<std::uint64_t>(s);
 }
@@ -76,7 +76,7 @@ constexpr std::string_view kEnd = "-----END RHP OPERATOR CERTIFICATE-----";
     auto var = std::move(*var##_r)
 
 [[nodiscard]] result<operator_cert_fields> fields_from(const value& v) {
-    RHP_TRY(m, detail::fixed_map::of(v, 11, "a certificate body", kWhere));
+    RHP_TRY(m, detail::fixed_map::of(v, 11, "a certificate body", kOpCertWhere));
     operator_cert_fields f;
     RHP_TRY(serial, m.count(0, "serial"));
     f.serial = serial;
@@ -165,10 +165,10 @@ result<void> validate_operator_cert(const operator_cert_fields& f) {
 }
 
 result<operator_cert> issue_operator_cert(const ed25519_secret_key& ca_key, operator_cert_fields f) {
-    if constexpr (!kSigning) {
+    if constexpr (!kCertSigning) {
         (void)ca_key;
         (void)f;
-        return fail(errc::kDisabled, "RHP is compiled out (RHP_ENABLE=0)", std::string{kWhere});
+        return fail(errc::kDisabled, "RHP is compiled out (RHP_ENABLE=0)", std::string{kOpCertWhere});
     } else {
         if (ca_key.empty()) {
             return invalid("issuing needs the CA's private key");
@@ -200,10 +200,10 @@ result<std::vector<std::byte>> encode_operator_cert(const operator_cert& cert) {
 
 result<operator_cert> decode_operator_cert(std::span<const std::byte> bytes) {
     if (bytes.size() > kMaxCertBytes) {
-        return fail(errc::kProtocol, std::format("a certificate is at most {} bytes", kMaxCertBytes), std::string{kWhere});
+        return fail(errc::kProtocol, std::format("a certificate is at most {} bytes", kMaxCertBytes), std::string{kOpCertWhere});
     }
     RHP_TRY(outer, detail::decode_canonical(bytes));
-    RHP_TRY(m, detail::fixed_map::of(outer, 4, "a certificate", kWhere));
+    RHP_TRY(m, detail::fixed_map::of(outer, 4, "a certificate", kOpCertWhere));
     RHP_TRY(tag, m.text(0, "rhp", kMaxCertText));
     if (tag != "opcert") {
         return std::unexpected{m.bad(std::format("this is a '{}' document, not an operator certificate", tag))};
@@ -219,13 +219,13 @@ result<operator_cert> decode_operator_cert(std::span<const std::byte> bytes) {
     RHP_TRY(inner, detail::decode_canonical(out.body));
     RHP_TRY(f, fields_from(inner));
     if (auto ok = validate_operator_cert(f); !ok) {
-        return fail(errc::kProtocol, ok.error().message, std::string{kWhere});
+        return fail(errc::kProtocol, ok.error().message, std::string{kOpCertWhere});
     }
     // Canonical: the body re-encodes to itself (sorted lists, smallest integer forms), so one
     // certificate has one encoding.
     auto again = detail::encode_canonical(body_value(f));
     if (!again || !std::ranges::equal(*again, out.body)) {
-        return fail(errc::kProtocol, "the certificate body is not canonical", std::string{kWhere});
+        return fail(errc::kProtocol, "the certificate body is not canonical", std::string{kOpCertWhere});
     }
     out.fields = std::move(f);
     return out;
@@ -269,7 +269,7 @@ result<operator_cert> operator_cert_from_text(std::string_view text) {
 result<operator_cert> load_operator_cert(const std::string& path) {
     const auto text = detail::read_file(path);
     if (!text) {
-        return fail(errc::kNotFound, std::format("can't read certificate file {}", path), std::string{kWhere});
+        return fail(errc::kNotFound, std::format("can't read certificate file {}", path), std::string{kOpCertWhere});
     }
     return operator_cert_from_text(*text);
 }
@@ -348,34 +348,34 @@ std::string trusted_ca_line(std::string_view name, const ed25519_public_key& key
 }
 
 result<const trusted_ca*> verify_operator_cert(const operator_cert& cert, const trusted_cas& cas, std::chrono::system_clock::time_point now) {
-    if constexpr (!kSigning) {
+    if constexpr (!kCertSigning) {
         (void)cert;
         (void)cas;
         (void)now;
-        return fail(errc::kDisabled, "RHP is compiled out (RHP_ENABLE=0)", std::string{kWhere});
+        return fail(errc::kDisabled, "RHP is compiled out (RHP_ENABLE=0)", std::string{kOpCertWhere});
     } else {
         const trusted_ca* ca = cas.find(cert.ca);
         if (ca == nullptr) {
-            return fail(errc::kBadSignature, std::format("certificate {} is signed by a CA this host doesn't trust", cert.id()), std::string{kWhere});
+            return fail(errc::kBadSignature, std::format("certificate {} is signed by a CA this host doesn't trust", cert.id()), std::string{kOpCertWhere});
         }
         if (!ed25519_check(ca->key, cert.sig, signed_message(cert.body))) {
-            return fail(errc::kBadSignature, std::format("certificate {}'s signature by CA '{}' doesn't match", cert.id(), ca->name), std::string{kWhere});
+            return fail(errc::kBadSignature, std::format("certificate {}'s signature by CA '{}' doesn't match", cert.id(), ca->name), std::string{kOpCertWhere});
         }
         // The fields are what was signed: decode_operator_cert read them from this body. A cert
         // built by hand must be re-read from its body.
         RHP_TRY(signed_fields, detail::decode_canonical(cert.body));
         RHP_TRY(f, fields_from(signed_fields));
         if (f != cert.fields) {
-            return fail(errc::kBadSignature, std::format("certificate {}'s fields differ from its signed body", cert.id()), std::string{kWhere});
+            return fail(errc::kBadSignature, std::format("certificate {}'s fields differ from its signed body", cert.id()), std::string{kOpCertWhere});
         }
-        const std::uint64_t t = unix_seconds(now);
+        const std::uint64_t t = cert_seconds(now);
         if (t < f.not_before || t >= f.not_after) {
             return fail(errc::kExpired, std::format("certificate {} is valid from {} to {} (Unix seconds), now is {}", cert.id(), f.not_before, f.not_after, t),
-                        std::string{kWhere});
+                        std::string{kOpCertWhere});
         }
         if (!f.critical.empty()) {
             return fail(errc::kForbidden, std::format("certificate {} has a critical option this host doesn't understand: '{}'", cert.id(), f.critical.front()),
-                        std::string{kWhere});
+                        std::string{kOpCertWhere});
         }
         return ca;
     }

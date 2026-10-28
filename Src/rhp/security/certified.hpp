@@ -39,6 +39,22 @@ struct script_claims {
 // Strict: exactly the six fields, in order, re-encoding to the same bytes.
 [[nodiscard]] result<script_claims> decode_claims(std::span<const std::byte> bytes);
 
+// What a certified::key puts in the claims when the client doesn't say (signing_context wins where
+// set). Outside `certified` so its default member initializers can serve as default arguments there.
+struct certified_claim_options {
+    std::chrono::seconds lifetime{600}; // claims.not_after = now + lifetime (at most the cert's not_after)
+    std::string app;
+    std::string env;
+    std::string audience;
+    std::string identity;
+};
+
+// How a certified::trust checks claims.
+struct certified_trust_options {
+    std::chrono::seconds max_lifetime{3600}; // how far ahead claims.not_after may be
+    std::size_t replay_entries = 4096;       // live nonces kept
+};
+
 // The certified signer policy: config<>::signer<Rhp::security::certified>. Operators sign with a
 // short-lived key their operator CA vouches for (an operator certificate); hosts trust the CA.
 //
@@ -61,14 +77,7 @@ struct script_claims {
 struct certified {
     static constexpr std::string_view name = "certified";
 
-    // What a key puts in the claims when the client doesn't say (signing_context wins where set).
-    struct claim_options {
-        std::chrono::seconds lifetime{600}; // claims.not_after = now + lifetime (at most the cert's not_after)
-        std::string app;
-        std::string env;
-        std::string audience;
-        std::string identity;
-    };
+    using claim_options = certified_claim_options;
 
     class key {
     public:
@@ -89,10 +98,7 @@ struct certified {
         claim_options claims_;
     };
 
-    struct trust_options {
-        std::chrono::seconds max_lifetime{3600}; // how far ahead claims.not_after may be
-        std::size_t replay_entries = 4096;       // live nonces kept
-    };
+    using trust_options = certified_trust_options;
 
     class trust {
     public:

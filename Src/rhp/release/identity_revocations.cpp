@@ -25,7 +25,7 @@ namespace {
 using security::identity_revocation_list;
 using security::public_key_ref;
 
-constexpr std::string_view kEnvelopeTag = "identity-revocations";
+constexpr std::string_view kIdentityEnvelopeTag = "identity-revocations";
 
 bool key_less(const public_key_ref& a, const public_key_ref& b) {
     return a.alg != b.alg ? a.alg < b.alg : std::ranges::lexicographical_compare(a.pub, b.pub);
@@ -187,11 +187,11 @@ result<void> sign(signed_identity_revocations& r, const security::signing_key& k
 }
 
 result<std::vector<std::byte>> encode_identity_revocations(const signed_identity_revocations& r) {
-    return detail::encode_signed(kEnvelopeTag, r.body_bytes, r.signatures);
+    return detail::encode_signed(kIdentityEnvelopeTag, r.body_bytes, r.signatures);
 }
 
 result<signed_identity_revocations> decode_identity_revocations(std::span<const std::byte> envelope) {
-    auto parts = detail::decode_signed(envelope, kEnvelopeTag);
+    auto parts = detail::decode_signed(envelope, kIdentityEnvelopeTag);
     if (!parts) {
         return std::unexpected{std::move(parts).error()};
     }

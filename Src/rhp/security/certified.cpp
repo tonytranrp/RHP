@@ -33,8 +33,8 @@ namespace Rhp::security {
 
 namespace {
 
-constexpr bool kSigning = RHP_ENABLE != 0;
-constexpr std::string_view kWhere = "security.certified";
+constexpr bool kClaimSigning = RHP_ENABLE != 0;
+constexpr std::string_view kCertifiedWhere = "security.certified";
 
 #define RHP_TRY(var, expr)                                  \
     auto var##_r = (expr);                                  \
@@ -44,10 +44,10 @@ constexpr std::string_view kWhere = "security.certified";
     auto var = std::move(*var##_r)
 
 [[nodiscard]] std::unexpected<error> refuse(errc code, std::string message) {
-    return std::unexpected{make_error(code, std::move(message), std::string{kWhere})};
+    return std::unexpected{make_error(code, std::move(message), std::string{kCertifiedWhere})};
 }
 
-[[nodiscard]] std::uint64_t unix_seconds(std::chrono::system_clock::time_point t) {
+[[nodiscard]] std::uint64_t claim_seconds(std::chrono::system_clock::time_point t) {
     const auto s = std::chrono::duration_cast<std::chrono::seconds>(t.time_since_epoch()).count();
     return s < 0 ? 0 : static_cast<std::uint64_t>(s);
 }
@@ -94,7 +94,7 @@ result<std::vector<std::byte>> encode_claims(const script_claims& c) {
 
 result<script_claims> decode_claims(std::span<const std::byte> bytes) {
     RHP_TRY(v, detail::decode_canonical(bytes));
-    RHP_TRY(m, detail::fixed_map::of(v, 6, "script claims", kWhere));
+    RHP_TRY(m, detail::fixed_map::of(v, 6, "script claims", kCertifiedWhere));
     script_claims c;
     RHP_TRY(not_after, m.count(0, "not_after"));
     c.not_after = not_after;
@@ -129,10 +129,10 @@ result<value> certified::key::sign(std::string_view source) const {
 }
 
 result<value> certified::key::sign(std::string_view source, const signing_context& context) const {
-    if constexpr (!kSigning) {
+    if constexpr (!kClaimSigning) {
         (void)source;
         (void)context;
-        return fail(errc::kDisabled, "RHP is compiled out (RHP_ENABLE=0)", std::string{kWhere});
+        return fail(errc::kDisabled, "RHP is compiled out (RHP_ENABLE=0)", std::string{kCertifiedWhere});
     } else {
         if (secret_.empty() || cert_bytes_.empty()) {
             return refuse(errc::kInvalidArgument, "a certified key needs an operator key and its certificate");
@@ -144,7 +144,7 @@ result<value> certified::key::sign(std::string_view source, const signing_contex
         RHP_TRY(nonce, platform::random_array<16>());
         const auto pick = [](std::string_view given, const std::string& fallback) { return std::string{given.empty() ? std::string_view{fallback} : given}; };
         script_claims c;
-        const std::uint64_t now = unix_seconds(std::chrono::system_clock::now());
+        const std::uint64_t now = claim_seconds(std::chrono::system_clock::now());
         const auto lifetime = claims_.lifetime.count() > 0 ? static_cast<std::uint64_t>(claims_.lifetime.count()) : 1;
         c.not_after = (std::min)(now + lifetime, cert_.fields.not_after);
         c.app = pick(context.app, claims_.app);
@@ -234,11 +234,11 @@ result<std::string> certified::trust::verify(std::string_view source, const valu
 }
 
 result<std::string> certified::trust::verify(std::string_view source, const value& signature, const signature_context& context) const {
-    if constexpr (!kSigning) {
+    if constexpr (!kClaimSigning) {
         (void)source;
         (void)signature;
         (void)context;
-        return fail(errc::kDisabled, "RHP is compiled out (RHP_ENABLE=0)", std::string{kWhere});
+        return fail(errc::kDisabled, "RHP is compiled out (RHP_ENABLE=0)", std::string{kCertifiedWhere});
     } else {
         if (signature.is_nil()) {
             return refuse(errc::kBadSignature, "the script is not signed");
@@ -269,7 +269,7 @@ result<std::string> certified::trust::verify(std::string_view source, const valu
         if (!claims) {
             return refuse(errc::kBadSignature, std::format("malformed claims signed by {}: {}", who, claims.error().message));
         }
-        const std::uint64_t now = unix_seconds(context.now);
+        const std::uint64_t now = claim_seconds(context.now);
         const auto max_lifetime = static_cast<std::uint64_t>((std::max)(state_->options.max_lifetime.count(), std::chrono::seconds::rep{0}));
         if (claims->not_after <= now) {
             return refuse(errc::kExpired, std::format("the claims signed by {} expired at {} (Unix seconds), now is {}", who, claims->not_after, now));

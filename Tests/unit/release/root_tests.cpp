@@ -174,22 +174,22 @@ TEST_CASE("a root version may not be skipped or repeated", "[release][root]") {
 
 TEST_CASE("an expired root is refused as an update but not as an anchor", "[release][root]") {
     root_signers k;
-    constexpr std::uint64_t kNow = 1'800'000'000;
+    constexpr std::uint64_t kRootDocNow = 1'800'000'000;
     auto d1 = root_doc(1, {&k.a}, 1);
-    d1.expires = kNow - 1000; // expired long ago: still an anchor
+    d1.expires = kRootDocNow - 1000; // expired long ago: still an anchor
     const auto v1 = signed_root_by(d1, {&k.a});
     CHECK(Rhp::release::verify_root(v1));
     auto d2 = root_doc(2, {&k.a}, 1);
-    d2.expires = kNow - 10;
+    d2.expires = kRootDocNow - 10;
     const auto v2 = signed_root_by(d2, {&k.a});
     const std::vector<Rhp::release::signed_root> expired{v2};
-    CHECK(Rhp::release::verify_chain(v1, expired, kNow).error().code == errc::kExpired);
-    CHECK(Rhp::release::verify_chain(v1, expired, kNow, 60)); // within the clock skew
+    CHECK(Rhp::release::verify_chain(v1, expired, kRootDocNow).error().code == errc::kExpired);
+    CHECK(Rhp::release::verify_chain(v1, expired, kRootDocNow, 60)); // within the clock skew
     // An expired root on the way to a valid one is fine.
     auto d3 = root_doc(3, {&k.a}, 1);
-    d3.expires = kNow + 3600;
+    d3.expires = kRootDocNow + 3600;
     const std::vector<Rhp::release::signed_root> through{v2, signed_root_by(d3, {&k.a})};
-    CHECK(Rhp::release::verify_chain(v1, through, kNow));
+    CHECK(Rhp::release::verify_chain(v1, through, kRootDocNow));
 }
 
 TEST_CASE("a root names the trust of each role", "[release][root]") {
