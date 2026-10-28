@@ -32,6 +32,20 @@ constexpr std::string_view kNotLocal = "plaintext connection refused: insecure_l
     return link.loopback() || (address && address->is_local());
 }
 
+// An address as a TLS backend checks it against a certificate: dotted IPv4 (an IPv4-mapped IPv6
+// address too), else eight hexadecimal groups.
+[[nodiscard]] std::string address_text(const net::ip_address& ip) {
+    const auto& b = ip.bytes();
+    if (ip.is_v4()) {
+        return std::format("{}.{}.{}.{}", unsigned{b[12]}, unsigned{b[13]}, unsigned{b[14]}, unsigned{b[15]});
+    }
+    std::string out;
+    for (std::size_t i = 0; i < b.size(); i += 2) {
+        out += std::format("{}{:x}", i == 0 ? "" : ":", (unsigned{b[i]} << 8) | b[i + 1]);
+    }
+    return out;
+}
+
 class secure_link final : public net::link, private net::link_handler {
 public:
     enum class mode : std::uint8_t {
@@ -262,10 +276,12 @@ result<channel_policy> channel_policy::make(const net::endpoint& ep, bool networ
             return p;
         }
         security::tls::settings client = settings;
-        // With a CA, check the name too: by default the one dialed, unless it is an IP address (one
-        // that parses as IPv4 or IPv6: "cafe1" and "db1.de" are names, and get checked).
-        if (!client.ca_pem.empty() && client.server_name.empty() && !net::ip_address::parse(ep.host)) {
-            client.server_name = ep.host;
+        // With a CA, check the name too: by default the one dialed. One that parses as IPv4 or IPv6
+        // ("cafe1" and "db1.de" are names) is an address, checked against the certificate's IP
+        // addresses: written plainly, without brackets or a zone, as both backends read it.
+        if (!client.ca_pem.empty() && client.server_name.empty()) {
+            const auto ip = net::ip_address::parse(ep.host);
+            client.server_name = ip ? address_text(*ip) : ep.host;
         }
         auto ctx = backend.client(client);
         if (!ctx) {

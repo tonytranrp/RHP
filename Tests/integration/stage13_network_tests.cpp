@@ -429,7 +429,7 @@ static_assert(Rhp::net::transport<any_name_tcp>);
 
 } // namespace stage13_net_fixtures
 
-TEST_CASE("stage13: a CA-checked dial checks the host name unless it is an IP address", "[stage13][tls]") {
+TEST_CASE("stage13: a CA-checked dial checks the host name it dialed", "[stage13][tls]") {
     using named_cfg = Rhp::config<>::transport<any_name_tcp>::logger<Rhp::core::null_logger>;
     keys k;
     Rhp::host_options with_cert;
@@ -449,6 +449,34 @@ TEST_CASE("stage13: a CA-checked dial checks the host name unless it is an IP ad
     for (const std::string_view name : {"cafe1", "db1.de", "beef.test"}) {
         INFO(name);
         Rhp::client<named_cfg> wrong{Rhp::endpoint::dial(name, port), k.as("patch"), k.dev(), checked};
+        CHECK_FALSE(wrong.connect());
+    }
+    // Nor is an address: a certificate for a name doesn't vouch for one.
+    Rhp::client<named_cfg> address{Rhp::endpoint::dial("10.0.0.7", port), k.as("patch"), k.dev(), checked};
+    CHECK_FALSE(address.connect());
+}
+
+TEST_CASE("stage13: a CA-checked dial to an IP address checks the certificate's IP addresses", "[stage13][tls]") {
+    using named_cfg = Rhp::config<>::transport<any_name_tcp>::logger<Rhp::core::null_logger>;
+    keys k;
+    Rhp::host_options with_cert;
+    with_cert.tls.cert_pem = std::string{rhp_test::tls::kIpHostCertPem}; // issued for 127.0.0.1 and ::1
+    with_cert.tls.key_pem = std::string{rhp_test::tls::kIpHostKeyPem};
+    pumped_host<tcp_cfg> host{Rhp::endpoint::listen("127.0.0.1", 0), k.ring(), k.trusted(), with_cert};
+    const auto port = *host->port();
+    Rhp::client_options checked;
+    checked.tls.ca_pem = std::string{rhp_test::tls::kIpCaPem};
+    checked.connect_timeout = 3s;
+    {
+        Rhp::client<named_cfg> right{Rhp::endpoint::dial("127.0.0.1", port, Rhp::net::require_tls), k.as("patch"), k.dev(), checked};
+        CHECK(right.exec<int>("return 4") == 4);
+        CHECK(right.info().tls);
+    }
+    // Another address reaching the same host (any_name_tcp dials 127.0.0.1 whatever it is given):
+    // the certificate isn't its.
+    for (const std::string_view other : {"10.0.0.7", "127.0.0.2", "[2001:db8::7]"}) {
+        INFO(other);
+        Rhp::client<named_cfg> wrong{Rhp::endpoint::dial(other, port, Rhp::net::require_tls), k.as("patch"), k.dev(), checked};
         CHECK_FALSE(wrong.connect());
     }
 }

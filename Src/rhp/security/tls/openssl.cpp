@@ -281,7 +281,11 @@ public:
         if (client_) {
             SSL_set_connect_state(ssl.get());
             if (!server_name_.empty()) {
-                if (SSL_set_tlsext_host_name(ssl.get(), server_name_.c_str()) != 1 || SSL_set1_host(ssl.get(), server_name_.c_str()) != 1) {
+                // An IP address is checked against the certificate's IP addresses and sent in no SNI
+                // (RFC 6066 has no place for one); a name against its DNS names, and sent.
+                const bool ip = X509_VERIFY_PARAM_set1_ip_asc(SSL_get0_param(ssl.get()), server_name_.c_str()) == 1;
+                ERR_clear_error(); // a name isn't an address: nothing to report
+                if (!ip && (SSL_set_tlsext_host_name(ssl.get(), server_name_.c_str()) != 1 || SSL_set1_host(ssl.get(), server_name_.c_str()) != 1)) {
                     return failure(errc::kInvalidArgument, "bad server_name");
                 }
             }
