@@ -50,6 +50,14 @@ TEST_CASE("hardening: capped turns unlimited and larger limits into the cap", "[
     STATIC_REQUIRE(c.memory == 4'096);
     STATIC_REQUIRE(c.wall_ms == 50);
 
+    // cancel_check_instructions: 0 is the default (1'000), not unlimited.
+    constexpr limits checks{.cancel_check_instructions = 5'000};
+    STATIC_REQUIRE(Rhp::capped(limits{.cancel_check_instructions = 0xFFFF'FFFF}, checks).cancel_check_instructions == 5'000);
+    STATIC_REQUIRE(Rhp::capped(limits{.cancel_check_instructions = 200}, checks).cancel_check_instructions == 200);
+    STATIC_REQUIRE(Rhp::capped(limits{.cancel_check_instructions = 0}, checks).cancel_check_instructions == 0);
+    STATIC_REQUIRE(Rhp::capped(limits{.cancel_check_instructions = 0}, limits{.cancel_check_instructions = 500}).cancel_check_instructions == 500);
+    STATIC_REQUIRE(Rhp::capped(limits{.cancel_check_instructions = 0xFFFF'FFFF}, limits{.cancel_check_instructions = 0}).cancel_check_instructions == 0xFFFF'FFFF);
+
     // Network and wire limits are host-wide, not per role: caps never touch them.
     constexpr limits wire{.max_frame = 123, .pending_handshakes = 0, .resume_ms = 0};
     constexpr limits d = Rhp::capped(wire, caps);
@@ -68,12 +76,15 @@ TEST_CASE("hardening: the observe and production caps bound every run", "[core][
     STATIC_REQUIRE(observe.event_queue == 1024);
     STATIC_REQUIRE(observe.request_rate != 0);
     STATIC_REQUIRE(observe.pump_requests != 0);
+    STATIC_REQUIRE(Rhp::capped(limits{.cancel_check_instructions = 0xFFFF'FFFF}, Rhp::kObserveCaps).cancel_check_instructions == 10'000);
 
     constexpr limits production = Rhp::capped(limits{}, Rhp::kProductionCaps);
     STATIC_REQUIRE(production.memory == 512ull * 1024 * 1024);
     STATIC_REQUIRE(production.wall_ms == 1'000);
     STATIC_REQUIRE(production.cancel_checks == cancel_scope::kEverything);
     STATIC_REQUIRE(production.event_queue == limits{}.event_queue);
+    STATIC_REQUIRE(production.cancel_check_instructions == limits{}.cancel_check_instructions);
+    STATIC_REQUIRE(Rhp::capped(limits{.cancel_check_instructions = 0xFFFF'FFFF}, Rhp::kProductionCaps).cancel_check_instructions == 10'000);
     // Observe in production: both caps, the tighter of each.
     constexpr limits both = Rhp::capped(production, Rhp::kObserveCaps);
     STATIC_REQUIRE(both.memory == observe.memory);
