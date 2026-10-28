@@ -84,6 +84,19 @@ public:
         host_detail::setup s;
         s.hardening = strictest(Cfg::hardening_v, options.hardening);
         s.unsigned_scripts = std::same_as<typename Cfg::signer_t, security::unsigned_scripts>;
+        // Decision AL11: at production hardening the host trusts no key tagged env=dev. The one check
+        // per kind is here: the authenticator (keyring PSKs, device allow-list) and the trusted signers
+        // are copied without them, so a dev key fails its handshake (kAuth) and a dev signer's
+        // scripts are unsigned to this host (kBadSignature). Policies without without(key_env) keep
+        // their own rules (security::certified checks its certificates' environments itself).
+        if (s.hardening == hardening::kProduction) {
+            if constexpr (requires { { auth.without(security::key_env::kDev) } -> std::convertible_to<typename Cfg::auth_t>; }) {
+                auth = auth.without(security::key_env::kDev);
+            }
+            if constexpr (requires { { trust.without(security::key_env::kDev) } -> std::convertible_to<typename Cfg::trust_t>; }) {
+                trust = trust.without(security::key_env::kDev);
+            }
+        }
         if constexpr (kBuildHardening == hardening::kDev) {
             if (!options.dev_session.empty()) {
                 s.dev_identity = add_dev_identity(auth, trust);

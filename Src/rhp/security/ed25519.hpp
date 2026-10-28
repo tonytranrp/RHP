@@ -101,6 +101,8 @@ public:
     [[nodiscard]] std::optional<key_env> env_of(std::string_view name) const noexcept;
     // Tags a trusted signer (kNotFound otherwise).
     result<void> set_env(std::string_view name, key_env env);
+    // A copy without the signers tagged `env` (Rhp::host leaves out dev signers at production hardening).
+    [[nodiscard]] trusted_signers without(key_env env) const;
     [[nodiscard]] std::size_t size() const noexcept { return keys_.size(); }
 
 private:

@@ -48,6 +48,9 @@ public:
         return psk_keyring{std::move(more)};
     }
 
+    // A copy that leaves out the keys tagged `env` (Rhp::host: dev keys at production hardening).
+    [[nodiscard]] psk_keyring without(key_env env) const { return psk_keyring{keys_->without(env)}; }
+
     [[nodiscard]] std::unique_ptr<host_handshake> begin() const;
     // Per-request HTTP proofs against the same keys (Rhp::security::http_authenticator).
     [[nodiscard]] result<http_grant> verify_http(const http_proof& request, std::chrono::system_clock::time_point now) const {

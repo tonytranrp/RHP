@@ -44,6 +44,8 @@ public:
     [[nodiscard]] std::optional<key_env> env_of(std::string_view name) const noexcept;
     // Tags a key that is in the ring (kNotFound otherwise).
     result<void> set_env(std::string_view name, key_env env);
+    // A copy without the keys tagged `env` (Rhp::host leaves out dev keys at production hardening).
+    [[nodiscard]] keyring without(key_env env) const;
     [[nodiscard]] std::size_t size() const noexcept { return entries_.size(); }
     // What from_file noticed that isn't fatal: a file other users can read. Callers show them (the
     // headless server example prints "warning: ..."), as identity_file::warnings.

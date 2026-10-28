@@ -116,6 +116,20 @@ std::optional<key_env> keyring::env_of(std::string_view name) const noexcept {
     return std::nullopt;
 }
 
+keyring keyring::without(key_env env) const {
+    keyring out;
+    for (const keyring_entry& e : entries_) {
+        if (const auto tag = env_of(e.name); tag != env) {
+            out.entries_.push_back(e);
+            if (tag) {
+                out.envs_.emplace_back(e.name, *tag);
+            }
+        }
+    }
+    out.warnings_ = warnings_;
+    return out;
+}
+
 result<void> keyring::set_env(std::string_view name, key_env env) {
     if (find(name) == nullptr) {
         return fail(errc::kNotFound, std::format("key '{}' is not in the keyring", name), "security.keyring");

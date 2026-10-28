@@ -162,6 +162,19 @@ std::optional<key_env> trusted_signers::env_of(std::string_view name) const noex
     return std::nullopt;
 }
 
+trusted_signers trusted_signers::without(key_env env) const {
+    trusted_signers out;
+    for (const auto& [name, key] : keys_) {
+        if (const auto tag = env_of(name); tag != env) {
+            out.keys_.emplace_back(name, key);
+            if (tag) {
+                out.envs_.emplace_back(name, *tag);
+            }
+        }
+    }
+    return out;
+}
+
 result<void> trusted_signers::set_env(std::string_view name, key_env env) {
     if (find(name) == nullptr) {
         return fail(errc::kNotFound, std::format("signer '{}' is not trusted", name), "security.trusted_signers");
