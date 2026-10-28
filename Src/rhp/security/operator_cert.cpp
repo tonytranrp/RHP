@@ -49,7 +49,8 @@ constexpr std::string_view kEnd = "-----END RHP OPERATOR CERTIFICATE-----";
     return env == kEnvDev || env == kEnvProd;
 }
 
-[[nodiscard]] std::uint64_t cert_seconds(std::chrono::system_clock::time_point t) {
+// Only for signing and verifying, which an RHP_ENABLE=OFF build leaves out.
+[[nodiscard, maybe_unused]] std::uint64_t cert_seconds(std::chrono::system_clock::time_point t) {
     const auto s = std::chrono::duration_cast<std::chrono::seconds>(t.time_since_epoch()).count();
     return s < 0 ? 0 : static_cast<std::uint64_t>(s);
 }
@@ -109,7 +110,7 @@ constexpr std::string_view kEnd = "-----END RHP OPERATOR CERTIFICATE-----";
     return f;
 }
 
-[[nodiscard]] std::vector<std::byte> signed_message(std::span<const std::byte> body) {
+[[nodiscard, maybe_unused]] std::vector<std::byte> signed_message(std::span<const std::byte> body) {
     std::vector<std::byte> out;
     out.reserve(kOperatorCertDomain.size() + body.size());
     for (const char c : kOperatorCertDomain) {
