@@ -119,7 +119,25 @@ Process for every stage: one branch + PR per stage, conventional commits (`feat:
 
 ### Stage 13a (2026-10-27)
 
-Recorded validation for Stage 13a: to be filled in by the orchestrator (builds at every hardening level, hosted CI).
+Debug builds of the `stage-13a-hardening` branch on this Windows/WSL host:
+
+| Check | Result |
+|---|---|
+| `windows-msvc` | 1026/1026 |
+| `windows-msvc`, unity build | 1026/1026 |
+| `windows-msvc`, `RHP_HARDENING=lan` | 1027/1027 (tests needing dev features skip with a reason) |
+| `windows-msvc`, `RHP_HARDENING=production` | 1027/1027 (same) |
+| `windows-msvc`, `RHP_ENABLE=OFF` | 244/244 |
+| `windows-clang-cl` | 1026/1026 |
+| `windows-msvc-asan` | 1021/1021 |
+| `linux-clang` (WSL, unity build) | 1026/1026 |
+| `linux-clang`, `RHP_HARDENING=production` (WSL) | 1027/1027 |
+| `linux-clang-asan` (WSL, no PCH) | 1024/1024 |
+| `linux-clang-tsan` (WSL) | 1024/1024 after the pump-turn test waits for its requests to arrive (it failed once under load); the 154 integration tests then passed 3 runs in a row at `-j 8` |
+| Pattern-matching runaways (`[b...a]*` over 128 KiB, a 1 MiB near-miss find) | 18.8 s / 25.4 s past a 100 ms wall before the fix; all 8 runaway patterns stop in 0.82 s after |
+| Libraries above dev | `dumpbin /symbols` on the production `rhp_luad.lib`: no `luaopen_io` / `luaopen_debug` / `luaopen_package`, no `os.execute` / `getenv` / `exit` |
+
+Not run locally: the OpenSSL path of the IP-address certificate check on Windows (no OpenSSL here; the Linux builds run it), hosted CI's new `hardened` job, Android and Apple.
 
 ### Cleanup pass (2026-10-27)
 
