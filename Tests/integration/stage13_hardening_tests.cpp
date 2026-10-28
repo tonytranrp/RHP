@@ -179,7 +179,9 @@ TEST_CASE("stage13: observe identities have limits of their own", "[stage13][har
 
 TEST_CASE("stage13: a served release manager runs at the host's hardening level", "[stage13][hardening][release]") {
     keys k;
-    Rhp::release::manager releases{Rhp::release::trust{}, {.app = "s13h"}};
+    Rhp::release::manager_options options;
+    options.app = "s13h";
+    Rhp::release::manager releases{Rhp::release::trust{}, options};
     CHECK(releases.options().hardening == Rhp::kBuildHardening);
     Rhp::host<loop_cfg> host{Rhp::endpoint::listen("s13h.releases", 1), k.ring(), k.trusted(), {.hardening = hardening::kLan}};
     REQUIRE(host.serve(releases));
