@@ -24,13 +24,15 @@ Rhp::host<my_cfg> host{Rhp::endpoint::listen("game", 1), keys, signers};
 | `clock<K>` | `Rhp::exec::clock_source` | `Rhp::exec::steady_clock` |
 | `logger<O>` | `Rhp::core::logger` | `Rhp::core::stderr_logger` |
 | `discovery<D>` | `Rhp::net::discovery` | `Rhp::net::mdns`; `mdns_wire` forces the own responder, `no_discovery` disables it |
+| `hardening<H>` | `Rhp::hardening` value, at least `Rhp::kBuildHardening` | `Rhp::kBuildHardening` (CMake `RHP_HARDENING`; decisions AL1 / AL2) |
 
-Readers: `transport_t`, `tls_t`, `codec_t`, `auth_t`, `credential_t`, `signer_t`, `signing_key_t`, `trust_t`, `executor_t`, `io_t`, `errors_t`, `clock_t`, `logger_t`, `discovery_t`, `limits_v`, and `return_t<T>` (the error mode's return type). `Rhp::configuration<C>` accepts anything built from `Rhp::config<>`.
+Readers: `transport_t`, `tls_t`, `codec_t`, `auth_t`, `credential_t`, `signer_t`, `signing_key_t`, `trust_t`, `executor_t`, `io_t`, `errors_t`, `clock_t`, `logger_t`, `discovery_t`, `limits_v`, `hardening_v`, and `return_t<T>` (the error mode's return type). `Rhp::configuration<C>` accepts anything built from `Rhp::config<>`.
 
 ## Rules
 
 - Each slot is constrained where it is written: a bad transport fails on the `::transport<X>` line (`Tests/compile_fail/config_bad_*.cpp`).
 - A later link overrides an earlier one for the same slot; the result is always a `Rhp::config<...>`, and `Rhp::config<>` with no links is exactly the default chain.
 - In a dependent context write `Cfg::template transport<X>`.
+- `hardening<H>` only raises the build's level: a weaker `H` fails on that line (`config_detail::no_weaker_than_build`, `Tests/compile_fail/config_hardening_below_build.cpp`). `Rhp::host` takes `signer<unsigned_scripts>` only at `hardening_v == kDev` (`Rhp::host_configuration`); a client reads `hardening_v` too (above `kDev` it refuses `insecure_lan`).
 - Discovery registration is explicit through `host.advertise`; selecting a provider publishes nothing by itself.
 - `tls<Rhp::security::tls::none>` builds without TLS: non-loopback endpoints then need `insecure_lan`.

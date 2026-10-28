@@ -3,6 +3,7 @@
 #include <type_traits>
 
 #include <rhp/core/errors_mode.hpp>
+#include <rhp/core/hardening.hpp>
 #include <rhp/core/limits.hpp>
 #include <rhp/core/log.hpp>
 #include <rhp/exec/executor.hpp>
@@ -39,7 +40,8 @@ enum class slot : unsigned char {
     kErrors,
     kClock,
     kLogger,
-    kDiscovery
+    kDiscovery,
+    kHardening
 };
 
 // One link of the chain: which slot it fills and with what.
@@ -54,6 +56,16 @@ template <::Rhp::limits L>
 struct limits_value {
     static constexpr ::Rhp::limits value = L;
 };
+
+// A Rhp::hardening level carried as a type.
+template <::Rhp::hardening H>
+struct hardening_value {
+    static constexpr ::Rhp::hardening value = H;
+};
+
+// A config may raise the build's hardening level (RHP_HARDENING), never lower it.
+template <::Rhp::hardening H>
+concept no_weaker_than_build = H >= kBuildHardening;
 
 // Settings minus every one that fills slot S.
 template <slot S, class List>
@@ -112,12 +124,15 @@ using get_or_t = typename get_or<S, Default, Settings...>::type;
 //       ::errors   <Rhp::errors::expected>     // Rhp::errors::mode         default expected
 //       ::clock    <Rhp::exec::steady_clock>   // Rhp::exec::clock_source   default steady_clock
 //       ::logger   <Rhp::core::stderr_logger>  // Rhp::core::logger         default stderr_logger
-//       ::discovery<Rhp::net::mdns>;           // Rhp::net::discovery       explicit advertise opt-in
+//       ::discovery<Rhp::net::mdns>            // Rhp::net::discovery       explicit advertise opt-in
+//       ::hardening<Rhp::kBuildHardening>;     // value, the build's or up  default RHP_HARDENING
 //
 // Rhp::config<> with no links is exactly that chain. In your own templates (a dependent context)
 // write `Cfg::template transport<X>`.
-// `signer<Rhp::security::unsigned_scripts>` is the explicit opt-out of script signing;
-// `tls<Rhp::security::tls::none>` builds without TLS (non-loopback endpoints then need insecure_lan).
+// `signer<Rhp::security::unsigned_scripts>` is the explicit opt-out of script signing (a host needs
+// hardening kDev for it); `tls<Rhp::security::tls::none>` builds without TLS (non-loopback endpoints
+// then need insecure_lan). `hardening<Rhp::hardening::kLan>` makes a host (or a client) stricter than
+// the build; a level below the build's (RHP_HARDENING) fails to compile.
 template <class... Settings>
 struct config {
     template <net::transport T>
@@ -144,6 +159,9 @@ struct config {
     using logger = config_detail::rebind_t<config_detail::slot::kLogger, O, Settings...>;
     template <net::discovery D>
     using discovery = config_detail::rebind_t<config_detail::slot::kDiscovery, D, Settings...>;
+    template <::Rhp::hardening H>
+        requires config_detail::no_weaker_than_build<H>
+    using hardening = config_detail::rebind_t<config_detail::slot::kHardening, config_detail::hardening_value<H>, Settings...>;
 
     using transport_t = config_detail::get_or_t<config_detail::slot::kTransport, net::tcp, Settings...>;
     using tls_t = config_detail::get_or_t<config_detail::slot::kTls, security::tls::auto_backend, Settings...>;
@@ -161,6 +179,8 @@ struct config {
     using discovery_t = config_detail::get_or_t<config_detail::slot::kDiscovery, net::mdns, Settings...>;
 
     static constexpr ::Rhp::limits limits_v = config_detail::get_or_t<config_detail::slot::kLimits, config_detail::limits_value<::Rhp::limits{}>, Settings...>::value;
+    static constexpr ::Rhp::hardening hardening_v =
+        config_detail::get_or_t<config_detail::slot::kHardening, config_detail::hardening_value<kBuildHardening>, Settings...>::value;
 
     // The error-mode return type of a T-returning call: Rhp::result<T> or T.
     template <class T>
