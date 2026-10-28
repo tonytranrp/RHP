@@ -8,10 +8,10 @@
 #include <utility>
 
 #include <catch2/catch_test_macros.hpp>
-#include <rhp_test/hardening.hpp>
 #include <lauxlib.h>
 #include <lua.h>
 #include <lualib.h>
+#include <rhp_test/hardening.hpp>
 
 #include <rhp/core/error.hpp>
 #include <rhp/core/limits.hpp>
@@ -50,7 +50,9 @@ Rhp::result<Rhp::script::value_list> exec_cancelled(sandbox& box, std::string_vi
 
 // Work Lua does in C, where no hook fires, that would run for minutes unchecked: a pattern that
 // backtracks through ten nested expansions (and the same through gmatch and gsub), %b rescanning to
-// the end from every position, and plain finds whose every candidate almost matches.
+// the end from every position, plain finds whose every candidate almost matches, an expansion of a
+// long bracket class (each character scans the class), and plain characters before a special (each
+// start position matches them to the end, one tail call at a time).
 constexpr std::string_view kRunawayPatterns[] = {
     R"lua(return string.find(("a"):rep(5000), ("a*"):rep(10) .. "b"))lua",
     R"lua(for m in ("a"):rep(5000):gmatch(("a*"):rep(10) .. "b") do end)lua",
@@ -58,6 +60,8 @@ constexpr std::string_view kRunawayPatterns[] = {
     R"lua(return string.find(("("):rep(1 << 20), "%b()"))lua",
     R"lua(return string.find(("a"):rep(1 << 20), ("a"):rep(1 << 16) .. "b", 1, true))lua",
     R"lua(return string.find(("a"):rep(1 << 20), ("a"):rep(1 << 16) .. "b"))lua", // no specials: a plain find too
+    R"lua(return string.find(("a"):rep(1 << 17), "[" .. ("b"):rep(1 << 17) .. "a]*"))lua",
+    R"lua(return ("a"):rep(1 << 20):find(("a"):rep(1 << 20) .. "."))lua",
 };
 
 // What `source` (which returns one string) gives in a plain Lua state: no step function, no hook.
@@ -251,6 +255,11 @@ TEST_CASE("charging pattern steps doesn't change what matching returns", "[scrip
         add((("a"):rep(5000)):find(("a*"):rep(10) .. "$"))
         add((("a"):rep(20000) .. "b"):match("(a-)b"):len())
         add(s:match("^(.-)(b+)$"))
+        local class = ("x"):rep(500)
+        add((("a"):rep(20000) .. "c"):find("[" .. class .. "a]*c"))
+        add((("a"):rep(20000) .. "c"):find("[^" .. class .. "]-c"))
+        add(("THE (quick) fox"):find("%f[" .. class .. "%a]%a+", 5))
+        add((("a"):rep(20000) .. "b"):find(("a"):rep(20000) .. "."))
         -- Lua's own recursion limit is untouched: 5000 nested items are "too complex" at once.
         add(pcall(string.find, ("a"):rep(5000), ("a?"):rep(5000) .. ("a"):rep(5000)))
         return table.concat(out, " ")
