@@ -149,7 +149,7 @@ Stage 13 (decisions AL10–AL13, [Stage 13](../decisions/stage13-security.md)) s
 
 - `--env dev|prod` tags both files and the host lines keygen prints (`... env=prod`).
 - `--passphrase` seals the signing key (Argon2i, 64 MiB and 3 passes by default, then XChaCha20-Poly1305); signing commands ask for it on a terminal or read `RHP_PASSPHRASE`.
-- `--device` makes an Ed25519 device key instead of a PSK and prints its allow-list line. The device-key authenticator that uses it is not merged yet.
+- `--device` makes an Ed25519 device key instead of a PSK and prints its allow-list line (see Device keys below).
 
 **Key handles and stores** (`<rhp/security/key_handle.hpp>`, `<rhp/security/key_store.hpp>`). A `key_handle` signs with Ed25519 or P-256 (ECDSA with SHA-256, raw r||s), either in software or through a callback, so a key held by the Secure Enclave, StrongBox, a TPM or a YubiKey never enters RHP. P-256 needs a TLS backend. Keys are stored by a `key_store`:
 
@@ -196,7 +196,13 @@ Patterns are `lib:`, `cap:`, `patch:`, `event:` and `op:` with `*` or `prefix.*`
 - `event:` covers `rhp.on`, `once` and `wait_event`, and remote subscriptions (so observe can't read C++ events its scopes deny).
 - `op:` covers requests, by their wire name.
 
-The scopes in operator certificates are carried and signed, but not enforced yet.
+A certificate's `--scope`s narrow what its scripts may do on top of the identity's scopes: its ops are checked, and a signed exec, load or reload runs under the intersection. A module loaded that way keeps the narrowing for every handler it registers; a narrowed exec may not register handlers at all (load a module when you need them). A certificate can't hide a lib the identity has: one whose scopes deny it is refused.
+
+When a host serves a manager whose root names `operator_ca` keys, those replace the trusted-CA file and follow root updates without a restart, and certificate serials in an identity revocation list are refused. Operator keys may be P-256 (`rhp-cli cert issue --device` with a P-256 device identity), so they can live in hardware; that needs a TLS backend.
+
+**Device keys.** With `config<>::auth<Rhp::security::device_keys>` neither side holds the other's secret: the host has an allow-list of client public keys (`name role alg base64-public-key [scopes] [env=dev|prod]`, the line `keygen --device` prints) and a host key of its own; each side signs the handshake transcript, bound to the TLS exporter, so TLS is required and a TLS-terminating relay fails. Clients pin host keys in `known_hosts` (`endpoint alg base64-public-key`; `rhp-cli --known-hosts`, default `<config>/rhp/known_hosts`): an unknown host key is refused unless confirmed on a terminal or with `--trust-new-host`, a changed one always. Pass `manager.identities()` to `device_keys` so revoked device keys are refused. `headless_server --allow-list FILE [--host-key FILE]` runs one. The Python client and `rhp-cli fleet` / `rollout` stay PSK-only.
+
+**Production refuses dev keys.** At production hardening a host drops every `env=dev` keyring entry, device key and trusted signer: tag what you ship `--env prod`.
 
 ## Hardening checklist
 

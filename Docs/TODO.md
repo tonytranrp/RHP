@@ -24,9 +24,9 @@ Done when: *one RHP serves a developer's PC, test phones, QA builds and store ap
 - [x] Operator CAs and short-lived operator certificates, the `certified` signer with claims (expiry, app, env, audience, nonce, identity), signature contexts on the host, `rhp-cli ca` / `cert` / `--cert-file` (AL11)
 - [x] Root of trust (threshold-signed, rotation with old and new thresholds, compromised keys' lists dropped on restore), identity revocations, `kTrust` (op 44), `rhp-cli root` / `revoke-identity` / `trust push` (AL12)
 - [x] Capability scopes (`Rhp::scope_set`, `Rhp::cap<>`, a keyring scopes column; lib, cap, patch, event and op checks) (AL13)
-- [ ] The device-key authenticator (`security::device_keys`, host allow-lists, client `known_hosts` and trust on first use), and production refusing `env=dev` keys (AL10, AL11)
-- [ ] Pairing: QR one-time secret, CPace six-digit code, trust on first use, `kEnroll`, `rhp-cli pair` (AL10)
-- [ ] Certificates joined up: certificate scopes narrowing requests, operator CAs and serial revocation from the root, operator keys as key handles, `--sign-cmd` (AL11–AL13)
+- [x] The device-key authenticator (`security::device_keys`, host allow-lists, client `known_hosts` and trust on first use), and production refusing `env=dev` keys (AL10, AL11)
+- [ ] Pairing wired into hosts: `kEnroll`, `rhp-cli pair`, on-device approval (AL10). The primitives are merged: CPace over X25519 (draft-21 vectors), `rhp-pair://` links, a one-time secret book, six-digit codes.
+- [x] Certificates joined up: certificate scopes narrowing requests, operator CAs and serial revocation from the root, operator keys as key handles (AL11–AL13); `--sign-cmd` still open
 - Untested so far: the Apple Keychain store, the typed passphrase prompt.
 
 13c — production delivery (planned):
