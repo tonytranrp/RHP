@@ -1,9 +1,19 @@
 include_guard(GLOBAL)
 
-# Generates <rhp/build_config.hpp>: how this RHP was built (RHP_ENABLE, the TLS backends, the target
-# OS). Rhp::core carries it as a header of its own, so it is installed with the other headers; every
-# public header that branches on these macros includes it (see cmake/build_config.hpp.in).
+# Generates <rhp/build_config.hpp>: how this RHP was built (RHP_ENABLE, RHP_HARDENING, the TLS
+# backends, the target OS). Rhp::core carries it as a header of its own, so it is installed with the
+# other headers; every public header that branches on these macros includes it (see
+# cmake/build_config.hpp.in).
 set(RHP_GENERATED_INCLUDE_DIR "${PROJECT_BINARY_DIR}/include")
+
+# Rhp::hardening's values: kDev 0, kLan 1, kProduction 2.
+if(RHP_HARDENING STREQUAL "production")
+    set(RHP_BUILD_CONFIG_HARDENING 2)
+elseif(RHP_HARDENING STREQUAL "lan")
+    set(RHP_BUILD_CONFIG_HARDENING 1)
+else()
+    set(RHP_BUILD_CONFIG_HARDENING 0)
+endif()
 
 set(RHP_BUILD_CONFIG_ENABLE 0)
 set(RHP_BUILD_CONFIG_TLS_HAS_OPENSSL 0)

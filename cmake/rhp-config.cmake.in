@@ -5,6 +5,7 @@
 #   rhp_STAGE               the stage this RHP implements (RHP has no release numbers)
 #   rhp_PROTOCOL_REVISION   the wire protocol revision its hosts and clients speak
 #   rhp_ENABLE              1 for a live build, 0 for one compiled out (RHP_ENABLE=OFF)
+#   rhp_HARDENING           dev, lan or production: the most this RHP allows (RHP_HARDENING)
 #   rhp_TLS_HAS_OPENSSL     1 if the OpenSSL backend is built (the system's OpenSSL is then required)
 #   rhp_TLS_HAS_MBEDTLS     1 if the Mbed TLS backend is built (shipped inside the package)
 #   rhp_PLATFORM            WINDOWS, LINUX, MACOS, IOS or ANDROID
@@ -20,6 +21,7 @@ endif()
 set(rhp_STAGE "@RHP_STAGE@")
 set(rhp_PROTOCOL_REVISION @RHP_PROTOCOL_REVISION@)
 set(rhp_ENABLE @RHP_BUILD_CONFIG_ENABLE@)
+set(rhp_HARDENING "@RHP_HARDENING@")
 set(rhp_TLS_HAS_OPENSSL @RHP_BUILD_CONFIG_TLS_HAS_OPENSSL@)
 set(rhp_TLS_HAS_MBEDTLS @RHP_BUILD_CONFIG_TLS_HAS_MBEDTLS@)
 set(rhp_PLATFORM "@RHP_PLATFORM@")

@@ -36,6 +36,8 @@ rhp_add_compile_fail(build_config_enable_mismatch SOURCE build_config_enable_mis
     EXPECT "RHP_ENABLE differs from the value this RHP was built with")
 rhp_add_compile_fail(build_config_platform_mismatch SOURCE build_config_platform_mismatch.cpp LINKS Rhp::core
     EXPECT "RHP_PLATFORM_[A-Z]+ is defined, but this RHP was built for")
+rhp_add_compile_fail(build_config_hardening_mismatch SOURCE build_config_hardening_mismatch.cpp LINKS Rhp::core
+    EXPECT "RHP_HARDENING differs from the value this RHP was built with")
 if(RHP_ENABLE)
     rhp_add_compile_fail(fake_not_a_lib SOURCE fake_not_a_lib.cpp LINKS Rhp::test CONSTRAINT lib_type)
     rhp_add_compile_fail(fake_result_not_default SOURCE fake_result_not_default.cpp LINKS Rhp::test EXPECT "a result type the fake can.t make")

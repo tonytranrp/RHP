@@ -13,6 +13,13 @@
 #error "RHP: RHP_ENABLE differs from the value this RHP was built with (@RHP_BUILD_CONFIG_ENABLE@)"
 #endif
 
+// Rhp::kBuildHardening (<rhp/core/hardening.hpp>): 0 dev, 1 lan, 2 production.
+#if !defined(RHP_HARDENING)
+#define RHP_HARDENING @RHP_BUILD_CONFIG_HARDENING@
+#elif RHP_HARDENING != @RHP_BUILD_CONFIG_HARDENING@
+#error "RHP: RHP_HARDENING differs from the value this RHP was built with (@RHP_BUILD_CONFIG_HARDENING@)"
+#endif
+
 #if !defined(RHP_TLS_HAS_OPENSSL)
 #define RHP_TLS_HAS_OPENSSL @RHP_BUILD_CONFIG_TLS_HAS_OPENSSL@
 #elif RHP_TLS_HAS_OPENSSL != @RHP_BUILD_CONFIG_TLS_HAS_OPENSSL@

@@ -20,6 +20,7 @@ rhp_add_test_suite(rhp_core_tests
         core/convert_tests.cpp
         core/error_tests.cpp
         core/errors_mode_tests.cpp
+        core/hardening_tests.cpp
         core/ids_tests.cpp
         core/listener_table_tests.cpp
         core/log_tests.cpp
