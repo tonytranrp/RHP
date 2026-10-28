@@ -187,6 +187,7 @@ public:
         auth_grant grant = make_grant(secret(), transcript_.view(), true);
         grant.identity = entry_->name;
         grant.granted = entry_->granted;
+        grant.scopes = entry_->scopes;
         return grant;
     }
 

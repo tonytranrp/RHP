@@ -8,16 +8,18 @@
 
 #include <rhp/core/result.hpp>
 #include <rhp/core/role.hpp>
+#include <rhp/core/scopes.hpp>
 #include <rhp/security/key.hpp>
 
 namespace Rhp::security {
 
 // One key the host accepts: its name is the identity (one lua_State per identity), its role what
-// that identity may do.
+// that identity may do, its scopes what it may reach (decision AL13; default everything).
 struct keyring_entry {
     std::string name;
     key secret;
     role granted = role::kObserve;
+    scope_set scopes{};
 };
 
 // The host's keys. Names are unique; add() fails with kAlreadyLoaded on a duplicate.
@@ -30,7 +32,8 @@ public:
 
     result<void> add(keyring_entry entry);
 
-    // Text with one `name role base64-key` per line (role: observe, patch or admin; '#' starts a
+    // Text with one `name role base64-key [scopes]` per line (role: observe, patch or admin; scopes:
+    // comma-separated scope patterns, Rhp::scope_set, everything when left out; '#' starts a
     // comment), e.g. what `rhp-cli keygen` prints for the host.
     [[nodiscard]] static result<keyring> parse(std::string_view text);
     [[nodiscard]] static result<keyring> from_file(const std::string& path);

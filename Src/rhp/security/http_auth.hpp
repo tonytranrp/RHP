@@ -76,6 +76,7 @@ struct http_grant {
     // Signs the answers to this request (X-RHP-Proof); empty when the authenticator derives none.
     std::optional<http_answer_key> answer_key = {};
     bool bound = false; // the proof covered the TLS channel
+    scope_set scopes{}; // the identity's scopes (auth_grant::scopes)
 };
 
 // What an answer's X-RHP-Proof covers.

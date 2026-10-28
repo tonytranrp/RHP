@@ -42,6 +42,14 @@ TEST_CASE("http proof grants the key's identity and role", "[security][http]") {
     // Remembered past the window measured from the proof's own time (not from a later now()).
     CHECK(grant->expires > signed_at + Rhp::security::kHttpSkew);
     CHECK(f.sign() != header); // a fresh nonce every time
+    CHECK(grant->scopes.unrestricted());
+
+    auto scopes = Rhp::scope_set::parse("op:exec,!lib:debug");
+    REQUIRE(scopes);
+    const Rhp::security::keyring scoped{{"dev", f.secret, Rhp::role::kPatch, *scopes}};
+    auto narrow = verify_http_authorization(scoped, f.request(f.sign()));
+    REQUIRE(narrow);
+    CHECK(narrow->scopes == *scopes);
 }
 
 TEST_CASE("http proof covers every part of the request", "[security][http]") {
@@ -88,7 +96,7 @@ TEST_CASE("http proof refuses malformed and foreign authorization", "[security][
     Rhp::security::keyring unknown{{"someone", f.secret, Rhp::role::kAdmin}};
     CHECK_FALSE(verify_http_authorization(unknown, f.request(header)));
     for (const auto& bad : {std::string{"RHP dev,0,nonce,mac"}, std::string{"Bearer x"}, std::string{"RHP dev,1,2"}, std::string{"RHP ,1,2,3"},
-                                  std::string{"RHP "} + std::string(600, 'x'), header + ",extra"}) {
+                            std::string{"RHP "} + std::string(600, 'x'), header + ",extra"}) {
         const auto checked = verify_http_authorization(f.keys, f.request(bad));
         REQUIRE_FALSE(checked);
         CHECK(checked.error().code == Rhp::errc::kAuth);

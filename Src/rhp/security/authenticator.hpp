@@ -8,6 +8,7 @@
 
 #include <rhp/core/result.hpp>
 #include <rhp/core/role.hpp>
+#include <rhp/core/scopes.hpp>
 #include <rhp/core/value.hpp>
 #include <rhp/wire/frame.hpp>
 
@@ -17,6 +18,9 @@ namespace Rhp::security {
 struct auth_grant {
     std::string identity; // the key's name (one lua_State per identity)
     role granted = role::kObserve;
+    // What the identity may reach (its keyring entry's scopes; decision AL13). Host side only: a
+    // client's grant leaves it at everything.
+    scope_set scopes{};
     std::unique_ptr<wire::frame_sealer> outgoing; // seals frames this side sends
     std::unique_ptr<wire::frame_sealer> incoming; // verifies frames this side receives
 };

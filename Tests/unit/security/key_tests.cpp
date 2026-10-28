@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <filesystem>
+#include <format>
 #include <fstream>
 #include <string>
 #include <string_view>
@@ -12,6 +13,7 @@
 #include <rhp/core/error.hpp>
 #include <rhp/core/result.hpp>
 #include <rhp/core/role.hpp>
+#include <rhp/core/scopes.hpp>
 #include <rhp/security/key.hpp>
 #include <rhp/security/keyring.hpp>
 
@@ -100,4 +102,42 @@ TEST_CASE("keyring: names are unique and keys required", "[security][keyring]") 
     CHECK(ring.find("nobody") == nullptr);
     CHECK(ring.size() == 1);
     CHECK_THROWS_AS((Rhp::security::keyring{{"a", *k, Rhp::role::kObserve}, {"a", *k, Rhp::role::kObserve}}), Rhp::exception);
+}
+
+TEST_CASE("keyring: the scopes column is optional", "[security][keyring][scopes]") {
+    auto k = key::generate();
+    REQUIRE(k);
+    const std::string b64 = k->to_base64();
+    const std::string text = std::format("# name role key [scopes]\n"
+                                         "old patch {}\n"
+                                         "shop patch {} lib:game,cap:economy.*,!cap:economy.grant\n"
+                                         "watch observe {} op:exec,op:list,!event:admin.*\n",
+                                         b64, b64, b64);
+    auto ring = Rhp::security::keyring::parse(text);
+    REQUIRE(ring);
+    REQUIRE(ring->size() == 3);
+    // An old line (no column) allows everything.
+    CHECK(ring->find("old")->scopes.unrestricted());
+    CHECK(ring->find("shop")->granted == Rhp::role::kPatch);
+    const Rhp::scope_set& shop = ring->find("shop")->scopes;
+    CHECK(shop.allows(Rhp::scope_kind::kLib, "game"));
+    CHECK_FALSE(shop.allows(Rhp::scope_kind::kLib, "debug"));
+    CHECK(shop.allows(Rhp::scope_kind::kCap, "economy.write"));
+    CHECK_FALSE(shop.allows(Rhp::scope_kind::kCap, "economy.grant"));
+    CHECK(shop.allows(Rhp::scope_kind::kOp, "load"));
+    const Rhp::scope_set& watch = ring->find("watch")->scopes;
+    CHECK(watch.allows(Rhp::scope_kind::kOp, "exec"));
+    CHECK_FALSE(watch.allows(Rhp::scope_kind::kOp, "load"));
+    CHECK_FALSE(watch.allows(Rhp::scope_kind::kEvent, "admin.kick"));
+    // Entries made in code default to everything.
+    Rhp::security::keyring made{{"code", *k, Rhp::role::kPatch}};
+    CHECK(made.find("code")->scopes.unrestricted());
+
+    auto bad = Rhp::security::keyring::parse(std::format("a patch {} lib:game,files:x\n", b64));
+    REQUIRE_FALSE(bad);
+    CHECK(bad.error().code == errc::kInvalidArgument);
+    CHECK(bad.error().message.starts_with("line 1: 'files:x'"));
+    auto extra = Rhp::security::keyring::parse(std::format("a patch {} lib:game op:exec\n", b64));
+    REQUIRE_FALSE(extra);
+    CHECK(extra.error().message.contains("[scopes]"));
 }

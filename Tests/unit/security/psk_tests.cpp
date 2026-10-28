@@ -7,6 +7,7 @@
 
 #include <rhp/core/error.hpp>
 #include <rhp/core/role.hpp>
+#include <rhp/core/scopes.hpp>
 #include <rhp/core/value.hpp>
 #include <rhp/security/authenticator.hpp>
 #include <rhp/security/key.hpp>
@@ -71,6 +72,20 @@ TEST_CASE("psk: the right key gets the identity and role and matching frame keys
     // Tampering fails.
     const std::string other = "header and payloaD";
     CHECK_FALSE(r.host->incoming->verify(Rhp::utils::as_bytes(other), from_client));
+}
+
+TEST_CASE("psk: the grant carries the key's scopes", "[security][psk][scopes]") {
+    fixture f;
+    auto scopes = Rhp::scope_set::parse("lib:game,!op:revert_all");
+    REQUIRE(scopes);
+    const psk_keyring host{keyring{{"dev", f.dev, Rhp::role::kAdmin, *scopes}, {"qa", f.qa, Rhp::role::kPatch}}};
+    auto dev = handshake(host, psk_identity{"dev", f.dev});
+    REQUIRE(dev.host);
+    CHECK(dev.host->scopes == *scopes);
+    CHECK(dev.client->scopes.unrestricted()); // the client side doesn't learn them
+    auto qa = handshake(host, psk_identity{"qa", f.qa});
+    REQUIRE(qa.host);
+    CHECK(qa.host->scopes.unrestricted());
 }
 
 TEST_CASE("psk: every session gets fresh keys", "[security][psk]") {

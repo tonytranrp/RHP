@@ -180,7 +180,8 @@ result<http_grant> verify_http_authorization(const keyring& keys, const http_pro
     }
     // Remembered one second past the window, so a proof can't be replayed at its edge.
     const auto expires = std::chrono::system_clock::time_point{std::chrono::seconds{seconds + skew + 1}};
-    return http_grant{std::string{name}, found->granted, std::string{nonce_text}, expires, answer_key(found->secret.bytes(), expected), !request.channel.empty()};
+    return http_grant{std::string{name}, found->granted, std::string{nonce_text}, expires, answer_key(found->secret.bytes(), expected), !request.channel.empty(),
+                      found->scopes};
 }
 
 std::string http_answer_proof(const http_answer_key& key, const http_answer& answer) {

@@ -8,6 +8,7 @@
 #include <rhp/core/error.hpp>
 #include <rhp/core/result.hpp>
 #include <rhp/core/role.hpp>
+#include <rhp/core/scopes.hpp>
 #include <rhp/security/detail/text.hpp>
 #include <rhp/security/key.hpp>
 #include <rhp/security/keyring.hpp>
@@ -40,8 +41,8 @@ result<keyring> keyring::parse(std::string_view text) {
     keyring out;
     for (const detail::text_line& line : detail::content_lines(text)) {
         const auto f = detail::fields(line.text);
-        if (f.size() != 3) {
-            return fail(errc::kInvalidArgument, std::format("line {}: expected `name role base64-key`", line.number), "security.keyring");
+        if (f.size() != 3 && f.size() != 4) {
+            return fail(errc::kInvalidArgument, std::format("line {}: expected `name role base64-key [scopes]`", line.number), "security.keyring");
         }
         const auto granted = parse_role(f[1]);
         if (!granted) {
@@ -51,7 +52,15 @@ result<keyring> keyring::parse(std::string_view text) {
         if (!secret) {
             return fail(errc::kInvalidArgument, std::format("line {}: {}", line.number, secret.error().message), "security.keyring");
         }
-        if (auto added = out.add({std::string{f[0]}, std::move(*secret), *granted}); !added) {
+        scope_set scopes;
+        if (f.size() == 4) {
+            auto parsed = scope_set::parse(f[3]);
+            if (!parsed) {
+                return fail(errc::kInvalidArgument, std::format("line {}: {}", line.number, parsed.error().message), "security.keyring");
+            }
+            scopes = std::move(*parsed);
+        }
+        if (auto added = out.add({std::string{f[0]}, std::move(*secret), *granted, std::move(scopes)}); !added) {
             return fail(added.error().code, std::format("line {}: {}", line.number, added.error().message), "security.keyring");
         }
     }
