@@ -18,7 +18,7 @@ while (game::running()) { host.pump(); game::update(); }    // Lua runs only her
 ```
 
 ```bash
-rhp-cli keygen dev --role patch                      # dev.rhpid; `rhp-cli pubkey -i dev.rhpid` prints the host's lines
+rhp-cli keygen dev --role patch                      # dev.rhpid + dev.rhpsign; prints the host's lines
 rhp-cli connect 127.0.0.1:7777 -i dev.rhpid          # REPL; every script is signed
 ```
 
@@ -73,7 +73,8 @@ end)
 - **Binding C++:** `Rhp::lib<>` functions, variables, read-only values, sub-libs and opaque handles with methods and properties; `Rhp::undo<>` inverses, `Rhp::irreversible`, `Rhp::requires_role<>`; asynchronous bindings (`Rhp::async<T>`); patch points; C++ events (`Rhp::lua_event<>`); custom types through `Rhp::convert<T>`; LuaLS stubs.
 - **Scheduling and events:** `rhp.wait` / `rhp.sleep` / `rhp.next_frame`, timers and frame callbacks with pause / resume / reschedule, background tasks (`rhp.spawn`), script events (`rhp.publish`, `rhp.on`, `rhp.wait_event`), a handler error policy, C++ and remote listeners (`host.on_script_event`, `client.on`).
 - **Transports:** in-process loopback, TCP, WebSocket, reliable UDP, local IPC, or your own; reverse mode (the host dials out, for phones and NAT); opt-in DNS-SD discovery; an authenticated HTTP gateway; fleet broadcasts.
-- **Security:** pre-shared-key mutual authentication, roles (`observe`, `patch`, `admin`), Ed25519-signed scripts, TLS 1.3 (OpenSSL or Mbed TLS) bound to the key handshake, per-frame MACs, audit events.
+- **Security:** pre-shared-key or device-key mutual authentication, roles (`observe`, `patch`, `admin`), Ed25519-signed scripts, TLS 1.3 (OpenSSL or Mbed TLS) bound to the key handshake, per-frame MACs, audit events.
+- **Identities and trust (Stage 13b):** device keys (hosts keep only public keys; clients pin host keys), keys in files, a passphrase seal, DPAPI, the Apple Keychain or hardware through a sign callback; short-lived operator certificates whose script signatures carry claims (expiry, app, environment, audience, a one-use nonce); an offline, threshold-signed root of trust with rotation and revocation; capability scopes (`lib:`, `cap:`, `patch:`, `event:`, `op:`) per identity and per certificate; production builds refuse keys tagged `env=dev`.
 - **Hardening (Stage 13a):** build levels `RHP_HARDENING=dev|lan|production` that compile out what a build doesn't allow and cap limits per role; per-identity request rates, pump budgets and handler caps; admission control for unauthenticated connections; a sandbox without finalizers or address leaks that restores its shared libraries; owner-only key files; dev sessions that need no key files.
 - **Sessions:** acks, resends and heartbeats; a dropped link resumes within `limits.resume_ms` with every call run exactly once.
 - **Releases:** signed bundles a host keeps across restarts, with channels, anti-rollback floors, health-watched candidates, revocation and staged fleet rollout.
@@ -142,6 +143,8 @@ The short list; the full one is [Docs/guide/limitations.md](Docs/guide/limitatio
 - Runaway timers, frame callbacks, handlers and tasks run by `pump()` can only be stopped by limits, not from the network.
 - Script events stay inside one identity. Remote event delivery is rate-limited per session, and the HTTP gateway has no event stream.
 - Sessions survive dropped connections (`resume_ms`), not host restarts; releases do survive restarts. Protocol revisions must match.
+- `table.sort` without a comparator, `load` of a huge chunk and `<` between long strings run in C without a limit or cancel check.
+- Pairing (six-digit codes, QR links) has its primitives but isn't wired into hosts yet; the Python client is PSK-only.
 - macOS and iOS run in hosted CI only, not on real hardware. Recorded validation is mostly Debug builds.
 
 ## Stages
@@ -161,9 +164,9 @@ The short list; the full one is [Docs/guide/limitations.md](Docs/guide/limitatio
 | 10 | signed releases, persistence, revocation, staged rollout |
 | 11 | tunables, sampling profiler, debugger, `rhp-cli dap` |
 | 12 | `Rhp::test`: a test engine for Lua scripts |
-| 13 | security for every deployment: 13a hardening levels, sandbox and network fixes, rate limits, dev sessions; 13b key handles and stores, operator certificates, a root of trust, capability scopes (`stage-13`); the device-key authenticator, pairing and 13c production delivery are open |
+| 13 | security for every deployment: 13a hardening levels, sandbox and network fixes, rate limits, dev sessions; 13b key handles and stores, device keys, operator certificates, a root of trust, capability scopes (`stage-13`); pairing wired into hosts and 13c production delivery are open |
 
-Stages 0–12 are implemented and tagged; `stage-13` tags the first part of Stage 13 (13a and the first wave of 13b). Open validation and platform items are in [Status and TODO](Docs/TODO.md).
+Stages 0–12 are implemented and tagged; `stage-13` tags Stage 13a and 13b (all of 13b but pairing wired into hosts and `--sign-cmd`). Open validation and platform items are in [Status and TODO](Docs/TODO.md).
 
 ## Layout
 

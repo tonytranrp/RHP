@@ -32,3 +32,5 @@
 **Stage 10:** `kProtocolRevision` 5 (releases and revocation lists): see [stage10-releases.md](stage10-releases.md).
 
 **Stage 11:** `kProtocolRevision` 6 (tunables, the profiler and the debugger): see [stage11-tools.md](stage11-tools.md).
+
+**Stage 13b:** `kProtocolRevision` 7: `kTrust` (op 44, `{documents}` → `{root_version, identity_seq}`), `release_status` also answers `root_version` and `identity_seq`, the welcome carries `host_key` (the host device key's fingerprint), a device-key handshake (`hello.auth.scheme = "device"`) and certified script signatures (`{cert, claims, sig}`): see [stage13-security.md](stage13-security.md). Reliable UDP's own packet revision went to 2 in Stage 13a (stateless cookies), independent of this number.

@@ -10,6 +10,7 @@ using game_lib = Rhp::lib<"game">                                               
     ::fn<"find", &game::find>                                                                          // pure, observe role
     ::fn<"explode", &game::explode, Rhp::irreversible>                                                 // allowed, but counted in revert reports
     ::fn<"wipe", &game::wipe, Rhp::requires_role<Rhp::role::kAdmin>>                                  // admin only
+    ::fn<"grant", &game::grant_gold, Rhp::undo<&game::take_gold>, Rhp::cap<"economy.grant">>          // patch, and a scope allowing cap:economy.grant
     ::var<"gravity", &game::g_gravity>                                                                // read: observe, write: patch (journaled)
     ::var<"speed", &game::g_speed, Rhp::range<0.0, 10.0>, Rhp::unit<"m/s">>                             // a tunable: writes outside [0, 10] raise kOutOfRange
     ::ro<"tick", &game::g_tick>                                                                        // read only
@@ -29,7 +30,7 @@ host.install<game_lib>(); // or sandbox.install<game_lib>()
 
 Names must be Lua identifiers and unique inside the lib.
 
-**Tags on `fn`** (at most one of `undo` / `irreversible`, at most one `requires_role`):
+**Tags on `fn`** (at most one of `undo` / `irreversible`, at most one `requires_role`, at most one `cap`):
 
 | Tag | Effect |
 |---|---|
@@ -37,6 +38,9 @@ Names must be Lua identifiers and unique inside the lib.
 | `Rhp::undo<&g>` | changes state, `g` takes it back. `g` is fed the binding's result (a `Rhp::result<>` is unwrapped), or failing that its arguments. Needs patch role |
 | `Rhp::irreversible` | changes state and cannot be taken back. Needs patch role; each call is reported as irreversible when reverted |
 | `Rhp::requires_role<R>` | override the derived role. Use it to raise the requirement; assigning observe to a mutating function would explicitly grant that mutation to observe callers |
+| `Rhp::cap<"name">` | the binding also needs a capability (a dotted lowercase name, `"economy.write"`): called by an identity whose [capability scopes](security.md#keys-certificates-and-the-root-of-trust) deny `cap:economy.write` (a keyring or allow-list column, or an operator certificate's scopes), it raises `kForbidden` ("needs capability economy.write") as a missing role does. One bit test per call; untagged bindings pay nothing. Also on `method` and `property` |
+
+Roles say how much an identity may do; capabilities say to which parts of your API. A shop tool's key can be `patch` with `cap:economy.*,!cap:economy.grant`, and the `lib:` patterns of the same column decide which libs are installed for that identity at all.
 
 Rules of the road:
 
@@ -86,7 +90,7 @@ print(e.hp)
 | Entry | Meaning |
 |---|---|
 | `method<"name", &f, tags...>` | `h:name(args...)` calls `f(h, args...)`. Takes the `fn` tags (`undo`, `irreversible`, `requires_role`) and may be asynchronous. Errors are labelled `entity:name`; a missing or wrong handle is reported as `(self)` |
-| `property<"name", &f [, requires_role<R>]>` | `h.name` reads `f(h)`. One parameter, a result, nothing to undo, no waiting |
+| `property<"name", &f [, requires_role<R>] [, cap<"c">]>` | `h.name` reads `f(h)`. One parameter, a result, nothing to undo, no waiting |
 
 - The handle must be declared in the same lib tree (a lib that only adds members to a handle declared elsewhere re-declares `::handle` with the same name, type and validity check). A stale handle fails every member with `kStaleHandle`.
 - Members are read-only from Lua: `e.hp = 5` raises `kInvalidArgument`. An unknown member reads as `nil` (also on handle types without members). One property makes every lookup on that handle a C call (the methods-only `__index` is a plain table): see [benchmarks](../benchmarks.md).
