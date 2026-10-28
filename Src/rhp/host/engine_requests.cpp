@@ -89,7 +89,8 @@ namespace {
     return out;
 }
 
-[[nodiscard]] std::optional<script::debug_scope> parse_scope(std::string_view text) noexcept {
+// Both only for the debugger, which a production build leaves out.
+[[nodiscard, maybe_unused]] std::optional<script::debug_scope> parse_scope(std::string_view text) noexcept {
     for (const auto s : {script::debug_scope::kLocals, script::debug_scope::kUpvalues, script::debug_scope::kGlobals}) {
         if (script::to_string(s) == text) {
             return s;
@@ -98,7 +99,7 @@ namespace {
     return std::nullopt;
 }
 
-[[nodiscard]] wire::debug_variable_message variable_message(const script::debug_variable& v) {
+[[nodiscard, maybe_unused]] wire::debug_variable_message variable_message(const script::debug_variable& v) {
     return wire::debug_variable_message{v.name, v.type, v.text, v.expandable};
 }
 
@@ -175,8 +176,10 @@ result<std::string> engine::check_signature(const pump_session& sess, const inbo
     }
     auto who = in.signer ? *in.signer : setup_.verify ? setup_.verify(source, signature)
                                                       : result<std::string>{std::string{}};
-    if (!who && signature.is_nil() && sess.granted == role::kObserve) {
-        who = std::string{}; // observe can't mutate anything: unsigned code is allowed
+    if constexpr (kBuildHardening != hardening::kProduction) { // production: observe signs too
+        if (!who && signature.is_nil() && sess.granted == role::kObserve && setup_.hardening != hardening::kProduction) {
+            who = std::string{}; // observe can't mutate anything: unsigned code is allowed
+        }
     }
     if (who && audit_ != nullptr) {
         audit_->signer = *who;
@@ -299,11 +302,14 @@ void engine::request(const inbound& in, const error* refused) {
 }
 
 void engine::admit(inbound& in) {
-    const Rhp::limits& l = setup_.limits;
     const auto ps = pump_sessions_.find(in.session);
     const auto it = ps != pump_sessions_.end() ? identities_.find(ps->second.identity) : identities_.end();
-    if ((l.request_rate == 0 && l.pump_requests == 0) || it == identities_.end() || !is_enabled()) {
+    if (it == identities_.end() || !is_enabled()) {
         return request(in); // which drops a request nobody is left to answer, and refuses while disabled
+    }
+    const Rhp::limits& l = limits_for(ps->second.granted); // the identity's own: observe's, capped for the hardening level
+    if (l.request_rate == 0 && l.pump_requests == 0) {
+        return request(in);
     }
     pump_session& sess = ps->second;
     identity_runtime& rt = it->second;
@@ -332,36 +338,40 @@ void engine::admit(inbound& in) {
 }
 
 void engine::start_queued() {
-    const std::uint32_t budget = setup_.limits.pump_requests;
-    if (budget == 0) {
-        return;
-    }
-    // By name, as the map keeps them; looked up again before each start (a request may end an identity).
-    std::vector<std::string> turns;
+    // By name, as the map keeps them, with each identity's own budget (limits.pump_requests for its
+    // role; only identities with one queue); looked up again before each start (a request may end an
+    // identity).
+    struct turn {
+        std::string name;
+        std::uint32_t left = 0;
+    };
+    std::vector<turn> turns;
     for (const auto& [name, rt] : identities_) {
         if (!rt.queued.empty()) {
-            turns.push_back(name);
+            turns.push_back({name, limits_for(rt.box->caller_role()).pump_requests});
         }
     }
     if (turns.empty()) {
         return;
     }
-    std::ranges::rotate(turns, std::ranges::upper_bound(turns, first_turn_));
-    first_turn_ = turns.front();
-    for (std::uint32_t round = 0; round < budget; ++round) {
-        bool started = false;
-        for (const std::string& name : turns) {
-            const auto it = identities_.find(name);
+    std::ranges::rotate(turns, std::ranges::upper_bound(turns, first_turn_, {}, &turn::name));
+    first_turn_ = turns.front().name;
+    for (bool started = true; started;) {
+        started = false;
+        for (turn& t : turns) {
+            if (t.left == 0) {
+                continue;
+            }
+            const auto it = identities_.find(t.name);
             if (it == identities_.end() || it->second.queued.empty()) {
+                t.left = 0;
                 continue;
             }
             const inbound in = std::move(it->second.queued.front());
             it->second.queued.pop_front();
+            --t.left;
             request(in);
             started = true;
-        }
-        if (!started) {
-            return;
         }
     }
 }
@@ -680,64 +690,75 @@ void engine::op_debug(request_ctx& c) {
 }
 
 result<wire::debug_reply> engine::debug(identity_runtime& rt, script::sandbox& box, session_id session, const wire::debug_request& m) {
-    wire::debug_reply out;
-    const request_id req{m.request};
-    const std::string_view action = m.action;
-    if (action == "break") {
-        auto lines = box.set_breakpoints(m.source, m.lines);
-        if (!lines) {
-            return std::unexpected{std::move(lines).error()};
-        }
-        out.lines = std::move(*lines);
-        rt.debuggers.insert(session);
-    } else if (action == "pause") {
-        box.debug_pause();
-        rt.debuggers.insert(session);
-    } else if (action == "continue" || action == "into" || action == "over" || action == "out") {
-        const script::step_mode mode = action == "into"   ? script::step_mode::kInto
-                                       : action == "over" ? script::step_mode::kOver
-                                       : action == "out"  ? script::step_mode::kOut
-                                                          : script::step_mode::kContinue;
-        if (auto r = box.debug_resume(req, mode); !r) {
-            return std::unexpected{std::move(r).error()};
-        }
-    } else if (action == "paused") {
-        for (const script::debug_stop& p : box.paused()) {
-            out.paused.push_back(wire::debug_stop_message{p.request.value(), p.label, p.reason, p.source, p.line, p.module.value()});
-        }
-    } else if (action == "stack") {
-        auto frames = box.debug_stack(req);
-        if (!frames) {
-            return std::unexpected{std::move(frames).error()};
-        }
-        for (script::debug_frame& f : *frames) {
-            out.frames.push_back(wire::debug_frame_message{f.level, std::move(f.name), std::move(f.what), std::move(f.source), f.line, f.defined});
-        }
-    } else if (action == "variables") {
-        const auto scope = parse_scope(m.scope);
-        if (!scope) {
-            return fail(errc::kInvalidArgument, std::format("scope is locals, upvalues or globals, not '{}'", m.scope), "debug");
-        }
-        auto vars = box.debug_variables(req, m.frame, *scope, m.path);
-        if (!vars) {
-            return std::unexpected{std::move(vars).error()};
-        }
-        for (const script::debug_variable& v : *vars) {
-            out.variables.push_back(variable_message(v));
-        }
-    } else if (action == "evaluate") {
-        auto v = box.debug_evaluate(req, m.frame, m.expression);
-        if (!v) {
-            return std::unexpected{std::move(v).error()};
-        }
-        out.variables.push_back(variable_message(*v));
-    } else if (action == "reset") {
-        box.debug_reset();
-        rt.debuggers.clear();
+    if constexpr (kBuildHardening == hardening::kProduction) { // decision AL2: not in a production binary
+        (void)rt;
+        (void)box;
+        (void)session;
+        (void)m;
+        return fail(errc::kForbidden, "the remote debugger is compiled out of this build (RHP_HARDENING=production)", "debug");
     } else {
-        return fail(errc::kInvalidArgument, std::format("'{}' is not a debug action", m.action), "debug");
+        if (setup_.hardening == hardening::kProduction) {
+            return fail(errc::kForbidden, "a host at hardening production has no remote debugger", "debug");
+        }
+        wire::debug_reply out;
+        const request_id req{m.request};
+        const std::string_view action = m.action;
+        if (action == "break") {
+            auto lines = box.set_breakpoints(m.source, m.lines);
+            if (!lines) {
+                return std::unexpected{std::move(lines).error()};
+            }
+            out.lines = std::move(*lines);
+            rt.debuggers.insert(session);
+        } else if (action == "pause") {
+            box.debug_pause();
+            rt.debuggers.insert(session);
+        } else if (action == "continue" || action == "into" || action == "over" || action == "out") {
+            const script::step_mode mode = action == "into"   ? script::step_mode::kInto
+                                           : action == "over" ? script::step_mode::kOver
+                                           : action == "out"  ? script::step_mode::kOut
+                                                              : script::step_mode::kContinue;
+            if (auto r = box.debug_resume(req, mode); !r) {
+                return std::unexpected{std::move(r).error()};
+            }
+        } else if (action == "paused") {
+            for (const script::debug_stop& p : box.paused()) {
+                out.paused.push_back(wire::debug_stop_message{p.request.value(), p.label, p.reason, p.source, p.line, p.module.value()});
+            }
+        } else if (action == "stack") {
+            auto frames = box.debug_stack(req);
+            if (!frames) {
+                return std::unexpected{std::move(frames).error()};
+            }
+            for (script::debug_frame& f : *frames) {
+                out.frames.push_back(wire::debug_frame_message{f.level, std::move(f.name), std::move(f.what), std::move(f.source), f.line, f.defined});
+            }
+        } else if (action == "variables") {
+            const auto scope = parse_scope(m.scope);
+            if (!scope) {
+                return fail(errc::kInvalidArgument, std::format("scope is locals, upvalues or globals, not '{}'", m.scope), "debug");
+            }
+            auto vars = box.debug_variables(req, m.frame, *scope, m.path);
+            if (!vars) {
+                return std::unexpected{std::move(vars).error()};
+            }
+            for (const script::debug_variable& v : *vars) {
+                out.variables.push_back(variable_message(v));
+            }
+        } else if (action == "evaluate") {
+            auto v = box.debug_evaluate(req, m.frame, m.expression);
+            if (!v) {
+                return std::unexpected{std::move(v).error()};
+            }
+            out.variables.push_back(variable_message(*v));
+        } else if (action == "reset") {
+            box.debug_reset();
+            rt.debuggers.clear();
+        } else {
+            return fail(errc::kInvalidArgument, std::format("'{}' is not a debug action", m.action), "debug");
+        }
+        return out;
     }
-    return out;
 }
 
 void engine::abandon_blob(pump_session& sess, const inbound& in) {

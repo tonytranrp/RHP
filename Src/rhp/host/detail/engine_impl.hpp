@@ -31,6 +31,7 @@
 
 #include <rhp/core/convert.hpp>
 #include <rhp/core/error.hpp>
+#include <rhp/core/hardening.hpp>
 #include <rhp/core/ids.hpp>
 #include <rhp/core/log.hpp>
 #include <rhp/core/result.hpp>
@@ -239,6 +240,19 @@ public:
 
 private:
     [[nodiscard]] static event::time_point now() { return std::chrono::system_clock::now(); }
+
+    // ---- hardening (host.cpp) --------------------------------------------------------------------------
+
+    // Why the host can't start at its hardening level: unsigned_scripts or an insecure_lan endpoint
+    // above kDev. Nothing when it can.
+    [[nodiscard]] std::optional<error> refusal() const;
+
+    // An identity's limits, by its role: observe identities have their own (host_options::
+    // observe_limits); both are capped for the hardening level (hardened()). Sandboxes, admit() and
+    // start_queued() all read these.
+    [[nodiscard]] const Rhp::limits& limits_for(role granted) const noexcept {
+        return granted == role::kObserve ? *setup_.options.observe_limits : setup_.limits;
+    }
 
     // Runs `fn` on the I/O thread and returns its result; under zero_threads the caller runs the
     // context itself. A context that stopped answering reports kTimeout instead of blocking forever.

@@ -12,6 +12,7 @@
 #include <string_view>
 
 #include <rhp/core/error.hpp>
+#include <rhp/core/hardening.hpp>
 #include <rhp/core/limits.hpp>
 #include <rhp/core/log.hpp>
 #include <rhp/core/result.hpp>
@@ -56,6 +57,13 @@ struct host_options {
     // How long a received frame's ack waits for an outgoing frame to carry it (session::options);
     // 0 acks every read at once.
     std::uint32_t ack_delay_ms = 5;
+    // Raises the host's hardening above its config's (Rhp::hardening; never lowers it): the host
+    // runs at the strictest of RHP_HARDENING, config<>::hardening and this. A host whose signer is
+    // unsigned_scripts doesn't start above kDev (kForbidden from port()).
+    Rhp::hardening hardening = Rhp::hardening::kDev;
+    // Observe identities' limits (empty: the config's). From hardening kLan up they are capped by
+    // Rhp::kObserveCaps; in kProduction every identity's are capped by Rhp::kProductionCaps too.
+    std::optional<Rhp::limits> observe_limits{};
 };
 
 // A whole blob as a sink sees it (host.on_blob). Views are valid during the sink call only.
@@ -94,6 +102,9 @@ struct setup {
     // The authenticator's HTTP proof check; empty when it isn't a security::http_authenticator.
     std::function<result<security::http_grant>(const security::http_proof&, std::chrono::system_clock::time_point)> http_auth;
     net::discovery_ops discovery;
+    // The strictest of the config's hardening and host_options::hardening (the engine adds the build's).
+    Rhp::hardening hardening = kBuildHardening;
+    bool unsigned_scripts = false; // the config's signer is security::unsigned_scripts
 };
 
 using installer = result<void> (*)(script::sandbox& box);

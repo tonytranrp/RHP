@@ -11,14 +11,14 @@ struct transport {
 };
 
 using metered_cfg = Rhp::config<>::transport<metered::transport>   // concept-checked on this line
-    ::signer<Rhp::security::unsigned_scripts>::logger<Rhp::core::null_logger>;
+    ::logger<Rhp::core::null_logger>;
 ```
 
 RHP layers the session on top of any ordered byte stream: framing, CRC32C, the PSK handshake, the per-frame MAC, seq / ack / nack and heartbeats. A transport only moves bytes.
 
 Its link derives from `Rhp::net::link_decorator`, which forwards `loopback()`, `encrypted()` and `channel_binding()` to the wrapped link. Rules for a link: call the handler only on the `io_context`'s thread (use `io_context::post` from elsewhere), report `on_closed` once and never after the link is destroyed, and write queued bytes before closing.
 
-The example turns script signing off by type (`signer<Rhp::security::unsigned_scripts>`) to stay about transports. Don't do that in a real host.
+The example signs its scripts with a key it makes for the run (`ed25519_secret_key::generate()`, trusted by the host), as every config above `hardening::kDev` must.
 
 ## Build and run
 

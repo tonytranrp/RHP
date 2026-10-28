@@ -49,6 +49,15 @@ void engine::start_gateway() {
         gateway_error_ = make_error(errc::kDisabled, "the authenticator can't check HTTP proofs (Rhp::security::http_authenticator)", "host.gateway");
         return;
     }
+    if (ep.insecure_lan && setup_.hardening != hardening::kDev) {
+        gateway_error_ = make_error(errc::kForbidden, std::format("{}: insecure_lan is refused at hardening {}; use TLS", ep, setup_.hardening), "host.gateway");
+        return;
+    }
+    if (setup_.hardening == hardening::kProduction && !setup_.options.http_require_binding) {
+        gateway_error_ =
+            make_error(errc::kForbidden, "at hardening production the HTTP gateway needs http_require_binding (proofs bound to the TLS channel)", "host.gateway");
+        return;
+    }
     auto policy = session::channel_policy::make(ep, true, setup_.tls, setup_.options.tls);
     if (!policy) {
         gateway_error_ = std::move(policy).error();

@@ -5,8 +5,28 @@
 
 namespace Rhp::host_detail {
 
+namespace {
+
+// The setup at its effective hardening level (decisions AL1 and AL4): the build's level added (a
+// setup can't go below it), the limits capped, observe identities' own limits settled.
+[[nodiscard]] setup hardened(setup s) {
+    s.hardening = strictest(kBuildHardening, s.hardening);
+    Rhp::limits observe = s.options.observe_limits.value_or(s.limits);
+    if (s.hardening == hardening::kProduction) {
+        s.limits = capped(s.limits, kProductionCaps);
+        observe = capped(observe, kProductionCaps);
+    }
+    if (s.hardening != hardening::kDev) {
+        observe = capped(observe, kObserveCaps);
+    }
+    s.options.observe_limits = observe;
+    return s;
+}
+
+} // namespace
+
 engine::engine(setup s)
-    : setup_(std::move(s)),
+    : setup_(hardened(std::move(s))),
       inbox_(setup_.options.inbox_capacity),
       outbox_(setup_.options.inbox_capacity) {
     sample_clock();
@@ -17,6 +37,11 @@ engine::engine(setup s)
     session_options_.resumable = setup_.limits.resume_ms != 0;
     if (const auto seed = session::random_seed()) {
         rng_.seed(*seed);
+    }
+    if (auto refused = refusal()) {
+        listen_error_ = std::move(*refused);
+        log(log_level::kError, "host refused to start at hardening {}: {}", setup_.hardening, *listen_error_);
+        return;
     }
     auto policy = session::channel_policy::make(setup_.ep, setup_.transport.network, setup_.tls, setup_.options.tls);
     if (!policy) {
@@ -61,6 +86,19 @@ engine::~engine() {
         teardown(id);
     }
     identities_.clear();
+}
+
+std::optional<error> engine::refusal() const {
+    const hardening level = setup_.hardening;
+    if (setup_.unsigned_scripts && level != hardening::kDev) {
+        return make_error(errc::kForbidden,
+                          std::format("signer<unsigned_scripts> runs only at hardening dev, and this host is at {} (RHP_HARDENING, config<>::hardening, host_options::hardening)", level),
+                          "host");
+    }
+    if (setup_.ep.insecure_lan && level != hardening::kDev) {
+        return make_error(errc::kForbidden, std::format("{}: insecure_lan is refused at hardening {}; use TLS", setup_.ep, level), "host");
+    }
+    return std::nullopt;
 }
 
 result<void> engine::listening() const {
@@ -156,6 +194,9 @@ result<void> engine::add_blob_sink(std::string_view name, blob_fn fn, role need)
 }
 
 result<void> engine::advertise(net::advertise_options options) {
+    if (setup_.hardening == hardening::kProduction) {
+        return fail(errc::kForbidden, "a host at hardening production doesn't advertise itself", "host.advertise");
+    }
     if (auto here = on_pump_thread("host.advertise"); !here) {
         return here;
     }

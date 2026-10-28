@@ -22,6 +22,7 @@
 #include <rhp/client/detail/engine.hpp>
 #include <rhp/core/convert.hpp>
 #include <rhp/core/error.hpp>
+#include <rhp/core/hardening.hpp>
 #include <rhp/core/ids.hpp>
 #include <rhp/core/listener_table.hpp>
 #include <rhp/core/result.hpp>
@@ -84,7 +85,9 @@ public:
         options_.ack_delay_ms = setup_.options.ack_delay_ms;
         options_.platform = std::string{platform::kOsName};
         options_.resumable = setup_.limits.resume_ms != 0;
-        if (auto policy = session::channel_policy::make(setup_.ep, setup_.transport.network, setup_.tls, setup_.options.tls)) {
+        if (const hardening level = strictest(kBuildHardening, setup_.hardening); setup_.ep.insecure_lan && level != hardening::kDev) {
+            policy_error_ = make_error(errc::kForbidden, std::format("{}: insecure_lan is refused at hardening {}; use TLS", setup_.ep, level), "client");
+        } else if (auto policy = session::channel_policy::make(setup_.ep, setup_.transport.network, setup_.tls, setup_.options.tls)) {
             policy_ = std::move(*policy);
         } else {
             policy_error_ = std::move(policy).error();

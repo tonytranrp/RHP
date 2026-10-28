@@ -249,6 +249,7 @@ private:
         s.member.codec = wire::codec_ops_for<typename Cfg::codec_t>;
         s.member.begin_handshake = [identity = std::move(identity)] { return identity.begin(); };
         s.member.limits = Cfg::limits_v;
+        s.member.hardening = Cfg::hardening_v;
         s.member.io_thread = Cfg::io_t::kOwnsThread;
         s.member.options = std::move(options.client);
         if (signing) {
