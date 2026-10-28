@@ -66,11 +66,13 @@ struct host_options {
     // Rhp::kObserveCaps; in kProduction every identity's are capped by Rhp::kProductionCaps too.
     std::optional<Rhp::limits> observe_limits{};
     // A dev session (decision AL7) for this app name; empty = none. In a dev build at hardening
-    // kDev, a host listening on a loopback address or local IPC adds an admin identity of its own
+    // kDev, a host listening on a loopback address or local IPC (and an HTTP gateway, if any, on a
+    // loopback address: it accepts the same identities) adds an admin identity of its own
     // (a fresh PSK and Ed25519 signer) and writes how to reach it to
     // security::dev_session_path(app), owner-only, for `rhp-cli connect --dev app`; the file goes
     // when the host does. Needs config<>::auth<psk_keyring> and signer<ed25519> (the defaults).
-    // Anywhere else the host doesn't start (kForbidden from port()).
+    // Anywhere else the host doesn't start (kForbidden from port()); nor, gateway included, when the
+    // file can't be written.
     std::string dev_session{};
 };
 
