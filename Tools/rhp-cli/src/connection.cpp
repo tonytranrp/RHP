@@ -1,5 +1,6 @@
 #include "connection.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -22,7 +23,9 @@
 #include <rhp/platform/files.hpp>
 #include <rhp/platform/process.hpp>
 #include <rhp/rhp.hpp>
+#include <rhp/security/certified.hpp>
 #include <rhp/security/dev_session.hpp>
+#include <rhp/security/operator_cert.hpp>
 
 namespace rhp_cli {
 
@@ -62,6 +65,10 @@ void add_connection_options(CLI::App& cmd, connection_options& o, bool positiona
     cmd.add_option("--server-name", o.server_name, "the name the host's certificate must carry (with --ca)");
     cmd.add_option("--cert", o.cert, "with --listen: this side's certificate chain (PEM); default: ephemeral self-signed");
     cmd.add_option("--key", o.key, "with --listen: the certificate's private key (PEM)");
+    cmd.add_option("--cert-file", o.cert_file, "sign scripts with this operator certificate (.rhpcert, rhp-cli cert issue) and the identity's signing key");
+    cmd.add_option("--claim-app", o.claim_app, "with --cert-file: the app the scripts are for (default: any)");
+    cmd.add_option("--claim-env", o.claim_env, "with --cert-file: the host environment they are for, dev or prod (default: any)");
+    cmd.add_option("--claim-audience", o.claim_audience, "with --cert-file: the host id they are for (host_options::host_id; default: any)");
     cmd.add_flag("--listen", o.listen, "reverse mode: listen at the address and wait for the host to dial in");
     cmd.add_option("--timeout", o.timeout_ms, "ms to wait for the session (default 10000, 600000 with --listen)");
 }
@@ -86,11 +93,11 @@ void print_warnings(const Rhp::security::identity_file& id, terminal* out) {
 
 // Makes the client, connects and says to whom.
 template <class Cfg>
-std::optional<connection<Cfg>> start(const Rhp::endpoint& ep, const Rhp::security::identity_file& id, Rhp::client_options options, std::unique_ptr<terminal> out) {
+std::optional<connection<Cfg>> start(const Rhp::endpoint& ep, const Rhp::security::identity_file& id, Rhp::client_options options, std::unique_ptr<terminal> out,
+                                     std::optional<typename Cfg::signing_key_t> signer) {
     terminal* sink = out.get();
     options.on_output = [sink](std::uint64_t, std::string_view line) { (*sink)(style::kOutput, line); };
     options.on_emit = [sink](std::uint64_t, Rhp::module_id, const Rhp::value& v) { (*sink)(style::kOutput, "emit " + format_value(v)); };
-    auto signer = id.signer_key();
     auto c = signer ? std::make_unique<Rhp::client<Cfg>>(ep, id.credential(), std::move(*signer), options) : std::make_unique<Rhp::client<Cfg>>(ep, id.credential(), options);
     if (!signer) {
         (*out)(style::kInfo, "this identity has no signing_key: only observe hosts will run its scripts");
@@ -142,7 +149,26 @@ std::optional<connected> open_connection(const connection_options& o, replxx::Re
         *field = std::move(*pem);
     }
     options.tls.server_name = o.server_name;
-    return start<cli_cfg>(*ep, *id, std::move(options), std::move(out));
+    std::optional<cli_cfg::signing_key_t> signer;
+    if (!o.cert_file.empty()) {
+        auto cert = Rhp::security::load_operator_cert(o.cert_file);
+        if (!cert) {
+            (*out)(style::kError, std::format("{}", cert.error()));
+            return std::nullopt;
+        }
+        if (!id->signing || !std::ranges::equal(id->signing->public_key().bytes(), cert->fields.pub)) {
+            (*out)(style::kError, std::format("certificate {} names another key than {}'s signing_key", cert->id(), o.identity));
+            return std::nullopt;
+        }
+        options.app = o.claim_app;
+        options.env = o.claim_env;
+        options.audience = o.claim_audience;
+        (*out)(style::kInfo, std::format("signing as {} (max role {})", cert->id(), cert->fields.max_role));
+        signer.emplace(Rhp::security::certified::key{*id->signing, std::move(*cert)});
+    } else if (auto key = id->signer_key()) {
+        signer.emplace(std::move(*key));
+    }
+    return start<cli_cfg>(*ep, *id, std::move(options), std::move(out), std::move(signer));
 }
 
 std::optional<dev_connected> open_dev_connection(std::string_view app, int timeout_ms, replxx::Replxx* rx) {
@@ -164,10 +190,12 @@ std::optional<dev_connected> open_dev_connection(std::string_view app, int timeo
     Rhp::client_options options;
     options.connect_timeout = std::chrono::milliseconds{timeout_ms > 0 ? timeout_ms : 10'000};
     if (target->ipc) {
-        auto c = start<cli_ipc_cfg>(target->ep, session->identity, std::move(options), std::move(out));
+        auto c = start<cli_ipc_cfg>(target->ep, session->identity, std::move(options), std::move(out), session->identity.signer_key());
         return c ? std::optional<dev_connected>{std::move(*c)} : std::nullopt;
     }
-    auto c = start<cli_cfg>(target->ep, session->identity, std::move(options), std::move(out));
+    auto key = session->identity.signer_key();
+    auto c = start<cli_cfg>(target->ep, session->identity, std::move(options), std::move(out),
+                            key ? std::optional<cli_cfg::signing_key_t>{std::move(*key)} : std::nullopt);
     return c ? std::optional<dev_connected>{std::move(*c)} : std::nullopt;
 }
 

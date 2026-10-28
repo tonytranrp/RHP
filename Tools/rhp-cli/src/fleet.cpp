@@ -110,7 +110,7 @@ int run_fleet(const broadcast_options& o) {
         return 1;
     }
     options->timeout = std::chrono::milliseconds{o.timeout_ms};
-    Rhp::fleet<cli_cfg> group{s->id.credential(), std::move(s->key), std::move(*options)};
+    Rhp::fleet<cli_cfg> group{s->id.credential(), cli_cfg::signing_key_t{std::move(s->key)}, std::move(*options)};
     auto discovered = group.discover(o.discovery.to_browse());
     if (!discovered) {
         std::println(stderr, "{}", discovered.error());
@@ -159,7 +159,7 @@ int run_rollout(const rollout_options& o) {
     if (!options) {
         return 1;
     }
-    auto group = signer ? std::make_unique<Rhp::fleet<cli_cfg>>(id->credential(), std::move(*signer), std::move(*options))
+    auto group = signer ? std::make_unique<Rhp::fleet<cli_cfg>>(id->credential(), cli_cfg::signing_key_t{std::move(*signer)}, std::move(*options))
                         : std::make_unique<Rhp::fleet<cli_cfg>>(id->credential(), std::move(*options));
     if (o.hosts.empty()) {
         if (auto found = group->discover(o.discovery.to_browse()); !found) {

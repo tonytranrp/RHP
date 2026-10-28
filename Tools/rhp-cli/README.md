@@ -24,6 +24,16 @@ add to the host's signers file:   dev <public key>
 | `pubkey -i id [--role r]` | `rhp-cli pubkey -i dev.rhpid --role admin` (the bare keyring line, with the PSK, and the signers line; role default `patch`) |
 | `sign <file> -i id` | `rhp-cli sign patch.lua -i dev.rhpid` (prints `signer base64-signature` for other tools) |
 
+### Operator certificates
+
+Hosts with `signer<Rhp::security::certified>` trust an offline operator CA instead of each operator (decision AL11). The CA signs short-lived certificates for operators' keys; scripts are signed with the operator's key plus claims (expiry, app, environment, host id, identity, a nonce) so a signed script can't be replayed elsewhere or later.
+
+| Subcommand | Example |
+|---|---|
+| `ca init <name> [-o file] [--env dev\|prod] [--force]` | `rhp-cli ca init ops --env prod` (writes `ops.rhpca` owner-only, prints the host's trusted-CA line `name base64-key [env=...]`) |
+| `cert issue --ca file --principal p --key k [--hours N] [--max-role r] [--app a]... [--env e]... [--scope s]... [--serial n] [-o file]` | `rhp-cli cert issue --ca ops.rhpca --principal alice --key alice.rhpid --hours 8 --max-role patch --app game` (`--key`: an identity file or a `[name] base64-public-key` line; only the public half is used; a dev CA's certificates are tagged `env=dev`) |
+| `cert show <file> [--trusted cas]` | `rhp-cli cert show alice.rhpcert --trusted rhp_operator_cas.txt` (prints the fields; with `--trusted`, checks it now) |
+
 ## Connection options
 
 Every network subcommand takes `-c/--connect host:port` (`connect` takes the address as its first argument) and `-i/--identity file` (or `RHP_IDENTITY`), plus:
@@ -36,6 +46,7 @@ Every network subcommand takes `-c/--connect host:port` (`connect` takes the add
 | `--ca pem` / `--server-name n` | check the host's certificate (by default it isn't: the key handshake is bound to the TLS channel instead) |
 | `--cert pem` / `--key pem` | with `--listen`: this side's certificate (default: ephemeral self-signed) |
 | `--insecure-lan` | plaintext to a non-loopback address (trusted networks only) |
+| `--cert-file rhpcert` | sign scripts with this operator certificate and the identity's signing key (the key the certificate names); `--claim-app`, `--claim-env`, `--claim-audience` add claims (default: any) |
 
 A dropped connection is redialed and the session resumed on its own. When rhp-cli exits its session ends, and the host reverts what it did except pinned modules. Exit status: 0 when every command succeeded, 1 otherwise, 2 for usage errors.
 
@@ -143,6 +154,8 @@ rhp-cli test -s scripts tests/combat_spec.lua --reporter junit:report.xml
 | `src/connection.hpp/.cpp` | the terminal, the connection options network subcommands share, `open_connection`, `open_dev_connection` (TCP or local IPC), `load_identity` (prints its warnings), `load_signer` |
 | `src/dev.hpp/.cpp` | `connect --dev`: which dev session file (`pick_dev_session`) and where it may point (`dev_endpoint`) |
 | `src/keys.cpp` | `keygen`, `pubkey`, `sign` |
+| `src/certs.cpp` | `ca init`, `cert issue`, `cert show` |
+| `src/cli_signer.hpp` | `rhp_cli::cli_signer`: rhp-cli's signer policy, an identity's Ed25519 key or a certified key behind one type |
 | `src/fleet.cpp` | `discover`, `fleet`, `rollout` |
 | `src/releases.cpp` | `release ...`, `revoke ...` |
 | `src/test_command.cpp` | `test` |

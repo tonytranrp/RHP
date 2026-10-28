@@ -55,6 +55,12 @@ struct connection_options {
     std::string server_name;
     std::string cert;
     std::string key;
+    // Sign with this operator certificate (.rhpcert) and the identity's signing key, which it must name;
+    // the claims name the identity and, when given, the host's app, environment and id.
+    std::string cert_file;
+    std::string claim_app;
+    std::string claim_env;
+    std::string claim_audience;
     int timeout_ms = 0; // 0: 10 s when dialing, 10 min when listening
 };
 

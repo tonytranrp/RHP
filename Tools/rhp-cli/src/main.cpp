@@ -410,6 +410,8 @@ int main(int argc, char** argv) {
     rhp_cli::add_keygen(app, commands);
     rhp_cli::add_pubkey(app, commands);
     rhp_cli::add_sign(app, commands);
+    rhp_cli::add_ca(app, commands);
+    rhp_cli::add_cert(app, commands);
     rhp_cli::add_discover(app, commands);
     rhp_cli::add_fleet(app, commands);
     add_connect(app, commands);

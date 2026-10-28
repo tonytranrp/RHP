@@ -23,6 +23,7 @@
 #include <utility>
 #include <vector>
 
+#include "cli_signer.hpp"
 #include "text.hpp"
 
 #include <rhp/client/client.hpp>
@@ -999,7 +1000,8 @@ Ctrl+C cancels a running script.)");
     std::jthread watcher_;
 };
 
-// rhp-cli's own configuration (its shell is instantiated in main.cpp).
-using cli_cfg = Rhp::config<>::logger<Rhp::core::null_logger>;
+// rhp-cli's own configuration (its shell is instantiated in main.cpp): scripts are signed with an
+// identity's key or an operator certificate's (cli_signer).
+using cli_cfg = Rhp::config<>::logger<Rhp::core::null_logger>::signer<cli_signer>;
 
 } // namespace rhp_cli

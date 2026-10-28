@@ -28,6 +28,10 @@ void add_keygen(CLI::App& app, command_list& out);
 void add_pubkey(CLI::App& app, command_list& out);
 void add_sign(CLI::App& app, command_list& out);
 
+// certs.cpp: operator CAs and certificates (no network).
+void add_ca(CLI::App& app, command_list& out);
+void add_cert(CLI::App& app, command_list& out);
+
 // fleet.cpp: DNS-SD discovery, fleet broadcasts and rollouts.
 void add_discover(CLI::App& app, command_list& out);
 void add_fleet(CLI::App& app, command_list& out);

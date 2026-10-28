@@ -34,17 +34,20 @@
 #include <rhp/core/log.hpp>
 #include <rhp/core/role.hpp>
 #include <rhp/core/value.hpp>
+#include <rhp/event/events.hpp>
 #include <rhp/host/host.hpp>
 #include <rhp/net/io_context.hpp>
 #include <rhp/net/loopback/loopback.hpp>
 #include <rhp/net/tcp/tcp.hpp>
 #include <rhp/platform/random.hpp>
 #include <rhp/script/lib.hpp>
+#include <rhp/security/certified.hpp>
 #include <rhp/security/dev_session.hpp>
 #include <rhp/security/ed25519.hpp>
 #include <rhp/security/identity_file.hpp>
 #include <rhp/security/key.hpp>
 #include <rhp/security/keyring.hpp>
+#include <rhp/security/operator_cert.hpp>
 #include <rhp/security/psk_keyring.hpp>
 #include <rhp/utils/scope_guard.hpp>
 #include <rhp_test/eventually.hpp>
@@ -704,6 +707,64 @@ TEST_CASE("rhp-cli: keygen keeps the PSK in the file and makes patch identities"
     CHECK(dir.read("shown_err.txt").find("warning: an admin identity") != std::string::npos);
 }
 
+TEST_CASE("rhp-cli: ca init and cert issue make what a certified host takes", "[cli][process][certified]") {
+    scratch_dir dir;
+    const auto id = dir.path / "alice.rhpid";
+    REQUIRE(run(std::format("{} keygen alice --out {} > {}", kCli, q(id), q(dir.path / "keygen.txt"))) == 0);
+    REQUIRE(run(std::format("{} ca init ops --env prod --out {} > {}", kCli, q(dir.path / "ops.rhpca"), q(dir.path / "ca.txt"))) == 0);
+    const std::string ca_out = dir.read("ca.txt");
+    constexpr std::string_view kLine = "trusted CA file:   ";
+    const auto at_line = ca_out.find(kLine);
+    REQUIRE(at_line != std::string::npos);
+    std::string trusted = ca_out.substr(at_line + kLine.size(), ca_out.find('\n', at_line) - at_line - kLine.size());
+    if (trusted.ends_with('\r')) {
+        trusted.pop_back();
+    }
+    CHECK(trusted.ends_with("env=prod"));
+    dir.write("cas.txt", trusted + "\n");
+    const auto cert = dir.path / "alice.rhpcert";
+    REQUIRE(run(std::format("{} cert issue --ca {} --principal alice --key {} --hours 1 --max-role patch --app game --serial 5 -o {} > {}", kCli,
+                            q(dir.path / "ops.rhpca"), q(id), q(cert), q(dir.path / "issue.txt"))) == 0);
+    CHECK(dir.read("issue.txt").find("alice#5") != std::string::npos);
+    REQUIRE(run(std::format("{} cert show {} --trusted {} > {}", kCli, q(cert), q(dir.path / "cas.txt"), q(dir.path / "show.txt"))) == 0);
+    CHECK(dir.read("show.txt").find("valid now, signed by CA 'ops'") != std::string::npos);
+    CHECK(dir.read("show.txt").find("max role     patch") != std::string::npos);
+
+    // A host with signer<certified> that trusts the CA.
+    using cert_host_cfg = Rhp::config<>::logger<Rhp::core::null_logger>::signer<Rhp::security::certified>;
+    const auto identity = Rhp::security::identity_file::load(id.string());
+    REQUIRE(identity);
+    auto cas = Rhp::security::trusted_cas::from_file((dir.path / "cas.txt").string());
+    REQUIRE(cas);
+    Rhp::host<cert_host_cfg> host{Rhp::endpoint::listen("127.0.0.1", 0), Rhp::security::keyring{{"alice", identity->psk, Rhp::role::kPatch}},
+                                  Rhp::security::certified::trust{std::move(*cas)}, {.app = "game"}};
+    std::string signer;
+    std::mutex signer_mutex;
+    auto audit = host.on<Rhp::event::script_executed>([&](const Rhp::event::script_executed& e) {
+        const std::scoped_lock lock{signer_mutex};
+        signer = e.signer;
+    });
+    std::jthread pump{[&](std::stop_token stop) {
+        while (!stop.stop_requested()) {
+            host.pump();
+            std::this_thread::sleep_for(1ms);
+        }
+    }};
+    const std::string who = std::format("-c 127.0.0.1:{} -i {}", *host.port(), q(id));
+    CHECK(run(std::format("{} exec \"return 6 * 7\" {} --cert-file {} --claim-app game > {} 2>&1", kCli, who, q(cert), q(dir.path / "exec.txt"))) == 0);
+    CHECK(dir.read("exec.txt").find("42") != std::string::npos);
+    CHECK(dir.read("exec.txt").find("signing as alice#5") != std::string::npos);
+    {
+        const std::scoped_lock lock{signer_mutex};
+        CHECK(signer == "alice#5");
+    }
+    // Claims for another app, and a plain Ed25519 signature, are refused.
+    CHECK(run(std::format("{} exec \"return 1\" {} --cert-file {} --claim-app editor > {} 2>&1", kCli, who, q(cert), q(dir.path / "editor.txt"))) == 1);
+    CHECK(dir.read("editor.txt").find("out_of_scope") != std::string::npos);
+    CHECK(run(std::format("{} exec \"return 1\" {} > {} 2>&1", kCli, who, q(dir.path / "plain.txt"))) == 1);
+    CHECK(dir.read("plain.txt").find("bad_signature") != std::string::npos);
+    pump.request_stop();
+}
 TEST_CASE("rhp-cli: connect --dev reads a dev session file", "[cli][process]") {
     scratch_dir dir;
     const auto id = dir.path / "dev.rhpid";
