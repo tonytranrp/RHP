@@ -19,7 +19,7 @@ rhp-cli keygen dev --role patch
 rhp-cli pubkey -i dev.rhpid --role patch
 ```
 
-`keygen` writes `dev.rhpid` and shows the keyring line with `<psk from dev.rhpid>` in place of the key; `pubkey` prints both lines whole. Put the first into `keys.txt` and the second into `signers.pub` (keep `keys.txt` readable by you alone: the server prints a `warning:` otherwise), then:
+`keygen` writes `dev.rhpid` (the connection identity) and `dev.rhpsign` (the signing key, found beside it) and shows the keyring line with `<psk from dev.rhpid>` in place of the key; `pubkey` prints both lines whole. Put the first into `keys.txt` and the second into `signers.pub` (keep `keys.txt` readable by you alone: the server prints a `warning:` otherwise), then:
 
 ```bash
 headless_server --port 7777 --keys keys.txt --signers signers.pub --audit audit.log --blobs incoming

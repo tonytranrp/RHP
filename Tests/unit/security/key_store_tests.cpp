@@ -33,37 +33,37 @@ namespace fs = std::filesystem;
 namespace key_store_fixtures {
 
 // Cheap Argon2i for tests (the defaults take about a second).
-constexpr passphrase_kdf kQuick{.memory_kib = 64, .passes = 1};
+constexpr passphrase_kdf kCheapKdf{.memory_kib = 64, .passes = 1};
 
-struct temp_folder {
+struct store_folder {
     fs::path path;
 
-    temp_folder() {
+    store_folder() {
         std::string suffix;
         for (const std::byte b : *Rhp::platform::random_array<6>()) {
             suffix += std::format("{:02x}", std::to_integer<unsigned>(b));
         }
         path = fs::temp_directory_path() / ("rhp_key_store_" + suffix);
     }
-    ~temp_folder() {
+    ~store_folder() {
         std::error_code ec;
         fs::remove_all(path, ec);
     }
-    temp_folder(const temp_folder&) = delete;
-    temp_folder& operator=(const temp_folder&) = delete;
+    store_folder(const store_folder&) = delete;
+    store_folder& operator=(const store_folder&) = delete;
 };
 
-std::string read(const fs::path& path) {
+std::string read_text(const fs::path& path) {
     std::ifstream in{path, std::ios::binary};
     return {std::istreambuf_iterator<char>{in}, std::istreambuf_iterator<char>{}};
 }
 
-void write(const fs::path& path, std::string_view text) {
+void write_text(const fs::path& path, std::string_view text) {
     std::ofstream out{path, std::ios::binary | std::ios::trunc};
     out << text;
 }
 
-bool same(const key& a, const key& b) {
+bool same_key(const key& a, const key& b) {
     return std::ranges::equal(a.bytes(), b.bytes());
 }
 
@@ -73,7 +73,7 @@ using namespace key_store_fixtures;
 
 TEST_CASE("passphrase sealing round-trips and refuses a wrong passphrase", "[security][key_store]") {
     const key secret = *key::generate();
-    auto sealed = seal_with_passphrase(secret.bytes(), "correct horse", kQuick);
+    auto sealed = seal_with_passphrase(secret.bytes(), "correct horse", kCheapKdf);
     REQUIRE(sealed);
     CHECK(sealed->starts_with("argon2i:m=64,t=1:"));
     CHECK(is_passphrase_sealed(*sealed));
@@ -81,10 +81,10 @@ TEST_CASE("passphrase sealing round-trips and refuses a wrong passphrase", "[sec
     CHECK(sealed->find(secret.to_base64()) == std::string::npos);
     auto opened = open_with_passphrase(*sealed, "correct horse");
     REQUIRE(opened);
-    CHECK(same(*opened, secret));
+    CHECK(same_key(*opened, secret));
 
     // A fresh salt and nonce every time.
-    CHECK(*seal_with_passphrase(secret.bytes(), "correct horse", kQuick) != *sealed);
+    CHECK(*seal_with_passphrase(secret.bytes(), "correct horse", kCheapKdf) != *sealed);
 
     CHECK(open_with_passphrase(*sealed, "correct horse!").error().code == errc::kAuth);
     CHECK(open_with_passphrase(*sealed, "").error().code == errc::kAuth);
@@ -110,26 +110,26 @@ TEST_CASE("the default passphrase parameters are written into the sealed value",
     auto sealed = seal_with_passphrase(secret.bytes(), "pw");
     REQUIRE(sealed);
     CHECK(sealed->starts_with("argon2i:m=65536,t=3:"));
-    CHECK(same(*open_with_passphrase(*sealed, "pw"), secret));
+    CHECK(same_key(*open_with_passphrase(*sealed, "pw"), secret));
 }
 
 TEST_CASE("a file key store keeps owner-only files", "[security][key_store]") {
-    temp_folder dir;
+    store_folder dir;
     file_key_store store{dir.path};
     const key secret = *key::generate();
     REQUIRE(store.store("dev.signing", secret));
     const fs::path file = store.path_of("dev.signing");
     CHECK(file == dir.path / "dev.signing.rhpkey");
     CHECK_FALSE(Rhp::platform::readable_by_others(file));
-    CHECK(read(file).find("secret = \"" + secret.to_base64() + "\"") != std::string::npos);
+    CHECK(read_text(file).find("secret = \"" + secret.to_base64() + "\"") != std::string::npos);
     auto loaded = store.load("dev.signing");
     REQUIRE(loaded);
-    CHECK(same(*loaded, secret));
+    CHECK(same_key(*loaded, secret));
 
     // Replacing, removing, and names that aren't names.
     const key other = *key::generate();
     REQUIRE(store.store("dev.signing", other));
-    CHECK(same(*store.load("dev.signing"), other));
+    CHECK(same_key(*store.load("dev.signing"), other));
     REQUIRE(store.remove("dev.signing"));
     CHECK(store.load("dev.signing").error().code == errc::kNotFound);
     CHECK(store.remove("dev.signing").error().code == errc::kNotFound);
@@ -139,31 +139,31 @@ TEST_CASE("a file key store keeps owner-only files", "[security][key_store]") {
     }
     CHECK(store.store(std::string(65, 'k'), secret).error().code == errc::kInvalidArgument);
 
-    write(dir.path / "broken.rhpkey", "nothing here\n");
+    write_text(dir.path / "broken.rhpkey", "nothing here\n");
     CHECK(store.load("broken").error().code == errc::kInvalidArgument);
 }
 
 TEST_CASE("a file key store seals with its passphrase", "[security][key_store]") {
-    temp_folder dir;
-    file_key_store store{dir.path, {.passphrase = "hunter22", .kdf = kQuick}};
+    store_folder dir;
+    file_key_store store{dir.path, {.passphrase = "hunter22", .kdf = kCheapKdf}};
     const key secret = *key::generate();
     REQUIRE(store.store("ci", secret));
-    const std::string text = read(store.path_of("ci"));
+    const std::string text = read_text(store.path_of("ci"));
     CHECK(text.find("secret = \"argon2i:m=64,t=1:") != std::string::npos);
     CHECK(text.find(secret.to_base64()) == std::string::npos);
-    CHECK(same(*store.load("ci"), secret));
+    CHECK(same_key(*store.load("ci"), secret));
 
     // Without the passphrase, or with another one: kAuth.
     CHECK(file_key_store{dir.path}.load("ci").error().code == errc::kAuth);
-    CHECK(file_key_store(dir.path, {.passphrase = "hunter2", .kdf = kQuick}).load("ci").error().code == errc::kAuth);
+    CHECK(file_key_store(dir.path, {.passphrase = "hunter2", .kdf = kCheapKdf}).load("ci").error().code == errc::kAuth);
 
     // A store with a passphrase still reads plain files.
     REQUIRE(file_key_store{dir.path}.store("plain", secret));
-    CHECK(same(*store.load("plain"), secret));
+    CHECK(same_key(*store.load("plain"), secret));
 }
 
 TEST_CASE("a file key store can wrap through the app", "[security][key_store]") {
-    temp_folder dir;
+    store_folder dir;
     int wraps = 0;
     int unwraps = 0;
     // Stands in for an Android Keystore key: anything that turns bytes into other bytes and back.
@@ -184,8 +184,8 @@ TEST_CASE("a file key store can wrap through the app", "[security][key_store]") 
                                                 }}};
     const key secret = *key::generate();
     REQUIRE(store.store("app", secret));
-    CHECK(read(store.path_of("app")).find("secret = \"wrapped:") != std::string::npos);
-    CHECK(same(*store.load("app"), secret));
+    CHECK(read_text(store.path_of("app")).find("secret = \"wrapped:") != std::string::npos);
+    CHECK(same_key(*store.load("app"), secret));
     CHECK(wraps == 1);
     CHECK(unwraps == 1);
     // A store without the wrapping can't read it.
@@ -193,7 +193,7 @@ TEST_CASE("a file key store can wrap through the app", "[security][key_store]") 
 }
 
 TEST_CASE("a DPAPI key store opens only for this user", "[security][key_store]") {
-    temp_folder dir;
+    store_folder dir;
     dpapi_key_store store{dir.path};
     const key secret = *key::generate();
     auto stored = store.store("dev", secret);
@@ -202,16 +202,16 @@ TEST_CASE("a DPAPI key store opens only for this user", "[security][key_store]")
         return;
     }
     REQUIRE(stored);
-    const std::string text = read(store.path_of("dev"));
+    const std::string text = read_text(store.path_of("dev"));
     CHECK(text.find("secret = \"wrapped:") != std::string::npos);
     CHECK(text.find(secret.to_base64()) == std::string::npos);
-    CHECK(same(*store.load("dev"), secret));
+    CHECK(same_key(*store.load("dev"), secret));
 
     // A changed blob is kAuth (DPAPI checks its own MAC).
     const auto start = text.find("wrapped:") + 8 + 40;
     std::string changed = text;
     changed[start] = changed[start] == 'A' ? 'B' : 'A';
-    write(store.path_of("dev"), changed);
+    write_text(store.path_of("dev"), changed);
     CHECK(store.load("dev").error().code == errc::kAuth);
 }
 
@@ -233,7 +233,7 @@ TEST_CASE("a callback key store uses the app's functions", "[security][key_store
     }};
     const key secret = *key::generate();
     REQUIRE(store.store("phone", secret));
-    CHECK(same(*store.load("phone"), secret));
+    CHECK(same_key(*store.load("phone"), secret));
     CHECK(store.load("other").error().code == errc::kNotFound);
     CHECK(store.remove("phone").error().code == errc::kDisabled);
     CHECK(store.store("../phone", secret).error().code == errc::kInvalidArgument);
@@ -252,8 +252,8 @@ TEST_CASE("the Keychain store is disabled off Apple targets", "[security][key_st
 }
 
 TEST_CASE("private keys go into stores and come back as key handles", "[security][key_store]") {
-    temp_folder dir;
-    file_key_store store{dir.path, {.passphrase = "pw", .kdf = kQuick}};
+    store_folder dir;
+    file_key_store store{dir.path, {.passphrase = "pw", .kdf = kCheapKdf}};
     const key seed = *generate_private_key(key_algorithm::kEd25519);
     REQUIRE(store_key(store, "device", key_algorithm::kEd25519, seed.bytes()));
     auto handle = load_key(store, "device");

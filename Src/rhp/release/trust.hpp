@@ -18,7 +18,7 @@ namespace Rhp::release {
 // `threshold` distinct keys must sign (default 1).
 //
 // Text form (rhp_release_signers.pub), one key per line, '#' starts a comment:
-//   name base64-public-key [pattern,pattern,...]     (no patterns: "*")
+//   name base64-public-key [pattern,pattern,...] [env=dev|prod]     (no patterns: "*")
 //
 // These keys are separate from the script signers (security::trusted_signers): a key that may
 // sign a one-off exec need not be able to ship a release, and the other way round.

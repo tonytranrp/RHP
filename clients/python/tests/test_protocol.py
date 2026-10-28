@@ -193,6 +193,19 @@ def test_identity_file_and_script_signature():
             Identity.parse(bad)
 
 
+def test_identity_reads_the_signing_key_file_beside_it(tmp_path):
+    import base64
+    psk, seed = base64.b64encode(PSK).decode(), base64.b64encode(SEED).decode()
+    (tmp_path / "dev.rhpid").write_text('name = "dev"\npsk = "%s"\nenv = "prod"\n' % psk)
+    assert Identity.load(tmp_path / "dev.rhpid").signing_key is None
+    (tmp_path / "dev.rhpsign").write_text('signer = "lead"\nsigning_key = "%s"\nenv = "prod"\n' % seed)
+    me = Identity.load(tmp_path / "dev.rhpid")
+    assert me.signing_key == SEED and me.signer == "lead" and me.psk == PSK
+    # A sealed one needs Argon2i: the identity still loads, without a signing key.
+    (tmp_path / "dev.rhpsign").write_text('signer = "lead"\nsigning_key = "argon2i:m=64,t=1:AAAA"\n')
+    assert Identity.load(tmp_path / "dev.rhpid").signing_key is None
+
+
 def test_profile_report_reads_truncated_replies():
     from rhp_client.client import ProfileReport
 

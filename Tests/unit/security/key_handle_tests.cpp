@@ -20,7 +20,7 @@ using namespace Rhp::security;
 
 namespace key_handle_fixtures {
 
-std::vector<std::byte> from_hex(std::string_view hex) {
+std::vector<std::byte> hex_bytes(std::string_view hex) {
     std::vector<std::byte> out;
     for (std::size_t i = 0; i + 1 < hex.size(); i += 2) {
         const auto nibble = [](char c) { return static_cast<unsigned>(c <= '9' ? c - '0' : (c | 0x20) - 'a' + 10); };
@@ -72,14 +72,14 @@ TEST_CASE("an Ed25519 key handle matches RFC 8032", "[security][key_handle]") {
          "92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69da085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00"},
     };
     for (const rfc_vector& v : vectors) {
-        auto handle = key_handle::from_private_key(key_algorithm::kEd25519, from_hex(v.seed));
+        auto handle = key_handle::from_private_key(key_algorithm::kEd25519, hex_bytes(v.seed));
         REQUIRE(handle);
         CHECK(handle->alg() == key_algorithm::kEd25519);
-        CHECK(std::vector<std::byte>(handle->public_key().begin(), handle->public_key().end()) == from_hex(v.pub));
-        const auto message = from_hex(v.message);
+        CHECK(std::vector<std::byte>(handle->public_key().begin(), handle->public_key().end()) == hex_bytes(v.pub));
+        const auto message = hex_bytes(v.message);
         auto sig = handle->sign(message);
         REQUIRE(sig);
-        CHECK(*sig == from_hex(v.sig));
+        CHECK(*sig == hex_bytes(v.sig));
         CHECK(verify(key_algorithm::kEd25519, handle->public_key(), message, *sig));
     }
 }
@@ -113,7 +113,7 @@ TEST_CASE("Ed25519 key handles round-trip and refuse what isn't theirs", "[secur
 }
 
 TEST_CASE("fingerprints are short and stable and name the algorithm", "[security][key_handle]") {
-    const auto handle = *key_handle::from_private_key(key_algorithm::kEd25519, from_hex("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60"));
+    const auto handle = *key_handle::from_private_key(key_algorithm::kEd25519, hex_bytes("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60"));
     const std::string fp = handle.fingerprint();
     CHECK(fp.size() == 22);
     CHECK(fp.find_first_of("+/=") == std::string::npos);
@@ -126,19 +126,19 @@ TEST_CASE("fingerprints are short and stable and name the algorithm", "[security
 
 TEST_CASE("a P-256 key handle matches RFC 6979 A.2.5", "[security][key_handle][p256]") {
     if (!has_p256()) {
-        CHECK(key_handle::from_private_key(key_algorithm::kP256, from_hex(kP256Private)).error().code == errc::kDisabled);
-        CHECK(verify(key_algorithm::kP256, from_hex(kP256Public), text_bytes("sample"), from_hex(kP256SampleSig)).error().code == errc::kDisabled);
+        CHECK(key_handle::from_private_key(key_algorithm::kP256, hex_bytes(kP256Private)).error().code == errc::kDisabled);
+        CHECK(verify(key_algorithm::kP256, hex_bytes(kP256Public), text_bytes("sample"), hex_bytes(kP256SampleSig)).error().code == errc::kDisabled);
         SKIP("no TLS backend: P-256 reports kDisabled");
     }
-    auto handle = key_handle::from_private_key(key_algorithm::kP256, from_hex(kP256Private));
+    auto handle = key_handle::from_private_key(key_algorithm::kP256, hex_bytes(kP256Private));
     REQUIRE(handle);
     CHECK(handle->alg() == key_algorithm::kP256);
-    CHECK(std::vector<std::byte>(handle->public_key().begin(), handle->public_key().end()) == from_hex(kP256Public));
+    CHECK(std::vector<std::byte>(handle->public_key().begin(), handle->public_key().end()) == hex_bytes(kP256Public));
 
     // The RFC's (deterministic) signatures verify; ours are randomized, so they verify without matching.
-    CHECK(verify(key_algorithm::kP256, handle->public_key(), text_bytes("sample"), from_hex(kP256SampleSig)));
-    CHECK(verify(key_algorithm::kP256, handle->public_key(), text_bytes("test"), from_hex(kP256TestSig)));
-    CHECK(verify(key_algorithm::kP256, handle->public_key(), text_bytes("test"), from_hex(kP256SampleSig)).error().code == errc::kBadSignature);
+    CHECK(verify(key_algorithm::kP256, handle->public_key(), text_bytes("sample"), hex_bytes(kP256SampleSig)));
+    CHECK(verify(key_algorithm::kP256, handle->public_key(), text_bytes("test"), hex_bytes(kP256TestSig)));
+    CHECK(verify(key_algorithm::kP256, handle->public_key(), text_bytes("test"), hex_bytes(kP256SampleSig)).error().code == errc::kBadSignature);
     auto sig = handle->sign(text_bytes("sample"));
     REQUIRE(sig);
     CHECK(sig->size() == key_handle::kSignatureSize);
@@ -169,7 +169,7 @@ TEST_CASE("P-256 key handles round-trip and refuse what isn't theirs", "[securit
     auto off_curve = std::vector<std::byte>(handle.public_key().begin(), handle.public_key().end());
     off_curve[64] ^= std::byte{1};
     CHECK(verify(key_algorithm::kP256, off_curve, message, sig).error().code == errc::kBadSignature);
-    CHECK(key_handle::from_private_key(key_algorithm::kP256, from_hex("FFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551")).error().code ==
+    CHECK(key_handle::from_private_key(key_algorithm::kP256, hex_bytes("FFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551")).error().code ==
           errc::kInvalidArgument);
     CHECK(key_handle::from_private_key(key_algorithm::kP256, std::vector<std::byte>(32)).error().code == errc::kInvalidArgument);
 }
@@ -214,19 +214,19 @@ TEST_CASE("a P-256 callback key may return DER", "[security][key_handle][p256]")
     }
     // What a Secure Enclave or Android Keystore returns: SEQUENCE { INTEGER r, INTEGER s }, with a
     // leading 0 where the high bit is set (r of "sample" here), none where it isn't.
-    const auto r = from_hex(kP256SampleSig.substr(0, 64));
-    const auto s = from_hex(kP256SampleSig.substr(64));
+    const auto r = hex_bytes(kP256SampleSig.substr(0, 64));
+    const auto s = hex_bytes(kP256SampleSig.substr(64));
     std::vector<std::byte> der{std::byte{0x30}, std::byte{0}, std::byte{0x02}, std::byte{33}, std::byte{0}};
     der.insert(der.end(), r.begin(), r.end());
     der.insert(der.end(), {std::byte{0x02}, std::byte{33}, std::byte{0}});
     der.insert(der.end(), s.begin(), s.end());
     der[1] = static_cast<std::byte>(der.size() - 2);
 
-    const auto pub = from_hex(kP256Public);
+    const auto pub = hex_bytes(kP256Public);
     const auto handle = *key_handle::from_callback(key_algorithm::kP256, pub, [&](std::span<const std::byte>) -> Rhp::result<std::vector<std::byte>> { return der; });
     const auto sig = handle.sign(text_bytes("sample"));
     REQUIRE(sig);
-    CHECK(*sig == from_hex(kP256SampleSig));
+    CHECK(*sig == hex_bytes(kP256SampleSig));
     CHECK(verify(key_algorithm::kP256, pub, text_bytes("sample"), *sig));
 
     auto broken = der;

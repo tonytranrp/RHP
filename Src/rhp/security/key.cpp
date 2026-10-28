@@ -2,6 +2,7 @@
 #include <cstddef>
 #include <cstdlib>
 #include <format>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -29,6 +30,18 @@ void secure_wipe(void* data, std::size_t size) noexcept {
 
 std::string base64_encode(std::span<const std::byte> bytes) {
     return utils::base64_encode(bytes);
+}
+
+result<std::optional<key_env>> parse_env_field(std::string_view field) {
+    constexpr std::string_view kEnvPrefix = "env=";
+    if (!field.starts_with(kEnvPrefix)) {
+        return std::optional<key_env>{};
+    }
+    const auto env = parse_key_env(field.substr(kEnvPrefix.size()));
+    if (!env) {
+        return fail(errc::kInvalidArgument, std::format("unknown environment '{}' (env=dev or env=prod)", field.substr(kEnvPrefix.size())), "security.key");
+    }
+    return env;
 }
 
 result<std::vector<std::byte>> base64_decode(std::string_view text) {

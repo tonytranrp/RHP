@@ -43,7 +43,7 @@ namespace Rhp::platform {
 
 namespace {
 
-[[maybe_unused]] constexpr const char* kWhere = "platform.key_storage";
+[[maybe_unused]] constexpr const char* kStorageWhere = "platform.key_storage";
 
 } // namespace
 
@@ -76,7 +76,7 @@ result<std::vector<std::byte>> protect(std::span<const std::byte> plain) {
     DATA_BLOB entropy = blob_of(std::as_bytes(std::span{kEntropy}));
     DATA_BLOB out{};
     if (CryptProtectData(&in, L"rhp key", &entropy, nullptr, nullptr, CRYPTPROTECT_UI_FORBIDDEN, &out) == 0) {
-        return fail(errc::kRuntime, std::format("CryptProtectData failed (error {})", GetLastError()), kWhere);
+        return fail(errc::kRuntime, std::format("CryptProtectData failed (error {})", GetLastError()), kStorageWhere);
     }
     return take(out);
 }
@@ -86,7 +86,7 @@ result<std::vector<std::byte>> unprotect(std::span<const std::byte> sealed) {
     DATA_BLOB entropy = blob_of(std::as_bytes(std::span{kEntropy}));
     DATA_BLOB out{};
     if (CryptUnprotectData(&in, nullptr, &entropy, nullptr, nullptr, CRYPTPROTECT_UI_FORBIDDEN, &out) == 0) {
-        return fail(errc::kAuth, std::format("CryptUnprotectData failed: not this user's, or damaged (error {})", GetLastError()), kWhere);
+        return fail(errc::kAuth, std::format("CryptUnprotectData failed: not this user's, or damaged (error {})", GetLastError()), kStorageWhere);
     }
     return take(out);
 }
@@ -94,11 +94,11 @@ result<std::vector<std::byte>> unprotect(std::span<const std::byte> sealed) {
 #else
 
 result<std::vector<std::byte>> protect(std::span<const std::byte>) {
-    return fail(errc::kDisabled, "DPAPI is Windows only", kWhere);
+    return fail(errc::kDisabled, "DPAPI is Windows only", kStorageWhere);
 }
 
 result<std::vector<std::byte>> unprotect(std::span<const std::byte>) {
-    return fail(errc::kDisabled, "DPAPI is Windows only", kWhere);
+    return fail(errc::kDisabled, "DPAPI is Windows only", kStorageWhere);
 }
 
 #endif
@@ -131,7 +131,7 @@ using cf_ptr = std::unique_ptr<std::remove_pointer_t<T>, cf_release>;
     const auto cf_service = cf_string(service);
     const auto cf_account = cf_string(account);
     if (!query || !cf_service || !cf_account) {
-        return fail(errc::kRuntime, "can't build a Keychain query", kWhere);
+        return fail(errc::kRuntime, "can't build a Keychain query", kStorageWhere);
     }
     CFDictionarySetValue(query.get(), kSecClass, kSecClassGenericPassword);
     CFDictionarySetValue(query.get(), kSecAttrService, cf_service.get());
@@ -140,7 +140,7 @@ using cf_ptr = std::unique_ptr<std::remove_pointer_t<T>, cf_release>;
 }
 
 [[nodiscard]] std::unexpected<error> keychain_failure(std::string_view what, OSStatus status) {
-    return fail(status == errSecItemNotFound ? errc::kNotFound : errc::kRuntime, std::format("{} (OSStatus {})", what, static_cast<int>(status)), kWhere);
+    return fail(status == errSecItemNotFound ? errc::kNotFound : errc::kRuntime, std::format("{} (OSStatus {})", what, static_cast<int>(status)), kStorageWhere);
 }
 
 } // namespace
@@ -158,7 +158,7 @@ result<std::vector<std::byte>> keychain_load(std::string_view service, std::stri
     }
     const cf_ptr<CFTypeRef> owned{found};
     if (CFGetTypeID(found) != CFDataGetTypeID()) {
-        return fail(errc::kRuntime, "the Keychain item holds no data", kWhere);
+        return fail(errc::kRuntime, "the Keychain item holds no data", kStorageWhere);
     }
     const auto data = static_cast<CFDataRef>(found);
     const auto* bytes = reinterpret_cast<const std::byte*>(CFDataGetBytePtr(data));
@@ -176,7 +176,7 @@ result<void> keychain_store(std::string_view service, std::string_view account, 
     }
     const cf_ptr<CFDataRef> data{CFDataCreate(kCFAllocatorDefault, reinterpret_cast<const UInt8*>(secret.data()), static_cast<CFIndex>(secret.size()))};
     if (!data) {
-        return fail(errc::kRuntime, "out of memory", kWhere);
+        return fail(errc::kRuntime, "out of memory", kStorageWhere);
     }
     CFDictionarySetValue(query->get(), kSecValueData, data.get());
     CFDictionarySetValue(query->get(), kSecAttrAccessible, kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly);
@@ -200,15 +200,15 @@ result<void> keychain_remove(std::string_view service, std::string_view account)
 #else
 
 result<std::vector<std::byte>> keychain_load(std::string_view, std::string_view) {
-    return fail(errc::kDisabled, "the Keychain is Apple only", kWhere);
+    return fail(errc::kDisabled, "the Keychain is Apple only", kStorageWhere);
 }
 
 result<void> keychain_store(std::string_view, std::string_view, std::span<const std::byte>) {
-    return fail(errc::kDisabled, "the Keychain is Apple only", kWhere);
+    return fail(errc::kDisabled, "the Keychain is Apple only", kStorageWhere);
 }
 
 result<void> keychain_remove(std::string_view, std::string_view) {
-    return fail(errc::kDisabled, "the Keychain is Apple only", kWhere);
+    return fail(errc::kDisabled, "the Keychain is Apple only", kStorageWhere);
 }
 
 #endif
@@ -217,7 +217,7 @@ result<void> keychain_remove(std::string_view, std::string_view) {
 
 result<std::string> read_secret_line(std::string_view prompt) {
     if (!stdin_is_terminal()) {
-        return fail(errc::kDisabled, "standard input is not a terminal", kWhere);
+        return fail(errc::kDisabled, "standard input is not a terminal", kStorageWhere);
     }
     std::fprintf(stderr, "%.*s", static_cast<int>(prompt.size()), prompt.data());
     std::fflush(stderr);
@@ -251,7 +251,7 @@ result<std::string> read_secret_line(std::string_view prompt) {
     const bool read = static_cast<bool>(std::getline(std::cin, line));
     std::fprintf(stderr, "\n");
     if (!read) {
-        return fail(errc::kNotFound, "no passphrase (end of input)", kWhere);
+        return fail(errc::kNotFound, "no passphrase (end of input)", kStorageWhere);
     }
     if (!line.empty() && line.back() == '\r') {
         line.pop_back();

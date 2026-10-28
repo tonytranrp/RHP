@@ -84,6 +84,7 @@ if(RHP_ENABLE)
             security/signing_tests.cpp
             security/operator_cert_tests.cpp
             security/certified_tests.cpp
+            security/split_key_file_tests.cpp
             security/tls_tests.cpp
             security/http_auth_tests.cpp
         LINKS

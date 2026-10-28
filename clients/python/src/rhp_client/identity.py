@@ -6,6 +6,12 @@
     signing_key = "base64 of 32 bytes"   # optional: the Ed25519 seed that signs scripts
     signer = "dev"                       # optional: the name the host trusts the public key under
 
+Since Stage 13b `rhp-cli keygen` keeps the signing key in a file of its own beside the identity
+(`dev.rhpsign`: `signer`, `signing_key`, `env`); `Identity.load` reads it when the identity has no
+signing key. A signing key sealed with a passphrase ("argon2i:...") needs Argon2i, which Python's
+standard library lacks: such an identity loads without a signing key (it can still connect).
+An `env = "dev|prod"` field is accepted and ignored.
+
 The private parts are never printed (repr() shows the name and signer only).
 """
 
@@ -48,6 +54,22 @@ except ImportError:  # pragma: no cover - depends on the environment
         return _ed25519.public_key(seed)
 
 
+def _fields(text: str, what: str) -> dict:
+    """`key = "value"` lines ('#' comments) as {key: (value, line number)}."""
+    fields = {}
+    for number, line in enumerate(text.splitlines(), start=1):
+        line = line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        if "=" not in line:
+            raise RhpError("invalid_argument", 'line %d: expected `key = "value"`' % number, what)
+        key, value = (part.strip() for part in line.split("=", 1))
+        if len(value) < 2 or value[0] != '"' or value[-1] != '"':
+            raise RhpError("invalid_argument", 'line %d: expected `key = "value"`' % number, what)
+        fields[key] = (value[1:-1], number)
+    return fields
+
+
 def _decode_key(text: str, what: str, line: int) -> bytes:
     try:
         raw = base64.b64decode(text.strip(), validate=True)
@@ -79,17 +101,7 @@ class Identity:
 
     @classmethod
     def parse(cls, text: str) -> "Identity":
-        fields = {}
-        for number, line in enumerate(text.splitlines(), start=1):
-            line = line.split("#", 1)[0].strip()
-            if not line:
-                continue
-            if "=" not in line:
-                raise RhpError("invalid_argument", 'line %d: expected `key = "value"`' % number, "identity file")
-            key, value = (part.strip() for part in line.split("=", 1))
-            if len(value) < 2 or value[0] != '"' or value[-1] != '"':
-                raise RhpError("invalid_argument", 'line %d: expected `key = "value"`' % number, "identity file")
-            fields[key] = (value[1:-1], number)
+        fields = _fields(text, "identity file")
         if "name" not in fields or "psk" not in fields:
             raise RhpError("invalid_argument", "an identity file needs `name` and `psk`", "identity file")
         psk = _decode_key(fields["psk"][0], "psk", fields["psk"][1])
@@ -100,7 +112,17 @@ class Identity:
     @classmethod
     def load(cls, path: Union[str, "os.PathLike[str]"]) -> "Identity":
         with open(path, encoding="utf-8") as fh:
-            return cls.parse(fh.read())
+            identity = cls.parse(fh.read())
+        signing_path = os.path.splitext(os.fspath(path))[0] + ".rhpsign"
+        if identity.signing_key is not None or not os.path.exists(signing_path):
+            return identity
+        with open(signing_path, encoding="utf-8") as fh:
+            fields = _fields(fh.read(), "signing key file")
+        if "signing_key" not in fields or fields["signing_key"][0].startswith("argon2i:"):
+            return identity
+        seed = _decode_key(fields["signing_key"][0], "signing_key", fields["signing_key"][1])
+        signer = fields["signer"][0] if "signer" in fields else identity.name
+        return cls(identity.name, identity.psk, seed, signer)
 
     def public_key(self) -> Optional[bytes]:
         """The Ed25519 public key a host's trusted-signers file lists for this identity."""

@@ -27,14 +27,14 @@ namespace Rhp::security {
 
 namespace {
 
-constexpr const char* kWhere = "security.key_store";
+constexpr const char* kStoreWhere = "security.key_store";
 constexpr std::string_view kWrappedPrefix = "wrapped:";
 constexpr std::string_view kFileHeader = "# RHP key: keep it private\n";
 
 [[nodiscard]] result<void> check_name(std::string_view name) {
     const auto allowed = [](char c) { return std::isalnum(static_cast<unsigned char>(c)) != 0 || c == '.' || c == '_' || c == '-'; };
     if (name.empty() || name.size() > 64 || name.front() == '.' || !std::ranges::all_of(name, allowed)) {
-        return fail(errc::kInvalidArgument, std::format("'{}' is no key name (1..64 letters, digits, '.', '_', '-'; not starting with '.')", name), kWhere);
+        return fail(errc::kInvalidArgument, std::format("'{}' is no key name (1..64 letters, digits, '.', '_', '-'; not starting with '.')", name), kStoreWhere);
     }
     return {};
 }
@@ -71,7 +71,7 @@ struct wiped_bytes {
         return std::string{v.substr(1, v.size() - 2)};
     }
     const std::u8string name = path.u8string();
-    return fail(errc::kInvalidArgument, std::format("{}: no `secret = \"...\"` line", std::string_view{reinterpret_cast<const char*>(name.data()), name.size()}), kWhere);
+    return fail(errc::kInvalidArgument, std::format("{}: no `secret = \"...\"` line", std::string_view{reinterpret_cast<const char*>(name.data()), name.size()}), kStoreWhere);
 }
 
 } // namespace
@@ -80,7 +80,7 @@ struct wiped_bytes {
 
 result<void> store_key(key_store& to, std::string_view name, key_algorithm alg, std::span<const std::byte> private_key) {
     if (private_key.size() != key_handle::kPrivateKeySize) {
-        return fail(errc::kInvalidArgument, std::format("a {} private key is {} bytes, got {}", to_string(alg), key_handle::kPrivateKeySize, private_key.size()), kWhere);
+        return fail(errc::kInvalidArgument, std::format("a {} private key is {} bytes, got {}", to_string(alg), key_handle::kPrivateKeySize, private_key.size()), kStoreWhere);
     }
     std::vector<std::byte> tagged;
     tagged.reserve(1 + private_key.size());
@@ -101,7 +101,7 @@ result<key_handle> load_key(const key_store& from, std::string_view name) {
     }
     const std::span<const std::byte> bytes = secret->bytes();
     if (bytes.size() != 1 + key_handle::kPrivateKeySize || (bytes[0] != std::byte{1} && bytes[0] != std::byte{2})) {
-        return fail(errc::kInvalidArgument, std::format("'{}' holds no private key", name), kWhere);
+        return fail(errc::kInvalidArgument, std::format("'{}' holds no private key", name), kStoreWhere);
     }
     return key_handle::from_private_key(bytes[0] == std::byte{2} ? key_algorithm::kP256 : key_algorithm::kEd25519, bytes.subspan(1));
 }
@@ -125,7 +125,7 @@ result<key> file_key_store::load(std::string_view name) const {
     const std::filesystem::path path = path_of(name);
     auto text = detail::read_file(path);
     if (!text) {
-        return fail(errc::kNotFound, std::format("no key '{}' in this store", name), kWhere);
+        return fail(errc::kNotFound, std::format("no key '{}' in this store", name), kStoreWhere);
     }
     const utils::scope_guard wipe_text{[&]() noexcept { secure_wipe(text->data(), text->size()); }};
     auto value = secret_value(*text, path);
@@ -135,13 +135,13 @@ result<key> file_key_store::load(std::string_view name) const {
     const utils::scope_guard wipe_value{[&]() noexcept { secure_wipe(value->data(), value->size()); }};
     if (is_passphrase_sealed(*value)) {
         if (options_.passphrase.empty()) {
-            return fail(errc::kAuth, std::format("key '{}' is sealed with a passphrase and this store has none", name), kWhere);
+            return fail(errc::kAuth, std::format("key '{}' is sealed with a passphrase and this store has none", name), kStoreWhere);
         }
         return open_with_passphrase(*value, options_.passphrase);
     }
     if (value->starts_with(kWrappedPrefix)) {
         if (!wrapping_.unwrap) {
-            return fail(errc::kInvalidArgument, std::format("key '{}' is wrapped and this store can't unwrap", name), kWhere);
+            return fail(errc::kInvalidArgument, std::format("key '{}' is wrapped and this store can't unwrap", name), kStoreWhere);
         }
         auto wrapped = base64_decode(std::string_view{*value}.substr(kWrappedPrefix.size()));
         if (!wrapped) {
@@ -195,7 +195,7 @@ result<void> file_key_store::remove(std::string_view name) {
     }
     std::error_code ec;
     if (!std::filesystem::remove(path_of(name), ec)) {
-        return fail(ec ? errc::kRuntime : errc::kNotFound, ec ? ec.message() : std::format("no key '{}' in this store", name), kWhere);
+        return fail(ec ? errc::kRuntime : errc::kNotFound, ec ? ec.message() : std::format("no key '{}' in this store", name), kStoreWhere);
     }
     return {};
 }
@@ -238,7 +238,7 @@ result<key> callback_key_store::load(std::string_view name) const {
         return std::unexpected{std::move(ok).error()};
     }
     if (!callbacks_.load) {
-        return fail(errc::kDisabled, "this key store has no load function", kWhere);
+        return fail(errc::kDisabled, "this key store has no load function", kStoreWhere);
     }
     return callbacks_.load(name);
 }
@@ -248,7 +248,7 @@ result<void> callback_key_store::store(std::string_view name, const key& secret)
         return ok;
     }
     if (!callbacks_.store) {
-        return fail(errc::kDisabled, "this key store has no store function", kWhere);
+        return fail(errc::kDisabled, "this key store has no store function", kStoreWhere);
     }
     return callbacks_.store(name, secret);
 }
@@ -258,7 +258,7 @@ result<void> callback_key_store::remove(std::string_view name) {
         return ok;
     }
     if (!callbacks_.remove) {
-        return fail(errc::kDisabled, "this key store has no remove function", kWhere);
+        return fail(errc::kDisabled, "this key store has no remove function", kStoreWhere);
     }
     return callbacks_.remove(name);
 }

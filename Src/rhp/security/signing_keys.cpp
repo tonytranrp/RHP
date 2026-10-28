@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <format>
 #include <initializer_list>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -109,8 +110,17 @@ result<trusted_signers> trusted_signers::parse(std::string_view text) {
     trusted_signers out;
     for (const detail::text_line& line : detail::content_lines(text)) {
         const auto f = detail::fields(line.text);
-        if (f.size() != 2) {
-            return fail(errc::kInvalidArgument, std::format("line {}: expected `name base64-public-key`", line.number), "security.trusted_signers");
+        if (f.size() < 2) {
+            return fail(errc::kInvalidArgument, std::format("line {}: expected `name base64-public-key [env=dev|prod]`", line.number), "security.trusted_signers");
+        }
+        std::optional<key_env> env;
+        for (const std::string_view extra : std::span{f}.subspan(2)) {
+            auto tag = parse_env_field(extra);
+            if (!tag || !*tag) {
+                return fail(errc::kInvalidArgument, std::format("line {}: {}", line.number, tag ? std::format("unexpected '{}'", extra) : tag.error().message),
+                            "security.trusted_signers");
+            }
+            env = *tag;
         }
         auto key = ed25519_public_key::from_base64(f[1]);
         if (!key) {
@@ -118,6 +128,9 @@ result<trusted_signers> trusted_signers::parse(std::string_view text) {
         }
         if (auto added = out.add(std::string{f[0]}, *key); !added) {
             return fail(added.error().code, std::format("line {}: {}", line.number, added.error().message), "security.trusted_signers");
+        }
+        if (env) {
+            (void)out.set_env(f[0], *env);
         }
     }
     return out;
@@ -138,6 +151,29 @@ const ed25519_public_key* trusted_signers::find(std::string_view name) const noe
         }
     }
     return nullptr;
+}
+
+std::optional<key_env> trusted_signers::env_of(std::string_view name) const noexcept {
+    for (const auto& [n, env] : envs_) {
+        if (n == name) {
+            return env;
+        }
+    }
+    return std::nullopt;
+}
+
+result<void> trusted_signers::set_env(std::string_view name, key_env env) {
+    if (find(name) == nullptr) {
+        return fail(errc::kNotFound, std::format("signer '{}' is not trusted", name), "security.trusted_signers");
+    }
+    for (auto& [n, e] : envs_) {
+        if (n == name) {
+            e = env;
+            return {};
+        }
+    }
+    envs_.emplace_back(std::string{name}, env);
+    return {};
 }
 
 } // namespace Rhp::security

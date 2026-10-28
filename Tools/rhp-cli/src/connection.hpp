@@ -84,8 +84,13 @@ using dev_connected = std::variant<connection<cli_cfg>, connection<cli_ipc_cfg>>
 // connected with its endpoint (refused unless loopback or local IPC) and identity.
 [[nodiscard]] std::optional<dev_connected> open_dev_connection(std::string_view app, int timeout_ms, replxx::Replxx* rx);
 
-// identity_file::load, its warnings printed first ("warning: ..."); nullopt after printing the
-// error. Through `out` when given, else to stderr.
+// The passphrase for the signing key file beside the identity file at `identity_path`:
+// RHP_PASSPHRASE, else typed on the terminal when that file is sealed, else "".
+[[nodiscard]] std::string signing_passphrase(const std::string& identity_path);
+
+// identity_file::load (with the signing key file beside it, opened with signing_passphrase), its
+// warnings printed first ("warning: ..."); nullopt after printing the error. Through `out` when
+// given, else to stderr.
 [[nodiscard]] std::optional<Rhp::security::identity_file> load_identity(const std::string& path, terminal* out = nullptr);
 
 // An identity that signs scripts and release files.

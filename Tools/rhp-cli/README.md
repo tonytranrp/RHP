@@ -8,20 +8,25 @@ The REPL and scripting client for RHP hosts. Every script it sends is signed wit
 rhp-cli keygen dev
 ```
 
-Writes `dev.rhpid` (name, PSK, signing key) atomically and owner-only on every OS (mode 0600 on POSIX, a DACL for your account alone on Windows): keep it private. It prints the two lines the host needs after a label; the PSK stays in the file:
+Writes two files (decision AL11), each atomically and owner-only on every OS (mode 0600 on POSIX, a DACL for your account alone on Windows): `dev.rhpid`, the connection identity (`name`, `psk`, `env`), and `dev.rhpsign` beside it, the Ed25519 key that signs scripts and releases (`signer`, `signing_key`, `env`). Keep both private. It prints the two lines the host needs after a label; the PSK stays in the file:
 
 ```text
-wrote dev.rhpid (keep it private)
-add to the host's keyring file:   dev patch <psk from dev.rhpid>   (rhp-cli pubkey -i dev.rhpid --role patch prints it whole)
-add to the host's signers file:   dev <public key>
+wrote dev.rhpid (connection identity) and dev.rhpsign (signing key): keep them private
+add to the host's keyring file:   dev patch <psk from dev.rhpid> env=dev   (rhp-cli pubkey -i dev.rhpid --role patch prints it whole)
+add to the host's signers file:   dev <public key> env=dev
 ```
 
-`rhp-cli pubkey -i dev.rhpid` prints both lines whole (for scripts that write the host's files); `--show-secret` makes keygen print the keyring line whole too. `--role observe|patch|admin` (default `patch`; `admin` prints a warning) sets the keyring line's role; `-o/--out` names the file; `--force` replaces an existing one. Loading an identity file that other users can read, or whose PSK looks chosen by a person rather than random, prints a `warning:` line (never an error).
+`rhp-cli pubkey -i dev.rhpid` prints both lines whole (for scripts that write the host's files); `--show-secret` makes keygen print the keyring line whole too. `--role observe|patch|admin` (default `patch`; `admin` prints a warning) sets the keyring line's role; `--env dev|prod` (default `dev`) tags both keys and their host lines (`env=prod`; production hosts will refuse dev keys); `-o/--out` names the identity file (the signing key goes beside it with the extension `.rhpsign`); `--force` replaces existing files.
+
+- `--passphrase` seals the signing key (Argon2i, then XChaCha20-Poly1305): typed twice on the terminal, or taken from `RHP_PASSPHRASE`. Every command that signs asks for it again (or reads `RHP_PASSPHRASE`); without it the identity still connects but signs nothing.
+- `--device` writes an Ed25519 device key (`alg`, `device_key`) instead of a PSK, for hosts that authenticate device keys, and prints its allow-list line (`name role ed25519 <public key> env=..`) instead of a keyring line.
+
+`-i` takes the `.rhpid`; the `.rhpsign` beside it is found by its name. Identity files that hold their signing key themselves (what keygen wrote before Stage 13b, and dev session files) still work. Loading a key file that other users can read, or whose PSK looks chosen by a person rather than random, prints a `warning:` line (never an error).
 
 | Subcommand | Example |
 |---|---|
-| `keygen <name> [-o file] [--role r] [--force] [--show-secret]` | `rhp-cli keygen ci --role observe -o ci.rhpid` |
-| `pubkey -i id [--role r]` | `rhp-cli pubkey -i dev.rhpid --role admin` (the bare keyring line, with the PSK, and the signers line; role default `patch`) |
+| `keygen <name> [-o file] [--role r] [--env dev\|prod] [--passphrase] [--device] [--force] [--show-secret]` | `rhp-cli keygen ci --role observe --env prod -o ci.rhpid` |
+| `pubkey -i id [--role r]` | `rhp-cli pubkey -i dev.rhpid --role admin` (the bare keyring line, with the PSK, or a device key's allow-list line, and the signers line; role default `patch`) |
 | `sign <file> -i id` | `rhp-cli sign patch.lua -i dev.rhpid` (prints `signer base64-signature` for other tools) |
 
 ### Operator certificates

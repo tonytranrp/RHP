@@ -28,6 +28,8 @@
 #endif
 
 #include <catch2/catch_test_macros.hpp>
+#include <rhp_test/eventually.hpp>
+#include <rhp_test/hardening.hpp>
 
 #include <rhp/client/client.hpp>
 #include <rhp/config/config.hpp>
@@ -39,6 +41,7 @@
 #include <rhp/net/io_context.hpp>
 #include <rhp/net/loopback/loopback.hpp>
 #include <rhp/net/tcp/tcp.hpp>
+#include <rhp/platform/files.hpp>
 #include <rhp/platform/random.hpp>
 #include <rhp/script/lib.hpp>
 #include <rhp/security/certified.hpp>
@@ -50,8 +53,6 @@
 #include <rhp/security/operator_cert.hpp>
 #include <rhp/security/psk_keyring.hpp>
 #include <rhp/utils/scope_guard.hpp>
-#include <rhp_test/eventually.hpp>
-#include <rhp_test/hardening.hpp>
 
 using namespace std::chrono_literals;
 namespace fs = std::filesystem;
@@ -765,6 +766,57 @@ TEST_CASE("rhp-cli: ca init and cert issue make what a certified host takes", "[
     CHECK(dir.read("plain.txt").find("bad_signature") != std::string::npos);
     pump.request_stop();
 }
+
+TEST_CASE("rhp-cli: keygen splits identity and signing key and tags them", "[cli][process]") {
+    scratch_dir dir;
+    const auto id = dir.path / "dev.rhpid";
+    const auto signing = dir.path / "dev.rhpsign";
+    REQUIRE(run(std::format("{} keygen dev --env prod --out {} > {}", kCli, q(id), q(dir.path / "keygen.txt"))) == 0);
+    CHECK(fs::exists(signing));
+    CHECK(dir.read("dev.rhpid").find("signing_key") == std::string::npos);
+    CHECK(dir.read("dev.rhpsign").find("psk") == std::string::npos);
+    CHECK_FALSE(Rhp::platform::readable_by_others(signing));
+    const auto identity = Rhp::security::identity_file::load(id.string());
+    REQUIRE(identity);
+    CHECK(identity->env == Rhp::security::key_env::kProd);
+    REQUIRE(identity->signers_line());
+    CHECK(dir.read("keygen.txt").find(*identity->signers_line()) != std::string::npos);
+    CHECK(identity->signers_line()->ends_with(" env=prod"));
+    // Neither file is replaced without --force; a bad env is refused.
+    fs::remove(id);
+    CHECK(run(std::format("{} keygen dev --out {} > {} 2>&1", kCli, q(id), q(dir.path / "again.txt"))) == 1);
+    CHECK(dir.read("again.txt").find("dev.rhpsign exists") != std::string::npos);
+    CHECK(run(std::format("{} keygen x --env staging --out {} > {} 2>&1", kCli, q(dir.path / "x.rhpid"), q(dir.path / "bad_env.txt"))) == 2);
+
+    // --passphrase seals the signing key; RHP_PASSPHRASE opens it again (no terminal here to ask on).
+#if defined(_WIN32)
+    const auto with_passphrase = [](std::string_view pw) { return std::format("set \"RHP_PASSPHRASE={}\" && ", pw); };
+#else
+    const auto with_passphrase = [](std::string_view pw) { return std::format("RHP_PASSPHRASE='{}' ", pw); };
+#endif
+    const auto sealed = dir.path / "ci.rhpid";
+    REQUIRE(run(with_passphrase("open sesame") + std::format("{} keygen ci --passphrase --out {} > {}", kCli, q(sealed), q(dir.path / "sealed.txt"))) == 0);
+    CHECK(dir.read("ci.rhpsign").find("signing_key = \"argon2i:") != std::string::npos);
+    CHECK(run(with_passphrase("open sesame") + std::format("{} sign {} -i {} > {}", kCli, q(dir.path / "keygen.txt"), q(sealed), q(dir.path / "sig.txt"))) == 0);
+    CHECK(dir.read("sig.txt").starts_with("ci "));
+    CHECK(run(with_passphrase("wrong") + std::format("{} sign {} -i {} > {} 2>&1", kCli, q(dir.path / "keygen.txt"), q(sealed), q(dir.path / "wrong.txt"))) == 1);
+    CHECK(dir.read("wrong.txt").find("auth") != std::string::npos);
+    // Without one there is nothing to sign with.
+    CHECK(run(std::format("{} sign {} -i {} > {} 2>&1", kCli, q(dir.path / "keygen.txt"), q(sealed), q(dir.path / "none.txt"))) == 1);
+    CHECK(dir.read("none.txt").find("sealed with a passphrase") != std::string::npos);
+    CHECK(run(std::format("{} keygen ci2 --passphrase --out {} > {} 2>&1 < {}", kCli, q(dir.path / "ci2.rhpid"), q(dir.path / "no_tty.txt"), q(dir.path / "sealed.txt"))) == 1);
+
+    // --device: a device key instead of the PSK, and its allow-list line.
+    const auto phone = dir.path / "phone.rhpid";
+    REQUIRE(run(std::format("{} keygen phone --device --role observe --out {} > {}", kCli, q(phone), q(dir.path / "device.txt"))) == 0);
+    const auto device = Rhp::security::identity_file::load(phone.string());
+    REQUIRE(device);
+    CHECK(device->psk.empty());
+    REQUIRE(device->device_line(Rhp::role::kObserve));
+    CHECK(dir.read("device.txt").find("device allow-list: " + *device->device_line(Rhp::role::kObserve)) != std::string::npos);
+    CHECK(dir.read("phone.rhpid").find("alg         = \"ed25519\"") != std::string::npos);
+}
+
 TEST_CASE("rhp-cli: connect --dev reads a dev session file", "[cli][process]") {
     scratch_dir dir;
     const auto id = dir.path / "dev.rhpid";
@@ -835,10 +887,10 @@ TEST_CASE("rhp-cli: test runs Lua tests offline and with a host's API faked", "[
     dir.write("keys.txt", lines.substr(0, nl + 1));
     dir.write("signers.pub", lines.substr(nl + 1));
     dir.write("game_spec.lua", "it('gravity is a number', function()\n"
-                                     "    assert.is_number(game.gravity)\n"
-                                     "    game.gravity = 2\n"
-                                     "    assert.equals(2, game.gravity)\n"
-                                     "end)\n");
+                               "    assert.is_number(game.gravity)\n"
+                               "    game.gravity = 2\n"
+                               "    assert.equals(2, game.gravity)\n"
+                               "end)\n");
 
     // Offline with nothing faked: `game` doesn't exist.
     CHECK(run(std::format("{} test {} --no-color > {} 2>&1", kCli, q(dir.path / "game_spec.lua"), q(dir.path / "offline.txt"))) == 1);

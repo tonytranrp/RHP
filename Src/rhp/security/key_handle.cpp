@@ -27,7 +27,7 @@ namespace {
 
 namespace p256 = tls::detail;
 
-constexpr const char* kWhere = "security.key_handle";
+constexpr const char* kHandleWhere = "security.key_handle";
 
 // The P-256 group order n, big-endian.
 constexpr std::array<unsigned char, 32> kP256Order{0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
@@ -87,10 +87,10 @@ struct p256_secret {
 
 [[nodiscard]] result<void> check_public_key(key_algorithm alg, std::span<const std::byte> public_key) {
     if (public_key.size() != key_handle::public_key_size(alg)) {
-        return fail(errc::kInvalidArgument, std::format("a {} public key is {} bytes, got {}", to_string(alg), key_handle::public_key_size(alg), public_key.size()), kWhere);
+        return fail(errc::kInvalidArgument, std::format("a {} public key is {} bytes, got {}", to_string(alg), key_handle::public_key_size(alg), public_key.size()), kHandleWhere);
     }
     if (alg == key_algorithm::kP256 && public_key[0] != std::byte{0x04}) {
-        return fail(errc::kInvalidArgument, "a P-256 public key is SEC1 uncompressed (it starts with 0x04)", kWhere);
+        return fail(errc::kInvalidArgument, "a P-256 public key is SEC1 uncompressed (it starts with 0x04)", kHandleWhere);
     }
     return {};
 }
@@ -102,7 +102,7 @@ key_handle::key_handle(key_algorithm alg, std::vector<std::byte> public_key, sig
 
 result<key_handle> key_handle::from_private_key(key_algorithm alg, std::span<const std::byte> private_key) {
     if (private_key.size() != kPrivateKeySize) {
-        return fail(errc::kInvalidArgument, std::format("a {} private key is {} bytes, got {}", to_string(alg), kPrivateKeySize, private_key.size()), kWhere);
+        return fail(errc::kInvalidArgument, std::format("a {} private key is {} bytes, got {}", to_string(alg), kPrivateKeySize, private_key.size()), kHandleWhere);
     }
     if (alg == key_algorithm::kEd25519) {
         auto secret = ed25519_secret_key::from_bytes(private_key);
@@ -112,7 +112,7 @@ result<key_handle> key_handle::from_private_key(key_algorithm alg, std::span<con
         return from_ed25519(*secret);
     }
     if (!valid_p256_scalar(private_key)) {
-        return fail(errc::kInvalidArgument, "not a P-256 private key (0 or not below the group order)", kWhere);
+        return fail(errc::kInvalidArgument, "not a P-256 private key (0 or not below the group order)", kHandleWhere);
     }
     auto secret = std::make_shared<p256_secret>();
     std::ranges::copy(private_key, secret->d.begin());
@@ -131,7 +131,7 @@ result<key_handle> key_handle::from_private_key(key_algorithm alg, std::span<con
 
 result<key_handle> key_handle::from_ed25519(const ed25519_secret_key& secret) {
     if (secret.empty()) {
-        return fail(errc::kInvalidArgument, "an empty Ed25519 private key", kWhere);
+        return fail(errc::kInvalidArgument, "an empty Ed25519 private key", kHandleWhere);
     }
     const ed25519_public_key pub = secret.public_key();
     return key_handle{key_algorithm::kEd25519, std::vector<std::byte>(pub.bytes().begin(), pub.bytes().end()),
@@ -146,14 +146,14 @@ result<key_handle> key_handle::from_callback(key_algorithm alg, std::span<const 
         return std::unexpected{std::move(ok).error()};
     }
     if (!sign) {
-        return fail(errc::kInvalidArgument, "a callback key needs a sign function", kWhere);
+        return fail(errc::kInvalidArgument, "a callback key needs a sign function", kHandleWhere);
     }
     return key_handle{alg, std::vector<std::byte>(public_key.begin(), public_key.end()), std::move(sign)};
 }
 
 result<std::vector<std::byte>> key_handle::sign(std::span<const std::byte> message) const {
     if (!sign_) {
-        return fail(errc::kInvalidArgument, "an empty key handle signs nothing", kWhere);
+        return fail(errc::kInvalidArgument, "an empty key handle signs nothing", kHandleWhere);
     }
     auto sig = sign_(message);
     if (!sig || sig->size() == kSignatureSize) {
@@ -164,23 +164,23 @@ result<std::vector<std::byte>> key_handle::sign(std::span<const std::byte> messa
             return std::move(*raw);
         }
     }
-    return fail(errc::kInvalidArgument, std::format("the {} key's signer returned {} bytes, not a signature", to_string(alg_), sig->size()), kWhere);
+    return fail(errc::kInvalidArgument, std::format("the {} key's signer returned {} bytes, not a signature", to_string(alg_), sig->size()), kHandleWhere);
 }
 
 result<void> verify(key_algorithm alg, std::span<const std::byte> public_key, std::span<const std::byte> message, std::span<const std::byte> signature) {
     if (!check_public_key(alg, public_key) || signature.size() != key_handle::kSignatureSize) {
-        return fail(errc::kBadSignature, std::format("a malformed {} public key or signature", to_string(alg)), kWhere);
+        return fail(errc::kBadSignature, std::format("a malformed {} public key or signature", to_string(alg)), kHandleWhere);
     }
     if (alg == key_algorithm::kEd25519) {
         if (!ed25519_check(*ed25519_public_key::from_bytes(public_key), signature, message)) {
-            return fail(errc::kBadSignature, "the Ed25519 signature doesn't match", kWhere);
+            return fail(errc::kBadSignature, "the Ed25519 signature doesn't match", kHandleWhere);
         }
         return {};
     }
     auto checked = p256::p256_verify(std::span<const std::byte, p256::kP256PublicKeySize>{public_key.data(), p256::kP256PublicKeySize}, message,
                                      std::span<const std::byte, p256::kP256SignatureSize>{signature.data(), p256::kP256SignatureSize});
     if (!checked && checked.error().code == errc::kInvalidArgument) {
-        return fail(errc::kBadSignature, checked.error().message, kWhere);
+        return fail(errc::kBadSignature, checked.error().message, kHandleWhere);
     }
     return checked;
 }

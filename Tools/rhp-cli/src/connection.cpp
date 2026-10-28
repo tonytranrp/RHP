@@ -21,6 +21,7 @@
 #include <replxx.hxx>
 
 #include <rhp/platform/files.hpp>
+#include <rhp/platform/key_storage.hpp>
 #include <rhp/platform/process.hpp>
 #include <rhp/rhp.hpp>
 #include <rhp/security/certified.hpp>
@@ -199,8 +200,22 @@ std::optional<dev_connected> open_dev_connection(std::string_view app, int timeo
     return c ? std::optional<dev_connected>{std::move(*c)} : std::nullopt;
 }
 
+std::string signing_passphrase(const std::string& identity_path) {
+    std::string passphrase = Rhp::platform::environment_variable("RHP_PASSPHRASE");
+    const std::string signing_path = Rhp::security::signing_key_file::beside(identity_path);
+    if (passphrase.empty() && Rhp::security::signing_key_file::sealed(signing_path)) {
+        // Asked for only on a terminal: a REPL fed from a file reads its commands from stdin.
+        if (auto typed = Rhp::platform::read_secret_line(std::format("passphrase for {}: ", signing_path))) {
+            passphrase = std::move(*typed);
+        }
+    }
+    return passphrase;
+}
+
 std::optional<Rhp::security::identity_file> load_identity(const std::string& path, terminal* out) {
-    auto id = Rhp::security::identity_file::load(path);
+    std::string passphrase = signing_passphrase(path);
+    auto id = Rhp::security::identity_file::load(path, passphrase);
+    Rhp::security::secure_wipe(passphrase.data(), passphrase.size());
     if (!id) {
         if (out != nullptr) {
             (*out)(style::kError, std::format("{}", id.error()));
@@ -220,7 +235,7 @@ std::optional<signer> load_signer(const std::string& path) {
     }
     auto key = id->signer_key();
     if (!key) {
-        std::println(stderr, "{} has no signing_key", path);
+        std::println(stderr, "{} has no signing key (none in it, and no {} beside it)", path, Rhp::security::signing_key_file::beside(path));
         return std::nullopt;
     }
     return signer{std::move(*id), std::move(*key)};

@@ -3,6 +3,7 @@
 #include <array>
 #include <cstddef>
 #include <initializer_list>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -11,6 +12,7 @@
 
 #include <rhp/core/result.hpp>
 #include <rhp/core/value.hpp>
+#include <rhp/security/key.hpp>
 #include <rhp/security/signer.hpp>
 
 namespace Rhp::security {
@@ -86,8 +88,8 @@ public:
 
     result<void> add(std::string name, ed25519_public_key key);
 
-    // Text with one `name base64-public-key` per line ('#' starts a comment), e.g. what
-    // `rhp-cli keygen` prints for the host.
+    // Text with one `name base64-public-key [env=dev|prod]` per line ('#' starts a comment), e.g.
+    // what `rhp-cli keygen` prints for the host.
     [[nodiscard]] static result<trusted_signers> parse(std::string_view text);
     [[nodiscard]] static result<trusted_signers> from_file(const std::string& path);
 
@@ -95,10 +97,15 @@ public:
     [[nodiscard]] result<std::string> verify(std::string_view source, const value& signature) const;
 
     [[nodiscard]] const ed25519_public_key* find(std::string_view name) const noexcept;
+    // The `env=` tag of a signer (decision AL11); nullopt for an untagged or unknown signer.
+    [[nodiscard]] std::optional<key_env> env_of(std::string_view name) const noexcept;
+    // Tags a trusted signer (kNotFound otherwise).
+    result<void> set_env(std::string_view name, key_env env);
     [[nodiscard]] std::size_t size() const noexcept { return keys_.size(); }
 
 private:
     std::vector<std::pair<std::string, ed25519_public_key>> keys_;
+    std::vector<std::pair<std::string, key_env>> envs_;
 };
 
 // The default signer policy: standard Ed25519 (Monocypher's optional RFC 8032 implementation).

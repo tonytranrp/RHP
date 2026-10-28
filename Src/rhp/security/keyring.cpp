@@ -1,6 +1,7 @@
 #include <format>
 #include <initializer_list>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -41,8 +42,8 @@ result<keyring> keyring::parse(std::string_view text) {
     keyring out;
     for (const detail::text_line& line : detail::content_lines(text)) {
         const auto f = detail::fields(line.text);
-        if (f.size() != 3 && f.size() != 4) {
-            return fail(errc::kInvalidArgument, std::format("line {}: expected `name role base64-key [scopes]`", line.number), "security.keyring");
+        if (f.size() < 3) {
+            return fail(errc::kInvalidArgument, std::format("line {}: expected `name role base64-key [scopes] [env=dev|prod]`", line.number), "security.keyring");
         }
         const auto granted = parse_role(f[1]);
         if (!granted) {
@@ -52,16 +53,32 @@ result<keyring> keyring::parse(std::string_view text) {
         if (!secret) {
             return fail(errc::kInvalidArgument, std::format("line {}: {}", line.number, secret.error().message), "security.keyring");
         }
-        scope_set scopes;
-        if (f.size() == 4) {
-            auto parsed = scope_set::parse(f[3]);
+        // After the key: at most one scopes field and at most one env= tag, in either order.
+        std::optional<key_env> env;
+        std::optional<scope_set> scopes;
+        for (const std::string_view extra : std::span{f}.subspan(3)) {
+            auto tag = parse_env_field(extra);
+            if (!tag) {
+                return fail(errc::kInvalidArgument, std::format("line {}: {}", line.number, tag.error().message), "security.keyring");
+            }
+            if (*tag && !env) {
+                env = **tag;
+                continue;
+            }
+            if (*tag || scopes) {
+                return fail(errc::kInvalidArgument, std::format("line {}: unexpected '{}'", line.number, extra), "security.keyring");
+            }
+            auto parsed = scope_set::parse(extra);
             if (!parsed) {
                 return fail(errc::kInvalidArgument, std::format("line {}: {}", line.number, parsed.error().message), "security.keyring");
             }
             scopes = std::move(*parsed);
         }
-        if (auto added = out.add({std::string{f[0]}, std::move(*secret), *granted, std::move(scopes)}); !added) {
+        if (auto added = out.add({std::string{f[0]}, std::move(*secret), *granted, scopes ? std::move(*scopes) : scope_set{}}); !added) {
             return fail(added.error().code, std::format("line {}: {}", line.number, added.error().message), "security.keyring");
+        }
+        if (env) {
+            (void)out.set_env(f[0], *env);
         }
     }
     return out;
@@ -87,6 +104,29 @@ const keyring_entry* keyring::find(std::string_view name) const noexcept {
         }
     }
     return nullptr;
+}
+
+std::optional<key_env> keyring::env_of(std::string_view name) const noexcept {
+    for (const auto& [n, env] : envs_) {
+        if (n == name) {
+            return env;
+        }
+    }
+    return std::nullopt;
+}
+
+result<void> keyring::set_env(std::string_view name, key_env env) {
+    if (find(name) == nullptr) {
+        return fail(errc::kNotFound, std::format("key '{}' is not in the keyring", name), "security.keyring");
+    }
+    for (auto& [n, e] : envs_) {
+        if (n == name) {
+            e = env;
+            return {};
+        }
+    }
+    envs_.emplace_back(std::string{name}, env);
+    return {};
 }
 
 } // namespace Rhp::security

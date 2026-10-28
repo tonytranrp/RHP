@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -48,6 +49,32 @@ private:
 
     std::vector<std::byte> bytes_;
 };
+
+// Which environment a key belongs to (decision AL11): `env=dev` / `env=prod` on key lines and key
+// files. Untagged keys (files from before Stage 13b) have none. Read and kept for now; a
+// production-hardened host refusing dev keys builds on it.
+enum class key_env : unsigned char {
+    kDev,
+    kProd
+};
+
+[[nodiscard]] constexpr std::string_view to_string(key_env env) noexcept {
+    return env == key_env::kProd ? "prod" : "dev";
+}
+
+[[nodiscard]] constexpr std::optional<key_env> parse_key_env(std::string_view name) noexcept {
+    if (name == "dev") {
+        return key_env::kDev;
+    }
+    if (name == "prod") {
+        return key_env::kProd;
+    }
+    return std::nullopt;
+}
+
+// The environment of an `env=dev|prod` field on a key line; nullopt for a field that isn't one,
+// kInvalidArgument for `env=` with another value.
+[[nodiscard]] result<std::optional<key_env>> parse_env_field(std::string_view field);
 
 // Zeroes memory in a way the optimizer keeps (secrets leaving scope).
 void secure_wipe(void* data, std::size_t size) noexcept;

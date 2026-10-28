@@ -15,6 +15,7 @@
 #include <rhp/release/trust.hpp>
 #include <rhp/security/detail/text.hpp>
 #include <rhp/security/ed25519.hpp>
+#include <rhp/security/key.hpp>
 
 namespace Rhp::release {
 
@@ -76,9 +77,19 @@ result<void> trust::add(std::string name, security::ed25519_public_key key, std:
 result<trust> trust::parse(std::string_view text) {
     trust out;
     for (const security::detail::text_line& line : security::detail::content_lines(text)) {
-        const auto f = security::detail::fields(line.text);
+        // An `env=dev|prod` tag (decision AL11) may end the line, as in a script signers file.
+        auto f = security::detail::fields(line.text);
+        if (f.size() > 2) {
+            auto tag = security::parse_env_field(f.back());
+            if (!tag) {
+                return std::unexpected{bad_trust(std::format("line {}: {}", line.number, tag.error().message))};
+            }
+            if (*tag) {
+                f.pop_back();
+            }
+        }
         if (f.size() != 2 && f.size() != 3) {
-            return std::unexpected{bad_trust(std::format("line {}: expected `name base64-public-key [pattern,pattern,...]`", line.number))};
+            return std::unexpected{bad_trust(std::format("line {}: expected `name base64-public-key [pattern,pattern,...] [env=dev|prod]`", line.number))};
         }
         auto key = security::ed25519_public_key::from_base64(f[1]);
         if (!key) {
