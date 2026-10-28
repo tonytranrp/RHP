@@ -2,6 +2,8 @@
 // pump() and logging, and the free functions host<Cfg> calls.
 
 #include <rhp/host/detail/engine_impl.hpp>
+#include <rhp/net/local/local.hpp>
+#include <rhp/security/dev_session.hpp>
 
 namespace Rhp::host_detail {
 
@@ -68,9 +70,14 @@ engine::engine(setup s)
     listener_ = std::move(*listener);
     listen_port_ = static_cast<std::uint16_t>(listener_->port());
     log(log_level::kInfo, "host listening on {} over {} (port {}{})", setup_.ep, setup_.transport.name, listener_->port(), tls_note);
+    open_dev_session();
 }
 
 engine::~engine() {
+    if (!dev_session_file_.empty()) {
+        std::error_code ignored;
+        std::filesystem::remove(dev_session_file_, ignored);
+    }
     release_events_.reset(); // a manager that outlives the host never calls into it again
     for (const auto& [name, state] : program_attached_) {
         state->detach(this); // a game thread may still fire: never after this
@@ -98,7 +105,52 @@ std::optional<error> engine::refusal() const {
     if (setup_.ep.insecure_lan && level != hardening::kDev) {
         return make_error(errc::kForbidden, std::format("{}: insecure_lan is refused at hardening {}; use TLS", setup_.ep, level), "host");
     }
-    return std::nullopt;
+    if (setup_.options.dev_session.empty()) {
+        return std::nullopt;
+    }
+    if constexpr (kBuildHardening != hardening::kDev) {
+        return make_error(errc::kForbidden, std::format("dev sessions are compiled out of this build (RHP_HARDENING={})", kBuildHardening), "host.dev_session");
+    } else {
+        if (level != hardening::kDev) {
+            return make_error(errc::kForbidden, std::format("a dev session needs hardening dev, and this host is at {}", level), "host.dev_session");
+        }
+        // On this machine only, at an address other processes can dial.
+        const bool local = setup_.transport.name == net::local_ipc::name || (setup_.transport.network && net::is_loopback_host(setup_.ep.host));
+        if (setup_.ep.direction != net::endpoint::mode::kListen || !local) {
+            return make_error(errc::kForbidden,
+                              std::format("a dev session listens on a loopback address or local IPC only, not {} over {}", setup_.ep, setup_.transport.name),
+                              "host.dev_session");
+        }
+        if (!setup_.dev_identity) {
+            return setup_.dev_identity.error();
+        }
+        return std::nullopt;
+    }
+}
+
+void engine::open_dev_session() {
+    if constexpr (kBuildHardening == hardening::kDev) {
+        if (setup_.options.dev_session.empty()) {
+            return;
+        }
+        security::dev_session session;
+        session.app = setup_.options.dev_session;
+        session.transport = std::string{setup_.transport.name};
+        session.host = setup_.ep.host;
+        session.port = setup_.transport.network ? listen_port_ : std::uint16_t{0};
+        session.identity = std::move(*setup_.dev_identity);
+        auto path = security::dev_session_path(session.app);
+        auto written = path ? security::write_dev_session(*path, session) : result<void>{std::unexpected{path.error()}};
+        if (!written) {
+            listen_error_ = std::move(written).error();
+            listener_.reset();
+            listen_port_ = 0;
+            log(log_level::kError, "host stopped listening: no dev session file: {}", *listen_error_);
+            return;
+        }
+        dev_session_file_ = std::move(*path);
+        log(log_level::kInfo, "dev session of {} at {}: rhp-cli connect --dev {}", session.app, session.endpoint(), session.app);
+    }
 }
 
 result<void> engine::listening() const {

@@ -28,10 +28,18 @@ headless_server --port 7777 --keys keys.txt --signers signers.pub --audit audit.
 rhp-cli connect 127.0.0.1:7777 -i dev.rhpid
 ```
 
+On your own machine a dev session skips the key files (a build with `RHP_HARDENING=dev`, the default):
+
+```bash
+headless_server --port 0 --dev-session my_game
+rhp-cli connect --dev my_game
+```
+
 | Option | What |
 |---|---|
 | `--host H --port N` | listen address (default `127.0.0.1`; port 0 = any free port). `--port` is required unless `--reverse` is given |
-| `--keys FILE` | keyring: `name role base64-psk` per line (required) |
+| `--keys FILE` | keyring: `name role base64-psk` per line (required without `--dev-session`) |
+| `--dev-session APP` | a dev session (dev builds, listening on loopback): the host makes an admin identity for this run and writes a connect file, so `rhp-cli connect --dev APP` needs no key files |
 | `--signers FILE` | trusted signers: `name base64-public-key` per line; without it only observe sessions can run code |
 | `--audit FILE` | every host event as a JSON line |
 | `--blobs DIR` | blob sink `files` (admin): pushed files land in `DIR` (file name only) |

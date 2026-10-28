@@ -39,6 +39,15 @@ public:
     psk_keyring() : keys_(std::make_shared<const keyring>()) {}
     psk_keyring(keyring keys) : keys_(std::make_shared<const keyring>(std::move(keys))) {}
 
+    // A copy that also accepts `entry` (kAlreadyLoaded when its name is taken); this one is unchanged.
+    [[nodiscard]] result<psk_keyring> with(keyring_entry entry) const {
+        keyring more = *keys_;
+        if (auto added = more.add(std::move(entry)); !added) {
+            return std::unexpected{std::move(added).error()};
+        }
+        return psk_keyring{std::move(more)};
+    }
+
     [[nodiscard]] std::unique_ptr<host_handshake> begin() const;
     // Per-request HTTP proofs against the same keys (Rhp::security::http_authenticator).
     [[nodiscard]] result<http_grant> verify_http(const http_proof& request, std::chrono::system_clock::time_point now) const {
