@@ -18,6 +18,7 @@ if(RHP_ENABLE)
         puc_lua/hook.cpp
         puc_lua/lib_proxy.cpp
         puc_lua/modules.cpp
+        puc_lua/narrowing.cpp
         puc_lua/requests.cpp
         puc_lua/sandbox.cpp
         puc_lua/sandbox_api.cpp

@@ -211,6 +211,7 @@ int lua_rhp_patch(lua_State* L) {
     if (!impl.scope_allows(scope_kind::kPatch, *id)) {
         s.raise(make_error(errc::kForbidden, std::format("needs scope patch:{}", *id), "rhp.patch"));
     }
+    impl.refuse_narrowed(L, "rhp.patch"); // a narrowed exec's patch would outlive its narrowing
     std::optional<error> failure;
     {
         auto point = find_point(*id);

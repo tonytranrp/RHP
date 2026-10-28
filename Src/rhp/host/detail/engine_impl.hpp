@@ -155,7 +155,7 @@ struct inbound {
     session_id session;
     std::string identity; // kAuthFailed: the key name the peer tried, if it named one
     role granted = role::kObserve;
-    scope_set scopes;     // kOpened: what the identity may reach (decision AL13)
+    scope_set scopes; // kOpened: what the identity may reach (decision AL13)
     std::shared_ptr<cancel_relay> relay;
     wire::op code = wire::op::kExec;
     std::uint64_t req = 0;
@@ -168,6 +168,7 @@ struct inbound {
     // kExec / kLoad / kReload: the signature check, made on the network thread (an Ed25519 check
     // takes about a tenth of a millisecond: not on the game's frame). Empty when it wasn't made.
     std::optional<result<std::string>> signer;
+    scope_set signed_scopes; // and the scopes the signature carries (an operator certificate's; decision AL13)
 };
 
 // Pump thread -> network thread.
@@ -558,9 +559,22 @@ private:
     [[nodiscard]] result<module_id> resolve(script::sandbox& box, const wire::module_ref& ref);
 
     // Who signed `source`: the signer's name, "" for unsigned code an observe session may run, or
-    // kBadSignature. Records the source's hash and signer in the audit record.
+    // kBadSignature. Records the source's hash and signer in the audit record. `narrowed`: the scopes
+    // the signature carries met with the identity's (decision AL13), when it carries any; the request's
+    // op must be among them (kForbidden).
     [[nodiscard]] result<std::string> check_signature(const pump_session& sess, const inbound& in, std::string_view module, std::string_view source,
-                                                      const value& signature);
+                                                      const value& signature, std::optional<scope_set>& narrowed);
+
+    // Runs a sandbox operation narrowed to `narrowed` (sandbox::narrow), when set.
+    template <std::invocable Op>
+    [[nodiscard]] static auto narrowed_run(script::sandbox& box, const std::optional<scope_set>& narrowed, Op&& op) {
+        if (!narrowed) {
+            return op();
+        }
+        box.narrow(*narrowed);
+        const utils::scope_guard clear{[&box] { box.narrow(scope_set{}); }};
+        return op();
+    }
     // What setup_.verify checks a script against for a session (host.cpp): its identity and role,
     // host_options' app / env / host_id, the wall clock and the host's hardening. Any thread.
     [[nodiscard]] security::signature_context signature_context_for(std::string_view identity, role granted) const;

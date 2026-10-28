@@ -175,6 +175,7 @@ if(RHP_ENABLE)
             script/lib_tests.cpp
             script/limits_tests.cpp
             script/method_tests.cpp
+            script/narrow_tests.cpp
             script/patch_point_tests.cpp
             script/reload_tests.cpp
             script/request_tests.cpp

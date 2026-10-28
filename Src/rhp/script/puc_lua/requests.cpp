@@ -431,6 +431,9 @@ value_list sandbox_impl::collect_results(lua_State* L, int first, int last) {
 
 void sandbox_impl::request_ended(request_record& req, const result<value_list>* outcome, bool abandoned) noexcept {
     stop_waiting(req);
+    if (!narrowed_.empty() && req.owner.module == scratch_) [[unlikely]] {
+        forget_narrowing({scratch_.value(), req.id.value()}); // a narrowed exec's (it left no handlers)
+    }
     if (debugger_ && debugger_->step && debugger_->step->request == req.id) {
         debugger_->step.reset(); // a step that ran off the end of its request
         rearm_all();

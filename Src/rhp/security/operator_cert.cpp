@@ -17,6 +17,7 @@
 #include <rhp/core/error.hpp>
 #include <rhp/core/result.hpp>
 #include <rhp/core/role.hpp>
+#include <rhp/core/scopes.hpp>
 #include <rhp/core/value.hpp>
 #include <rhp/platform/files.hpp>
 #include <rhp/security/detail/canonical.hpp>
@@ -159,6 +160,11 @@ result<void> validate_operator_cert(const operator_cert_fields& f) {
     for (const std::string& env : f.envs) {
         if (!valid_env(env)) {
             return invalid(std::format("unknown environment '{}' (dev or prod)", env));
+        }
+    }
+    for (const std::string& s : f.scopes) { // one pattern each (decision AL13)
+        if (s.contains(',') || !scope_set::parse(s)) {
+            return invalid(std::format("'{}' is not a scope pattern (lib:, cap:, patch:, event:, op: with an optional !)", s));
         }
     }
     return {};

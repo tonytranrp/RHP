@@ -175,13 +175,18 @@ result<module_id> engine::resolve(script::sandbox& box, const wire::module_ref& 
 }
 
 result<std::string> engine::check_signature(const pump_session& sess, const inbound& in, std::string_view module, std::string_view source,
-                                            const value& signature) {
+                                            const value& signature, std::optional<scope_set>& narrowed) {
     if (audit_ != nullptr) {
         audit_->module = module;
         audit_->hash = security::to_hex(security::blake2b_256(source));
     }
-    auto who = in.signer ? *in.signer : setup_.verify ? setup_.verify(source, signature, signature_context_for(sess.identity, sess.granted))
-                                                      : result<std::string>{std::string{}};
+    scope_set signed_scopes = in.signed_scopes;
+    auto who = in.signer ? *in.signer : result<std::string>{std::string{}};
+    if (!in.signer && setup_.verify) {
+        security::signature_context context = signature_context_for(sess.identity, sess.granted);
+        context.scopes = &signed_scopes;
+        who = setup_.verify(source, signature, context);
+    }
     if constexpr (kBuildHardening != hardening::kProduction) { // production: observe signs too
         if (!who && signature.is_nil() && sess.granted == role::kObserve && setup_.hardening != hardening::kProduction) {
             who = std::string{}; // observe can't mutate anything: unsigned code is allowed
@@ -191,6 +196,17 @@ result<std::string> engine::check_signature(const pump_session& sess, const inbo
     if (who && !who->empty() && setup_.signer_key && releases_.revoked_signer) {
         if (const auto key = setup_.signer_key(*who); key && releases_.revoked_signer(*key)) {
             who = fail(errc::kRevoked, std::format("the key of signer '{}' is revoked (identity revocations)", *who), "host.signature");
+        }
+    }
+    // A signature with scopes (an operator certificate's): the request runs under them and the
+    // identity's (decision AL13). Its op first: a certificate for `op:exec` doesn't load modules.
+    narrowed.reset();
+    if (who && !signed_scopes.unrestricted()) {
+        const std::string_view op = wire::to_string(in.code);
+        if (!signed_scopes.allows(scope_kind::kOp, op)) {
+            who = fail(errc::kForbidden, std::format("{} needs scope op:{}, the signature's certificate ({}) lacks it", op, op, *who), std::string{op});
+        } else {
+            narrowed = scope_set::intersect(sess.scopes, signed_scopes);
         }
     }
     if (who && audit_ != nullptr) {
@@ -431,11 +447,12 @@ void engine::op_exec(request_ctx& c) {
     if (!m) {
         return;
     }
-    if (auto who = check_signature(c.sess, c.in, "", m->source, m->signature); !who) {
+    std::optional<scope_set> narrowed;
+    if (auto who = check_signature(c.sess, c.in, "", m->source, m->signature, narrowed); !who) {
         return reject(c, who.error());
     }
     run_tracked(c, {}, [&]() -> result<value> {
-        auto r = c.box.exec(m->source, m->chunk);
+        auto r = narrowed_run(c.box, narrowed, [&] { return c.box.exec(m->source, m->chunk); });
         if (!r) {
             return std::unexpected{std::move(r).error()};
         }
@@ -448,7 +465,8 @@ void engine::op_load(request_ctx& c) {
     if (!m) {
         return;
     }
-    if (auto who = check_signature(c.sess, c.in, m->name, m->source, m->signature); !who) {
+    std::optional<scope_set> narrowed;
+    if (auto who = check_signature(c.sess, c.in, m->name, m->source, m->signature, narrowed); !who) {
         return reject(c, who.error());
     }
     // The module id is only known once load() returns: track it through `loaded` (a load of a
@@ -457,7 +475,7 @@ void engine::op_load(request_ctx& c) {
     const auto existing = c.box.find(m->name);
     const request_id before = c.box.last_request();
     run_tracked(c, existing ? *existing : module_id{}, [&]() -> result<value> {
-        auto r = c.box.load(m->name, m->source);
+        auto r = narrowed_run(c.box, narrowed, [&] { return c.box.load(m->name, m->source); });
         if (!r) {
             return std::unexpected{std::move(r).error()};
         }
@@ -495,12 +513,13 @@ void engine::op_call(request_ctx& c) {
 void engine::op_reload(request_ctx& c) {
     std::optional<wire::reload_request> reload;
     std::optional<wire::rollback_request> rollback;
+    std::optional<scope_set> narrowed;
     if (c.in.code == wire::op::kReload) {
         reload = decode<wire::reload_request>(c);
         if (!reload) {
             return;
         }
-        if (auto who = check_signature(c.sess, c.in, ref_text(reload->module), reload->source, reload->signature); !who) {
+        if (auto who = check_signature(c.sess, c.in, ref_text(reload->module), reload->source, reload->signature, narrowed); !who) {
             return reject(c, who.error());
         }
     } else {
@@ -518,7 +537,7 @@ void engine::op_reload(request_ctx& c) {
     }
     const module_id target = *mod;
     run_tracked(c, target, [&]() -> result<value> {
-        auto r = reload ? c.box.reload(target, reload->source)
+        auto r = reload ? narrowed_run(c.box, narrowed, [&] { return c.box.reload(target, reload->source); })
                         : c.box.rollback(target, rollback->steps > std::numeric_limits<std::size_t>::max() ? std::numeric_limits<std::size_t>::max()
                                                                                                            : static_cast<std::size_t>(rollback->steps));
         if (!r) {

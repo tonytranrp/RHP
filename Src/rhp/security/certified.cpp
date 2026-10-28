@@ -21,6 +21,7 @@
 #include <rhp/core/hardening.hpp>
 #include <rhp/core/result.hpp>
 #include <rhp/core/role.hpp>
+#include <rhp/core/scopes.hpp>
 #include <rhp/core/value.hpp>
 #include <rhp/platform/random.hpp>
 #include <rhp/security/certified.hpp>
@@ -302,9 +303,21 @@ result<std::string> certified::trust::verify(std::string_view source, const valu
         if (!allows(cert->fields.max_role, context.granted)) {
             return refuse(errc::kForbidden, std::format("certificate {} allows at most {}, and this session is {}", who, cert->fields.max_role, context.granted));
         }
+        // Its capability scopes (decision AL13): the host narrows the request to them.
+        std::string scope_text;
+        for (const std::string& s : cert->fields.scopes) {
+            scope_text += scope_text.empty() ? s : "," + s;
+        }
+        auto scopes = scope_set::parse(scope_text);
+        if (!scopes) {
+            return refuse(errc::kForbidden, std::format("certificate {} has scopes this host can't read: {}", who, scopes.error().message));
+        }
         RHP_TRY(fresh, state_->remember(claims->nonce, claims->not_after, now));
         if (!fresh) {
             return refuse(errc::kBadSignature, std::format("the signature by {} was already used (replayed nonce)", who));
+        }
+        if (context.scopes != nullptr && !scopes->unrestricted()) {
+            *context.scopes = std::move(*scopes);
         }
         return who;
     }

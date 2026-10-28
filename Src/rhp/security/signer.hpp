@@ -8,6 +8,7 @@
 #include <rhp/core/hardening.hpp>
 #include <rhp/core/result.hpp>
 #include <rhp/core/role.hpp>
+#include <rhp/core/scopes.hpp>
 #include <rhp/core/value.hpp>
 
 namespace Rhp::security {
@@ -55,6 +56,10 @@ struct signature_context {
     std::string_view host_id{}; // host_options::host_id (empty: not set)
     std::chrono::system_clock::time_point now{};
     hardening level = kBuildHardening;
+    // Out (decision AL13): a trust whose signatures carry capability scopes (security::certified: the
+    // certificate's) stores them here when one verifies; the host narrows that request to them on
+    // top of the identity's. nullptr: the caller doesn't ask. Left as it is when there are none.
+    scope_set* scopes = nullptr;
 };
 
 // What a client knows when it signs, for a key that puts claims in its signature

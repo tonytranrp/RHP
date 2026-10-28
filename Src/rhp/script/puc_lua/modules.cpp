@@ -223,6 +223,7 @@ result<value_list> sandbox_impl::complete_load(module_record& mod, revision_id r
     abandon_requests([&](const request_record& r) { return r.owner.module == mod.id && r.owner.revision == old_revision; },
                      "its module revision was replaced by a reload");
     (void)ledger_.revert_revision(mod.id, old_revision);
+    forget_narrowing({mod.id.value(), old_revision.value()});
     release(mod.live);
     mod.live = std::move(*mod.pending);
     mod.pending.reset();
@@ -309,6 +310,7 @@ void sandbox_impl::abort_reload(module_record& mod) noexcept {
     release(*mod.pending);
     mod.pending.reset();
     mod.pending_source.reset();
+    forget_narrowing({mod.id.value(), revision.value()});
 }
 
 void sandbox_impl::release(module_instance& instance) noexcept {
@@ -360,16 +362,23 @@ result<void> sandbox_impl::install_lib(std::string_view name, c_function build, 
         // Every capability its bindings carry gets its bit; the ones the scopes deny go in the mask.
         for (const cap_ref& c : caps) {
             const std::uint64_t bit = assign_cap_bit(c);
+            installed_caps_.emplace_back(c.name, bit); // narrowings deny from these (narrowing.cpp)
             if (!options_.scopes.allows(scope_kind::kCap, c.name)) {
-                denied_caps_ |= bit;
+                base_denied_caps_ |= bit;
             }
         }
+        set_active_narrowing(active_narrowing_); // denied_caps_ again, with these
     }
     return out;
 }
 
 result<value_list> sandbox_impl::exec(std::string_view source, std::string_view chunk_name, bool cached) {
     const operation_scope operation{*this};
+    if (pending_narrowing_) {
+        if (auto libs = check_narrowed_libs(*pending_narrowing_); !libs) {
+            return std::unexpected{std::move(libs).error()};
+        }
+    }
     drain();
     std::string chunk;
     chunk.reserve(chunk_name.size() + 1);
@@ -383,6 +392,7 @@ result<value_list> sandbox_impl::exec(std::string_view source, std::string_view 
             return;
         }
         request_record& req = start_request(request_kind::kExec, effect_owner{scratch_}, {}, 0, true);
+        attach_narrowing({scratch_.value(), req.id.value()}, true);
         if (auto done = step(req, 0)) {
             out = std::move(*done);
         }
@@ -430,6 +440,11 @@ result<module_id> sandbox_impl::load(std::string_view name, std::string_view sou
     if (auto named = check_module_name(name); !named) {
         return std::unexpected{std::move(named).error()};
     }
+    if (pending_narrowing_) {
+        if (auto libs = check_narrowed_libs(*pending_narrowing_); !libs) {
+            return std::unexpected{std::move(libs).error()};
+        }
+    }
     if (const auto existing = find(name)) {
         auto reloaded = reload(*existing, source, bytecode);
         if (!reloaded) {
@@ -445,7 +460,7 @@ result<module_id> sandbox_impl::load(std::string_view name, std::string_view sou
         mod.state = module_state::kLoading;
         mod.revisions_made = 1;
         mod.live.revision = revision_id{1};
-        mod.history.push_back(revision_source{revision_id{1}, std::string{source}, source_hash(source)});
+        mod.history.push_back(revision_source{revision_id{1}, std::string{source}, source_hash(source), pending_narrowing_});
         modules_.emplace(id, std::move(mod));
     }
 
@@ -465,6 +480,7 @@ result<module_id> sandbox_impl::load(std::string_view name, std::string_view sou
         lua_rawgeti(L, LUA_REGISTRYINDEX, loader_ref_);
         lua_insert(L, -2);
         lua_rawgeti(L, LUA_REGISTRYINDEX, mod.live.env_ref);
+        attach_narrowing({id.value(), mod.live.revision.value()}, false);
         request_record& req = start_request(request_kind::kLoad, effect_owner{id, mod.live.revision}, mod.name, 2, true);
         if (auto done = step(req, 2); done && !*done) {
             failure = std::move(*done).error();
@@ -481,6 +497,7 @@ result<module_id> sandbox_impl::load(std::string_view name, std::string_view sou
             release(mod->live);
         }
         modules_.erase(id);
+        forget_narrowings(id);
     }
     drain();
     if (failure) {
@@ -498,7 +515,17 @@ result<revision_id> sandbox_impl::reload(module_id id, std::string_view source, 
     if (found == nullptr || found->scratch) {
         return fail(errc::kNotFound, std::format("no module with id {}", id));
     }
-    if (defer_if_running([this, id, src = std::string{source}] { (void)reload(id, src); })) { // parses: the bytecode's view won't live that long
+    if (pending_narrowing_) {
+        if (auto libs = check_narrowed_libs(*pending_narrowing_); !libs) {
+            return std::unexpected{std::move(libs).error()};
+        }
+    }
+    // Parses: the bytecode's view won't live that long. Narrowed as it would have been now.
+    if (defer_if_running([this, id, src = std::string{source}, narrowed = pending_narrowing_] {
+            const auto outer = std::exchange(pending_narrowing_, narrowed);
+            (void)reload(id, src);
+            pending_narrowing_ = outer;
+        })) {
         return revision_id{};
     }
     drain();
@@ -519,7 +546,7 @@ result<revision_id> sandbox_impl::reload(module_id id, std::string_view source, 
         lua_State* L = state_;
         const slice_scope slice{*this};
         mod->pending = module_instance{revision};
-        mod->pending_source = revision_source{revision, std::string{source}, source_hash(source)};
+        mod->pending_source = revision_source{revision, std::string{source}, source_hash(source), pending_narrowing_};
         mod->pending->env_ref = new_environment();
         if (auto compiled = compile(source, chunk, mod->pending->env_ref, false, bytecode); !compiled) {
             out = std::unexpected{std::move(compiled).error()};
@@ -528,6 +555,7 @@ result<revision_id> sandbox_impl::reload(module_id id, std::string_view source, 
         lua_rawgeti(L, LUA_REGISTRYINDEX, loader_ref_);
         lua_insert(L, -2);
         lua_rawgeti(L, LUA_REGISTRYINDEX, mod->pending->env_ref);
+        attach_narrowing({id.value(), revision.value()}, false);
         request_record& req = start_request(request_kind::kLoad, effect_owner{id, revision}, mod->name, 2, true);
         if (auto done = step(req, 2)) {
             if (!*done) {
@@ -561,8 +589,13 @@ result<revision_id> sandbox_impl::rollback(module_id id, std::size_t steps) {
         return fail(errc::kOutOfRange, std::format("module '{}' keeps {} revision(s); can't go back {}", mod->name, mod->history.size(), steps),
                     mod->name);
     }
-    const std::string source = mod->history[mod->history.size() - 1 - steps].source;
-    return reload(id, source);
+    // That revision's source, narrowed as it was (sandbox::narrow): a rollback carries no signature.
+    const revision_source& earlier = mod->history[mod->history.size() - 1 - steps];
+    const std::string source = earlier.source;
+    const auto outer = std::exchange(pending_narrowing_, earlier.narrowing);
+    auto out = reload(id, source);
+    pending_narrowing_ = outer;
+    return out;
 }
 
 result<value_list> sandbox_impl::call(module_id id, std::string_view function, std::span<const value> args) {
@@ -790,6 +823,7 @@ revert_report sandbox_impl::unload_module(module_record& mod) {
         }
     }
     modules_.erase(id);
+    forget_narrowings(id);
     return report;
 }
 

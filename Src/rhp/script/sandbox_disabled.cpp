@@ -46,6 +46,8 @@ result<void> sandbox::install_lib(std::string_view name, c_function, stub_fn, de
     return disabled();
 }
 
+void sandbox::narrow(scope_set) {}
+
 result<value_list> sandbox::exec(std::string_view, std::string_view) {
     return disabled();
 }

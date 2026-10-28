@@ -137,6 +137,16 @@ struct revision_source {
     revision_id revision;
     std::string source;
     std::uint32_t hash = 0;
+    std::optional<scope_set> narrowing{}; // sandbox::narrow when it was loaded: a rollback to it is narrowed alike
+};
+
+// Scopes one exec request or one module revision runs with besides sandbox_options::scopes
+// (sandbox::narrow, decision AL13).
+struct narrowing {
+    scope_set scopes;
+    std::uint64_t denied = 0;  // bits of the installed capabilities `scopes` deny
+    std::size_t caps_seen = 0; // installed capabilities when `denied` was worked out
+    bool exec = false;         // an exec request's: no lasting handlers or patches
 };
 
 struct module_record {
@@ -368,8 +378,13 @@ public:
 
     // ---- context ----------------------------------------------------------------------------
     [[nodiscard]] role caller_role() const noexcept override { return options_.caller_role; }
-    [[nodiscard]] bool scope_allows(scope_kind kind, std::string_view name) const noexcept override { return options_.scopes.allows(kind, name); }
-    [[nodiscard]] bool scope_denies(scope_kind kind, std::string_view name) const noexcept override { return options_.scopes.denies(kind, name); }
+    // The sandbox's scopes and, while narrowed code runs, its narrowing's.
+    [[nodiscard]] bool scope_allows(scope_kind kind, std::string_view name) const noexcept override {
+        return options_.scopes.allows(kind, name) && (active_narrowing_ == nullptr || active_narrowing_->scopes.allows(kind, name));
+    }
+    [[nodiscard]] bool scope_denies(scope_kind kind, std::string_view name) const noexcept override {
+        return options_.scopes.denies(kind, name) || (active_narrowing_ != nullptr && active_narrowing_->scopes.denies(kind, name));
+    }
     // Whether `path` (a member of an installed lib, "game.debug.speed") lies in a sub-lib the scopes
     // deny, which lib_builder left out ("!lib:game.debug").
     [[nodiscard]] bool sub_lib_denied(std::string_view path) const noexcept {
@@ -408,6 +423,10 @@ public:
     result<void> tune(std::string_view path, const value& v);
     // Every variable of the installed libs, without values (rhp.tunables reads them).
     [[nodiscard]] const std::vector<tunable_info>& tunable_list() const noexcept { return tunables_; }
+    // sandbox::narrow (narrowing.cpp): what exec / load / reload attach to the request or revision they start.
+    void narrow(scope_set scopes);
+    // Raises (naming `where`) in a narrowed exec: its lasting handlers and patches would outlive it.
+    void refuse_narrowed(lua_State* L, std::string_view where) const;
 
     // ---- debugger (debug.cpp) and profiler (profile.cpp) ------------------------------------------
     result<std::vector<std::uint32_t>> set_breakpoints(std::string_view source, std::span<const std::uint32_t> lines);
@@ -801,6 +820,20 @@ private:
     revert_report revert_module(module_record& mod);
     revert_report unload_module(module_record& mod);
 
+    // ---- narrowing (narrowing.cpp) ---------------------------------------------------------------
+    using narrowing_key = std::pair<std::uint64_t, std::uint64_t>; // (module, revision); (scratch, request) for an exec
+    // kForbidden when `scopes` deny a lib or sub-lib this sandbox has (they can't be taken away from one run).
+    [[nodiscard]] result<void> check_narrowed_libs(const scope_set& scopes) const;
+    // Narrows what runs as `key` to pending_narrowing_ (nothing without one).
+    void attach_narrowing(narrowing_key key, bool exec);
+    // active_scope: the narrowing of the code `owner` names, if any.
+    void narrow_to(const effect_owner& owner) noexcept;
+    void set_active_narrowing(narrowing* n) noexcept;
+    // Forgets a request's or revision's narrowing once no run is active (drop_narrowings).
+    void forget_narrowing(narrowing_key key) noexcept;
+    void forget_narrowings(module_id mod) noexcept;
+    void drop_narrowings() noexcept;
+
     sandbox_options options_;
     std::pmr::memory_resource* memory_; // nullptr: the C heap (realloc)
     // Blocks up to small_alloc::kMaxSize, in regions from memory_. A member, so it outlives the
@@ -841,6 +874,14 @@ private:
     id_generator<module_id> ids_;
     module_id scratch_;
     effect_owner current_;
+    // Narrowing (sandbox::narrow): context::denied_caps_ is base_denied_caps_ (the sandbox's scopes)
+    // plus the running code's narrowing's. Empty narrowed_ (the common case): active_scope skips it all.
+    std::uint64_t base_denied_caps_ = 0;
+    std::vector<std::pair<std::string_view, std::uint64_t>> installed_caps_; // (capability, bit) of the installed libs
+    std::optional<scope_set> pending_narrowing_;
+    std::map<narrowing_key, narrowing> narrowed_;
+    narrowing* active_narrowing_ = nullptr;
+    std::vector<narrowing_key> narrowing_drops_;
 
     // Scheduler.
     id_generator<request_id> request_ids_;
@@ -930,9 +971,10 @@ struct sandbox_impl::active_scope {
     sandbox_impl& self;
     effect_owner previous;
     run_budget* previous_budget;
+    narrowing* previous_narrowing;
 
     active_scope(sandbox_impl& s, run_budget* budget, lua_State* thread, request_record* request, const effect_owner& owner)
-        : self(s), previous(s.current_), previous_budget(s.budget_) {
+        : self(s), previous(s.current_), previous_budget(s.budget_), previous_narrowing(s.active_narrowing_) {
         if (self.running_.empty()) {
             self.cancel_running_.store(false, std::memory_order_release);
         }
@@ -945,6 +987,9 @@ struct sandbox_impl::active_scope {
             self.budget_ = budget;
         }
         self.current_ = owner;
+        if (!self.narrowed_.empty()) [[unlikely]] {
+            self.narrow_to(owner);
+        }
         if (checked) {
             self.enter_checked();
         }
@@ -962,6 +1007,12 @@ struct sandbox_impl::active_scope {
         self.running_.pop_back();
         self.budget_ = previous_budget;
         self.current_ = previous;
+        if (self.active_narrowing_ != previous_narrowing) [[unlikely]] {
+            self.set_active_narrowing(previous_narrowing);
+        }
+        if (self.running_.empty() && !self.narrowing_drops_.empty()) [[unlikely]] {
+            self.drop_narrowings();
+        }
         if (self.metering_ && self.running_.empty()) {
             self.credit_hook_progress(self.state_);
             self.meter_active_ += steady::now() - self.meter_run_started_;

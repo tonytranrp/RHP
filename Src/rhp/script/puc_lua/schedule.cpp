@@ -203,6 +203,7 @@ void sandbox_impl::refuse_while_closing(lua_State* L, std::string_view where) co
 }
 
 void sandbox_impl::refuse_over_handlers(lua_State* L, std::string_view where) const {
+    refuse_narrowed(L, where); // a narrowed exec's handlers would outlive its narrowing
     if (const std::uint32_t cap = options_.limits.handlers; cap != 0 && handlers_ >= cap) {
         stack{L}.raise(make_error(errc::kLimitExceeded,
                                   std::format("{} timers, frame callbacks, subscriptions and tasks are alive: the limit (limits.handlers); remove one first", handlers_),

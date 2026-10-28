@@ -191,6 +191,10 @@ result<void> sandbox::fire_event(std::string_view name, std::span<const value> a
     return impl_->fire_event(name, args);
 }
 
+void sandbox::narrow(scope_set scopes) {
+    impl_->narrow(std::move(scopes));
+}
+
 result<value_list> sandbox::exec(std::string_view source, std::string_view chunk_name) {
     return impl_->exec(source, chunk_name);
 }

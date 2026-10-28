@@ -68,16 +68,32 @@ struct certified_trust_options {
 // / audience / identity match the host's app, env, host id and the session's identity, and the
 // certificate's apps / envs list the host's (kOutOfScope); its max_role is at least the session's
 // role (kForbidden); the nonce wasn't seen before (kBadSignature). The signer it names is
-// "<principal>#<serial>".
+// "<principal>#<serial>". The certificate's scopes go to signature_context::scopes: the host runs
+// the script under them as well as the identity's (decision AL13).
 //
 // Replay: each trust keeps the nonces it accepted until their claims expire. The cache holds at
 // most trust_options::replay_entries live nonces; when it is full of unexpired ones, further
 // signatures are refused (kLimitExceeded) rather than forgetting one that could then be replayed.
 // Copies of a trust share the cache, the revoked serials and the revocation check.
+// What a certified key puts in the claims when the client doesn't say (signing_context wins where set).
+struct certified_claim_options {
+    std::chrono::seconds lifetime{600}; // claims.not_after = now + lifetime (at most the cert's not_after)
+    std::string app{};
+    std::string env{};
+    std::string audience{};
+    std::string identity{};
+};
+
+struct certified_trust_options {
+    std::chrono::seconds max_lifetime{3600}; // how far ahead claims.not_after may be
+    std::size_t replay_entries = 4096;       // live nonces kept
+};
+
 struct certified {
     static constexpr std::string_view name = "certified";
 
     using claim_options = certified_claim_options;
+    using trust_options = certified_trust_options;
 
     class key {
     public:
@@ -97,8 +113,6 @@ struct certified {
         std::vector<std::byte> cert_bytes_; // encoded once
         claim_options claims_;
     };
-
-    using trust_options = certified_trust_options;
 
     class trust {
     public:

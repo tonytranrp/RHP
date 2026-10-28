@@ -300,6 +300,15 @@ public:
 #endif
     }
 
+    // Narrows what the next exec / load / reload run (until narrow({}) clears it) to these scopes on
+    // top of sandbox_options::scopes (decision AL13; a host passes an operator certificate's): the
+    // code checks against both (cap:, patch:, event:) for as long as it runs, the handlers, patches
+    // and tasks of a narrowed module revision included; a rollback runs as the revision it goes back
+    // to was narrowed. Libs aren't taken away for one script: a narrowed operation whose scopes deny a
+    // lib or sub-lib the sandbox has is refused (kForbidden). A narrowed exec may not leave lasting
+    // handlers or patches (kForbidden from rhp.after / every / on / spawn / patch ...): load a module.
+    void narrow(scope_set scopes);
+
     // Runs source in the scratch module; effects are kept and owned by the scratch module.
     // On error only the effects of this run are reverted. Returns every value the chunk returned.
     result<value_list> exec(std::string_view source, std::string_view chunk_name = "exec");

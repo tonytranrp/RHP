@@ -17,10 +17,12 @@
 #include <rhp/core/hardening.hpp>
 #include <rhp/core/log.hpp>
 #include <rhp/core/role.hpp>
+#include <rhp/core/scopes.hpp>
 #include <rhp/event/events.hpp>
 #include <rhp/host/host.hpp>
 #include <rhp/net/endpoint.hpp>
 #include <rhp/net/loopback/loopback.hpp>
+#include <rhp/script/lib.hpp>
 #include <rhp/security/certified.hpp>
 #include <rhp/security/ed25519.hpp>
 #include <rhp/security/key.hpp>
@@ -36,13 +38,26 @@ namespace stage13_certified_fixtures {
 
 using cert_cfg = Rhp::config<>::transport<Rhp::net::loopback>::logger<Rhp::core::null_logger>::signer<Rhp::security::certified>;
 
+inline int g_coins = 0;
+
+inline void buy(int n) {
+    g_coins -= n;
+}
+
+using shop_lib = Rhp::lib<"s13cshop">::fn<"buy", &buy, Rhp::cap<"s13c.write">>;
+
 struct pki {
     Rhp::security::key patch_psk = *Rhp::security::key::generate();
     Rhp::security::key admin_psk = *Rhp::security::key::generate();
+    Rhp::security::key exec_psk = *Rhp::security::key::generate(); // an identity scoped to op:exec
     Rhp::security::ed25519_secret_key ca = *Rhp::security::ed25519_secret_key::generate();
     Rhp::security::ed25519_secret_key op = *Rhp::security::ed25519_secret_key::generate();
 
-    [[nodiscard]] Rhp::security::keyring ring() const { return Rhp::security::keyring{{"patch", patch_psk, Rhp::role::kPatch}, {"admin", admin_psk, Rhp::role::kAdmin}}; }
+    [[nodiscard]] Rhp::security::keyring ring() const {
+        return Rhp::security::keyring{{"patch", patch_psk, Rhp::role::kPatch},
+                                      {"admin", admin_psk, Rhp::role::kAdmin},
+                                      {"exec_only", exec_psk, Rhp::role::kPatch, *Rhp::scope_set::parse("op:exec")}};
+    }
 
     [[nodiscard]] Rhp::security::certified::trust trust(std::string ca_env = {}) const {
         Rhp::security::trusted_cas cas;
@@ -50,7 +65,7 @@ struct pki {
         return Rhp::security::certified::trust{std::move(cas)};
     }
 
-    [[nodiscard]] Rhp::security::certified::key key(Rhp::role max = Rhp::role::kPatch, std::vector<std::string> envs = {}) const {
+    [[nodiscard]] Rhp::security::certified::key key(Rhp::role max = Rhp::role::kPatch, std::vector<std::string> envs = {}, std::vector<std::string> scopes = {}) const {
         const auto now = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count());
         Rhp::security::operator_cert_fields f;
         f.serial = 9;
@@ -63,10 +78,14 @@ struct pki {
         f.max_role = max;
         f.apps = {"game"};
         f.envs = std::move(envs);
+        f.scopes = std::move(scopes);
         return {op, *Rhp::security::issue_operator_cert(ca, std::move(f))};
     }
 
     [[nodiscard]] Rhp::security::psk_identity as(std::string_view who) const {
+        if (who == "exec_only") {
+            return {"exec_only", exec_psk};
+        }
         return who == "admin" ? Rhp::security::psk_identity{"admin", admin_psk} : Rhp::security::psk_identity{"patch", patch_psk};
     }
 };
@@ -75,6 +94,7 @@ struct pki {
 class running_host {
 public:
     running_host(Rhp::endpoint ep, const pki& k, Rhp::host_options options, std::string ca_env = {}) : host_(std::move(ep), k.ring(), k.trust(std::move(ca_env)), std::move(options)) {
+        REQUIRE(host_.install<shop_lib>());
         pump_ = std::jthread{[this](std::stop_token stop) {
             while (!stop.stop_requested()) {
                 host_.pump();
@@ -165,4 +185,56 @@ TEST_CASE("stage13: a production host refuses dev-tagged CAs and certificates", 
     // A production host's environment is "prod".
     Rhp::client<cert_cfg> prod{at.reversed(), k.as("patch"), k.key(Rhp::role::kPatch, {"prod"}), claims("game", "prod")};
     CHECK(prod.exec<int>("return 1") == 1);
+}
+
+TEST_CASE("stage13: a certificate's scopes narrow the request it signs", "[stage13][certified][scopes]") {
+    pki k;
+    g_coins = 0;
+    const auto at = Rhp::endpoint::listen("s13c.scopes", 1);
+    running_host host{at, k, {.app = "game"}};
+    // The identity may load and buy; the certificate only exec, and not buy.
+    Rhp::client<cert_cfg> c{at.reversed(), k.as("patch"), k.key(Rhp::role::kPatch, {}, {"op:exec", "!cap:s13c.write"}), claims("game")};
+    const auto loaded = c.load("s13c_mod", "return {}");
+    REQUIRE_FALSE(loaded);
+    CHECK(loaded.error().code == errc::kForbidden);
+    CHECK(loaded.error().message.contains("op:load"));
+    const auto bought = c.exec("s13cshop.buy(1)");
+    REQUIRE_FALSE(bought);
+    CHECK(bought.error().code == errc::kForbidden);
+    CHECK(bought.error().message.contains("s13c.write"));
+    CHECK(g_coins == 0);
+    // A narrowed exec leaves no handlers behind.
+    CHECK(c.exec("rhp.after(1000, function() end)").error().code == errc::kForbidden);
+    CHECK(c.exec<int>("return 1 + 1") == 2);
+    // The same identity with an unscoped certificate may do both.
+    Rhp::client<cert_cfg> wide{at.reversed(), k.as("patch"), k.key(), claims("game")};
+    REQUIRE(wide.exec("s13cshop.buy(1)"));
+    CHECK(g_coins == -1);
+    REQUIRE(wide.load("s13c_mod", "return {}"));
+}
+
+TEST_CASE("stage13: the identity's scopes still bind a certificate that allows more", "[stage13][certified][scopes]") {
+    pki k;
+    const auto at = Rhp::endpoint::listen("s13c.scopes_identity", 1);
+    running_host host{at, k, {.app = "game"}};
+    Rhp::client<cert_cfg> c{at.reversed(), k.as("exec_only"), k.key(Rhp::role::kPatch, {}, {"op:exec", "op:load"}), claims("game")};
+    CHECK(c.exec<int>("return 1") == 1);
+    const auto loaded = c.load("s13c_scoped", "return {}");
+    REQUIRE_FALSE(loaded);
+    CHECK(loaded.error().code == errc::kForbidden);
+    CHECK(loaded.error().message.contains("exec_only"));
+}
+
+TEST_CASE("stage13: a module loaded under a certificate keeps its scopes", "[stage13][certified][scopes]") {
+    pki k;
+    g_coins = 0;
+    const auto at = Rhp::endpoint::listen("s13c.scopes_module", 1);
+    running_host host{at, k, {.app = "game"}};
+    Rhp::client<cert_cfg> c{at.reversed(), k.as("patch"), k.key(Rhp::role::kPatch, {}, {"!cap:s13c.write"}), claims("game")};
+    REQUIRE(c.load("s13c_buyer", "local M = {} function M.buy() s13cshop.buy(1) end return M"));
+    // A call carries no signature: the module's narrowing still applies.
+    const auto called = c.call("s13c_buyer", "buy");
+    REQUIRE_FALSE(called);
+    CHECK(called.error().code == errc::kForbidden);
+    CHECK(g_coins == 0);
 }
