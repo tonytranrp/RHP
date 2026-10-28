@@ -1,7 +1,9 @@
-// RHP_ENABLE=OFF: no cryptography is built, so no key handle can be made and nothing verifies.
+// RHP_ENABLE=OFF: no cryptography is built, so no key handle can be made, nothing verifies and no
+// passphrase seals (key stores still keep plain and wrapped secrets: key_store.cpp).
 #include <cstddef>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <rhp/core/error.hpp>
@@ -9,6 +11,7 @@
 #include <rhp/security/ed25519.hpp>
 #include <rhp/security/key.hpp>
 #include <rhp/security/key_handle.hpp>
+#include <rhp/security/key_store.hpp>
 
 namespace Rhp::security {
 
@@ -44,6 +47,18 @@ std::string key_fingerprint(key_algorithm, std::span<const std::byte>) {
 
 result<key> generate_private_key(key_algorithm) {
     return fail(errc::kDisabled, kDisabledMessage, "security.key_handle");
+}
+
+result<std::string> seal_with_passphrase(std::span<const std::byte>, std::string_view, const passphrase_kdf&) {
+    return fail(errc::kDisabled, kDisabledMessage, "security.passphrase");
+}
+
+result<key> open_with_passphrase(std::string_view, std::string_view) {
+    return fail(errc::kDisabled, kDisabledMessage, "security.passphrase");
+}
+
+bool is_passphrase_sealed(std::string_view value) noexcept {
+    return value.starts_with("argon2i:");
 }
 
 } // namespace Rhp::security

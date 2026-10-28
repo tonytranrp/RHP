@@ -78,6 +78,7 @@ if(RHP_ENABLE)
         SOURCES
             security/key_file_tests.cpp
             security/key_handle_tests.cpp
+            security/key_store_tests.cpp
             security/key_tests.cpp
             security/psk_tests.cpp
             security/signing_tests.cpp

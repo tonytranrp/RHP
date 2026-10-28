@@ -10,11 +10,13 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <vector>
 
 #include <catch2/catch_test_macros.hpp>
 
 #include <rhp/core/error.hpp>
 #include <rhp/platform/files.hpp>
+#include <rhp/platform/key_storage.hpp>
 #include <rhp/platform/os.hpp>
 #include <rhp/platform/random.hpp>
 #include <rhp/utils/scope_guard.hpp>
@@ -129,3 +131,33 @@ TEST_CASE("platform: the user configuration folder", "[platform][files]") {
         CHECK(dir->is_absolute());
     }
 }
+
+TEST_CASE("DPAPI seals for this user on Windows and is disabled elsewhere", "[platform][key_storage]") {
+    const std::string_view secret = "a 32-byte secret, give or take..";
+    auto sealed = Rhp::platform::protect(platform_fixtures::bytes_of(secret));
+    if constexpr (Rhp::platform::kOs != Rhp::platform::os_kind::kWindows) {
+        CHECK(sealed.error().code == Rhp::errc::kDisabled);
+        CHECK(Rhp::platform::unprotect(platform_fixtures::bytes_of(secret)).error().code == Rhp::errc::kDisabled);
+        return;
+    }
+    REQUIRE(sealed);
+    CHECK(sealed->size() > secret.size());
+    CHECK(std::string_view{reinterpret_cast<const char*>(sealed->data()), sealed->size()}.find(secret) == std::string_view::npos);
+    auto opened = Rhp::platform::unprotect(*sealed);
+    REQUIRE(opened);
+    CHECK(std::string_view{reinterpret_cast<const char*>(opened->data()), opened->size()} == secret);
+    // A changed blob doesn't open.
+    std::vector<std::byte> changed = *sealed;
+    changed[changed.size() / 2] ^= std::byte{1};
+    CHECK(Rhp::platform::unprotect(changed).error().code == Rhp::errc::kAuth);
+}
+
+TEST_CASE("the Keychain is disabled off Apple targets", "[platform][key_storage]") {
+    if constexpr (Rhp::platform::kOs == Rhp::platform::os_kind::kMacos || Rhp::platform::kOs == Rhp::platform::os_kind::kIos) {
+        SKIP("Keychain items need a signed app or a login keychain; not run here");
+    }
+    CHECK(Rhp::platform::keychain_load("rhp-tests", "k").error().code == Rhp::errc::kDisabled);
+    CHECK(Rhp::platform::keychain_store("rhp-tests", "k", platform_fixtures::bytes_of("x")).error().code == Rhp::errc::kDisabled);
+    CHECK(Rhp::platform::keychain_remove("rhp-tests", "k").error().code == Rhp::errc::kDisabled);
+}
+
