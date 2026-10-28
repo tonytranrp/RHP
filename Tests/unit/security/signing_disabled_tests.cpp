@@ -10,11 +10,22 @@
 #include <rhp/security/certified.hpp>
 #include <rhp/security/ed25519.hpp>
 #include <rhp/security/identity_file.hpp>
-#include <rhp/security/operator_cert.hpp>
 #include <rhp/security/key_handle.hpp>
+#include <rhp/security/operator_cert.hpp>
+#include <rhp/security/pairing.hpp>
+#include <rhp/security/pairing_cpace.hpp>
 
 using Rhp::errc;
 using namespace Rhp::security;
+
+TEST_CASE("disabled signing: CPace reports kDisabled while pairing codes still work", "[security][disabled]") {
+    auto code = generate_pairing_code();
+    REQUIRE(code);
+    auto prs = pairing_code_prs(*code);
+    REQUIRE(prs);
+    CHECK(cpace::start(cpace_role::kInitiator, {.prs = prs->bytes()}).error().code == errc::kDisabled);
+    CHECK(cpace_generator(prs->bytes(), {}, {}).error().code == errc::kDisabled);
+}
 
 TEST_CASE("disabled signing: keys load while signing and checking report kDisabled", "[security][disabled]") {
     auto secret = ed25519_secret_key::generate();
