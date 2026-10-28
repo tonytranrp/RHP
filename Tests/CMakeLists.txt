@@ -94,7 +94,7 @@ if(RHP_ENABLE AND RHP_BUILD_EXAMPLES AND NOT CMAKE_CROSSCOMPILING)
                 COMMAND "${Python3_EXECUTABLE}" -m pytest -q -p no:cacheprovider "${PROJECT_SOURCE_DIR}/clients/python/tests"
                 WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}/clients/python")
             set_tests_properties(python.client PROPERTIES
-                ENVIRONMENT "RHP_HEADLESS_SERVER=$<TARGET_FILE:headless_server>;PYTHONPATH=${PROJECT_SOURCE_DIR}/clients/python/src"
+                ENVIRONMENT "RHP_HEADLESS_SERVER=$<TARGET_FILE:headless_server>;RHP_HARDENING=${RHP_HARDENING};PYTHONPATH=${PROJECT_SOURCE_DIR}/clients/python/src"
                 LABELS "python;process" TIMEOUT 600)
         endif()
     endif()

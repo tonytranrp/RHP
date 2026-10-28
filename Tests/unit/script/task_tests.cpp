@@ -6,6 +6,7 @@
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
+#include <rhp_test/hardening.hpp>
 
 #include <rhp/core/error.hpp>
 #include <rhp/core/ids.hpp>
@@ -357,6 +358,7 @@ TEST_CASE("a task without waits is sliced when slice_us is set", "[script][tasks
 }
 
 TEST_CASE("a collected handle releases a finished task", "[script][tasks]") {
+    rhp_test::needs(Rhp::hardening::kDev, "admin's collectgarbage and finalizers");
     capture out;
     sandbox box = make_box(out, {}, Rhp::role::kAdmin); // admin keeps collectgarbage
     REQUIRE(box.exec("rhp.spawn(function() return 1 end)"));
@@ -447,6 +449,7 @@ TEST_CASE("a failed task stays failed under remove and fault", "[script][tasks]"
 }
 
 TEST_CASE("a finalizer may cancel a task waiting for the event being delivered", "[script][tasks]") {
+    rhp_test::needs(Rhp::hardening::kDev, "admin's collectgarbage and finalizers");
     capture out;
     sandbox box = make_box(out, {}, Rhp::role::kAdmin); // collectgarbage: a collection at a chosen allocation
     REQUIRE(box.exec(R"lua(
@@ -471,6 +474,7 @@ TEST_CASE("a finalizer may cancel a task waiting for the event being delivered",
 }
 
 TEST_CASE("a spawn that can't start leaves nothing behind on the main stack", "[script][tasks]") {
+    rhp_test::needs(Rhp::hardening::kDev, "admin's collectgarbage and finalizers");
     capture out;
     Rhp::limits limits;
     limits.memory = 2u * 1024u * 1024u;

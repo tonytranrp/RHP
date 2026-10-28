@@ -8,6 +8,7 @@
 #include <utility>
 
 #include <catch2/catch_test_macros.hpp>
+#include <rhp_test/hardening.hpp>
 #include <lauxlib.h>
 #include <lua.h>
 #include <lualib.h>
@@ -266,6 +267,7 @@ TEST_CASE("charging pattern steps doesn't change what matching returns", "[scrip
 }
 
 TEST_CASE("a check interval larger than Lua's hook count holds still arms the hook", "[script][limits]") {
+    rhp_test::needs(Rhp::hardening::kDev, "admin's debug library");
     Rhp::limits limits;
     limits.instructions = 1'000'000'000;             // arms the hook on every run
     limits.cancel_check_instructions = 0x8000'0000u; // more than an int, which is what Lua takes

@@ -12,6 +12,7 @@
 
 #include <catch2/catch_message.hpp>
 #include <catch2/catch_test_macros.hpp>
+#include <rhp_test/hardening.hpp>
 #include <rhp_test/net_support.hpp>
 
 #include <rhp/net/detail/http.hpp>
@@ -457,6 +458,7 @@ TEST_CASE("stage6: authenticated local IPC", "[integration][stage6][ipc]") {
 }
 
 TEST_CASE("stage6: HTTP shares identities and completes suspended requests", "[integration][stage6][http]") {
+    rhp_test::needs(Rhp::hardening::kLan, "an HTTP gateway without http_require_binding");
     using namespace stage6_fixtures;
     keys key;
     Rhp::host_options options;
@@ -502,6 +504,7 @@ TEST_CASE("stage6: HTTP shares identities and completes suspended requests", "[i
 }
 
 TEST_CASE("stage6: HTTP answers carry a proof for their own request", "[integration][stage6][http][security]") {
+    rhp_test::needs(Rhp::hardening::kLan, "an HTTP gateway without http_require_binding");
     using namespace stage6_fixtures;
     keys key;
     Rhp::host_options options;
@@ -530,6 +533,7 @@ TEST_CASE("stage6: HTTP answers carry a proof for their own request", "[integrat
 }
 
 TEST_CASE("stage6: HTTP channel binding refuses a relay that terminates TLS", "[integration][stage6][http][tls][security]") {
+    rhp_test::needs(Rhp::hardening::kLan, "an HTTP gateway without http_require_binding");
     using namespace stage6_fixtures;
     keys key;
     Rhp::host_options options;
@@ -570,6 +574,7 @@ TEST_CASE("stage6: HTTP channel binding refuses a relay that terminates TLS", "[
 }
 
 TEST_CASE("stage6: HTTP idle expiry follows the host clock", "[integration][stage6][http]") {
+    rhp_test::needs(Rhp::hardening::kLan, "an HTTP gateway without http_require_binding");
     using namespace stage6_fixtures;
     using clock_cfg = cfg::clock<shifted_clock>::limits<Rhp::limits{.gateway_idle_ms = 3'600'000}>;
     g_clock_shift_ms = 0;
@@ -621,6 +626,7 @@ TEST_CASE("stage6: a host can require channel-bound HTTP proofs", "[integration]
 }
 
 TEST_CASE("stage6: HTTP audit records name the caller of each request", "[integration][stage6][http][audit]") {
+    rhp_test::needs(Rhp::hardening::kLan, "an HTTP gateway without http_require_binding");
     using namespace stage6_fixtures;
     keys key;
     Rhp::host_options options;
@@ -665,6 +671,7 @@ TEST_CASE("stage6: reverse mode preserves TLS and WebSocket roles", "[integratio
 }
 
 TEST_CASE("stage6: HTTP cancels an abandoned request and expires the idle identity", "[integration][stage6][http]") {
+    rhp_test::needs(Rhp::hardening::kLan, "an HTTP gateway without http_require_binding");
     using namespace stage6_fixtures;
     using idle_cfg = cfg::limits<Rhp::limits{.gateway_idle_ms = 150}>;
     keys key;
@@ -718,6 +725,7 @@ void shutdown_answers_http() {
 }
 
 TEST_CASE("stage6: a host shutting down answers the HTTP requests in flight", "[integration][stage6][http]") {
+    rhp_test::needs(Rhp::hardening::kLan, "an HTTP gateway without http_require_binding");
     SECTION("with its own I/O thread") {
         shutdown_answers_http<stage6_fixtures::cfg>();
     }
@@ -727,6 +735,7 @@ TEST_CASE("stage6: a host shutting down answers the HTTP requests in flight", "[
 }
 
 TEST_CASE("stage6: a disabled host answers the HTTP requests in flight and ends their identities", "[integration][stage6][http][kill]") {
+    rhp_test::needs(Rhp::hardening::kLan, "an HTTP gateway without http_require_binding");
     using namespace stage6_fixtures;
     keys key;
     Rhp::host_options options;
@@ -749,6 +758,7 @@ TEST_CASE("stage6: a disabled host answers the HTTP requests in flight and ends 
 }
 
 TEST_CASE("stage6: authenticated HTTP requests release the handshake budget", "[integration][stage6][http]") {
+    rhp_test::needs(Rhp::hardening::kLan, "an HTTP gateway without http_require_binding");
     using namespace stage6_fixtures;
     using small_cfg = cfg::limits<Rhp::limits{.pending_handshakes = 1}>;
     keys key;
@@ -774,6 +784,7 @@ TEST_CASE("stage6: authenticated HTTP requests release the handshake budget", "[
 }
 
 TEST_CASE("stage6: HTTP expiry preserves another session of the identity", "[integration][stage6][http]") {
+    rhp_test::needs(Rhp::hardening::kLan, "an HTTP gateway without http_require_binding");
     using namespace stage6_fixtures;
     using idle_cfg = cfg::limits<Rhp::limits{.gateway_idle_ms = 150}>;
     keys key;
@@ -806,6 +817,7 @@ TEST_CASE("stage6: HTTP expiry preserves another session of the identity", "[int
 }
 
 TEST_CASE("stage6: HTTP expiry preserves pinned modules", "[integration][stage6][http]") {
+    rhp_test::needs(Rhp::hardening::kLan, "an HTTP gateway without http_require_binding");
     using namespace stage6_fixtures;
     using idle_cfg = cfg::limits<Rhp::limits{.gateway_idle_ms = 150}>;
     keys key;
@@ -934,6 +946,7 @@ TEST_CASE("stage6: zero-thread fleet progresses all members during discovery", "
 }
 
 TEST_CASE("stage6: fleet discovers and collects every signed result", "[integration][stage6][fleet][multicast]") {
+    rhp_test::needs(Rhp::hardening::kLan, "advertising (host.advertise)");
     using namespace stage6_fixtures;
     using discovered_cfg = cfg::discovery<Rhp::net::mdns_wire>;
     keys key;

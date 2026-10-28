@@ -31,6 +31,7 @@
 #include <rhp/security/keyring.hpp>
 #include <rhp/security/psk_keyring.hpp>
 #include <rhp_test/eventually.hpp>
+#include <rhp_test/hardening.hpp>
 
 using namespace std::chrono_literals;
 using Rhp::errc;
@@ -161,6 +162,7 @@ TEST_CASE("stage11: a client profiles its scripts", "[stage11][profile]") {
 }
 
 TEST_CASE("stage11: a client debugs a script that pauses at a breakpoint", "[stage11][debug]") {
+    rhp_test::needs(Rhp::hardening::kLan, "the remote debugger");
     keys k;
     const auto at = Rhp::endpoint::listen("itest.s11.debug", 1);
     running_host host{at, k};
@@ -219,6 +221,7 @@ TEST_CASE("stage11: a client debugs a script that pauses at a breakpoint", "[sta
 }
 
 TEST_CASE("stage11: a debugging client that goes away lets paused scripts run on", "[stage11][debug]") {
+    rhp_test::needs(Rhp::hardening::kLan, "the remote debugger");
     keys k;
     const auto at = Rhp::endpoint::listen("itest.s11.leave", 1);
     running_host host{at, k};
@@ -242,6 +245,7 @@ TEST_CASE("stage11: a debugging client that goes away lets paused scripts run on
 }
 
 TEST_CASE("stage11: breakpoints stay while another session still debugs", "[stage11][debug]") {
+    rhp_test::needs(Rhp::hardening::kLan, "the remote debugger");
     keys k;
     const auto at = Rhp::endpoint::listen("itest.s11.two", 1);
     running_host host{at, k};
@@ -273,6 +277,7 @@ TEST_CASE("stage11: breakpoints stay while another session still debugs", "[stag
 }
 
 TEST_CASE("stage11: debugger actions that change scripts are audited", "[stage11][debug]") {
+    rhp_test::needs(Rhp::hardening::kLan, "the remote debugger");
     keys k;
     const auto at = Rhp::endpoint::listen("itest.s11.audit", 1);
     running_host host{at, k};

@@ -17,6 +17,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <rhp/core/error.hpp>
+#include <rhp/core/hardening.hpp>
 #include <rhp/core/role.hpp>
 #include <rhp/core/value.hpp>
 #include <rhp/release/manager.hpp>
@@ -1073,10 +1074,10 @@ TEST_CASE("a role change swaps in a fresh sandbox and rolls back across it", "[r
     man.run_as = Rhp::role::kAdmin;
     REQUIRE(m.apply(envelope(man, {{"tuning", "game.speed = 9"}}, {&f.dev})));
     CHECK(fx::g_speed == 9);
-    CHECK(*m.sandbox("game.balance")->exec("return type(io)") == Rhp::value_list{Rhp::value{"table"}});
+    CHECK(m.sandbox("game.balance")->caller_role() == Rhp::role::kAdmin);
     REQUIRE(m.deactivate("game.balance"));
     CHECK(fx::g_speed == 2);
-    CHECK(*m.sandbox("game.balance")->exec("return type(io)") == Rhp::value_list{Rhp::value{"nil"}});
+    CHECK(m.sandbox("game.balance")->caller_role() != Rhp::role::kAdmin);
 }
 
 TEST_CASE("a candidate whose module faults is rolled back", "[release][manager]") {
@@ -1160,7 +1161,9 @@ TEST_CASE("a release asking to run as admin gets an admin sandbox when allowed",
     REQUIRE(m.apply(envelope(man, {{"tuning", "result = type(io) == 'table'"}}, {&f.dev})));
     auto* box = m.sandbox("game.balance");
     REQUIRE(box != nullptr);
-    CHECK(*box->exec("return type(io)") == Rhp::value_list{Rhp::value{"table"}}); // only admin sandboxes have io
+    CHECK(box->caller_role() == Rhp::role::kAdmin);
+    // Only admin sandboxes have io, and only in a dev build (RHP_HARDENING above dev leaves it out).
+    CHECK(*box->exec("return type(io)") == Rhp::value_list{Rhp::value{Rhp::kBuildHardening == Rhp::hardening::kDev ? "table" : "nil"}});
 }
 
 TEST_CASE("the directory store keeps releases across managers", "[release][store]") {

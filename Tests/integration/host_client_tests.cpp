@@ -22,6 +22,7 @@
 #include <rhp/client/client.hpp>
 #include <rhp/config/config.hpp>
 #include <rhp/core/error.hpp>
+#include <rhp/core/hardening.hpp>
 #include <rhp/core/errors_mode.hpp>
 #include <rhp/core/log.hpp>
 #include <rhp/core/role.hpp>
@@ -250,8 +251,8 @@ TEST_CASE("host+client: roles gate requests and bindings", "[integration][roles]
     CHECK(all->undone >= 1);
     CHECK(observer.exec<int>("return itest.value") == 0);
 
-    // Admin gets the full standard library, others don't.
-    CHECK(admin.exec<bool>("return io ~= nil") == true);
+    // Admin gets the full standard library (in a dev build), others don't.
+    CHECK(admin.exec<bool>("return io ~= nil") == (Rhp::kBuildHardening == Rhp::hardening::kDev));
     CHECK(patcher.exec<bool>("return io ~= nil") == false);
 }
 

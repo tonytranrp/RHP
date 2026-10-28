@@ -15,9 +15,11 @@
 #include <lauxlib.h>
 #include <lua.h>
 #include <lualib.h>
+#include <rhp_test/hardening.hpp>
 #include <rhp_test/script_support.hpp>
 
 #include <rhp/core/error.hpp>
+#include <rhp/core/hardening.hpp>
 #include <rhp/core/ids.hpp>
 #include <rhp/core/limits.hpp>
 #include <rhp/core/result.hpp>
@@ -159,6 +161,7 @@ TEST_CASE("observe and patch get the restricted standard library", "[script][san
 }
 
 TEST_CASE("admin gets the full standard library", "[script][sandbox]") {
+    rhp_test::needs(Rhp::hardening::kDev, "admin's full standard library");
     output_capture out;
     sandbox box = make_box(out, role::kAdmin);
     const auto problems = box.exec<std::string>(kFullStdlibProbe);
@@ -166,8 +169,21 @@ TEST_CASE("admin gets the full standard library", "[script][sandbox]") {
     CHECK(*problems == "");
 }
 
+TEST_CASE("hardened admin gets patch's standard library", "[script][sandbox][hardening]") {
+    // admin_stdlib off (a host above hardening dev); a lan or production build has no other kind.
+    const bool asked = GENERATE(false, Rhp::kBuildHardening != Rhp::hardening::kDev);
+    CAPTURE(asked);
+    sandbox box{sandbox_options{.caller_role = role::kAdmin, .admin_stdlib = asked, .output = [](std::string_view) {}}};
+    const auto problems = box.exec<std::string>(kRestrictedStdlibProbe);
+    REQUIRE(problems.has_value());
+    CHECK(*problems == "");
+    CHECK(box.exec("setmetatable({}, {__gc = print})").error().code == errc::kForbidden);
+    CHECK(box.caller_role() == role::kAdmin); // admin's own rights stay (rhp.patch, admin-tagged bindings)
+}
+
 TEST_CASE("load accepts text only for every role", "[script][sandbox]") {
     SECTION("binary chunks are refused even for admin and mode b") {
+        rhp_test::needs(Rhp::hardening::kDev, "admin's full standard library");
         output_capture out;
         sandbox box = make_box(out, role::kAdmin);
         const auto refused = box.exec(R"lua(
@@ -251,6 +267,7 @@ TEST_CASE("only admin may give a table a finalizer", "[script][sandbox][gc]") {
     }
 
     SECTION("admin keeps the standard setmetatable") {
+        rhp_test::needs(Rhp::hardening::kDev, "admin's full standard library");
         output_capture out;
         sandbox box = make_box(out, role::kAdmin);
         REQUIRE(box.exec("setmetatable({}, {__gc = function() print('finalized') end})"));

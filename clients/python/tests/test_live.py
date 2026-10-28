@@ -16,6 +16,9 @@ import rhp_client as rhp
 from rhp_client.identity import Identity
 
 SERVER = os.environ.get("RHP_HEADLESS_SERVER")
+# The build's hardening level (RHP's ctest sets it): production refuses unsigned observe code and
+# has no remote debugger.
+HARDENING = os.environ.get("RHP_HARDENING", "dev")
 pytestmark = pytest.mark.skipif(not SERVER or not os.path.exists(SERVER), reason="RHP_HEADLESS_SERVER isn't set")
 
 
@@ -100,12 +103,17 @@ def test_errors_arrive_as_rhp_errors(host):
 
 
 def test_signatures_and_roles(host):
-    with host.connect(host.observer) as watcher:  # observe: unsigned code runs, nothing may change
+    with host.connect(host.observer) as watcher:  # observe: unsigned code runs (below production), nothing may change
         assert watcher.role == "observe"
-        assert watcher.exec("return game.tick ~= nil") == [True]
-        with pytest.raises(rhp.RhpError) as forbidden:
-            watcher.exec("game.gravity = 1")
-        assert forbidden.value.code == "forbidden"
+        if HARDENING == "production":
+            with pytest.raises(rhp.RhpError) as unsigned:
+                watcher.exec("return game.tick ~= nil")
+            assert unsigned.value.code == "bad_signature"
+        else:
+            assert watcher.exec("return game.tick ~= nil") == [True]
+            with pytest.raises(rhp.RhpError) as forbidden:
+                watcher.exec("game.gravity = 1")
+            assert forbidden.value.code == "forbidden"
     with host.connect(host.stranger) as stranger:  # its key isn't a trusted signer
         with pytest.raises(rhp.RhpError) as bad:
             stranger.exec("return 1")
@@ -161,7 +169,7 @@ def test_resume_after_a_dropped_connection(host):
         assert c.exec("return kept + 1") == [42]  # same session: the scratch module kept its global
 
 
-def test_tunables_profiler_and_debugger(host):
+def test_tunables_and_profiler(host):
     with host.connect() as c:
         tunables = {t.path: t for t in c.tunables("game")}
         assert "game.gravity" in tunables and tunables["game.gravity"].writable
@@ -179,7 +187,14 @@ def test_tunables_profiler_and_debugger(host):
         assert report.truncated == 0  # a small profile fits one reply
         assert any("spin (py.work:1)" in stack for stack, _ in report.stacks)
         assert report.folded().count("\n") == len(report.stacks)
+        with pytest.raises(rhp.RhpError) as releases:
+            c.release_status()  # this host serves no release manager
+        assert releases.value.code == "not_found"
 
+
+@pytest.mark.skipif(HARDENING == "production", reason="the remote debugger is compiled out of production builds")
+def test_debugger(host):
+    with host.connect() as c:
         paused = threading.Event()
         c.on("rhp.debug", lambda e: paused.set() if e.args and e.args[0].get("kind") == "paused" else None)
         c.load("py.dbg", "function add(a, b)\n  local sum = a + b\n  return sum\nend")
@@ -194,9 +209,6 @@ def test_tunables_profiler_and_debugger(host):
         assert c.debug("evaluate", request=stop["request"], expression="a")["variables"][0]["text"] == "2"
         c.debug("continue", request=stop["request"])
         assert call.result(10) == [7]
-        with pytest.raises(rhp.RhpError) as releases:
-            c.release_status()  # this host serves no release manager
-        assert releases.value.code == "not_found"
 
 
 @pytest.fixture
