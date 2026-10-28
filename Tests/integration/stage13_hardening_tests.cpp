@@ -10,6 +10,7 @@
 #include <utility>
 
 #include <catch2/catch_test_macros.hpp>
+#include <rhp_test/eventually.hpp>
 #include <rhp_test/hardening.hpp>
 
 #include <rhp/build_config.hpp>
@@ -20,6 +21,7 @@
 #include <rhp/core/limits.hpp>
 #include <rhp/core/log.hpp>
 #include <rhp/core/role.hpp>
+#include <rhp/core/value.hpp>
 #include <rhp/host/host.hpp>
 #include <rhp/net/endpoint.hpp>
 #include <rhp/net/loopback/loopback.hpp>
@@ -182,6 +184,27 @@ TEST_CASE("stage13: a served release manager runs at the host's hardening level"
     Rhp::host<loop_cfg> host{Rhp::endpoint::listen("s13h.releases", 1), k.ring(), k.trusted(), {.hardening = hardening::kLan}};
     REQUIRE(host.serve(releases));
     CHECK(releases.options().hardening == Rhp::strictest(hardening::kLan, Rhp::kBuildHardening));
+}
+
+// ---- every level --------------------------------------------------------------------------------------
+
+TEST_CASE("stage13: an identity that keeps pinned modules gets its builtins back when its sessions end", "[stage13][hardening][pin]") {
+    keys k;
+    const auto at = Rhp::endpoint::listen("s13h.pinned_builtins", 1);
+    running_host<loop_cfg> host{at, k};
+    {
+        Rhp::client<loop_cfg> admin{at.reversed(), k.as("admin"), k.signer()};
+        REQUIRE(admin.load("s13h.kept", "return {get = function() return string.upper('kept') end}"));
+        REQUIRE(admin.pin("s13h.kept"));
+        REQUIRE(admin.exec("string.upper = function() return 'changed' end string.extra = 1 table.insert = nil"));
+        CHECK(admin.call("s13h.kept", "get") == Rhp::value_list{Rhp::value{"changed"}});
+    }
+    // When the last session's close is queued for pump(), so is the release: a new session comes after it.
+    REQUIRE(rhp_test::eventually([&] { return host->sessions() == 0; }));
+    Rhp::client<loop_cfg> admin{at.reversed(), k.as("admin"), k.signer()};
+    CHECK(admin.exec<bool>("return string.upper('a') == 'A' and string.extra == nil and table.insert ~= nil and ('a'):upper() == 'A'") == true);
+    CHECK(admin.call("s13h.kept", "get") == Rhp::value_list{Rhp::value{"KEPT"}}); // the pinned module stays, with builtins as they were made
+    REQUIRE(admin.unpin("s13h.kept"));
 }
 
 // ---- production ---------------------------------------------------------------------------------------

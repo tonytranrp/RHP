@@ -250,6 +250,10 @@ revert_report sandbox::revert_all() {
     return impl_->revert_all();
 }
 
+void sandbox::restore_builtins() {
+    impl_->restore_shared_tables();
+}
+
 result<module_id> sandbox::find(std::string_view name) const {
     return impl_->find(name);
 }
