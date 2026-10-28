@@ -4,7 +4,7 @@ One authenticated, reliable conversation over a link, and TLS over any link. Nam
 
 | Header | What |
 |---|---|
-| `session.hpp` | `session` (host or client side: `start`, `send`, `close`, `resume`; `id`, `current`, `ready`, `usable`, `identity`, `granted`, `scopes` (host side), `peer`, `peer_platform`, `offered_key`, `encrypted`, `handed_over`, `stats`), `handler` (`on_ready`, `on_message`, `on_closed`; `on_detached`, `on_resumed`, `resume_target` for resume), `options`, `state` (`kHandshaking`, `kReady`, `kDetached`, `kClosed`) |
+| `session.hpp` | `session` (host or client side: `start`, `send`, `close`, `resume`; `id`, `current`, `ready`, `usable`, `identity`, `granted`, `scopes` (host side), `peer`, `peer_platform`, `host_key` (the host device key's fingerprint, `security::device_keys`), `offered_key`, `encrypted`, `handed_over`, `stats`), `handler` (`on_ready`, `on_message`, `on_closed`; `on_detached`, `on_resumed`, `resume_target` for resume), `options`, `state` (`kHandshaking`, `kReady`, `kDetached`, `kClosed`) |
 | `secure_link.hpp` | `tls_client` / `tls_server` (TLS over any `net::link`; the server sniffs the first byte: `0x16` is TLS), `channel_policy` (which connections of an endpoint get TLS: `make`, `transport_endpoint`, `wrap` (a link, or a dial's outcome), `tls`) |
 | `admission.hpp` | `admission`: who may wait unauthenticated (`admit` / `release`, tickets; see below) |
 | `backoff.hpp` | `backoff_delay` (capped exponential backoff with full jitter for redials; hosts and clients) and `random_seed` (64 bits from the OS random source) |

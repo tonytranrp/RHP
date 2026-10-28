@@ -90,10 +90,10 @@ public:
         // scripts are unsigned to this host (kBadSignature). Policies without without(key_env) keep
         // their own rules (security::certified checks its certificates' environments itself).
         if (s.hardening == hardening::kProduction) {
-            if constexpr (requires { { auth.without(security::key_env::kDev) } -> std::convertible_to<typename Cfg::auth_t>; }) {
+            if constexpr (requires(const typename Cfg::auth_t& a) { { a.without(security::key_env::kDev) } -> std::convertible_to<typename Cfg::auth_t>; }) {
                 auth = auth.without(security::key_env::kDev);
             }
-            if constexpr (requires { { trust.without(security::key_env::kDev) } -> std::convertible_to<typename Cfg::trust_t>; }) {
+            if constexpr (requires(const typename Cfg::trust_t& t) { { t.without(security::key_env::kDev) } -> std::convertible_to<typename Cfg::trust_t>; }) {
                 trust = trust.without(security::key_env::kDev);
             }
         }

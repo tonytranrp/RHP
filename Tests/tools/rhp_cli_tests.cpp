@@ -825,7 +825,7 @@ TEST_CASE("rhp-cli: keygen splits identity and signing key and tags them", "[cli
 TEST_CASE("rhp-cli: connect --dev reads a dev session file", "[cli][process]") {
     scratch_dir dir;
     const auto id = dir.path / "dev.rhpid";
-    REQUIRE(run(std::format("{} keygen dev --out {} > {}", kCli, q(id), q(dir.path / "keygen.txt"))) == 0);
+    REQUIRE(run(std::format("{} dev --out {} > {}", kHostKeygen, q(id), q(dir.path / "keygen.txt"))) == 0);
     auto identity = Rhp::security::identity_file::load(id.string());
     REQUIRE(identity);
     REQUIRE(run(std::format("{} pubkey -i {} > {}", kCli, q(id), q(dir.path / "lines.txt"))) == 0);
