@@ -95,6 +95,10 @@ const void* shown_pointer(lua_State* L, int index) {
     return rhp_lua_topointer(L, index);
 }
 
+const void* shown_address(lua_State* L, const void* p) {
+    return rhp_lua_hide_address(L, p);
+}
+
 std::uint32_t take_hook_progress(lua_State* L) noexcept {
     if (((L->hookmask & LUA_MASKCOUNT) == 0 && !hook_at_safepoints(L)) || L->basehookcount <= 0) {
         return 0;

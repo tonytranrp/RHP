@@ -21,6 +21,7 @@
 #include <rhp/core/error.hpp>
 #include <rhp/core/role.hpp>
 #include <rhp/script/detail/context.hpp>
+#include <rhp/script/puc_lua/lua_internals.hpp>
 #include <rhp/script/puc_lua/views_impl.hpp>
 #include <rhp/script/stack.hpp>
 #include <rhp/script/views.hpp>
@@ -448,7 +449,8 @@ int object_newindex(lua_State* L) {
 int object_tostring(lua_State* L) {
     auto* n = static_cast<view_node*>(lua_touserdata(L, 1));
     const result<place> p = locate(*n);
-    const std::string text = p ? std::format("{}: {}", n->type->name, static_cast<const void*>(p->data)) : std::format("{}: gone", n->type->name);
+    // The object's address hashed as tostring hashes addresses: two views of one object show the same.
+    const std::string text = p ? std::format("{}: {}", n->type->name, internals::shown_address(L, p->data)) : std::format("{}: gone", n->type->name);
     lua_pushlstring(L, text.data(), text.size());
     return 1;
 }

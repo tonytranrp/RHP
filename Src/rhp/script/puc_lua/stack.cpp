@@ -13,6 +13,7 @@
 
 #include <rhp/script/detail/context.hpp>
 #include <rhp/script/puc_lua/keys.hpp>
+#include <rhp/script/puc_lua/lua_internals.hpp>
 #include <rhp/script/puc_lua/sandbox_impl.hpp>
 #include <rhp/script/puc_lua/views_impl.hpp>
 #include <rhp/script/stack.hpp>
@@ -550,6 +551,10 @@ void* stack::to_userdata(int index, std::string_view key) const noexcept {
     std::memcpy(buffer, key.data(), key.size());
     buffer[key.size()] = '\0';
     return luaL_testudata(state_, index, buffer);
+}
+
+const void* stack::shown_address(const void* p) const {
+    return detail::internals::shown_address(state_, p);
 }
 
 // ---- registry references ---------------------------------------------------------------------------
