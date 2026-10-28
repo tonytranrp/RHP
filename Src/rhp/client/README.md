@@ -4,7 +4,7 @@
 
 | Header | What |
 |---|---|
-| `client.hpp` | `Rhp::client<Cfg>`: `connect()`; blocking calls for every op (`exec`, `load`, `call`, `reload`, `rollback`, `revert`, `unload`, `checkpoint`, `revert_to`, `revert_all`, `pin` / `unpin`, `list`, `status`, `describe`, `blob`, `release_apply` / `release_confirm` / `release_deactivate` / `release_status` / `revoke`, `tunables` / `tune`, `profile`, `debug`); `async()` (a `pending` for the script ops), `exec_async` / `exec_future`; `on` / `off` (host events); `cancel()` / `cancel(request)`; `port` (reverse mode); `poll`; `info()` / `connected()` |
+| `client.hpp` | `Rhp::client<Cfg>`: `connect()`; blocking calls for every op (`exec`, `load`, `call`, `reload`, `rollback`, `revert`, `unload`, `checkpoint`, `revert_to`, `revert_all`, `pin` / `unpin`, `list`, `status`, `describe`, `blob`, `release_apply` / `release_confirm` / `release_deactivate` / `release_status` / `revoke` / `trust`, `tunables` / `tune`, `profile`, `debug`); `async()` (a `pending` for the script ops), `exec_async` / `exec_future`; `on` / `off` (host events); `cancel()` / `cancel(request)`; `port` (reverse mode); `poll`; `info()` / `connected()` |
 | `pending.hpp` | `Rhp::pending<T, Errors>`: one async result: `then`, `get`, `future`, `co_await`, `ready`, `request()` |
 | `fleet.hpp` | `Rhp::fleet<Cfg>`: `discover` / `add` members, `exec` / `load` / `call` start on every member and collect one `host_result<T>` per host within a shared deadline, `rollout`, `release_status`; `Rhp::discover<Cfg>()`; the `broadcastable` concept |
 | `rollout.hpp` | `rollout_plan` (canaries, cumulative `rollout_stage`s with an observe time, `max_failures`, `rollback_on_failure`, `on_progress`), `rollout_host`, `rollout_report` |

@@ -375,6 +375,12 @@ class Client:
         """Sends a signed revocation list (a .rhprev file); returns how many channels changed."""
         return self._wait(self._start(Op.REVOKE, {"envelope": bytes(envelope)}))
 
+    def trust(self, documents: List[bytes]) -> dict:
+        """Sends trust documents for the host's release manager: root of trust versions (.rhproot files;
+        consecutive versions walk as one chain) and identity revocation lists (.rhpidrev), applied in
+        order. Returns {root_version, identity_seq} as the host holds them afterwards."""
+        return self._wait(self._start(Op.TRUST, {"documents": [bytes(d) for d in documents]}))
+
     # ---- tools: this identity's own sandbox ------------------------------------------------------------
 
     def tunables(self, prefix: str = "") -> List[Tunable]:

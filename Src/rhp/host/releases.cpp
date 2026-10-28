@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <chrono>
+#include <cstddef>
 #include <format>
 #include <functional>
 #include <optional>
@@ -42,6 +43,7 @@ std::string_view kind_name(release::release_event::kind k) noexcept {
     case release::release_event::kind::kRolledBack: return "rolled_back";
     case release::release_event::kind::kRefused: return "refused";
     case release::release_event::kind::kRevocations: return "revocations";
+    case release::release_event::kind::kTrust: return "trust";
     }
     return "unknown";
 }
@@ -53,6 +55,9 @@ wire::release_status_reply to_message(const release::manager& m) {
     out.build = m.options().build;
     out.platform = m.options().platform;
     out.revocation_seq = m.revocation_seq();
+    const auto trust = m.trust_held();
+    out.root_version = trust.root_version;
+    out.identity_seq = trust.identity_seq;
     for (const release::channel_status& s : m.status()) {
         wire::channel_status_message c;
         c.channel = s.channel;
@@ -122,6 +127,18 @@ result<value> handle(release::manager& m, wire::op code, const value& body) {
         }
         return value{*r};
     }
+    case wire::op::kTrust: {
+        auto req = Rhp::from_value<wire::trust_request>(body);
+        if (!req) {
+            return std::unexpected{std::move(req).error()};
+        }
+        const std::vector<std::vector<std::byte>> documents(req->documents.begin(), req->documents.end());
+        auto r = m.update_trust(documents);
+        if (!r) {
+            return std::unexpected{std::move(r).error()};
+        }
+        return Rhp::to_value(wire::trust_reply{r->root_version, r->identity_seq});
+    }
     default: return fail(errc::kProtocol, "not a release request", "host.releases");
     }
 }
@@ -133,6 +150,7 @@ release_bridge bridge(release::manager& m) {
     b.handle = [&m](wire::op code, const value& body) { return handle(m, code, body); };
     b.pump = [&m] { m.pump(); };
     b.harden = [&m](hardening level) { return m.harden(level); };
+    b.revoked_signer = [ids = m.identities()](const security::ed25519_public_key& key) { return ids->is_revoked_signer(key); };
     b.on_event = [&m](std::function<void(event::release_changed)> publish) {
         return m.on_event([publish = std::move(publish)](const release::release_event& e) {
             event::release_changed out;

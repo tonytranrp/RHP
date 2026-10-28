@@ -198,7 +198,7 @@ TEST_CASE("messages: event fields default when missing", "[wire][messages][stage
 }
 
 TEST_CASE("messages: release ops need admin to change and observe to read", "[wire][messages][stage10]") {
-    CHECK(wire::kProtocolRevision == 6);
+    CHECK(wire::kProtocolRevision == 7);
     for (const auto code : {wire::op::kReleaseApply, wire::op::kReleaseConfirm, wire::op::kReleaseDeactivate}) {
         CHECK(wire::required_role(code) == Rhp::role::kAdmin);
         CHECK(wire::is_request(code));
@@ -224,11 +224,23 @@ TEST_CASE("messages: release messages round-trip", "[wire][messages][stage10]") 
     c.attempts = 1;
     c.confirm = "manual";
     c.modules = {"tuning"};
-    wire::release_status_reply status{"mygame", "1.0", "windows", 2, {c}};
+    wire::release_status_reply status{"mygame", "1.0", "windows", 2, {c}, 3, 5};
     CHECK(*Rhp::from_value<wire::release_status_reply>(Rhp::to_value(status)) == status);
     const wire::release_apply_reply reply{"game.balance", Rhp::value::bytes(32, std::byte{8}), 4, "candidate", false, Rhp::value::bytes(32, std::byte{7}), {"dev"}};
     CHECK(*Rhp::from_value<wire::release_apply_reply>(Rhp::to_value(reply)) == reply);
     CHECK_FALSE(Rhp::from_value<wire::release_apply_request>(Rhp::value{"nope"}));
+}
+
+TEST_CASE("messages: trust carries its own signatures and round-trips", "[wire][messages][stage13]") {
+    CHECK(wire::required_role(wire::op::kTrust) == Rhp::role::kObserve);
+    CHECK(wire::is_request(wire::op::kTrust));
+    CHECK(wire::to_string(wire::op::kTrust) == "trust");
+    const wire::trust_request req{{Rhp::value::bytes{std::byte{1}}, Rhp::value::bytes{std::byte{2}, std::byte{3}}}};
+    CHECK(*Rhp::from_value<wire::trust_request>(Rhp::to_value(req)) == req);
+    CHECK(Rhp::from_value<wire::trust_request>(value{value::map{}}).error().code == errc::kProtocol);
+    const wire::trust_reply reply{4, 9};
+    CHECK(*Rhp::from_value<wire::trust_reply>(Rhp::to_value(reply)) == reply);
+    CHECK(*Rhp::from_value<wire::trust_reply>(value{value::map{}}) == wire::trust_reply{});
 }
 
 TEST_CASE("messages: subscribe ops need observe and event is a reply", "[wire][messages][stage7]") {

@@ -20,10 +20,12 @@
 #include <rhp/platform/os.hpp>
 #include <rhp/release/manifest.hpp>
 #include <rhp/release/release.hpp>
+#include <rhp/release/root_of_trust.hpp>
 #include <rhp/release/store.hpp>
 #include <rhp/release/trust.hpp>
 #include <rhp/script/lib.hpp>
 #include <rhp/script/sandbox.hpp>
+#include <rhp/security/identity_revocations.hpp>
 #include <rhp/security/key.hpp>
 
 namespace Rhp::release {
@@ -141,6 +143,7 @@ struct apply_result {
 
 struct restore_report {
     std::vector<std::string> restored;                           // channels running again
+    std::vector<std::string> dropped;                            // store keys of revocation lists thrown away because only keys the root marks compromised signed them
     std::vector<std::pair<std::string, error>> failed;           // releases given up on (their channel runs its fallback, or nothing); "*": the stored revocation list or the state
     std::vector<std::pair<std::string, error>> deferred;         // channels that run nothing this time but keep their releases (an unreadable file, a lib installed after restore(), a clock outside the validity window, a load out of time or memory): tried again at the next restore
     std::vector<std::pair<std::string, release_id>> quarantined; // candidates given up on (too many restarts unconfirmed, or they failed to load)
@@ -154,6 +157,7 @@ struct release_event {
         kRolledBack,  // a candidate or an active release stopped; `fallback` runs instead (or nothing)
         kRefused,     // apply() refused a release, or revoke() a signed list past the seq cap (`err`)
         kRevocations, // a revocation list was applied
+        kTrust,       // a newer root of trust (`seq`: its version) or identity revocations (`seq`: theirs) were accepted; `reason` says which
     };
     kind what = kind::kApplied;
     std::string channel;
@@ -204,12 +208,28 @@ class manager_impl;
 // fail too (pump() retries the save), so what runs never drifts from what a restart brings back.
 // A revocation list takes effect even when it can't be saved.
 //
+// Root of trust (decision AL12, root_of_trust.hpp): a manager made with a root anchor (the root the
+// application embeds or configures) takes its release trust from the held root's release role and
+// its revocation-list trust from the revocation role. update_root walks to newer versions (each
+// signed by thresholds of the previous root's keys and its own); every accepted version is kept in
+// the store ("trust/root/<version>") and restore() walks them again from the anchor. A release that
+// already ran keeps running when its signer retires (leaves the roles): stored releases also verify
+// against the release roles of the earlier versions held, less the compromised keys. Keys the held
+// root marks compromised lose what they signed: on restore (and at once when update_root brings a
+// root that marks them), revocation lists signed only by compromised keys are thrown away and what
+// they raised (revocation seq, floors, revoked releases and keys) is taken back, so a stolen key's
+// fast-forward is undone; releases signed only by them stop. Without a root (the trust constructor)
+// nothing of this applies and the manager behaves as before.
+//
 // Single-threaded: use it from one thread (the pump thread), not from a channel's own scripts (that
 // is refused) nor from a listener that throws. Don't move a manager a host serves. With
 // RHP_ENABLE=0 it is inert: every operation reports kDisabled.
 class manager {
 public:
     explicit manager(trust keys, manager_options options = {}, any_store store = memory_store{});
+    // With a root of trust: `anchor` must be signed by a threshold of its own root keys (otherwise
+    // restore() and every change fail with why). Its expiry isn't checked.
+    explicit manager(signed_root anchor, manager_options options = {}, any_store store = memory_store{});
     ~manager();
     manager(const manager&) = delete;
     manager& operator=(const manager&) = delete;
@@ -245,6 +265,40 @@ public:
     // stop (and are never fallen back to), floors rise. Returns how many channels changed. A list whose
     // seq or floors pass the seq cap is refused whole (kOutOfRange, and a kRefused event).
     result<std::size_t> revoke(std::span<const std::byte> envelope);
+
+    // Walks the held root to the newest of `newer` (consecutive versions, oldest first; versions the
+    // manager already holds are skipped): see verify_chain (the newest must not have expired, with
+    // clock_skew). Each new version is stored before it takes effect (nothing changes when that
+    // fails); then the trust follows the newest and what compromised keys signed is dropped. Returns
+    // the version held. kNotFound for a manager made without a root.
+    result<std::uint64_t> update_root(std::span<const signed_root> newer);
+
+    // What a kTrust request carries: root envelopes (walked as by update_root, in the order given) and
+    // identity revocation lists (see revoke_identities). Returns the root version and identity seq held.
+    struct trust_state {
+        std::uint64_t root_version = 0; // 0: no root
+        std::uint64_t identity_seq = 0;
+    };
+    result<trust_state> update_trust(std::span<const std::vector<std::byte>> documents);
+
+    // The root held (the newest accepted version), nullptr without one.
+    [[nodiscard]] const signed_root* root() const noexcept;
+    // The root version and identity revocation seq held (what status reports).
+    [[nodiscard]] trust_state trust_held() const noexcept;
+
+    // Applies a signed identity revocation list (identity_revocations.hpp) newer than any applied:
+    // signed by the root's revocation role (without a root, by the "*" keys of the trust given), its
+    // seq at most max_seq_jump past the last one's (past this host's clock for the first; kOutOfRange
+    // and a kRefused event beyond). Lists add up; each is kept in the store ("trust/identities/<seq>")
+    // and restored; with a root, lists signed only by keys it marks compromised are dropped. In effect
+    // at once, even if it can't be saved. Returns its seq.
+    result<std::uint64_t> revoke_identities(std::span<const std::byte> envelope);
+
+    // Every identity revocation the manager holds: certificate serials, script signer keys and
+    // device keys to stop trusting. Thread-safe to query from any thread for as long as it is held
+    // (it outlives the manager); host.serve hands it to the host, which refuses scripts signed by a
+    // revoked signer key; operator-certificate and device-key checks ask it too.
+    [[nodiscard]] std::shared_ptr<const security::revoked_identities> identities() const noexcept;
 
     [[nodiscard]] std::vector<channel_status> status() const;
     [[nodiscard]] std::uint64_t revocation_seq() const noexcept;

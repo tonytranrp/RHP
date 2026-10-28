@@ -41,6 +41,7 @@ using wire::profile_reply;
 using wire::release_apply_reply;
 using wire::release_status_reply;
 using wire::revert_summary;
+using wire::trust_reply;
 using wire::tunable_message;
 
 // Talks to an Rhp::host: authenticates with a credential (a key name + secret for psk_keyring),
@@ -201,6 +202,17 @@ public:
     // Sends a signed revocation list (a .rhprev file); returns how many channels changed.
     return_t<std::uint64_t> revoke(std::span<const std::byte> envelope) {
         return finish(client_detail::as<std::uint64_t>(send(wire::op::kRevoke, wire::revoke_request{value::bytes(envelope.begin(), envelope.end())})));
+    }
+
+    // Sends trust documents for the host's release manager (Stage 13b): root of trust envelopes (.rhproot;
+    // consecutive versions walk as one chain) and identity revocation lists (.rhpidrev), applied in
+    // order. Returns the root version and identity revocation seq the host holds afterwards.
+    return_t<trust_reply> trust(std::span<const std::vector<std::byte>> documents) {
+        wire::trust_request req;
+        for (const auto& d : documents) {
+            req.documents.emplace_back(d.begin(), d.end());
+        }
+        return finish(client_detail::as<trust_reply>(send(wire::op::kTrust, std::move(req))));
     }
 
     // ---- tools: this identity's own sandbox on the host (Stage 11) ----------------------------------

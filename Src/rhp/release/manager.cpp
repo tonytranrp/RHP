@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <charconv>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -10,6 +11,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -23,13 +25,16 @@
 #include <rhp/release/detail/codec.hpp>
 #include <rhp/release/detail/compiled_cache.hpp>
 #include <rhp/release/detail/state.hpp>
+#include <rhp/release/identity_revocations.hpp>
 #include <rhp/release/manager.hpp>
 #include <rhp/release/manifest.hpp>
 #include <rhp/release/release.hpp>
+#include <rhp/release/root_of_trust.hpp>
 #include <rhp/release/store.hpp>
 #include <rhp/release/trust.hpp>
 #include <rhp/script/sandbox.hpp>
 #include <rhp/security/ed25519.hpp>
+#include <rhp/security/identity_revocations.hpp>
 #include <rhp/utils/scope_guard.hpp>
 
 namespace Rhp::release {
@@ -43,7 +48,89 @@ using steady = std::chrono::steady_clock;
 constexpr std::string_view kStateKey = "state";
 constexpr std::string_view kRevocationsKey = "revocations";     // the newest list (stores written before every list was kept)
 constexpr std::string_view kRevocationsPrefix = "revocations/"; // every accepted list, by seq
+constexpr std::string_view kRootsPrefix = "trust/root/";        // every root version accepted after the anchor
+constexpr std::string_view kIdentitiesPrefix = "trust/identities/"; // every accepted identity revocation list, by seq
+constexpr std::string_view kSeenKey = "trust/seen";             // with a root: per channel and release key, the highest seq it signed here
+
+// The highest seq each release key signed per channel (with a root): what a floor still stands on
+// once some of those keys are marked compromised.
+using seen_map = std::map<std::string, std::vector<std::pair<security::ed25519_public_key, std::uint64_t>>, std::less<>>;
+
+result<std::vector<std::byte>> encode_seen(const seen_map& seen) {
+    value::array channels;
+    for (const auto& [channel, keys] : seen) {
+        value::array entries;
+        for (const auto& [key, seq] : keys) {
+            value::map e;
+            e.emplace_back(value{"key"}, value{key_bytes(key)});
+            e.emplace_back(value{"seq"}, value{seq});
+            entries.emplace_back(std::move(e));
+        }
+        value::map c;
+        c.emplace_back(value{"channel"}, value{channel});
+        c.emplace_back(value{"keys"}, value{std::move(entries)});
+        channels.emplace_back(std::move(c));
+    }
+    value::map doc;
+    doc.emplace_back(value{"rhp"}, value{"trust-seen"});
+    doc.emplace_back(value{"channels"}, value{std::move(channels)});
+    return encode(value{std::move(doc)});
+}
+
+result<seen_map> decode_seen(std::span<const std::byte> bytes) {
+    auto v = decode(bytes);
+    const value* tag = v ? v->find("rhp") : nullptr;
+    const value* channels = v ? v->find("channels") : nullptr;
+    const auto* list = channels != nullptr ? channels->get_if<value::array>() : nullptr;
+    if (tag == nullptr || tag->get_if<std::string>() == nullptr || *tag->get_if<std::string>() != "trust-seen" || list == nullptr) {
+        return std::unexpected{bad_body("not a trust-seen record")};
+    }
+    seen_map out;
+    for (const value& c : *list) {
+        const value* name = c.find("channel");
+        const value* keys = c.find("keys");
+        const auto* entries = keys != nullptr ? keys->get_if<value::array>() : nullptr;
+        if (name == nullptr || name->get_if<std::string>() == nullptr || entries == nullptr) {
+            return std::unexpected{bad_body("a trust-seen channel is {channel, keys}")};
+        }
+        auto& slot = out[*name->get_if<std::string>()];
+        for (const value& e : *entries) {
+            const value* k = e.find("key");
+            const value* s = e.find("seq");
+            const auto* raw = k != nullptr ? k->get_if<value::bytes>() : nullptr;
+            auto key = raw != nullptr ? security::ed25519_public_key::from_bytes(*raw) : result<security::ed25519_public_key>{std::unexpected{bad_body("no key")}};
+            auto seq = s != nullptr ? count(*s, "seq") : result<std::uint64_t>{std::unexpected{bad_body("no seq")}};
+            if (!key || !seq) {
+                return std::unexpected{bad_body("a trust-seen entry is {key = 32 bytes, seq}")};
+            }
+            slot.emplace_back(*key, *seq);
+        }
+    }
+    return out;
+}
 constexpr std::uint32_t kDefaultWallMs = 10'000;
+
+std::string root_key(std::uint64_t version) {
+    return std::format("{}{:020}", kRootsPrefix, version);
+}
+
+std::string identities_key(std::uint64_t seq) {
+    return std::format("{}{:020}", kIdentitiesPrefix, seq);
+}
+
+// The number a "<prefix><20 digits>" store key ends with (nullopt for anything else).
+std::optional<std::uint64_t> numbered(std::string_view key, std::string_view prefix) {
+    if (!key.starts_with(prefix)) {
+        return std::nullopt;
+    }
+    key.remove_prefix(prefix.size());
+    std::uint64_t n = 0;
+    const auto [end, ec] = std::from_chars(key.data(), key.data() + key.size(), n);
+    if (ec != std::errc{} || end != key.data() + key.size()) {
+        return std::nullopt;
+    }
+    return n;
+}
 
 std::string release_key(const release_id& id) {
     return std::string{kReleasesPrefix} + to_hex(id);
@@ -108,6 +195,12 @@ private:
 
 } // namespace
 
+// A revocation list the store keeps, under its key.
+struct stored_list {
+    std::string key;
+    signed_revocations list;
+};
+
 // A release that passed the checks, with who signed it.
 struct checked_release {
     release r;
@@ -135,11 +228,19 @@ struct channel_runtime {
 class manager_impl {
 public:
     manager_impl(trust keys, manager_options options, any_store store)
-        : keys_(std::move(keys)), options_(std::move(options)), store_(std::move(store)) {
+        : keys_(keys), list_keys_(std::move(keys)), options_(std::move(options)), store_(std::move(store)) {
         if (options_.limits.wall_ms == 0) {
             options_.limits.wall_ms = kDefaultWallMs;
         }
         options_.hardening = strictest(kBuildHardening, options_.hardening);
+    }
+
+    manager_impl(signed_root anchor, manager_options options, any_store store) : manager_impl(trust{}, std::move(options), std::move(store)) {
+        if (auto ok = verify_root(anchor); !ok) {
+            anchor_error_ = make_error(ok.error().code, std::format("the root anchor doesn't verify: {}", ok.error().message), "release.root");
+        }
+        roots_.push_back(std::move(anchor));
+        rebuild_trust();
     }
 
     // The sandboxes go first, while channels_ is whole: their callbacks (on_handler_error, the health
@@ -190,6 +291,9 @@ public:
         if (restored_) {
             return fail(errc::kAlreadyLoaded, "restore() runs once, before the first apply()", "release.manager");
         }
+        if (anchor_error_) {
+            return std::unexpected{*anchor_error_};
+        }
         auto bytes = store_.read(kStateKey);
         std::optional<decoded_state> state;
         if (bytes) {
@@ -205,15 +309,18 @@ public:
         // Every revocation list kept: they only ever withdraw trust, so what they say counts even if
         // a signature no longer verifies (its signer rotated out). One that can't be read fails the
         // restore, like the state.
-        revoked_set lists;
+        std::vector<stored_list> lists;
         if (auto read = read_lists(lists, report); !read) {
             return std::unexpected{std::move(read).error()};
         }
+        load_roots(report);
         restored_ = true;
         if (state) {
             revoked_ = std::move(state->revoked);
         }
-        revoked_.merge(lists);
+        for (const stored_list& l : lists) {
+            revoked_.merge(l.list.body);
+        }
         // Every channel is known before any of them runs: a restore that persists part way (a
         // candidate's boot attempt) never forgets the others.
         if (state) {
@@ -222,6 +329,8 @@ public:
                 c.state = std::move(s);
             }
         }
+        recover(lists, report.dropped);
+        rebuild_identities(report);
         for (const seq_floor& f : revoked_.floors) {
             raise_floor(f);
         }
@@ -230,6 +339,8 @@ public:
         }
         if (auto saved = persist(); !saved) {
             report.failed.emplace_back("*", std::move(saved).error());
+        } else {
+            forget_dropped(report.dropped);
         }
         collect_garbage();
         last_restore_ = report;
@@ -298,6 +409,7 @@ public:
         }
         c.state.floor = seq;
         c.state.held = false;
+        note_seen(channel, *checked);
         c.state.attempts = 0;
         if (mode == confirm_mode::kNow) {
             promote_to_active(c, id);
@@ -396,6 +508,145 @@ public:
             collect_garbage();
         }
         return changed;
+    }
+
+    // ---- root of trust ------------------------------------------------------------------------------
+
+    [[nodiscard]] const signed_root* root() const noexcept { return roots_.empty() ? nullptr : &roots_.back(); }
+
+    result<std::uint64_t> update_root(std::span<const signed_root> newer) {
+        if (roots_.empty()) {
+            return fail(errc::kNotFound, "this release manager holds no root of trust (make it with a root anchor)", "release.root");
+        }
+        if (auto ready = ready_to_change(); !ready) {
+            return std::unexpected{std::move(ready).error()};
+        }
+        // Versions held already are skipped (a client may send the whole chain), if they are the same.
+        std::size_t first = 0;
+        for (; first < newer.size() && newer[first].body.version <= roots_.back().body.version; ++first) {
+            const auto held = std::ranges::find(roots_, newer[first].body.version, [](const signed_root& r) { return r.body.version; });
+            if (held == roots_.end() || held->body_bytes != newer[first].body_bytes) {
+                return fail(errc::kSuperseded, std::format("root version {} is not newer than {}, the one this host holds", newer[first].body.version, roots_.back().body.version),
+                            "release.root");
+            }
+        }
+        if (first == newer.size()) {
+            return roots_.back().body.version;
+        }
+        const auto walk = newer.subspan(first);
+        auto newest = verify_chain(roots_.back(), walk, unix_seconds(wall_now()), skew_seconds());
+        if (!newest) {
+            return std::unexpected{std::move(newest).error()};
+        }
+        for (const signed_root& r : walk) { // kept before it takes effect: a restart walks to it again
+            auto bytes = encode_root(r);
+            if (!bytes) {
+                return std::unexpected{std::move(bytes).error()};
+            }
+            if (auto kept = store_.write(root_key(r.body.version), *bytes); !kept) {
+                return fail(kept.error().code, std::format("root version {} couldn't be saved: {}", r.body.version, kept.error().message), "release.root");
+            }
+        }
+        roots_.insert(roots_.end(), walk.begin(), walk.end());
+        rebuild_trust();
+        // What the newest root marks compromised loses what it signed at once.
+        std::vector<stored_list> lists;
+        restore_report unused;
+        std::vector<std::string> dropped;
+        if (read_lists(lists, unused)) {
+            recover(lists, dropped);
+        }
+        rebuild_identities(unused);
+        dropped.insert(dropped.end(), unused.dropped.begin(), unused.dropped.end());
+        (void)stop_revoked();
+        dirty_state_ = true;
+        if (persist()) {
+            forget_dropped(dropped);
+        }
+        collect_garbage();
+        const std::uint64_t version = roots_.back().body.version;
+        emit(release_event{release_event::kind::kTrust, {}, std::nullopt, std::nullopt, version, "root", std::nullopt});
+        return version;
+    }
+
+    result<manager::trust_state> update_trust(std::span<const std::vector<std::byte>> documents) {
+        std::vector<signed_root> roots;
+        const auto flush = [&]() -> result<void> {
+            if (roots.empty()) {
+                return {};
+            }
+            auto walked = update_root(roots);
+            roots.clear();
+            if (!walked) {
+                return std::unexpected{std::move(walked).error()};
+            }
+            return {};
+        };
+        for (const std::vector<std::byte>& doc : documents) {
+            const std::string tag = document_tag(doc);
+            if (tag == "root-envelope") {
+                auto r = decode_root(doc);
+                if (!r) {
+                    return std::unexpected{std::move(r).error()};
+                }
+                roots.push_back(std::move(*r));
+                continue;
+            }
+            if (auto done = flush(); !done) {
+                return std::unexpected{std::move(done).error()};
+            }
+            if (tag == "identity-revocations") {
+                if (auto taken = revoke_identities(doc); !taken && taken.error().code != errc::kSuperseded) {
+                    return std::unexpected{std::move(taken).error()};
+                }
+                continue;
+            }
+            return fail(errc::kInvalidArgument, std::format("a trust document is a root or identity revocations, not '{}'", tag.empty() ? "?" : tag), "release.trust");
+        }
+        if (auto done = flush(); !done) {
+            return std::unexpected{std::move(done).error()};
+        }
+        return held_trust();
+    }
+
+    [[nodiscard]] manager::trust_state held_trust() const noexcept { return {roots_.empty() ? 0 : roots_.back().body.version, identities_->seq()}; }
+
+    [[nodiscard]] std::shared_ptr<const security::revoked_identities> identities() const noexcept { return identities_; }
+
+    // ---- identity revocations ---------------------------------------------------------------------------
+
+    // Applies a signed identity revocation list newer than any applied: signed by the revocation role
+    // (list_keys_, less keys a release revocation list revoked), its seq within the AL9 cap of the last
+    // one's (of this host's clock for the first). In effect at once; kept under its own key.
+    result<std::uint64_t> revoke_identities(std::span<const std::byte> envelope) {
+        if (auto ready = ready_to_change(); !ready) {
+            return std::unexpected{std::move(ready).error()};
+        }
+        auto list = decode_identity_revocations(envelope);
+        if (!list) {
+            return std::unexpected{std::move(list).error()};
+        }
+        const std::uint64_t held = identities_->seq();
+        if (list->body.seq <= held) {
+            return fail(errc::kSuperseded, std::format("identity revocation list {} is not newer than {}", list->body.seq, held), "release.identities");
+        }
+        if (auto signers = list_keys_.verify(kIdentityRevocationSignatureDomain, list->body_bytes, list->signatures, "*", revoked_.keys); !signers) {
+            return std::unexpected{std::move(signers).error()};
+        }
+        if (auto moved = check_move(list->body.seq, held, std::format("identity revocation list {}", list->body.seq), "release.identities"); !moved) {
+            emit(release_event{release_event::kind::kRefused, {}, std::nullopt, std::nullopt, list->body.seq, {}, moved.error()});
+            return std::unexpected{std::move(moved).error()};
+        }
+        identities_->merge(list->body);
+        unsaved_lists_.emplace_back(identities_key(list->body.seq), std::vector<std::byte>(envelope.begin(), envelope.end()));
+        dirty_state_ = true;
+        auto saved = persist();
+        emit(release_event{release_event::kind::kTrust, {}, std::nullopt, std::nullopt, list->body.seq, "identities", std::nullopt});
+        if (!saved) {
+            return std::unexpected{save_failed(saved.error(), std::format("identity revocation list {} is in effect here, but couldn't be saved (tried again later)", list->body.seq),
+                                               "release.identities")};
+        }
+        return list->body.seq;
     }
 
     // ---- hardening -----------------------------------------------------------------------------------
@@ -527,8 +778,8 @@ private:
         return {};
     }
 
-    // Every revocation list the store keeps, merged into `out` (unverified: they only withdraw trust).
-    result<void> read_lists(revoked_set& out, restore_report& report) {
+    // Every revocation list the store keeps, with its key (unverified: they only withdraw trust).
+    result<void> read_lists(std::vector<stored_list>& out, restore_report& report) {
         auto keys = store_.keys();
         if (!keys) {
             return std::unexpected{std::move(keys).error()};
@@ -545,7 +796,7 @@ private:
                 return std::unexpected{std::move(bytes).error()};
             }
             if (auto list = decode_revocations(*bytes)) {
-                out.merge(list->body);
+                out.push_back(stored_list{key, std::move(*list)});
             } else {
                 report.failed.emplace_back("*", std::move(list).error());
             }
@@ -566,7 +817,24 @@ private:
 
     // ---- checks ------------------------------------------------------------------------------------
 
-    result<checked_release> check(release r) const {
+    // Who signed `r` among the release keys: the held root's release role (or the trust the manager
+    // was made with) and, for a `stored` release (one that ran here before), the release roles of the
+    // earlier roots held, less compromised keys (retired keys keep what they signed).
+    [[nodiscard]] result<std::vector<std::string>> verify_release(const release& r, bool stored) const {
+        auto signers = keys_.verify(r, revoked_.keys);
+        if (signers || !stored) {
+            return signers;
+        }
+        for (const trust& t : retired_) {
+            if (auto earlier = t.verify(r, revoked_.keys)) {
+                return earlier;
+            }
+        }
+        return signers;
+    }
+
+    // `stored`: a release from the store (restore, fallbacks), not one arriving now.
+    result<checked_release> check(release r, bool stored = false) const {
         const std::string_view channel = r.body.channel;
         if (revoked_.revokes(r.id)) {
             return std::unexpected{refused(errc::kRevoked, "this release is revoked", channel)};
@@ -574,7 +842,7 @@ private:
         if (const std::uint64_t floor = revoked_.floor_of(channel); r.body.seq <= floor) {
             return std::unexpected{refused(errc::kRevoked, std::format("seq {} is at or below the revoked floor {}", r.body.seq, floor), channel)};
         }
-        auto signers = keys_.verify(r, revoked_.keys);
+        auto signers = verify_release(r, stored);
         if (!signers) {
             return std::unexpected{std::move(signers).error()};
         }
@@ -1014,7 +1282,7 @@ private:
         if (!r) {
             return std::unexpected{std::move(r).error()};
         }
-        return check(std::move(*r));
+        return check(std::move(*r), true);
     }
 
     // ---- revocations ---------------------------------------------------------------------------------
@@ -1032,7 +1300,7 @@ private:
         // A key any list revoked can't sign a later one (that would forgive itself).
         std::vector<security::ed25519_public_key> excluded = revoked_.keys;
         excluded.insert(excluded.end(), list->body.keys.begin(), list->body.keys.end());
-        auto signers = keys_.verify(*list, excluded);
+        auto signers = list_keys_.verify(*list, excluded);
         if (!signers) {
             return std::unexpected{std::move(signers).error()};
         }
@@ -1049,6 +1317,21 @@ private:
         for (const seq_floor& f : list->body.floors) {
             raise_floor(f);
         }
+        const std::size_t changed = stop_revoked();
+        unsaved_lists_.emplace_back(revocations_key(seq), std::vector<std::byte>(envelope.begin(), envelope.end()));
+        dirty_state_ = true;
+        auto saved = persist();
+        emit(release_event{release_event::kind::kRevocations, {}, std::nullopt, std::nullopt, revoked_.seq, {}, std::nullopt});
+        if (!saved) {
+            return std::unexpected{
+                save_failed(saved.error(), std::format("revocation list {} is in effect here, but couldn't be saved (tried again later)", seq), "release.revocations")};
+        }
+        return changed;
+    }
+
+    // Stops what the revocation lists (or the trust) no longer allow, and forgets fallbacks they
+    // revoke. Returns how many channels stopped.
+    std::size_t stop_revoked() {
         std::size_t changed = 0;
         for (auto& [name, c] : channels_) {
             if (c.state.previous && stored_revoked(*c.state.previous)) {
@@ -1064,20 +1347,208 @@ private:
                 ++changed;
             }
         }
-        unsaved_lists_.emplace_back(revocations_key(seq), std::vector<std::byte>(envelope.begin(), envelope.end()));
-        dirty_state_ = true;
-        auto saved = persist();
-        emit(release_event{release_event::kind::kRevocations, {}, std::nullopt, std::nullopt, revoked_.seq, {}, std::nullopt});
-        if (!saved) {
-            return std::unexpected{
-                save_failed(saved.error(), std::format("revocation list {} is in effect here, but couldn't be saved (tried again later)", seq), "release.revocations")};
-        }
         return changed;
     }
 
-    // What the revocation lists say about a release (not its scope, window or libs).
+    // What the revocation lists (and the trust) say about a release (not its scope, window or libs).
     [[nodiscard]] bool revoked_by_lists(const release& r) const {
-        return revoked_.revokes(r.id) || r.body.seq <= revoked_.floor_of(r.body.channel) || !keys_.verify(r, revoked_.keys).has_value();
+        return revoked_.revokes(r.id) || r.body.seq <= revoked_.floor_of(r.body.channel) || !verify_release(r, true).has_value();
+    }
+
+    // ---- root of trust ----------------------------------------------------------------------------------
+
+    // The trust the held root names: its release role for releases (earlier roots' release roles,
+    // less compromised keys, for stored releases) and its revocation role for revocation lists.
+    void rebuild_trust() {
+        if (roots_.empty()) {
+            return;
+        }
+        const root_document& held = roots_.back().body;
+        compromised_ = compromised_keys(held);
+        keys_ = role_trust(held, root_role::kRelease).value_or(trust{});
+        list_keys_ = role_trust(held, root_role::kRevocation).value_or(trust{});
+        retired_.clear();
+        for (auto it = roots_.rbegin() + 1; it != roots_.rend(); ++it) {
+            const auto earlier = role_trust(it->body, root_role::kRelease);
+            if (!earlier) {
+                continue;
+            }
+            trust kept;
+            for (const trust::entry& e : earlier->entries()) {
+                if (std::ranges::find(compromised_, e.key) == compromised_.end()) {
+                    (void)kept.add(e.name, e.key, e.channels);
+                }
+            }
+            if (!kept.empty() && kept.set_threshold(earlier->threshold())) {
+                retired_.push_back(std::move(kept));
+            }
+        }
+    }
+
+    // Walks the root versions the store keeps from the anchor (a gap or one that doesn't verify ends
+    // the walk; the latter is reported).
+    void load_roots(restore_report& report) {
+        if (roots_.empty()) {
+            return;
+        }
+        auto keys = store_.keys();
+        if (!keys) {
+            return; // read_lists reports it
+        }
+        std::vector<std::pair<std::uint64_t, std::string>> found;
+        for (const std::string& key : *keys) {
+            if (const auto version = numbered(key, kRootsPrefix)) {
+                found.emplace_back(*version, key);
+            }
+        }
+        std::ranges::sort(found);
+        for (const auto& [version, key] : found) {
+            if (version <= roots_.back().body.version) {
+                continue;
+            }
+            if (version != roots_.back().body.version + 1) {
+                break;
+            }
+            auto bytes = store_.read(key);
+            auto next = bytes ? decode_root(*bytes) : result<signed_root>{std::unexpected{bytes.error()}};
+            auto ok = next ? verify_next_root(roots_.back(), *next) : result<void>{std::unexpected{next.error()}};
+            if (!ok) {
+                report.failed.emplace_back("*", make_error(ok.error().code, std::format("stored root version {}: {}", version, ok.error().message), "release.root"));
+                break;
+            }
+            roots_.push_back(std::move(*next));
+        }
+        rebuild_trust();
+        if (auto bytes = store_.read(kSeenKey)) {
+            if (auto seen = decode_seen(*bytes)) {
+                seen_ = std::move(*seen);
+            } else {
+                report.failed.emplace_back("*", std::move(seen).error());
+            }
+        }
+    }
+
+    // With a root: remembers the highest seq each key that signed `r` signed in its channel.
+    void note_seen(const std::string& channel, const checked_release& r) {
+        if (roots_.empty()) {
+            return;
+        }
+        auto& keys = seen_[channel];
+        for (const std::string& name : r.signers) {
+            const auto entry = std::ranges::find(keys_.entries(), name, &trust::entry::name);
+            if (entry == keys_.entries().end()) {
+                continue;
+            }
+            const auto it = std::ranges::find(keys, entry->key, &std::pair<security::ed25519_public_key, std::uint64_t>::first);
+            if (it == keys.end()) {
+                keys.emplace_back(entry->key, r.r.body.seq);
+            } else {
+                it->second = std::max(it->second, r.r.body.seq);
+            }
+        }
+    }
+
+    // TUF's recover step (decision AL12): revocation lists signed only by keys the held root marks
+    // compromised are dropped (their store keys go to `dropped`), and what they alone raised is taken
+    // back: the revocation seq, revoked releases and keys, floors. A channel floor a dropped list (or
+    // a release signed only by compromised keys) set comes down to what the remaining lists, the
+    // channel's other stored releases and the seqs trusted keys signed there (kSeenKey) justify: an
+    // older release can't be replayed below what an honest key already shipped.
+    void recover(const std::vector<stored_list>& lists, std::vector<std::string>& dropped) {
+        if (compromised_.empty()) {
+            return;
+        }
+        const std::vector<security::ed25519_public_key> others = trusted_keys(roots_.back().body);
+        revoked_set kept;
+        revoked_set gone;
+        for (const stored_list& l : lists) {
+            if (signed_only_by(compromised_, others, kRevocationSignatureDomain, l.list.body_bytes, l.list.signatures)) {
+                gone.merge(l.list.body);
+                dropped.push_back(l.key);
+            } else {
+                kept.merge(l.list.body);
+            }
+        }
+        if (!dropped.empty()) {
+            revoked_.seq = kept.seq;
+            std::erase_if(revoked_.releases, [&](const release_id& id) { return gone.revokes(id) && !kept.revokes(id); });
+            std::erase_if(revoked_.keys, [&](const security::ed25519_public_key& k) {
+                return std::ranges::find(gone.keys, k) != gone.keys.end() && std::ranges::find(kept.keys, k) == kept.keys.end();
+            });
+            for (seq_floor& f : revoked_.floors) {
+                if (gone.floor_of(f.channel) != 0) {
+                    f.seq = kept.floor_of(f.channel);
+                }
+            }
+            std::erase_if(revoked_.floors, [](const seq_floor& f) { return f.seq == 0; });
+        }
+        for (auto& [name, c] : channels_) {
+            const std::uint64_t by_list = gone.floor_of(name);
+            bool lower = by_list != 0 && by_list >= c.state.floor;
+            std::uint64_t floor = revoked_.floor_of(name);
+            for (const auto& id : {c.state.active, c.state.previous, c.state.candidate}) {
+                if (!id) {
+                    continue;
+                }
+                const auto r = read_stored(*id);
+                if (!r) {
+                    continue;
+                }
+                if (signed_only_by(compromised_, others, kReleaseSignatureDomain, r->body_bytes, r->signatures)) {
+                    lower = lower || r->body.seq >= c.state.floor;
+                } else {
+                    floor = std::max(floor, r->body.seq);
+                }
+            }
+            if (const auto seen = seen_.find(name); seen != seen_.end()) {
+                for (const auto& [key, seq] : seen->second) {
+                    if (std::ranges::find(compromised_, key) != compromised_.end()) {
+                        lower = lower || seq >= c.state.floor;
+                    } else {
+                        floor = std::max(floor, seq);
+                    }
+                }
+            }
+            if (lower && floor < c.state.floor) {
+                c.state.floor = floor;
+                dirty_state_ = true;
+            }
+        }
+    }
+
+    // The identity revocation lists the store keeps, less those signed only by compromised keys (their
+    // keys go to report.dropped), make up the union again. One that can't be read is reported, not used.
+    void rebuild_identities(restore_report& report) {
+        auto keys = store_.keys();
+        if (!keys) {
+            return;
+        }
+        const std::vector<security::ed25519_public_key> others = roots_.empty() ? std::vector<security::ed25519_public_key>{} : trusted_keys(roots_.back().body);
+        std::vector<security::identity_revocation_list> kept;
+        for (const std::string& key : *keys) {
+            if (!key.starts_with(kIdentitiesPrefix)) {
+                continue;
+            }
+            auto bytes = store_.read(key);
+            auto list = bytes ? decode_identity_revocations(*bytes) : result<signed_identity_revocations>{std::unexpected{bytes.error()}};
+            if (!list) {
+                report.failed.emplace_back("*", std::move(list).error());
+                continue;
+            }
+            if (signed_only_by(compromised_, others, kIdentityRevocationSignatureDomain, list->body_bytes, list->signatures)) {
+                report.dropped.push_back(key);
+                continue;
+            }
+            kept.push_back(std::move(list->body));
+        }
+        identities_->replace(kept);
+    }
+
+    // Removes dropped revocation lists from the store once the state no longer counts them.
+    void forget_dropped(const std::vector<std::string>& dropped) {
+        for (const std::string& key : dropped) {
+            (void)store_.remove(key);
+        }
     }
 
     // A stored release the lists revoke (one that can't be read is left alone).
@@ -1095,6 +1566,17 @@ private:
                 return kept;
             }
             unsaved_lists_.erase(unsaved_lists_.begin());
+        }
+        if (!roots_.empty()) {
+            auto seen = encode_seen(seen_);
+            if (!seen) {
+                dirty_state_ = true;
+                return std::unexpected{std::move(seen).error()};
+            }
+            if (auto written = store_.write(kSeenKey, *seen); !written) {
+                dirty_state_ = true;
+                return written;
+            }
         }
         std::vector<channel_state> states;
         states.reserve(channels_.size());
@@ -1196,9 +1678,16 @@ private:
         }
     }
 
-    trust keys_;
+    trust keys_;      // releases: the trust given, or the held root's release role
+    trust list_keys_; // revocation lists: the trust given, or the held root's revocation role
     manager_options options_;
     any_store store_;
+    std::vector<signed_root> roots_;                        // the anchor, then every version walked to (back(): the one held); empty without a root
+    std::optional<error> anchor_error_;                     // the anchor didn't verify: nothing changes
+    std::vector<trust> retired_;                            // earlier roots' release roles less compromised keys (stored releases)
+    std::vector<security::ed25519_public_key> compromised_; // what the held root marks compromised
+    seen_map seen_;
+    std::shared_ptr<security::revoked_identities> identities_ = std::make_shared<security::revoked_identities>(); // every identity revocation list kept (less compromised-only ones)                                          // with a root: the highest seq each release key signed per channel (kSeenKey)
     std::vector<std::pair<std::string, result<void> (*)(script::sandbox&)>> libs_;
     std::map<std::string, channel_runtime, std::less<>> channels_;
     revoked_set revoked_;
@@ -1217,6 +1706,8 @@ private:
 
 manager::manager(trust keys, manager_options options, any_store store)
     : impl_(std::make_unique<detail::manager_impl>(std::move(keys), std::move(options), std::move(store))) {}
+manager::manager(signed_root anchor, manager_options options, any_store store)
+    : impl_(std::make_unique<detail::manager_impl>(std::move(anchor), std::move(options), std::move(store))) {}
 manager::~manager() = default;
 manager::manager(manager&&) noexcept = default;
 manager& manager::operator=(manager&&) noexcept = default;
@@ -1243,6 +1734,30 @@ result<release_id> manager::deactivate(std::string_view channel, bool hold, std:
 
 result<std::size_t> manager::revoke(std::span<const std::byte> envelope) {
     return impl_->revoke(envelope);
+}
+
+result<std::uint64_t> manager::update_root(std::span<const signed_root> newer) {
+    return impl_->update_root(newer);
+}
+
+result<manager::trust_state> manager::update_trust(std::span<const std::vector<std::byte>> documents) {
+    return impl_->update_trust(documents);
+}
+
+const signed_root* manager::root() const noexcept {
+    return impl_->root();
+}
+
+manager::trust_state manager::trust_held() const noexcept {
+    return impl_->held_trust();
+}
+
+result<std::uint64_t> manager::revoke_identities(std::span<const std::byte> envelope) {
+    return impl_->revoke_identities(envelope);
+}
+
+std::shared_ptr<const security::revoked_identities> manager::identities() const noexcept {
+    return impl_->identities();
 }
 
 std::vector<channel_status> manager::status() const {

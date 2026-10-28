@@ -13,8 +13,9 @@ namespace Rhp::wire {
 // the frame layout, the handshake or a message schema.
 // 2: signatures, pin / unpin, blobs (Stage 4); 3: resume, CRC-less TLS frames (Stage 5);
 // 4: subscribe / unsubscribe / event (Stage 7); 5: releases and revocation lists (Stage 10);
-// 6: tunables, the profiler and the debugger (Stage 11).
-inline constexpr std::uint8_t kProtocolRevision = 6;
+// 6: tunables, the profiler and the debugger (Stage 11); 7: trust documents (roots of trust, identity
+// revocations; Stage 13b).
+inline constexpr std::uint8_t kProtocolRevision = 7;
 
 // What a frame carries (the header's `op`, 16 bits on the wire).
 //
@@ -57,6 +58,7 @@ enum class op : std::uint16_t {
     kTune,              // write one of them (journaled like an exec)
     kProfile,           // start / read / stop the sampling profiler of the identity's sandbox
     kDebug,             // the debugger of the identity's sandbox (breakpoints, steps, inspection)
+    kTrust,             // root of trust versions and identity revocations for the host's release manager
 
     kOutput = 48, // print() line
     kEmit,        // rhp.emit(value)
@@ -105,6 +107,7 @@ enum class op : std::uint16_t {
     case op::kTune: return "tune";
     case op::kProfile: return "profile";
     case op::kDebug: return "debug";
+    case op::kTrust: return "trust";
     case op::kOutput: return "output";
     case op::kEmit: return "emit";
     case op::kResult: return "result";
@@ -155,7 +158,8 @@ enum class op : std::uint16_t {
     case op::kReleaseStatus:
     case op::kTunables:
     case op::kProfile: // the identity's own sandbox
-    case op::kRevoke: return role::kObserve; // a revocation list carries its own signatures
+    case op::kRevoke: // a revocation list carries its own signatures
+    case op::kTrust: return role::kObserve; // so do roots and identity revocations
     case op::kLoad:
     case op::kReload:
     case op::kRollback:

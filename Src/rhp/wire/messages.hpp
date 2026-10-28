@@ -219,8 +219,25 @@ struct release_status_reply {
     std::string platform;
     std::uint64_t revocation_seq = 0;
     std::vector<channel_status_message> channels;
+    std::uint64_t root_version = 0; // the root of trust held (0: none)
+    std::uint64_t identity_seq = 0; // the newest identity revocation list applied
 
     [[nodiscard]] bool operator==(const release_status_reply&) const = default;
+};
+
+// trust (Stage 13b): root of trust envelopes (consecutive versions walk as one chain) and identity
+// revocation lists, applied in order. Like revoke, they carry their own signatures.
+struct trust_request {
+    std::vector<value::bytes> documents;
+
+    [[nodiscard]] bool operator==(const trust_request&) const = default;
+};
+
+struct trust_reply {
+    std::uint64_t root_version = 0; // the root of trust the host holds now (0: none)
+    std::uint64_t identity_seq = 0; // the newest identity revocation list it applied
+
+    [[nodiscard]] bool operator==(const trust_reply&) const = default;
 };
 
 // Tunables, profiler and debugger (Stage 11): the requesting identity's own sandbox.
@@ -347,6 +364,7 @@ struct debug_reply {
 //   release_confirm, release_deactivate   bytes (the id of the release confirmed / stopped)
 //   release_status        release_status_reply
 //   revoke                integer (channels that changed)
+//   trust                 trust_reply
 //   tunables              array of tunable_message
 //   tune                  nil
 //   profile               profile_reply
@@ -427,6 +445,8 @@ RHP_WIRE_MESSAGE_CONVERT(Rhp::wire::release_info_message);
 RHP_WIRE_MESSAGE_CONVERT(Rhp::wire::release_apply_reply);
 RHP_WIRE_MESSAGE_CONVERT(Rhp::wire::channel_status_message);
 RHP_WIRE_MESSAGE_CONVERT(Rhp::wire::release_status_reply);
+RHP_WIRE_MESSAGE_CONVERT(Rhp::wire::trust_request);
+RHP_WIRE_MESSAGE_CONVERT(Rhp::wire::trust_reply);
 RHP_WIRE_MESSAGE_CONVERT(Rhp::wire::tunables_request);
 RHP_WIRE_MESSAGE_CONVERT(Rhp::wire::tunable_message);
 RHP_WIRE_MESSAGE_CONVERT(Rhp::wire::tune_request);

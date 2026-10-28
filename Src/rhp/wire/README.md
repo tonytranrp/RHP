@@ -4,7 +4,7 @@ What travels between a host and a client. Namespace `Rhp::wire`. Target `Rhp::wi
 
 | Header | What |
 |---|---|
-| `ops.hpp` | `op` (16-bit frame op), `kProtocolRevision` (6), `frame_flag` (`kMac`, `kAckRequested`, `kCrcOmitted`; `kMore` reserved), op classes (`is_handshake`, `is_request`, `is_reply`, `is_sequenced`, `is_known`), `required_role(op)`, `to_string(op)` |
+| `ops.hpp` | `op` (16-bit frame op), `kProtocolRevision` (7), `frame_flag` (`kMac`, `kAckRequested`, `kCrcOmitted`; `kMore` reserved), op classes (`is_handshake`, `is_request`, `is_reply`, `is_sequenced`, `is_known`), `required_role(op)`, `to_string(op)` |
 | `frame.hpp` | the 28-byte `frame_header`, `encode_frame` (and its size check, `check_payload`), the incremental `frame_decoder` (`decode_status`, `frame_view`), `frame_sealer` (the MAC interface the authenticator implements) |
 | `codec.hpp` | the `codec` concept (`Rhp::value` ⇄ bytes), `decode_limits` (`max_depth` 100, `max_elements` 2^20), `codec_ops` / `codec_ops_for<C>` (the type-erased form the session uses) |
 | `codec/msgpack.hpp` | `msgpack`: RHP's own MessagePack codec for `Rhp::value` (the default `config<>::codec`) |
@@ -41,6 +41,7 @@ Every request and reply is an `envelope {req, idem, body}`: `req` ties replies, 
 | release_confirm / release_deactivate | admin | `{channel, hold, release}` | the release id (bytes) |
 | release_status | observe | nil | `release_status_reply` |
 | revoke | observe (the list carries its own signatures) | `{envelope}` | channels changed |
+| trust | observe (the documents carry their own signatures) | `{documents}` (root envelopes and identity revocation lists, applied in order) | `trust_reply` `{root_version, identity_seq}` |
 | tunables / tune | observe / patch | `{prefix}` / `{path, value}` | array of `tunable_message` / nil |
 | profile | observe | `{action, interval, max_depth, max_stacks}` | `profile_reply` |
 | debug | patch | `{action, source, lines, request, frame, scope, path, expression}` | `debug_reply` |

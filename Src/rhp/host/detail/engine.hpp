@@ -24,6 +24,7 @@
 #include <rhp/net/endpoint.hpp>
 #include <rhp/script/sandbox.hpp>
 #include <rhp/security/authenticator.hpp>
+#include <rhp/security/ed25519.hpp>
 #include <rhp/security/http_auth.hpp>
 #include <rhp/security/identity_file.hpp>
 #include <rhp/security/signer.hpp>
@@ -109,6 +110,9 @@ struct setup {
     // The signer policy's check of a script (with where it is about to run, for a trust that takes
     // it: security::verify_in_context): who signed it, or why not.
     std::function<result<std::string>(std::string_view source, const value& signature, const security::signature_context& context)> verify;
+    // The Ed25519 key a signer name stands for (trusted_signers::find); empty when the policy has no
+    // such lookup. Lets identity revocations (host.serve) withdraw a script signer's key.
+    std::function<std::optional<security::ed25519_public_key>(std::string_view signer)> signer_key;
     std::shared_ptr<event::hub> events;
     std::shared_ptr<event::script_hub> script_events;
     Rhp::limits limits{};
@@ -141,6 +145,8 @@ struct release_bridge {
     // Subscribes to the manager's events when the engine starts serving (publishes release_changed);
     // the engine drops the subscription before it goes.
     std::function<Rhp::subscription(std::function<void(event::release_changed)>)> on_event;
+    // True when the manager's identity revocations name this script signer key (pump thread).
+    std::function<bool(const security::ed25519_public_key&)> revoked_signer;
 };
 
 template <script::installable L>

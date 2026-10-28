@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <stop_token>
 #include <string>
 #include <string_view>
@@ -97,6 +98,14 @@ public:
             s.http_auth = [auth](const security::http_proof& request, std::chrono::system_clock::time_point now) { return auth.verify_http(request, now); };
         }
         s.begin_handshake = [auth = std::move(auth)] { return auth.begin(); };
+        if constexpr (requires(const typename Cfg::trust_t& t, std::string_view name) {
+                          { t.find(name) } -> std::convertible_to<const security::ed25519_public_key*>;
+                      }) {
+            s.signer_key = [trust](std::string_view name) -> std::optional<security::ed25519_public_key> {
+                const security::ed25519_public_key* key = trust.find(name);
+                return key != nullptr ? std::optional{*key} : std::nullopt;
+            };
+        }
         s.verify = [trust = std::move(trust)](std::string_view source, const value& signature, const security::signature_context& context) {
             return security::verify_in_context(trust, source, signature, context);
         };

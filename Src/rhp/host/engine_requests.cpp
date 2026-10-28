@@ -62,7 +62,8 @@ namespace {
     case wire::op::kReleaseConfirm:
     case wire::op::kReleaseDeactivate:
     case wire::op::kReleaseStatus:
-    case wire::op::kRevoke: return true;
+    case wire::op::kRevoke:
+    case wire::op::kTrust: return true;
     default: return false;
     }
 }
@@ -184,6 +185,12 @@ result<std::string> engine::check_signature(const pump_session& sess, const inbo
     if constexpr (kBuildHardening != hardening::kProduction) { // production: observe signs too
         if (!who && signature.is_nil() && sess.granted == role::kObserve && setup_.hardening != hardening::kProduction) {
             who = std::string{}; // observe can't mutate anything: unsigned code is allowed
+        }
+    }
+    // A signer key the served release manager's identity revocations name signs nothing any more.
+    if (who && !who->empty() && setup_.signer_key && releases_.revoked_signer) {
+        if (const auto key = setup_.signer_key(*who); key && releases_.revoked_signer(*key)) {
+            who = fail(errc::kRevoked, std::format("the key of signer '{}' is revoked (identity revocations)", *who), "host.signature");
         }
     }
     if (who && audit_ != nullptr) {

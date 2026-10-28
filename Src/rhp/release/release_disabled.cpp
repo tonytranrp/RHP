@@ -90,6 +90,9 @@ public:
 manager::manager(trust, manager_options options, any_store) : impl_(std::make_unique<detail::manager_impl>()) {
     impl_->options = std::move(options);
 }
+manager::manager(signed_root, manager_options options, any_store) : impl_(std::make_unique<detail::manager_impl>()) {
+    impl_->options = std::move(options);
+}
 manager::~manager() = default;
 manager::manager(manager&&) noexcept = default;
 manager& manager::operator=(manager&&) noexcept = default;
@@ -116,6 +119,31 @@ result<release_id> manager::deactivate(std::string_view, bool, std::optional<rel
 
 result<std::size_t> manager::revoke(std::span<const std::byte>) {
     return std::unexpected{disabled("release.manager")};
+}
+
+result<std::uint64_t> manager::update_root(std::span<const signed_root>) {
+    return std::unexpected{disabled("release.root")};
+}
+
+result<manager::trust_state> manager::update_trust(std::span<const std::vector<std::byte>>) {
+    return std::unexpected{disabled("release.trust")};
+}
+
+const signed_root* manager::root() const noexcept {
+    return nullptr;
+}
+
+manager::trust_state manager::trust_held() const noexcept {
+    return {};
+}
+
+result<std::uint64_t> manager::revoke_identities(std::span<const std::byte>) {
+    return std::unexpected{disabled("release.identities")};
+}
+
+std::shared_ptr<const security::revoked_identities> manager::identities() const noexcept {
+    static const auto kNone = std::make_shared<const security::revoked_identities>();
+    return kNone;
 }
 
 std::vector<channel_status> manager::status() const {

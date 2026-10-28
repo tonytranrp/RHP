@@ -1,6 +1,6 @@
 # rhp-client (Python)
 
-A pure-Python client for RHP hosts: connect with an identity file, run signed Lua, load and call modules, push blobs, watch events, drive releases, tunables, the profiler and the debugger. It speaks RHP's native protocol (revision 6) itself over TCP, or TLS 1.3 with pyOpenSSL, so it needs no C++ build, and it interoperates with `Rhp::host<>`, `rhp-cli` and `headless_server`. Python 3.9 or newer; no required dependencies.
+A pure-Python client for RHP hosts: connect with an identity file, run signed Lua, load and call modules, push blobs, watch events, drive releases and trust documents, tunables, the profiler and the debugger. It speaks RHP's native protocol (revision 7) itself over TCP, or TLS 1.3 with pyOpenSSL, so it needs no C++ build, and it interoperates with `Rhp::host<>`, `rhp-cli` and `headless_server`. Python 3.9 or newer; no required dependencies.
 
 ```python
 import rhp_client as rhp
@@ -25,7 +25,7 @@ pip install "./clients/python[tls,crypto]"
 
 Extras: `tls` (pyOpenSSL: TLS 1.3 with the RFC 9266 channel binding RHP's handshake needs), `crypto` (`cryptography`: fast, constant-time Ed25519; without it a pure-Python RFC 8032 signer is used), `speed` (`crc32c`: hardware CRC32C for big frames on plain connections), `test` (pytest).
 
-RHP has no release numbers; the package's version is `0+stage11`, the stage whose protocol it was written for. A host and its clients must speak the same protocol revision (`rhp_client.PROTOCOL_REVISION`).
+RHP has no release numbers; the package's version is `0+stage13`, the stage whose protocol it was written for. A host and its clients must speak the same protocol revision (`rhp_client.PROTOCOL_REVISION`).
 
 ## Connecting
 
@@ -64,6 +64,7 @@ Each blocks for its reply and raises `RhpError` (`.code`, `.message`, `.where`, 
 | `on(name, callback)` / `off(id)` | subscribe to a C++ `lua_event` of the host program, or to `rhp.publish` of this identity's scripts (`"*"`: every publish); callbacks get an `Event` (`name`, `module`, `args`, `dropped`) |
 | `release_apply(envelope, confirm="now")`, `release_confirm(channel, expected=b"")`, `release_deactivate(channel, hold=False, expected=b"")` | admin: run a signed `.rhprel`; confirm or stop what a channel runs (returns the release id; `expected` binds it to one release) |
 | `release_status()` / `revoke(envelope)` | the host's channels / apply a signed `.rhprev` (channels changed) |
+| `trust(documents)` | send root of trust versions (`.rhproot`) and identity revocation lists (`.rhpidrev`), in order: `{root_version, identity_seq}` the host holds |
 | `tunables(prefix="")` / `tune(path, value)` | the variables the host's libs expose (`Tunable`: value, range, step, unit, doc) / set one as a script would (patch) |
 | `profile("start" \| "read" \| "stop", interval=1000)` | `ProfileReport`: samples per folded stack (`.folded()` for flame graphs) |
 | `debug(action, **fields)` | the debugger (patch): `break` (source, lines), `pause`, `paused`, `continue` / `into` / `over` / `out` (request), `stack` (request), `variables` (request, frame, scope, path), `evaluate` (request, frame, expression), `reset`; pauses arrive as the event `rhp.debug` |

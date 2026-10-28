@@ -128,7 +128,9 @@ if(RHP_ENABLE)
         SOURCES
             release/bytecode_tests.cpp
             release/codec_tests.cpp
+            release/identity_revocation_tests.cpp
             release/manager_tests.cpp
+            release/root_manager_tests.cpp
             release/root_tests.cpp
         LINKS
             Rhp::release

@@ -16,7 +16,7 @@ __all__ = [
     "crc32c", "mac32", "encode_frame", "Frame", "FrameDecoder", "is_sequenced",
 ]
 
-PROTOCOL_REVISION = 6
+PROTOCOL_REVISION = 7
 MAGIC = b"RHP\x00"
 _HEADER = struct.Struct("<4sBBHQQI")
 HEADER_SIZE = _HEADER.size  # 28
@@ -63,6 +63,7 @@ class Op:
     TUNE = 41
     PROFILE = 42
     DEBUG = 43
+    TRUST = 44
     OUTPUT = 48
     EMIT = 49
     RESULT = 50

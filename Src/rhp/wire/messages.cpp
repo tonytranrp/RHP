@@ -638,6 +638,8 @@ value convert<wire::release_status_reply>::to_value(const wire::release_status_r
         .set("platform", m.platform)
         .set("revocation_seq", m.revocation_seq)
         .set("channels", m.channels)
+        .set("root_version", m.root_version)
+        .set("identity_seq", m.identity_seq)
         .done();
 }
 
@@ -649,7 +651,30 @@ result<wire::release_status_reply> convert<wire::release_status_reply>::from_val
     RHP_WIRE_READ(seq, in->field_or<std::uint64_t>("revocation_seq", 0));
     // Its errors say "release_status", not "release_status reply".
     RHP_WIRE_READ(channels, wire::message_list<wire::channel_status_message>(v, "channels", "release_status"));
-    return wire::release_status_reply{std::move(*app), std::move(*build), std::move(*platform), *seq, std::move(*channels)};
+    RHP_WIRE_READ(root_version, in->field_or<std::uint64_t>("root_version", 0));
+    RHP_WIRE_READ(identity_seq, in->field_or<std::uint64_t>("identity_seq", 0));
+    return wire::release_status_reply{std::move(*app), std::move(*build), std::move(*platform), *seq, std::move(*channels), *root_version, *identity_seq};
+}
+
+value convert<wire::trust_request>::to_value(const wire::trust_request& m) {
+    return wire::map_builder{}.set("documents", m.documents).done();
+}
+
+result<wire::trust_request> convert<wire::trust_request>::from_value(const value& v) {
+    RHP_WIRE_READ(in, wire::read_map(v, "trust"));
+    RHP_WIRE_READ(documents, in->field<std::vector<value::bytes>>("documents"));
+    return wire::trust_request{std::move(*documents)};
+}
+
+value convert<wire::trust_reply>::to_value(const wire::trust_reply& m) {
+    return wire::map_builder{}.set("root_version", m.root_version).set("identity_seq", m.identity_seq).done();
+}
+
+result<wire::trust_reply> convert<wire::trust_reply>::from_value(const value& v) {
+    RHP_WIRE_READ(in, wire::read_map(v, "trust reply"));
+    RHP_WIRE_READ(root_version, in->field_or<std::uint64_t>("root_version", 0));
+    RHP_WIRE_READ(identity_seq, in->field_or<std::uint64_t>("identity_seq", 0));
+    return wire::trust_reply{*root_version, *identity_seq};
 }
 
 // ---- Stage 11: tunables, profiler, debugger ----------------------------------------------------------
