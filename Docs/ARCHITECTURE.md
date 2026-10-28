@@ -76,7 +76,7 @@ flowchart TB
         CLIENT["Rhp::client · Rhp::fleet"]:::fe
     end
     subgraph L4["Layer 4 — Session & audit"]
-        SESS["Rhp::session<br/>handshake · seq/ack · MAC · resume · heartbeat · TLS over any link"]
+        SESS["Rhp::session<br/>handshake · seq/ack · MAC · resume · heartbeat · TLS over any link · admission"]
         AUD["Rhp::audit<br/>file / stream sinks"]
     end
     subgraph L3["Layer 3 — Backends (policies)"]
@@ -91,10 +91,10 @@ flowchart TB
         PLAT["Rhp::platform<br/>OS name · secure random"]
     end
     subgraph L1["Layer 1 — Core"]
-        CORE["Rhp::core<br/>error · result · value · convert · ids · log · limits · role · subscription"]
+        CORE["Rhp::core<br/>error · result · value · convert · ids · log · limits · hardening · role · subscription"]
     end
     subgraph L0["Layer 0 — Utils (zero deps)"]
-        UT["Rhp::utils<br/>fixed_string · type_list · function_traits · scope_guard · spsc_ring · byte_buffer · crc32c · base64 · units"]
+        UT["Rhp::utils<br/>fixed_string · type_list · function_traits · scope_guard · spsc_ring · byte_buffer · crc32c · siphash · base64 · units"]
     end
     L5 --> L4 --> L3 --> L2 --> L1 --> L0
     classDef fe fill:#2b6cb0,color:#fff,stroke:#1a365d
@@ -136,6 +136,7 @@ classDiagram
         clock~K~
         logger~O~
         discovery~D~
+        hardening~H~
     }
     class Transport {
         <<concept net::transport>>
@@ -201,7 +202,7 @@ classDiagram
     host --> http_gateway : optional frontend
 ```
 
-The other slots are simpler: `executor` is a marker (`exec::pumped`, the only one), `errors` picks `errors::expected` or `errors::throwing`, `clock` takes any `exec::clock_source` (`now()`), `logger` any `core::logger` (`enabled` / `write`), and `limits` a `Rhp::limits` value. There is no script-engine concept: Lua 5.5 (`puc_lua`) is the only engine.
+The other slots are simpler: `executor` is a marker (`exec::pumped`, the only one), `errors` picks `errors::expected` or `errors::throwing`, `clock` takes any `exec::clock_source` (`now()`), `logger` any `core::logger` (`enabled` / `write`), `limits` a `Rhp::limits` value, and `hardening` a `Rhp::hardening` level no weaker than the build's (`RHP_HARDENING`; Stage 13a, §39). There is no script-engine concept: Lua 5.5 (`puc_lua`) is the only engine.
 
 ### 3.1 Customization points
 
@@ -248,7 +249,8 @@ using my_cfg = Rhp::config<>
     ::clock    <Rhp::exec::steady_clock>                      // injectable (game time, deterministic tests)
     ::logger   <Rhp::core::stderr_logger>
     ::limits   <Rhp::limits{}>                                // everything unlimited, scripts run to completion
-    ::discovery<Rhp::net::mdns>;                              // advertisement stays an explicit host.advertise() opt-in
+    ::discovery<Rhp::net::mdns>                               // advertisement stays an explicit host.advertise() opt-in
+    ::hardening<Rhp::kBuildHardening>;                        // the build's level (RHP_HARDENING) or stricter (§39)
 ```
 
 `Rhp::config<>` with no links behaves exactly like this chain (the types differ: a written link is a setting of its own). TLS activates automatically for non-loopback network endpoints. `engine<>` is not a slot (Lua 5.5 is the only engine); see AA2–AA5 and the guide's [configuration table](guide/configuration.md#rhpconfig). There is **no default port** — every endpoint names one.
@@ -444,7 +446,9 @@ flowchart LR
 | Knob | Default | Effect |
 |---|---|---|
 | `limits.slice_us` | `0` = run to completion | opt-in time slicing per `pump()` |
-| `limits.instructions` / `memory` / `wall_ms` | `0` = unlimited | opt-in totals, per host config (the same for every identity and role); `wall_ms` counts time spent running, not suspended; **sticky** when hit (re-raise every tick, allocator keeps refusing) so `pcall` can't swallow them; a background task's instruction and wall budgets bound each resume |
+| `limits.instructions` / `memory` / `wall_ms` | `0` = unlimited | opt-in totals, per host config; observe identities have their own (`host_options::observe_limits`), capped by `kObserveCaps` from hardening `lan` up, and `production` caps every role by `kProductionCaps` (§39); pattern matching and plain find charge their steps to the run; `wall_ms` counts time spent running, not suspended; **sticky** when hit (re-raise every tick, allocator keeps refusing) so `pcall` can't swallow them; a background task's instruction and wall budgets bound each resume |
+| `limits.request_rate` / `pump_requests` | `0` = off | per identity, on the host: a token bucket of requests per second (`kLimitExceeded`, HTTP 429), and requests started per `pump()` with identities taking turns (§39 AL4) |
+| `limits.handlers` | `0` = unlimited | timers, frame callbacks, subscriptions and unfinished tasks alive at once per sandbox (§39 AL4) |
 | `limits.event_queue` | `65536` | events queued per sandbox for its next `pump()` (other threads' fires, `rhp.publish`); more are dropped and counted (`stats().dropped_events`) |
 | `sandbox_options::handler_errors` | `report` | what a failing timer, frame callback, event handler or task does: `report` (undo that call only), `remove` (also drop the handler) or `fault` (the module, as before Stage 7); a memory stop always faults |
 | cancel flag | always set | set by the **I/O thread** (atomic) when `cancel` / `revert_all` / disconnect arrives; the count hook checks it, so a runaway request can be stopped **even while `pump()` is stuck inside it** |
@@ -513,7 +517,7 @@ A Wi-Fi blip shorter than the resume window does **not** revert; a real disconne
 
 - **`pin(mod)`** (`kAdmin`): the host takes ownership of a module, so it survives its client's disconnect. Pinned modules belong to a host-owned identity, are reverted only by `unpin` + `revert`/`unload` or `revert_all`, and are listed with `pinned: true`. This is how `rhp-cli run patch.lua --pin` applies a lasting patch. *As built (Stage 4):* the identity's own sandbox stays alive while it has pinned modules; at its last disconnect the scratch module and every module the pinned ones don't `require` are reverted and unloaded (Y7).
 - **HTTP gateway:** logical sessions survive physical socket close and expire after **5 minutes idle**. Expiry stops their pending requests and applies normal identity cleanup, preserving other live sessions and pinned modules.
-- **Handshake flood guard:** clients are unlimited, but at most **64 unauthenticated** handshakes may be pending, each with a **5 s** timeout.
+- **Handshake flood guard:** clients are unlimited, but at most **64 unauthenticated** handshakes may be pending, each with a **5 s** timeout. *As built (Stage 13a, AL5):* also at most 8 from one IPv4 address or IPv6 /64, a 2 s first-byte deadline, and a newcomer takes the slot of the oldest silent connection (`session::admission`), so silent connections can't hold out a client or a resume.
 
 ## 6. Using RHP
 
@@ -653,18 +657,21 @@ stateDiagram-v2
 
 | Layer | Decision |
 |---|---|
-| Bind address | chosen by the application (there is no default endpoint; tutorials use loopback); non-loopback requires a keyring **and** TLS (or an explicit `insecure_lan` opt-in) |
+| Hardening | *Stage 13a (AL1, AL2):* `RHP_HARDENING=dev\|lan\|production` is the most a build allows; `config<>::hardening` and `host_options::hardening` only raise it, and what the build's level doesn't allow is compiled out. `lan` refuses `insecure_lan`, dev sessions and `unsigned_scripts`, gives admin patch's libraries and caps observe limits; `production` also requires signed observe code, refuses the debugger and advertising, needs channel-bound HTTP and caps every role |
+| Bind address | chosen by the application (there is no default endpoint; tutorials use loopback); non-loopback requires a keyring **and** TLS (or an explicit `insecure_lan` opt-in: since Stage 13a plaintext with loopback, private and link-local peers only, at hardening `dev` only) |
 | Authentication | `psk_keyring`: mutual challenge-response, keyed BLAKE2b (Monocypher); each key maps to an **identity** and a **role** |
-| Roles | `observe` (read, pure calls, subscriptions) · `patch` (mutations, load/revert) · `admin` (revert_all, pin/unpin, blobs, the full standard library, admin-tagged bindings) |
+| Roles | `observe` (read, pure calls, client subscriptions; no timers, handlers or tasks since Stage 13a) · `patch` (mutations, load/revert) · `admin` (revert_all, pin/unpin, blobs, admin-tagged bindings, and the full standard library in a `dev` build at hardening `dev`) |
 | Script signing | Ed25519 (Monocypher): host only runs code signed by a trusted developer key; `rhp-cli` signs automatically with the identity's private key |
 | Channel | TLS 1.3 on networks: the system's OpenSSL (desktop) or Mbed TLS (iOS, Android, and wherever OpenSSL isn't found) behind `tls::auto_backend`; keyed-BLAKE2b MAC on every frame after the handshake. *As built (Stage 5):* the PSK handshake is bound to the TLS connection (RFC 9266 tls-exporter), so the host's certificate needs no PKI; `ca_pem` adds certificate checks (AA4) |
-| Sandbox | non-admin: `string`, `table`, `math`, `utf8`, `coroutine`, `os.time`/`os.clock`; no `io`, `package`, `debug`, `dofile`, `loadfile`, `collectgarbage`, `string.dump`. **Admin: the full standard library** — `io`, `os` (incl. `execute`, `getenv`, `remove`, `rename`), `package.loadlib`, `debug` (decided: an admin key is fully trusted; `package.loadlib` can't load unsigned native code on iOS anyway). Every role: text-only `load` (binary chunks refused) and RHP's `require` (loaded modules only) |
-| Limits | unlimited, run to completion by default; cancel always works; optional sticky totals / slicing per host config (the same for every identity and role) |
-| Connections | unlimited concurrent clients per host (decided) — every one must authenticate |
+| Sandbox | non-admin: `string`, `table`, `math`, `utf8`, `coroutine`, `os.time`/`os.clock`; no `io`, `package`, `debug`, `dofile`, `loadfile`, `collectgarbage`, `string.dump`. **Admin: the full standard library** — `io`, `os` (incl. `execute`, `getenv`, `remove`, `rename`), `package.loadlib`, `debug` (decided: an admin key is fully trusted; `package.loadlib` can't load unsigned native code on iOS anyway); *since Stage 13a* only in a `dev` build at hardening `dev`, otherwise admin gets the non-admin libraries. Every role: text-only `load` (binary chunks refused) and RHP's `require` (loaded modules only). *Stage 13a (AL3):* non-admin `setmetatable` refuses `__gc`, pattern matching is charged to the run, `tostring` / `%p` show keyed hashes, changes to the shared library tables are undone by `revert_all` |
+| Limits | unlimited, run to completion by default; cancel always works; optional sticky totals / slicing per host config. *Stage 13a (AL4):* observe identities have their own (`observe_limits`), capped from `lan` up (`kObserveCaps`); `production` caps every role (`kProductionCaps`); per-identity `request_rate`, `pump_requests` and `handlers` |
+| Connections | unlimited concurrent clients per host (decided) — every one must authenticate. *Stage 13a (AL5):* unauthenticated ones go through `session::admission` (`pending_handshakes`, `handshakes_per_source`, `first_byte_ms`, eviction of the oldest silent one); reliable UDP opens only after a stateless cookie |
 | Discovery leak | mDNS TXT advertises host name, platform, protocol_rev, app name + build id, installed lib names **only when the host opts in** (off by default). Never keys. `discovery<Rhp::net::no_discovery>` turns it off |
 | Audit | `Rhp::event::script_executed {time, session, identity, granted, peer, op, module, hash, signer, outcome}` and the other host events, through `Rhp::audit::file_sink` / `ostream_sink` (JSON lines) |
 | Events exposure | `kSubscribe` needs only observe and covers every C++ `lua_event` in the process: keep secrets out of C++ event arguments |
-| Kill switches | compile-time `RHP_ENABLE=OFF` (host becomes a stub, patch points become direct calls) **and** runtime `host.set_enabled(false)` |
+| Kill switches | compile-time `RHP_ENABLE=OFF` (host becomes a stub, patch points become direct calls) **and** runtime `host.set_enabled(false)` (*Stage 13a, AL6:* closes every session, refuses connections, stops reverse dialing and runs no scripts until enabled) |
+| Dev sessions | *Stage 13a (AL7):* `host_options::dev_session` in a `dev` build on loopback or local IPC: a generated admin identity and signer, an owner-only connect file for `rhp-cli connect --dev` |
+| Key files | *Stage 13a (AL8):* identity and dev session files atomic and owner-only on every OS; loaders warn when others can read them; `keygen` defaults to patch and keeps the PSK in the file |
 
 > **iOS/App Store:** remote code that changes app behavior is restricted by store policy. Target dev/QA/enterprise builds; compile out with `RHP_ENABLE=OFF` for store builds. Check current Apple guidelines before shipping.
 
@@ -719,15 +726,15 @@ RHP/
 │   └── lua/lua_cxx.cpp · monocypher/*_cxx.cpp                   # C sources compiled as C++
 ├── Src/rhp/                 # one folder per module, included as <rhp/<module>/...>, umbrella rhp.hpp
 │   ├── utils/      fixed_string · type_list · function_traits · scope_guard · spsc_ring · byte_buffer
-│   │               crc32c(.cpp) · base64 · units · overloaded
-│   ├── core/       error · result · errors_mode · value(.cpp) · convert · ids · log(.cpp) · limits · role · subscription
-│   │               json(.cpp)
+│   │               crc32c(.cpp) · siphash · base64 · units · overloaded
+│   ├── core/       error · result · errors_mode · value(.cpp) · convert · ids · log(.cpp) · limits · hardening · role
+│   │               subscription · json(.cpp)
 │   ├── platform/   os · random(.cpp) · files(.cpp) · process(.cpp)   ← general OS facts
 │   ├── wire/       ops · frame(.cpp) · codec · codec/msgpack(.cpp) · messages(.cpp)
-│   ├── net/        endpoint · io_context(.cpp) · link · discovery · loopback/ · tcp/ · websocket/ · udp_reliable/
+│   ├── net/        address · endpoint · io_context(.cpp) · link · discovery · loopback/ · tcp/ · websocket/ · udp_reliable/
 │   │               local/ · mdns/ · detail/http                  ← Asio and OS APIs only in their .cpp files
 │   ├── security/   authenticator · key · keyring · psk_keyring · signer · ed25519 · signing_keys · identity_file
-│   │               hash · http_auth                 tls/: tls · openssl(.cpp) · mbedtls(.cpp) · auto_backend
+│   │               dev_session(.cpp) · hash · http_auth                 tls/: tls · openssl(.cpp) · mbedtls(.cpp) · auto_backend
 │   ├── exec/       executor (pumped, steady_clock) · io_runner (owned_io_thread, zero_threads)
 │   ├── script/     stack · marshal · lib · patch_point · lua_event · ledger · sandbox · stubs · detail/
 │   │               testing · api   puc_lua/: sandbox · schedule · script_events · tasks · lib_proxy · stack · debug
@@ -735,7 +742,7 @@ RHP/
 │   ├── test/       runner · options · reporter · report · cli · fake · fake_registry · lua/*.lua (the framework)
 │   ├── event/      events(.cpp) · hub — typed host events, subscriptions, JSON
 │   ├── audit/      sinks(.cpp) — file_sink, ostream_sink
-│   ├── session/    session(.cpp): handshake · seq/ack/nack · MAC · heartbeat · resume · secure_link(.cpp)
+│   ├── session/    session(.cpp): handshake · seq/ack/nack · MAC · heartbeat · resume · secure_link(.cpp) · admission(.cpp)
 │   ├── config/     config — the Rhp::config<> chain
 │   ├── host/       host · detail/engine · detail/releases (the serve bridge, releases.cpp) — host.cpp · engine_network.cpp ·
 │   │               engine_identities.cpp · engine_requests.cpp (the engine; private detail/engine_impl.hpp) · gateway.cpp
@@ -745,9 +752,10 @@ RHP/
 ├── Tests/
 │   ├── unit/          mirrors Src/rhp/* — files named `<thing>_tests.cpp`
 │   ├── integration/   host_client · stage4 · stage5 · stage6 · stage6_fleet · stage7 · stage9 · stage10 · stage11
+│   │                  stage13_hardening · stage13_network · stage13_limits
 │   ├── tools/         rhp-cli in-process + as a process against headless_server
 │   ├── package/       a consumer project built against the installed package (find_package / subdirectory)
-│   ├── compile_fail/  bad concepts, duplicate names — the build must fail naming the concept
+│   ├── compile_fail/  bad concepts, duplicate names, hardening below the build — the build must fail naming the concept
 │   ├── fuzz/          frame · envelope · msgpack · sandbox_escape · network (replay drivers / libFuzzer)
 │   └── support/       header-only test helpers (`rhp_test/…`)
 ├── Examples/
@@ -872,6 +880,7 @@ flowchart BT
 | Option | Default | Effect |
 |---|---|---|
 | `RHP_ENABLE` | `ON` | `OFF` → inert host, direct-call patch points |
+| `RHP_HARDENING` | `dev` | the most the build allows: `dev`, `lan` or `production` (§39 AL1); `RHP_HARDENING` 0/1/2 in `<rhp/build_config.hpp>`, `rhp_HARDENING` in the package |
 | `RHP_BUILD_TESTS` / `RHP_BUILD_EXAMPLES` / `RHP_BUILD_TOOLS` | `ON` when top-level | |
 | `RHP_WITH_TLS` | `ON` | TLS 1.3 backends: the system's OpenSSL ≥ 3.0 (desktop, if found) and Mbed TLS 4.2 (unless `RHP_TLS_MBEDTLS=OFF`); `auto_backend` prefers OpenSSL |
 | `RHP_TLS_OPENSSL` | `AUTO` | the system's OpenSSL ≥ 3.0: `AUTO` (if found, desktop only), `ON` (required), `OFF` |
@@ -932,7 +941,7 @@ flowchart TB
 
 Must-have cases: revert matrix (every effect kind × load/reload/rollback/revert/revert_to/unload × cross-module interleaving) · transactional reload · scheduler (cancel from the I/O thread stops an infinite loop inside `pump()`; opt-in `slice_us` yields on time) · sandbox escapes · roles (observe can't mutate) · signing (unsigned/wrong-key rejected) · reconnect+resume exactly-once · CRC corruption → nack → resend · blob fragmentation · boundary instantiations (`Rhp::config<>`, empty `Rhp::lib<"x">`, `void` returns, minimal user transport).
 
-**CI** (`.github/workflows/ci.yml`, four jobs): `linux` (linux-clang, -asan, -tsan), `windows` (msvc, clang-cl; `-LE multicast`), `apple` (macOS universal with Mbed TLS, `-LE "multicast|process"`; the iOS simulator, `-LE multicast`; an iOS device build) and `android` (NDK r29; x86_64 tests on an API 34 emulator through `Tools/android/run_tests.py`; an arm64 build). Hosted runners can't pass real multicast, and the macOS `[process]` cases are an open issue ([TODO](TODO.md)). Android device suites use the same adb runner locally.
+**CI** (`.github/workflows/ci.yml`): `linux` (linux-clang, -asan, -tsan), `windows` (msvc, clang-cl; `-LE multicast`), `disabled` (`RHP_ENABLE=OFF`), `hardened` (`RHP_HARDENING=production`, linux-clang; Stage 13a), `fuzz` (libFuzzer smoke), `package` (install and consumers), `apple` (macOS universal with Mbed TLS, `-LE "multicast|process"`; the iOS simulator, `-LE multicast`; an iOS device build) and `android` (NDK r29; x86_64 tests on an API 34 emulator through `Tools/android/run_tests.py`; an arm64 build). Hosted runners can't pass real multicast, and the macOS `[process]` cases are an open issue ([TODO](TODO.md)). Android device suites use the same adb runner locally.
 
 ---
 
@@ -1458,3 +1467,26 @@ Taken without a questionnaire: the user asked for a native test engine for the L
 | AK10 | Reports | Text, TAP 14, JUnit, JSON events, GitHub annotations; LCOV, Cobertura; folded stacks. |
 | AK11 | Entry points | `Rhp::test::main`, `rhp-cli test` (`--exe` via `platform::run_process`, `--api-from`), `rhp_add_lua_tests` (installed), the VS Code extension (`clients/vscode`); `RHP_ENABLE=OFF` reports files as not runnable, descriptions and fakes still work. |
 | AK12 | Cost | `bench_testing.cpp` first; then a process-wide bytecode cache for trusted chunks (`sandbox::exec_cached`), one collection per side of a measured test, cached assert / match chains, lazy `expect` messages, shared spy argument tables. |
+
+## 39. Decision log (round 15, Stage 13)
+
+Taken through a questionnaire (2026-10-27) after five research passes (a code audit, deployment to phones, secure update prior art, channel and authentication cryptography, the Lua sandbox and dev tooling): RHP now runs on one developer PC, against test phones, in internal / QA builds and in store apps driven from an operator's server, and one posture can't fit all four. Threat model: remote attackers, stolen operator keys, malicious script authors and the device owner. Stage 13 lands as three PRs. **13a (AL1–AL9) is implemented** on `stage-13a-hardening`; **13b (AL10–AL13) and 13c (AL14–AL16) are planned**. Per-topic reasoning: [Stage 13 decisions](decisions/stage13-security.md); usage: [Security](guide/security.md).
+
+| # | Topic | Decision |
+|---|---|---|
+| AL1 | Hardening levels | *13a, built.* `RHP_HARDENING=dev\|lan\|production` (default `dev`) in `<rhp/build_config.hpp>`, read as `Rhp::kBuildHardening` (`core/hardening.hpp`); `config<>::hardening<H>` (weaker doesn't compile) and `host_options::hardening` only raise it; a host runs at the strictest; what the build doesn't allow is compiled out (`if constexpr`). |
+| AL2 | What each level allows | *13a, built.* `lan`: no admin full standard library (`sandbox_options::admin_stdlib`), no `insecure_lan`, `unsigned_scripts` or dev sessions, observe capped. `production`: also signed observe code, no debugger, no `advertise()`, gateway only with `http_require_binding`, every role capped. |
+| AL3 | Sandbox | *13a, built, every level.* No `__gc` for non-admin (`lua_safe_setmetatable`); `lstrlib.c` patched so pattern matching and plain find charge their steps to the run; observe can't register timers, handlers or tasks; `tostring` / `%p` show a per-sandbox SipHash-2-4 of the address; shared library tables snapshot at creation and restored by `revert_all`. |
+| AL4 | Limits per role, rates | *13a, built.* `host_options::observe_limits`; `kObserveCaps` (2,000,000 instructions, 64 MiB, 20 ms, `kEverything`, 1024 events, 10 requests a second, 2 a pump) from `lan`, `kProductionCaps` (512 MiB, 1000 ms, `kEverything`, 65,536 events) at `production`, applied by `capped()`; new per-identity `limits.request_rate`, `pump_requests`, `handlers` (0 = off). |
+| AL5 | Admission and transports | *13a, built.* `session::admission`: `handshakes_per_source` (8, IPv4 address or IPv6 /64), `first_byte_ms` (2 s), the oldest silent connection evicted; `auth_failed.key`; reliable UDP stateless cookie (rudp packet revision 2, `utils::siphash24`); a listening client authenticates candidates side by side; `insecure_lan` plaintext with local peers only (`net::ip_address`, `link::address()`); a `server_name` is an address only if it parses as one; the Python client checks host names. |
+| AL6 | Kill switch | *13a, built.* `set_enabled(false)` closes every session (identities revert, pinned modules stay), refuses connections, stops reverse dialing, runs no requests, handlers, tasks or release channels until enabled. The signed, persisted remote disable is 13c. |
+| AL7 | Dev sessions | *13a, built.* `host_options::dev_session` (dev build, hardening `dev`, loopback or local IPC, `psk_keyring` + `ed25519`): a generated admin identity and signer `dev-session`, connect file `<config>/rhp/dev/<app>.rhpdev` owner-only (`security/dev_session`), removed with the host; `rhp-cli connect --dev [app]`. Phone pairing is 13b. |
+| AL8 | Key files | *13a, built.* `platform::write_private_file` (POSIX `O_EXCL` 0600 + rename, Windows explicit DACL); `identity_file::warnings` and `keyring::warnings()` for files others can read and PSKs that look chosen by a person; `rhp-cli keygen` / the Python client default to patch and keep the PSK out of their output. |
+| AL9 | Release seq caps | *13a, built.* `manager_options::max_seq_jump` (2^32) caps how far a release seq, a revocation list seq and the floors it raises move at once (from the host's clock where nothing was seen); refusals are `kOutOfRange`; restores take stored state as it is. |
+| AL10 | Device keys | *13b, planned.* Key-pair authenticator with host-side allow-lists of client public keys, pinned host keys, hardware keys through a sign callback, `key_store` interface; pairing by QR secret, CPace code, trust on first use, `adb forward`. Protocol revision 7. |
+| AL11 | Operator certificates | *13b, planned.* An offline operator CA, short-lived certificates (principal, max role, apps, environments, scopes, serial); script signatures with claims (expiry, app, environment, audience, nonce); `env=dev\|prod` keys; key custody options. |
+| AL12 | Root of trust | *13b, planned.* A versioned, threshold-signed root document listing release, revocation and operator-CA keys; TUF-style rotation and compromise recovery; revocation of certificates, signers and device keys. |
+| AL13 | Capability scopes | *13b, planned.* `lib:`, `cap:`, `patch:`, `event:`, `op:` patterns (deny wins) per identity and certificate; `Rhp::cap<"...">` tags on bindings. |
+| AL14 | Production delivery | *13c, planned.* Releases pulled over HTTPS by the app, a signed channel index against freeze attacks, keystore-MAC'd release state; opt-in support sessions through `Tools/rhp-relay`; a `mobile` limits preset, `pause_network()` / `resume_network()`. |
+| AL15 | Operations | *13c, planned.* Hash-chained, forwarded audit; attestation hooks; a signed, persisted remote disable; hybrid ML-KEM with OpenSSL 3.5+. |
+| AL16 | Store tiers | *13c, planned.* dev, store (production hardening: releases and support sessions) and off (`RHP_ENABLE=OFF`); store-policy disclosure guidance in the guide. |

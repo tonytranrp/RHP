@@ -18,7 +18,7 @@ while (game::running()) { host.pump(); game::update(); }    // Lua runs only her
 ```
 
 ```bash
-rhp-cli keygen dev --role patch                      # dev.rhpid; prints the keyring and signers lines
+rhp-cli keygen dev --role patch                      # dev.rhpid; `rhp-cli pubkey -i dev.rhpid` prints the host's lines
 rhp-cli connect 127.0.0.1:7777 -i dev.rhpid          # REPL; every script is signed
 ```
 
@@ -74,6 +74,7 @@ end)
 - **Scheduling and events:** `rhp.wait` / `rhp.sleep` / `rhp.next_frame`, timers and frame callbacks with pause / resume / reschedule, background tasks (`rhp.spawn`), script events (`rhp.publish`, `rhp.on`, `rhp.wait_event`), a handler error policy, C++ and remote listeners (`host.on_script_event`, `client.on`).
 - **Transports:** in-process loopback, TCP, WebSocket, reliable UDP, local IPC, or your own; reverse mode (the host dials out, for phones and NAT); opt-in DNS-SD discovery; an authenticated HTTP gateway; fleet broadcasts.
 - **Security:** pre-shared-key mutual authentication, roles (`observe`, `patch`, `admin`), Ed25519-signed scripts, TLS 1.3 (OpenSSL or Mbed TLS) bound to the key handshake, per-frame MACs, audit events.
+- **Hardening (Stage 13a):** build levels `RHP_HARDENING=dev|lan|production` that compile out what a build doesn't allow and cap limits per role; per-identity request rates, pump budgets and handler caps; admission control for unauthenticated connections; a sandbox without finalizers or address leaks that restores its shared libraries; owner-only key files; dev sessions that need no key files.
 - **Sessions:** acks, resends and heartbeats; a dropped link resumes within `limits.resume_ms` with every call run exactly once.
 - **Releases:** signed bundles a host keeps across restarts, with channels, anti-rollback floors, health-watched candidates, revocation and staged fleet rollout.
 - **Tools:** tunables with `Rhp::range` checks, a sampling profiler, a debugger that pauses one script while the program runs, and a DAP server for editors.
@@ -101,7 +102,7 @@ CPMAddPackage(NAME rhp GITHUB_REPOSITORY tonytranrp/RHP GIT_TAG stage-12)   # or
 target_link_libraries(my_app PRIVATE Rhp::rhp)
 ```
 
-`add_subdirectory` works the same way. Or install RHP once and use `find_package(rhp CONFIG REQUIRED)` with no version ([installed package](Docs/guide/getting-started.md#installed-package)). Releases are tagged by stage (`stage-0` ... `stage-12`); there are no version numbers. Hosts, clients and `rhp-cli` must speak the same protocol revision (Stages 7 to 9: revision 4; Stage 10: 5; Stages 11 and 12: 6).
+`add_subdirectory` works the same way. Or install RHP once and use `find_package(rhp CONFIG REQUIRED)` with no version ([installed package](Docs/guide/getting-started.md#installed-package)). Releases are tagged by stage (`stage-0` ... `stage-12`); there are no version numbers. Hosts, clients and `rhp-cli` must speak the same protocol revision (Stages 7 to 9: revision 4; Stage 10: 5; Stages 11, 12 and 13a: 6).
 
 ## Documentation
 
@@ -118,7 +119,7 @@ Start with the [user guide](Docs/guide/README.md):
 | [Releases](Docs/guide/releases.md) | signed releases kept across restarts, revocation, staged rollout |
 | [Tools](Docs/guide/tools.md) | tunables, the profiler, the debugger, DAP |
 | [Testing scripts](Docs/guide/testing-scripts.md) | Lua specs offline: spies, fakes, a fake clock, costs, coverage, CI, VS Code |
-| [Configuration](Docs/guide/configuration.md) / [Security](Docs/guide/security.md) | config slots, limits, options, CMake switches, keys, roles, signing |
+| [Configuration](Docs/guide/configuration.md) / [Security](Docs/guide/security.md) | config slots, limits, options, CMake switches, keys, roles, signing, hardening levels, dev sessions |
 | [Performance](Docs/guide/performance.md) | what RHP costs and the settings that change it |
 | [Reference](Docs/guide/reference.md) | error codes, events, wire protocol, sandbox contents |
 | [Limitations](Docs/guide/limitations.md) | what RHP doesn't do (yet) |
@@ -135,8 +136,8 @@ Compilers: MSVC (VS 2026), clang-cl, Clang 17+, AppleClang, Android NDK Clang. G
 
 The short list; the full one is [Docs/guide/limitations.md](Docs/guide/limitations.md).
 
-- RHP runs remote code by design: keys, roles, signatures and TLS decide *who*, not *what*. Admin identities are fully trusted.
-- No execution budgets by default. Set `limits.instructions` / `wall_ms` / `memory` / `slice_us` on any host that accepts keys you don't fully trust; they apply to every identity of the host. A long C++ call can't be interrupted.
+- RHP runs remote code by design: keys, roles, signatures and TLS decide *who*, not *what*. Admin identities are fully trusted (with Lua's whole standard library in `dev` builds).
+- No execution budgets by default in `dev` builds. Set `limits.instructions` / `wall_ms` / `memory` / `slice_us` on any host that accepts keys you don't fully trust; observe identities can have their own, and `lan` / `production` hardening caps them. A long C++ call can't be interrupted.
 - Undo covers recorded effects (variables, patches, timers, subscriptions, tasks, functions with an inverse), not irreversible calls or admin standard-library side effects.
 - Runaway timers, frame callbacks, handlers and tasks run by `pump()` can only be stopped by limits, not from the network.
 - Script events stay inside one identity. Remote event delivery is rate-limited per session, and the HTTP gateway has no event stream.
@@ -160,8 +161,9 @@ The short list; the full one is [Docs/guide/limitations.md](Docs/guide/limitatio
 | 10 | signed releases, persistence, revocation, staged rollout |
 | 11 | tunables, sampling profiler, debugger, `rhp-cli dap` |
 | 12 | `Rhp::test`: a test engine for Lua scripts |
+| 13 | security for every deployment: 13a hardening levels, sandbox and network fixes, rate limits, dev sessions (implemented on branch `stage-13a-hardening`); 13b identities and trust, 13c production delivery (planned) |
 
-Every stage is implemented. Open validation and platform items are in [Status and TODO](Docs/TODO.md).
+Stages 0–12 are implemented and tagged; Stage 13a is implemented on its branch, 13b and 13c are planned. Open validation and platform items are in [Status and TODO](Docs/TODO.md).
 
 ## Layout
 

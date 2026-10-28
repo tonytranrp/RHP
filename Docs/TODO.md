@@ -1,6 +1,37 @@
 # Status and TODO
 
-Last updated 2026-10-27. Stages 0–12 are implemented, merged and tagged (`stage-0` … `stage-12`). Progress is tracked as "Stage N" only (no `v1` / `v2` naming anywhere). Known limits are in [the guide's limitations page](guide/limitations.md).
+Last updated 2026-10-27. Stages 0–12 are implemented, merged and tagged (`stage-0` … `stage-12`); Stage 13a is implemented on its branch (`stage-13a-hardening`), and 13b and 13c are planned. Progress is tracked as "Stage N" only (no `v1` / `v2` naming anywhere). Known limits are in [the guide's limitations page](guide/limitations.md).
+
+## Stage 13 — security for every deployment
+
+Done when: *one RHP serves a developer's PC, test phones, QA builds and store apps, each with the posture it needs: what a build doesn't allow isn't in it, untrusted code is bounded, and production devices trust only what an offline root of trust allows.* Decisions: [Stage 13](decisions/stage13-security.md), ARCHITECTURE §39 (AL1–AL16). Usage: [Security](guide/security.md).
+
+13a — hardening, sandbox, network, dev (implemented, branch `stage-13a-hardening`):
+
+- [x] Hardening levels: `RHP_HARDENING=dev|lan|production`, `config<>::hardening`, `host_options::hardening` (strictest wins; a config below the build doesn't compile); dev-only and production-excluded code compiled out (AL1, AL2)
+- [x] Sandbox: no `__gc` for non-admin, pattern matching and plain find charged to the run (`lstrlib.c` patch), observe can't register handlers, hashed addresses, shared library tables restored on `revert_all` (AL3)
+- [x] Limits per role: `observe_limits`, `kObserveCaps`, `kProductionCaps`; per-identity `request_rate`, `pump_requests`, `handlers` (AL4)
+- [x] Network: admission control (per-source caps, first-byte deadline, eviction, `auth_failed.key`), reliable UDP stateless cookie, listening clients authenticate candidates side by side, `insecure_lan` with local peers only, IP-literal `server_name` check, Python client host-name check (AL5)
+- [x] `set_enabled(false)` as a hard kill switch (AL6)
+- [x] Dev sessions: `host_options::dev_session`, connect files, `rhp-cli connect --dev`, `headless_server --dev-session` (AL7)
+- [x] Owner-only key files on every OS, file and PSK warnings, keygen defaults to patch and keeps the PSK in the file (AL8)
+- [x] Release and revocation seq caps (`max_seq_jump`) (AL9)
+- [x] Tests: `stage13_hardening_tests`, `stage13_network_tests`, `stage13_limits_tests`, admission / channel-policy / address / hardening / SipHash unit tests, compile-fail fixtures for the levels, every suite at every level; CI's `hardened` job (`production`)
+
+13b — identities and trust (planned, protocol revision 7):
+
+- [ ] Device keys and a key-pair authenticator, `key_store` (file, DPAPI, Keychain, app callback), hardware keys through a sign callback; pairing (QR secret, CPace code, trust on first use) (AL10)
+- [ ] Operator CA and short-lived certificates; script signatures with claims; `env=dev|prod` keys; key custody (AL11)
+- [ ] A threshold-signed root of trust with rotation and compromise recovery (AL12)
+- [ ] Capability scopes (`Rhp::cap<>`, scope patterns per identity and certificate) (AL13)
+
+13c — production delivery (planned):
+
+- [ ] Releases pulled over HTTPS with a signed channel index, keystore-MAC'd release state, support sessions through `Tools/rhp-relay`, a `mobile` limits preset, `pause_network()` / `resume_network()` (AL14)
+- [ ] Hash-chained, forwarded audit; attestation hooks; a signed, persisted remote disable; hybrid ML-KEM (AL15)
+- [ ] Store tiers and disclosure guidance (AL16)
+
+Stage 13a follow-ups: the host doesn't print `keyring::warnings()` itself (callers show them); a connection that has sent part of a frame holds its handshake slot until `handshake_timeout_ms`; caps bound one identity, not the host.
 
 ## Stage 12 — a test engine for Lua scripts
 
@@ -78,6 +109,10 @@ Done when: *a stranger can install RHP with `find_package`, the reproduced threa
 Process for every stage: one branch + PR per stage, conventional commits (`feat:`, `fix:`, `test:`, `docs:`, `ci:`), rebase-merge only when told to.
 
 ## Recorded validation
+
+### Stage 13a (2026-10-27)
+
+Recorded validation for Stage 13a: to be filled in by the orchestrator (builds at every hardening level, hosted CI).
 
 ### Cleanup pass (2026-10-27)
 
