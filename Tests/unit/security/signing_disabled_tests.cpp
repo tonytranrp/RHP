@@ -1,5 +1,7 @@
 // RHP_ENABLE=OFF: keys and signer files still load; nothing can be signed or checked.
+#include <cstddef>
 #include <string>
+#include <vector>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -9,6 +11,7 @@
 #include <rhp/security/ed25519.hpp>
 #include <rhp/security/identity_file.hpp>
 #include <rhp/security/operator_cert.hpp>
+#include <rhp/security/key_handle.hpp>
 
 using Rhp::errc;
 using namespace Rhp::security;
@@ -47,4 +50,13 @@ TEST_CASE("disabled signing: operator certificates and certified signatures repo
     const certified::trust trust{*cas};
     CHECK(trust.verify("return 1", Rhp::value{}).error().code == errc::kDisabled);
     CHECK(certified::key{}.sign("return 1").error().code == errc::kDisabled);
+}
+
+TEST_CASE("disabled key handles: none can be made and nothing verifies", "[security][disabled]") {
+    const std::vector<std::byte> seed(32, std::byte{7});
+    CHECK(key_handle::from_private_key(key_algorithm::kEd25519, seed).error().code == errc::kDisabled);
+    CHECK(key_handle::from_callback(key_algorithm::kEd25519, seed, {}).error().code == errc::kDisabled);
+    CHECK(generate_private_key(key_algorithm::kP256).error().code == errc::kDisabled);
+    CHECK(verify(key_algorithm::kEd25519, seed, seed, std::vector<std::byte>(64)).error().code == errc::kDisabled);
+    CHECK(key_handle{}.sign(seed).error().code == errc::kDisabled);
 }

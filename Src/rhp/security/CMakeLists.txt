@@ -5,10 +5,11 @@
 set(rhp_security_sources key.cpp keyring.cpp signing_keys.cpp identity_file.cpp dev_session.cpp http_auth_common.cpp operator_cert.cpp certified.cpp)
 set(rhp_security_private_deps "")
 if(RHP_ENABLE)
-    list(APPEND rhp_security_sources psk_keyring.cpp hash.cpp ed25519.cpp http_auth.cpp)
-    set(rhp_security_private_deps Rhp::monocypher)
+    list(APPEND rhp_security_sources psk_keyring.cpp hash.cpp ed25519.cpp http_auth.cpp key_handle.cpp)
+    # P-256 runs on the TLS backend's crypto (security/tls/p256.hpp).
+    set(rhp_security_private_deps Rhp::monocypher Rhp::tls)
 else()
-    list(APPEND rhp_security_sources ed25519_disabled.cpp http_auth_disabled.cpp)
+    list(APPEND rhp_security_sources ed25519_disabled.cpp http_auth_disabled.cpp key_handle_disabled.cpp)
 endif()
 
 rhp_add_module(security
@@ -23,6 +24,7 @@ rhp_add_module(security
         http_auth.hpp
         identity_file.hpp
         key.hpp
+        key_handle.hpp
         keyring.hpp
         operator_cert.hpp
         psk_keyring.hpp

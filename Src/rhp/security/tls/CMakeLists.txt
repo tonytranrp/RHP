@@ -18,6 +18,7 @@ rhp_add_module(tls
         auto_backend.hpp
         mbedtls.hpp
         openssl.hpp
+        p256.hpp
         tls.hpp
     SOURCES
         ${rhp_tls_sources}

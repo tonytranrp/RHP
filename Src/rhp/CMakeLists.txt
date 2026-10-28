@@ -6,8 +6,8 @@ add_subdirectory(core)     # layer 1
 add_subdirectory(platform) # layer 2
 add_subdirectory(wire)     # layer 2
 add_subdirectory(net)      # layer 3
+add_subdirectory(security/tls) # layer 3 (security's P-256 runs on it)
 add_subdirectory(security) # layer 3
-add_subdirectory(security/tls) # layer 3
 add_subdirectory(exec)     # layer 3
 add_subdirectory(script)   # layer 3
 add_subdirectory(event)    # layer 3

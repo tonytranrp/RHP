@@ -23,6 +23,7 @@
 #include <rhp/core/result.hpp>
 #include <rhp/platform/random.hpp>
 #include <rhp/security/tls/mbedtls.hpp>
+#include <rhp/security/tls/p256.hpp>
 #include <rhp/security/tls/tls.hpp>
 #include <rhp/utils/byte_buffer.hpp>
 
@@ -464,3 +465,103 @@ result<std::shared_ptr<context>> mbedtls::client(const settings& s) {
 }
 
 } // namespace Rhp::security::tls
+
+#if !RHP_TLS_HAS_OPENSSL
+// ---- P-256 for key handles (OpenSSL's runs them where it is built) ---------------------------------
+
+namespace Rhp::security::tls::detail {
+
+namespace {
+
+constexpr psa_algorithm_t kEcdsaSha256 = PSA_ALG_ECDSA(PSA_ALG_SHA_256);
+
+// A volatile PSA key, destroyed when it goes (callers hold lib_mutex()).
+struct psa_key {
+    mbedtls_svc_key_id_t id = MBEDTLS_SVC_KEY_ID_INIT;
+
+    psa_key() = default;
+    ~psa_key() { (void)psa_destroy_key(id); }
+    psa_key(const psa_key&) = delete;
+    psa_key& operator=(const psa_key&) = delete;
+};
+
+// Imports a P-256 key pair (`d`) or public key into `out`.
+[[nodiscard]] psa_status_t import_p256(std::span<const std::byte> bytes, bool pair, psa_key& out) {
+    psa_key_attributes_t attributes = PSA_KEY_ATTRIBUTES_INIT;
+    psa_set_key_type(&attributes, pair ? PSA_KEY_TYPE_ECC_KEY_PAIR(PSA_ECC_FAMILY_SECP_R1) : PSA_KEY_TYPE_ECC_PUBLIC_KEY(PSA_ECC_FAMILY_SECP_R1));
+    psa_set_key_bits(&attributes, 256);
+    psa_set_key_usage_flags(&attributes, pair ? PSA_KEY_USAGE_SIGN_MESSAGE : PSA_KEY_USAGE_VERIFY_MESSAGE);
+    psa_set_key_algorithm(&attributes, kEcdsaSha256);
+    return psa_import_key(&attributes, reinterpret_cast<const std::uint8_t*>(bytes.data()), bytes.size(), &out.id);
+}
+
+[[nodiscard]] std::unexpected<error> psa_failure(errc code, std::string_view what, psa_status_t status) {
+    return fail(code, std::format("{} ({})", what, static_cast<int>(status)), kWhere);
+}
+
+} // namespace
+
+std::string_view p256_backend() noexcept {
+    return "mbedtls";
+}
+
+result<p256_public_key> p256_public_from_private(std::span<const std::byte, kP256PrivateKeySize> d) {
+    const std::scoped_lock lock{lib_mutex()};
+    if (auto ok = init_psa(); !ok) {
+        return std::unexpected{std::move(ok).error()};
+    }
+    psa_key key;
+    if (const psa_status_t s = import_p256(d, true, key); s != PSA_SUCCESS) {
+        return psa_failure(errc::kInvalidArgument, "not a P-256 private key", s);
+    }
+    p256_public_key out{};
+    std::size_t length = 0;
+    if (const psa_status_t s = psa_export_public_key(key.id, reinterpret_cast<std::uint8_t*>(out.data()), out.size(), &length);
+        s != PSA_SUCCESS || length != out.size()) {
+        return psa_failure(errc::kRuntime, "can't export the P-256 public key", s);
+    }
+    return out;
+}
+
+result<p256_signature> p256_sign(std::span<const std::byte, kP256PrivateKeySize> d, std::span<const std::byte> message) {
+    const std::scoped_lock lock{lib_mutex()};
+    if (auto ok = init_psa(); !ok) {
+        return std::unexpected{std::move(ok).error()};
+    }
+    psa_key key;
+    if (const psa_status_t s = import_p256(d, true, key); s != PSA_SUCCESS) {
+        return psa_failure(errc::kInvalidArgument, "not a P-256 private key", s);
+    }
+    p256_signature out{};
+    std::size_t length = 0;
+    if (const psa_status_t s = psa_sign_message(key.id, kEcdsaSha256, reinterpret_cast<const std::uint8_t*>(message.data()), message.size(),
+                                                reinterpret_cast<std::uint8_t*>(out.data()), out.size(), &length);
+        s != PSA_SUCCESS || length != out.size()) {
+        return psa_failure(errc::kRuntime, "P-256 signing failed", s);
+    }
+    return out;
+}
+
+result<void> p256_verify(std::span<const std::byte, kP256PublicKeySize> public_key, std::span<const std::byte> message,
+                         std::span<const std::byte, kP256SignatureSize> signature) {
+    const std::scoped_lock lock{lib_mutex()};
+    if (auto ok = init_psa(); !ok) {
+        return std::unexpected{std::move(ok).error()};
+    }
+    psa_key key;
+    if (const psa_status_t s = import_p256(public_key, false, key); s != PSA_SUCCESS) {
+        return psa_failure(errc::kInvalidArgument, "not a P-256 public key", s);
+    }
+    const psa_status_t s = psa_verify_message(key.id, kEcdsaSha256, reinterpret_cast<const std::uint8_t*>(message.data()), message.size(),
+                                              reinterpret_cast<const std::uint8_t*>(signature.data()), signature.size());
+    if (s == PSA_ERROR_INVALID_SIGNATURE) {
+        return fail(errc::kBadSignature, "the P-256 signature doesn't match", kWhere);
+    }
+    if (s != PSA_SUCCESS) {
+        return psa_failure(errc::kRuntime, "P-256 verification failed", s);
+    }
+    return {};
+}
+
+} // namespace Rhp::security::tls::detail
+#endif

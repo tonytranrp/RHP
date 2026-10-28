@@ -3,13 +3,21 @@
 #include <cstdint>
 #include <format>
 #include <memory>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 #include <openssl/bio.h>
+#include <openssl/bn.h>
+#include <openssl/core_names.h>
+#include <openssl/ec.h>
 #include <openssl/err.h>
 #include <openssl/evp.h>
+#include <openssl/obj_mac.h>
+#include <openssl/param_build.h>
+#include <openssl/params.h>
 #include <openssl/pem.h>
 #include <openssl/ssl.h>
 #include <openssl/x509.h>
@@ -19,6 +27,7 @@
 #include <rhp/core/result.hpp>
 #include <rhp/platform/random.hpp>
 #include <rhp/security/tls/openssl.hpp>
+#include <rhp/security/tls/p256.hpp>
 #include <rhp/security/tls/tls.hpp>
 #include <rhp/utils/byte_buffer.hpp>
 
@@ -345,3 +354,179 @@ result<std::shared_ptr<context>> openssl::client(const settings& s) {
 }
 
 } // namespace Rhp::security::tls
+
+// ---- P-256 for key handles ------------------------------------------------------------------------
+
+namespace Rhp::security::tls::detail {
+
+namespace {
+
+struct bn_free {
+    void operator()(BIGNUM* p) const noexcept { BN_clear_free(p); }
+};
+struct group_free {
+    void operator()(EC_GROUP* p) const noexcept { EC_GROUP_free(p); }
+};
+struct point_free {
+    void operator()(EC_POINT* p) const noexcept { EC_POINT_free(p); }
+};
+struct param_bld_free {
+    void operator()(OSSL_PARAM_BLD* p) const noexcept { OSSL_PARAM_BLD_free(p); }
+};
+struct params_free {
+    void operator()(OSSL_PARAM* p) const noexcept { OSSL_PARAM_free(p); }
+};
+struct pkey_ctx_free {
+    void operator()(EVP_PKEY_CTX* p) const noexcept { EVP_PKEY_CTX_free(p); }
+};
+struct md_ctx_free {
+    void operator()(EVP_MD_CTX* p) const noexcept { EVP_MD_CTX_free(p); }
+};
+struct ecdsa_sig_free {
+    void operator()(ECDSA_SIG* p) const noexcept { ECDSA_SIG_free(p); }
+};
+
+using bn_ptr = std::unique_ptr<BIGNUM, bn_free>;
+using group_ptr = std::unique_ptr<EC_GROUP, group_free>;
+using point_ptr = std::unique_ptr<EC_POINT, point_free>;
+using param_bld_ptr = std::unique_ptr<OSSL_PARAM_BLD, param_bld_free>;
+using params_ptr = std::unique_ptr<OSSL_PARAM, params_free>;
+using pkey_ctx_ptr = std::unique_ptr<EVP_PKEY_CTX, pkey_ctx_free>;
+using md_ctx_ptr = std::unique_ptr<EVP_MD_CTX, md_ctx_free>;
+using ecdsa_sig_ptr = std::unique_ptr<ECDSA_SIG, ecdsa_sig_free>;
+
+[[nodiscard]] const unsigned char* uc(const std::byte* p) noexcept {
+    return reinterpret_cast<const unsigned char*>(p);
+}
+
+// d as a BIGNUM, checked to be a P-256 scalar (0 < d < n).
+[[nodiscard]] result<bn_ptr> scalar(std::span<const std::byte, kP256PrivateKeySize> d, const EC_GROUP* group) {
+    bn_ptr bn{BN_bin2bn(uc(d.data()), static_cast<int>(d.size()), nullptr)};
+    if (!bn) {
+        return failure(errc::kRuntime, "out of memory");
+    }
+    if (BN_is_zero(bn.get()) || BN_cmp(bn.get(), EC_GROUP_get0_order(group)) >= 0) {
+        return fail(errc::kInvalidArgument, "not a P-256 private key (0 or not below the group order)", kWhere);
+    }
+    return bn;
+}
+
+// An EVP_PKEY for the public key `pub`, with the private scalar `d` when given.
+[[nodiscard]] result<pkey_ptr> make_pkey(std::span<const std::byte, kP256PublicKeySize> pub, const BIGNUM* d) {
+    param_bld_ptr bld{OSSL_PARAM_BLD_new()};
+    if (!bld || OSSL_PARAM_BLD_push_utf8_string(bld.get(), OSSL_PKEY_PARAM_GROUP_NAME, "prime256v1", 0) != 1 ||
+        OSSL_PARAM_BLD_push_octet_string(bld.get(), OSSL_PKEY_PARAM_PUB_KEY, pub.data(), pub.size()) != 1 ||
+        (d != nullptr && OSSL_PARAM_BLD_push_BN(bld.get(), OSSL_PKEY_PARAM_PRIV_KEY, d) != 1)) {
+        return failure(errc::kRuntime, "can't describe a P-256 key");
+    }
+    params_ptr params{OSSL_PARAM_BLD_to_param(bld.get())};
+    pkey_ctx_ptr ctx{EVP_PKEY_CTX_new_from_name(nullptr, "EC", nullptr)};
+    EVP_PKEY* raw = nullptr;
+    if (!params || !ctx || EVP_PKEY_fromdata_init(ctx.get()) != 1 ||
+        EVP_PKEY_fromdata(ctx.get(), &raw, d != nullptr ? EVP_PKEY_KEYPAIR : EVP_PKEY_PUBLIC_KEY, params.get()) != 1) {
+        return failure(errc::kInvalidArgument, "not a P-256 key");
+    }
+    return pkey_ptr{raw};
+}
+
+} // namespace
+
+std::string_view p256_backend() noexcept {
+    return "openssl";
+}
+
+result<p256_public_key> p256_public_from_private(std::span<const std::byte, kP256PrivateKeySize> d) {
+    const group_ptr group{EC_GROUP_new_by_curve_name(NID_X9_62_prime256v1)};
+    if (!group) {
+        return failure(errc::kRuntime, "no P-256 group");
+    }
+    auto bn = scalar(d, group.get());
+    if (!bn) {
+        return std::unexpected{std::move(bn).error()};
+    }
+    const point_ptr point{EC_POINT_new(group.get())};
+    p256_public_key out{};
+    if (!point || EC_POINT_mul(group.get(), point.get(), bn->get(), nullptr, nullptr, nullptr) != 1 ||
+        EC_POINT_point2oct(group.get(), point.get(), POINT_CONVERSION_UNCOMPRESSED, reinterpret_cast<unsigned char*>(out.data()), out.size(), nullptr) !=
+            out.size()) {
+        return failure(errc::kRuntime, "can't derive the P-256 public key");
+    }
+    return out;
+}
+
+result<p256_signature> p256_sign(std::span<const std::byte, kP256PrivateKeySize> d, std::span<const std::byte> message) {
+    const auto pub = p256_public_from_private(d);
+    if (!pub) {
+        return std::unexpected{pub.error()};
+    }
+    const bn_ptr bn{BN_bin2bn(uc(d.data()), static_cast<int>(d.size()), nullptr)};
+    if (!bn) {
+        return failure(errc::kRuntime, "out of memory");
+    }
+    auto key = make_pkey(*pub, bn.get());
+    if (!key) {
+        return std::unexpected{std::move(key).error()};
+    }
+    // EVP signs DER (an X9.62 ECDSA-Sig-Value); the wire wants r || s.
+    const md_ctx_ptr md{EVP_MD_CTX_new()};
+    std::size_t length = 0;
+    if (!md || EVP_DigestSignInit(md.get(), nullptr, EVP_sha256(), nullptr, key->get()) != 1 ||
+        EVP_DigestSign(md.get(), nullptr, &length, uc(message.data()), message.size()) != 1) {
+        return failure(errc::kRuntime, "P-256 signing failed");
+    }
+    std::vector<unsigned char> der(length);
+    if (EVP_DigestSign(md.get(), der.data(), &length, uc(message.data()), message.size()) != 1) {
+        return failure(errc::kRuntime, "P-256 signing failed");
+    }
+    const unsigned char* cursor = der.data();
+    const ecdsa_sig_ptr sig{d2i_ECDSA_SIG(nullptr, &cursor, static_cast<long>(length))};
+    if (!sig) {
+        return failure(errc::kRuntime, "can't read OpenSSL's P-256 signature");
+    }
+    const BIGNUM* r = nullptr;
+    const BIGNUM* s = nullptr;
+    ECDSA_SIG_get0(sig.get(), &r, &s);
+    p256_signature out{};
+    auto* raw = reinterpret_cast<unsigned char*>(out.data());
+    if (BN_bn2binpad(r, raw, 32) != 32 || BN_bn2binpad(s, raw + 32, 32) != 32) {
+        return failure(errc::kRuntime, "can't encode the P-256 signature");
+    }
+    return out;
+}
+
+result<void> p256_verify(std::span<const std::byte, kP256PublicKeySize> public_key, std::span<const std::byte> message,
+                         std::span<const std::byte, kP256SignatureSize> signature) {
+    auto key = make_pkey(public_key, nullptr);
+    if (!key) {
+        return std::unexpected{std::move(key).error()};
+    }
+    // r || s back to DER for EVP.
+    ecdsa_sig_ptr sig{ECDSA_SIG_new()};
+    BIGNUM* r = BN_bin2bn(uc(signature.data()), 32, nullptr);
+    BIGNUM* s = BN_bin2bn(uc(signature.data() + 32), 32, nullptr);
+    if (!sig || r == nullptr || s == nullptr || ECDSA_SIG_set0(sig.get(), r, s) != 1) {
+        BN_free(r);
+        BN_free(s);
+        return failure(errc::kRuntime, "out of memory");
+    }
+    const int der_size = i2d_ECDSA_SIG(sig.get(), nullptr);
+    if (der_size <= 0) {
+        return failure(errc::kRuntime, "can't encode the P-256 signature");
+    }
+    std::vector<unsigned char> der(static_cast<std::size_t>(der_size));
+    unsigned char* cursor = der.data();
+    if (i2d_ECDSA_SIG(sig.get(), &cursor) != der_size) {
+        return failure(errc::kRuntime, "can't encode the P-256 signature");
+    }
+    const md_ctx_ptr md{EVP_MD_CTX_new()};
+    if (!md || EVP_DigestVerifyInit(md.get(), nullptr, EVP_sha256(), nullptr, key->get()) != 1) {
+        return failure(errc::kRuntime, "P-256 verification failed");
+    }
+    if (EVP_DigestVerify(md.get(), der.data(), der.size(), uc(message.data()), message.size()) != 1) {
+        ERR_clear_error();
+        return fail(errc::kBadSignature, "the P-256 signature doesn't match", kWhere);
+    }
+    return {};
+}
+
+} // namespace Rhp::security::tls::detail
