@@ -41,6 +41,9 @@ engine::engine(setup s)
         rng_.seed(*seed);
     }
     if (auto refused = refusal()) {
+        if (setup_.options.gateway) {
+            gateway_error_ = *refused; // gateway_port() says why too
+        }
         listen_error_ = std::move(*refused);
         log(log_level::kError, "host refused to start at hardening {}: {}", setup_.hardening, *listen_error_);
         return;
@@ -121,6 +124,10 @@ std::optional<error> engine::refusal() const {
                               std::format("a dev session listens on a loopback address or local IPC only, not {} over {}", setup_.ep, setup_.transport.name),
                               "host.dev_session");
         }
+        // The HTTP gateway accepts the same identities, the dev session's admin one included.
+        if (const auto& gateway = setup_.options.gateway; gateway && !net::is_loopback_host(gateway->host)) {
+            return make_error(errc::kForbidden, std::format("a dev session's HTTP gateway listens on a loopback address only, not {}", *gateway), "host.dev_session");
+        }
         if (!setup_.dev_identity) {
             return setup_.dev_identity.error();
         }
@@ -145,6 +152,11 @@ void engine::open_dev_session() {
             listen_error_ = std::move(written).error();
             listener_.reset();
             listen_port_ = 0;
+            if (gateway_) { // it accepts the dev session's identity too
+                gateway_.reset();
+                gateway_port_ = 0;
+                gateway_error_ = listen_error_;
+            }
             log(log_level::kError, "host stopped listening: no dev session file: {}", *listen_error_);
             return;
         }

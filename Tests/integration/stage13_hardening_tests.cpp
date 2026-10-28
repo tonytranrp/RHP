@@ -327,9 +327,51 @@ TEST_CASE("stage13: a dev session listens on loopback or local IPC only", "[stag
         Rhp::host<tcp_cfg> reverse{Rhp::endpoint::dial("127.0.0.1", 9), k.ring(), k.trusted(), {.dev_session = app}};
         CHECK(refused(reverse));
     }
+    {
+        // The gateway would take the dev session's admin identity from anywhere.
+        Rhp::host_options exposed{.dev_session = app};
+        exposed.gateway = Rhp::endpoint::listen("0.0.0.0", 0);
+        Rhp::host<tcp_cfg> host{Rhp::endpoint::listen("127.0.0.1", 0), k.ring(), k.trusted(), exposed};
+        CHECK(refused(host));
+        CHECK(contains(host.port().error().message, "gateway"));
+        CHECK(host.gateway_port().error().code == errc::kForbidden);
+    }
+    {
+        Rhp::host_options local{.dev_session = app};
+        local.gateway = Rhp::endpoint::listen("127.0.0.1", 0);
+        Rhp::host<tcp_cfg> host{Rhp::endpoint::listen("127.0.0.1", 0), k.ring(), k.trusted(), local};
+        if (Rhp::security::dev_session_directory()) {
+            CHECK(host.port());
+            CHECK(host.gateway_port());
+        }
+    }
     if (const auto path = Rhp::security::dev_session_path(app)) {
         CHECK_FALSE(std::filesystem::exists(*path));
     }
+}
+
+TEST_CASE("stage13: a dev session that can't write its connect file stops the gateway too", "[stage13][hardening][dev_session]") {
+    rhp_test::needs(hardening::kDev, "dev sessions");
+    if (!Rhp::security::dev_session_directory()) {
+        SKIP("this platform has no user configuration folder for the connect file");
+    }
+    const std::string app = "rhp_stage13_dev_unwritable";
+    const auto path = Rhp::security::dev_session_path(app);
+    REQUIRE(path);
+    std::filesystem::create_directories(*path / "in_the_way"); // a folder where the file goes: it can't be written
+    keys k;
+    {
+        Rhp::host_options o{.dev_session = app};
+        o.gateway = Rhp::endpoint::listen("127.0.0.1", 0);
+        Rhp::host<tcp_cfg> host{Rhp::endpoint::listen("127.0.0.1", 0), k.ring(), k.trusted(), o};
+        const auto port = host.port();
+        REQUIRE_FALSE(port);
+        const auto gateway = host.gateway_port();
+        REQUIRE_FALSE(gateway);
+        CHECK(gateway.error().message == port.error().message);
+    }
+    std::error_code ignored;
+    std::filesystem::remove_all(*path, ignored);
 }
 
 TEST_CASE("stage13: a dev session is refused above hardening dev", "[stage13][hardening][dev_session]") {
