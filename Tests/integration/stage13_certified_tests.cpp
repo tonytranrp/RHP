@@ -55,7 +55,8 @@ struct pki {
         Rhp::security::operator_cert_fields f;
         f.serial = 9;
         f.principal = "alice";
-        const auto pub = op.public_key().bytes();
+        const auto pub_key = op.public_key(); // bytes() views it: keep it alive
+        const auto pub = pub_key.bytes();
         f.pub.assign(pub.begin(), pub.end());
         f.not_before = now - 60;
         f.not_after = now + 3600;

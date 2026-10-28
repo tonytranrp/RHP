@@ -18,7 +18,8 @@ using namespace release_test;
 namespace {
 
 Rhp::release::root_key root_key_of(const signer& s, std::vector<std::string> channels = {}) {
-    const auto pub = s.secret.public_key().bytes();
+    const auto pub_key = s.secret.public_key(); // bytes() views it: keep it alive
+    const auto pub = pub_key.bytes();
     return Rhp::release::root_key{"ed25519", std::vector<std::byte>(pub.begin(), pub.end()), std::move(channels)};
 }
 

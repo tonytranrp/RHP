@@ -92,10 +92,13 @@ TEST_CASE("passphrase sealing round-trips and refuses a wrong passphrase", "[sec
     std::string changed = *sealed;
     changed.replace(0, std::string_view{"argon2i:m=64,t=1:"}.size(), "argon2i:m=64,t=2:");
     CHECK(open_with_passphrase(changed, "correct horse").error().code == errc::kAuth);
-    // A changed ciphertext byte.
+    // A changed ciphertext byte: a character well before the padding, so all six of its bits are data
+    // (next to "==" some bits are padding a decoder may ignore).
     changed = *sealed;
-    changed[changed.size() - 3] = changed[changed.size() - 3] == 'A' ? 'B' : 'A';
-    CHECK(open_with_passphrase(changed, "correct horse").error().code == errc::kAuth);
+    changed[changed.size() - 10] = changed[changed.size() - 10] == 'A' ? 'B' : 'A';
+    const auto tampered = open_with_passphrase(changed, "correct horse");
+    REQUIRE_FALSE(tampered);
+    CHECK(tampered.error().code == errc::kAuth);
 
     CHECK(open_with_passphrase("argon2i:m=64:AAAA", "x").error().code == errc::kInvalidArgument);
     CHECK(open_with_passphrase("argon2i:m=64,t=1:AAAA", "x").error().code == errc::kInvalidArgument);

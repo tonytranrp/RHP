@@ -56,7 +56,8 @@ Rhp::release::manager_options options_at(std::uint64_t now) {
 }
 
 Rhp::release::root_key ed_key(const signer& s) {
-    const auto pub = s.secret.public_key().bytes();
+    const auto pub_key = s.secret.public_key(); // bytes() views it: keep it alive
+    const auto pub = pub_key.bytes();
     return Rhp::release::root_key{"ed25519", std::vector<std::byte>(pub.begin(), pub.end()), {}};
 }
 

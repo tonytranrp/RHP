@@ -30,7 +30,8 @@ constexpr std::uint64_t kNow = 1'800'000'000; // Unix seconds
     operator_cert_fields f;
     f.serial = 7;
     f.principal = "alice@ops";
-    const auto pub = operator_key.public_key().bytes();
+    const auto pub_key = operator_key.public_key(); // bytes() views it: keep it alive
+    const auto pub = pub_key.bytes();
     f.pub.assign(pub.begin(), pub.end());
     f.not_before = kNow - 60;
     f.not_after = kNow + 3600;

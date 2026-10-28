@@ -137,7 +137,8 @@ result<value> certified::key::sign(std::string_view source, const signing_contex
         if (secret_.empty() || cert_bytes_.empty()) {
             return refuse(errc::kInvalidArgument, "a certified key needs an operator key and its certificate");
         }
-        const auto pub = secret_.public_key().bytes();
+        const auto pub_key = secret_.public_key(); // bytes() views it: keep it alive
+        const auto pub = pub_key.bytes();
         if (!std::ranges::equal(pub, cert_.fields.pub)) {
             return refuse(errc::kInvalidArgument, std::format("this key isn't the one certificate {} names", cert_.id()));
         }
