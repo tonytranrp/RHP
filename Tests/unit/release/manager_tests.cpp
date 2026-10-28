@@ -15,6 +15,7 @@
 
 #include "release_support.hpp"
 #include <catch2/catch_test_macros.hpp>
+#include <rhp_test/hardening.hpp>
 
 #include <rhp/core/error.hpp>
 #include <rhp/core/hardening.hpp>
@@ -1214,4 +1215,76 @@ TEST_CASE("an empty any_store reports errors instead of crashing", "[release][st
     Rhp::release::manager m{trust_of({{&f.dev, {"*"}}}), f.options(), empty};
     CHECK(m.restore().error().code == errc::kInvalidArgument);
     CHECK(m.apply(f.speed_release(1, 2)).error().code == errc::kInvalidArgument);
+}
+
+TEST_CASE("a manager runs at least at the build's hardening level and harden only raises it", "[release][manager][hardening]") {
+    fixture f;
+    auto m = f.make();
+    CHECK(m.options().hardening == Rhp::kBuildHardening);
+    REQUIRE(m.harden(Rhp::hardening::kLan));
+    CHECK(m.options().hardening == Rhp::strictest(Rhp::hardening::kLan, Rhp::kBuildHardening));
+    REQUIRE(m.harden(Rhp::hardening::kDev));
+    CHECK(m.options().hardening == Rhp::strictest(Rhp::hardening::kLan, Rhp::kBuildHardening));
+}
+
+TEST_CASE("hardening above dev gives a running admin channel patch's libraries", "[release][manager][hardening]") {
+    fixture f;
+    auto o = f.options();
+    o.max_role = Rhp::role::kAdmin;
+    auto m = f.make(std::move(o));
+    auto man = manifest_for("game.balance", 1, {{"tuning", "game.speed = 7"}});
+    man.run_as = Rhp::role::kAdmin;
+    REQUIRE(m.apply(envelope(man, {{"tuning", "game.speed = 7"}}, {&f.dev})));
+    const auto has_io = [&] { return m.sandbox("game.balance")->exec<bool>("return io ~= nil"); };
+    CHECK(has_io() == (Rhp::kBuildHardening == Rhp::hardening::kDev));
+
+    std::vector<event_kind> events;
+    const auto sub = m.on_event([&](const Rhp::release::release_event& e) { events.push_back(e.what); });
+    REQUIRE(m.harden(Rhp::hardening::kLan));
+    CHECK(has_io() == false); // a new sandbox, made at lan
+    CHECK(m.sandbox("game.balance")->caller_role() == Rhp::role::kAdmin);
+    CHECK(fx::g_speed == 7); // the release runs on in it
+    const auto st = m.status();
+    REQUIRE(status_of(st, "game.balance") != nullptr);
+    CHECK(status_of(st, "game.balance")->running == slot::kActive);
+    CHECK(events.empty());
+}
+
+TEST_CASE("a running release that can't load at the new hardening level stops", "[release][manager][hardening]") {
+    rhp_test::needs(Rhp::hardening::kDev, "admin's full standard library");
+    fixture f;
+    auto o = f.options();
+    o.max_role = Rhp::role::kAdmin;
+    auto m = f.make(std::move(o));
+    const std::vector<module_source> modules{{"tuning", "assert(io ~= nil); game.speed = 4"}};
+    auto man = manifest_for("game.balance", 1, modules);
+    man.run_as = Rhp::role::kAdmin;
+    REQUIRE(m.apply(envelope(man, modules, {&f.dev})));
+    CHECK(fx::g_speed == 4);
+
+    std::vector<Rhp::release::release_event> events;
+    const auto sub = m.on_event([&](const Rhp::release::release_event& e) { events.push_back(e); });
+    REQUIRE(m.harden(Rhp::hardening::kLan));
+    CHECK(m.sandbox("game.balance") == nullptr);
+    CHECK(fx::g_speed == 1); // what it did is undone
+    REQUIRE(events.size() == 1);
+    CHECK(events[0].what == event_kind::kRolledBack);
+    CHECK(events[0].reason.starts_with("hardening lan"));
+    CHECK(events[0].err.has_value());
+}
+
+TEST_CASE("a production manager caps its channels' limits", "[release][manager][hardening]") {
+    fixture f;
+    auto o = f.options();
+    o.clock = {}; // real time: the wall cap is measured on it
+    o.limits.wall_ms = 60'000;
+    auto m = f.make(std::move(o));
+    REQUIRE(m.apply(f.speed_release(1, 3)));
+    REQUIRE(m.harden(Rhp::hardening::kProduction));
+    const auto started = std::chrono::steady_clock::now();
+    const auto stopped = m.sandbox("game.balance")->exec("while true do end");
+    REQUIRE_FALSE(stopped);
+    CHECK(stopped.error().code == errc::kTimeout);
+    CHECK(std::chrono::steady_clock::now() - started < std::chrono::seconds{30});
+    CHECK(fx::g_speed == 3);
 }

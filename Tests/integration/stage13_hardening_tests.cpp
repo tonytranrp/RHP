@@ -24,6 +24,8 @@
 #include <rhp/net/endpoint.hpp>
 #include <rhp/net/loopback/loopback.hpp>
 #include <rhp/net/tcp/tcp.hpp>
+#include <rhp/release/manager.hpp>
+#include <rhp/release/trust.hpp>
 #include <rhp/security/dev_session.hpp>
 #include <rhp/security/ed25519.hpp>
 #include <rhp/security/key.hpp>
@@ -171,6 +173,15 @@ TEST_CASE("stage13: observe identities have limits of their own", "[stage13][har
     CHECK(watcher.exec("for i = 1, 1e6 do end").error().code == errc::kBudgetExceeded);
     Rhp::client<loop_cfg> patch{at.reversed(), k.as("patch"), k.signer()};
     CHECK(patch.exec("for i = 1, 1e6 do end")); // the config's limits: none
+}
+
+TEST_CASE("stage13: a served release manager runs at the host's hardening level", "[stage13][hardening][release]") {
+    keys k;
+    Rhp::release::manager releases{Rhp::release::trust{}, {.app = "s13h"}};
+    CHECK(releases.options().hardening == Rhp::kBuildHardening);
+    Rhp::host<loop_cfg> host{Rhp::endpoint::listen("s13h.releases", 1), k.ring(), k.trusted(), {.hardening = hardening::kLan}};
+    REQUIRE(host.serve(releases));
+    CHECK(releases.options().hardening == Rhp::strictest(hardening::kLan, Rhp::kBuildHardening));
 }
 
 // ---- production ---------------------------------------------------------------------------------------

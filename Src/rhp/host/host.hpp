@@ -167,8 +167,9 @@ public:
 
     // Serves a release manager: clients apply, confirm and deactivate releases (admin) and read
     // their status or send revocation lists (observe) through it, and pump() pumps it (with every
-    // release_changed reported as a host event). The manager must outlive the host. Call from the
-    // pump thread. kAlreadyLoaded if one is served already.
+    // release_changed reported as a host event). Its channels run at the host's hardening level at
+    // least (release::manager::harden). The manager must outlive the host. Call from the pump
+    // thread. kAlreadyLoaded if one is served already.
     return_t<void> serve(release::manager& releases) {
 #if RHP_ENABLE
         return Cfg::errors_t::finish(host_detail::serve_releases(*engine_, host_detail::bridge(releases)));

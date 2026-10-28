@@ -132,6 +132,7 @@ release_bridge bridge(release::manager& m) {
     release_bridge b;
     b.handle = [&m](wire::op code, const value& body) { return handle(m, code, body); };
     b.pump = [&m] { m.pump(); };
+    b.harden = [&m](hardening level) { return m.harden(level); };
     b.on_event = [&m](std::function<void(event::release_changed)> publish) {
         return m.on_event([publish = std::move(publish)](const release::release_event& e) {
             event::release_changed out;
