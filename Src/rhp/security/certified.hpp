@@ -45,10 +45,10 @@ struct script_claims {
 // set). Outside `certified` so its default member initializers can serve as default arguments there.
 struct certified_claim_options {
     std::chrono::seconds lifetime{600}; // claims.not_after = now + lifetime (at most the cert's not_after)
-    std::string app;
-    std::string env;
-    std::string audience;
-    std::string identity;
+    std::string app{};
+    std::string env{};
+    std::string audience{};
+    std::string identity{};
 };
 
 // How a certified::trust checks claims.
@@ -78,20 +78,6 @@ struct certified_trust_options {
 // most trust_options::replay_entries live nonces; when it is full of unexpired ones, further
 // signatures are refused (kLimitExceeded) rather than forgetting one that could then be replayed.
 // Copies of a trust share the cache, the revoked serials and the revocation check.
-// What a certified key puts in the claims when the client doesn't say (signing_context wins where set).
-struct certified_claim_options {
-    std::chrono::seconds lifetime{600}; // claims.not_after = now + lifetime (at most the cert's not_after)
-    std::string app{};
-    std::string env{};
-    std::string audience{};
-    std::string identity{};
-};
-
-struct certified_trust_options {
-    std::chrono::seconds max_lifetime{3600}; // how far ahead claims.not_after may be
-    std::size_t replay_entries = 4096;       // live nonces kept
-};
-
 struct certified {
     static constexpr std::string_view name = "certified";
 

@@ -245,8 +245,8 @@ TEST_CASE("certified: revoked serials are refused", "[security][certified]") {
 }
 
 TEST_CASE("certified: a root of trust replaces the CAs and adds a revocation check", "[security][certified]") {
-    pki k;
-    pki other;
+    claims_pki k;
+    claims_pki other;
     auto trust = k.trust();
     const auto copy = trust;
     const auto mine = k.key(k.cert());
@@ -266,7 +266,7 @@ TEST_CASE("certified: a root of trust replaces the CAs and adds a revocation che
 }
 
 TEST_CASE("certified: the certificate's scopes reach the context", "[security][certified]") {
-    pki k;
+    claims_pki k;
     const auto trust = k.trust();
     const auto now = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count());
     operator_cert_fields f;
@@ -296,7 +296,7 @@ TEST_CASE("certified: the certificate's scopes reach the context", "[security][c
 }
 
 TEST_CASE("certified: a P-256 operator key held by a key handle signs", "[security][certified][p256]") {
-    pki k;
+    claims_pki k;
     const auto now = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count());
     auto secret = generate_private_key(key_algorithm::kP256);
     REQUIRE(secret);
