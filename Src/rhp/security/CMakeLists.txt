@@ -47,3 +47,6 @@ rhp_add_module(security
     PRIVATE_DEPS
         ${rhp_security_private_deps}
 )
+
+# File-local helpers that share names with psk_keyring.cpp and identity_file.cpp: compiled on their own in unity builds.
+set_source_files_properties(device_handshake.cpp known_hosts.cpp PROPERTIES SKIP_UNITY_BUILD_INCLUSION ON)

@@ -51,14 +51,14 @@ std::vector<std::byte> binding(std::byte fill) {
     return std::vector<std::byte>(32, fill);
 }
 
-struct fixture {
+struct device_fixture {
     key_handle host_key = new_key();
     key_handle phone = new_key();
     key_handle stranger = new_key();
     device_allow_list allowed;
     known_hosts pins;
 
-    fixture() {
+    device_fixture() {
         auto scopes = Rhp::scope_set::parse("lib:game");
         REQUIRE(scopes);
         REQUIRE(allowed.add({"phone", Rhp::role::kPatch, key_algorithm::kEd25519, pub_of(phone), *scopes, std::nullopt}));
@@ -98,10 +98,10 @@ outcome handshake(const device_keys& host, const device_credential& client) {
     return handshake(host, client, b, b);
 }
 
-struct temp_folder {
+struct device_temp_folder {
     fs::path path;
 
-    temp_folder() {
+    device_temp_folder() {
         std::string suffix;
         for (const std::byte b : *Rhp::platform::random_array<6>()) {
             suffix += std::format("{:02x}", std::to_integer<unsigned>(b));
@@ -109,12 +109,12 @@ struct temp_folder {
         path = fs::temp_directory_path() / ("rhp_device_keys_" + suffix);
         REQUIRE(Rhp::platform::make_private_directory(path));
     }
-    ~temp_folder() {
+    ~device_temp_folder() {
         std::error_code ec;
         fs::remove_all(path, ec);
     }
-    temp_folder(const temp_folder&) = delete;
-    temp_folder& operator=(const temp_folder&) = delete;
+    device_temp_folder(const device_temp_folder&) = delete;
+    device_temp_folder& operator=(const device_temp_folder&) = delete;
 };
 
 } // namespace device_keys_fixtures
@@ -122,7 +122,7 @@ struct temp_folder {
 using namespace device_keys_fixtures;
 
 TEST_CASE("device keys: a listed key gets its name and role and scopes and matching frame keys", "[security][device]") {
-    fixture f;
+    device_fixture f;
     auto r = handshake(f.host(), f.as(f.phone));
     REQUIRE(r.host);
     REQUIRE(r.client);
@@ -140,7 +140,7 @@ TEST_CASE("device keys: a listed key gets its name and role and scopes and match
 }
 
 TEST_CASE("device keys: an unlisted key is challenged like a listed one and fails at verify", "[security][device]") {
-    fixture f;
+    device_fixture f;
     auto r = handshake(f.host(), f.as(f.stranger));
     REQUIRE(r.client); // the host proved itself: the client can't tell it isn't listed
     REQUIRE_FALSE(r.host);
@@ -148,7 +148,7 @@ TEST_CASE("device keys: an unlisted key is challenged like a listed one and fail
 }
 
 TEST_CASE("device keys: a listed public key signed by another key fails", "[security][device]") {
-    fixture f;
+    device_fixture f;
     // Claims the phone's public key but signs with the stranger's private key.
     const key_handle impostor_signer = f.stranger;
     auto impostor = key_handle::from_callback(key_algorithm::kEd25519, f.phone.public_key(),
@@ -160,7 +160,7 @@ TEST_CASE("device keys: a listed public key signed by another key fails", "[secu
 }
 
 TEST_CASE("device keys: plaintext and a different channel binding are refused", "[security][device][tls]") {
-    fixture f;
+    device_fixture f;
     auto plain = handshake(f.host(), f.as(f.phone), {}, {});
     REQUIRE_FALSE(plain.host);
     CHECK(plain.host.error().code == errc::kAuth);
@@ -184,7 +184,7 @@ TEST_CASE("device keys: plaintext and a different channel binding are refused", 
 }
 
 TEST_CASE("device keys: a revoked device key is refused like an unlisted one", "[security][device][revocation]") {
-    fixture f;
+    device_fixture f;
     auto revoked = std::make_shared<revoked_identities>();
     REQUIRE(handshake(f.host(revoked), f.as(f.phone)).host);
     identity_revocation_list list;
@@ -197,7 +197,7 @@ TEST_CASE("device keys: a revoked device key is refused like an unlisted one", "
 }
 
 TEST_CASE("device keys: the client refuses a host key that isn't pinned or changed", "[security][device][known_hosts]") {
-    fixture f;
+    device_fixture f;
     const device_keys other_host{f.allowed, f.stranger};
     auto changed = handshake(other_host, f.as(f.phone));
     REQUIRE_FALSE(changed.client);
@@ -212,7 +212,7 @@ TEST_CASE("device keys: the client refuses a host key that isn't pinned or chang
 }
 
 TEST_CASE("device keys: trust on first use pins the key when the callback accepts it", "[security][device][known_hosts]") {
-    fixture f;
+    device_fixture f;
     device_credential c = f.as(f.phone);
     c.endpoint = "new:1";
     std::string asked;
@@ -239,7 +239,7 @@ TEST_CASE("device keys: trust on first use pins the key when the callback accept
 }
 
 TEST_CASE("device keys: a PSK hello to a device-key host is a protocol error", "[security][device]") {
-    fixture f;
+    device_fixture f;
     auto h = f.host().begin();
     h->bind_channel(binding(std::byte{1}));
     Rhp::value::map hello;
@@ -250,7 +250,7 @@ TEST_CASE("device keys: a PSK hello to a device-key host is a protocol error", "
 }
 
 TEST_CASE("device allow-list: lines with scopes and env tags parse and print back", "[security][device]") {
-    fixture f;
+    device_fixture f;
     const std::string pub = base64_encode(f.phone.public_key());
     const std::string text = std::format("# devices\nphone patch ed25519 {} lib:game env=prod\ntablet observe ed25519 {} env=dev\n", pub,
                                          base64_encode(f.stranger.public_key()));
@@ -275,8 +275,8 @@ TEST_CASE("device allow-list: lines with scopes and env tags parse and print bac
 }
 
 TEST_CASE("known hosts: lines parse and a file-backed set writes every pin", "[security][device][known_hosts]") {
-    fixture f;
-    temp_folder dir;
+    device_fixture f;
+    device_temp_folder dir;
     const fs::path file = dir.path / "known_hosts";
     auto pins = known_hosts::load(file); // no file yet: empty
     REQUIRE(pins);

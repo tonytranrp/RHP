@@ -25,6 +25,11 @@ add_executable(rhp-cli
 )
 target_link_libraries(rhp-cli PRIVATE rhp_cli_core Rhp::cli11 Rhp::replxx)
 rhp_set_warnings(rhp-cli)
+# main.cpp instantiates the client and shell for every credential and transport the CLI speaks: as a
+# unity file that is more sections than an MSVC object holds by default (C1128).
+if(MSVC)
+    target_compile_options(rhp-cli PRIVATE /bigobj)
+endif()
 rhp_use_shared_pch(rhp-cli apps)
 set_target_properties(rhp-cli PROPERTIES FOLDER "tools")
 

@@ -22,25 +22,25 @@ namespace Rhp::security {
 
 namespace {
 
-constexpr const char* kWhere = "security.device_allow_list";
+constexpr const char* kAllowListWhere = "security.device_allow_list";
 constexpr const char* kFormat = "`name role alg base64-public-key [scopes] [env=dev|prod]`";
 
 } // namespace
 
 result<void> device_allow_list::add(device_entry entry) {
     if (entry.name.empty()) {
-        return fail(errc::kInvalidArgument, "a device needs a name", kWhere);
+        return fail(errc::kInvalidArgument, "a device needs a name", kAllowListWhere);
     }
     const std::size_t size = key_handle::public_key_size(entry.alg);
     if (entry.public_key.size() != size || (entry.alg == key_algorithm::kP256 && entry.public_key.front() != std::byte{0x04})) {
         return fail(errc::kInvalidArgument, std::format("device '{}': a {} public key is {} bytes{}", entry.name, to_string(entry.alg), size, entry.alg == key_algorithm::kP256 ? ", uncompressed (0x04 first)" : ""),
-                    kWhere);
+                    kAllowListWhere);
     }
     if (find(entry.name) != nullptr) {
-        return fail(errc::kAlreadyLoaded, std::format("device '{}' is already on the allow-list", entry.name), kWhere);
+        return fail(errc::kAlreadyLoaded, std::format("device '{}' is already on the allow-list", entry.name), kAllowListWhere);
     }
     if (const device_entry* same = find(entry.alg, entry.public_key); same != nullptr) {
-        return fail(errc::kAlreadyLoaded, std::format("device '{}' has the key of '{}'", entry.name, same->name), kWhere);
+        return fail(errc::kAlreadyLoaded, std::format("device '{}' has the key of '{}'", entry.name, same->name), kAllowListWhere);
     }
     entries_.push_back(std::move(entry));
     return {};
@@ -51,19 +51,19 @@ result<device_allow_list> device_allow_list::parse(std::string_view text) {
     for (const detail::text_line& line : detail::content_lines(text)) {
         const auto f = detail::fields(line.text);
         if (f.size() < 4) {
-            return fail(errc::kInvalidArgument, std::format("line {}: expected {}", line.number, kFormat), kWhere);
+            return fail(errc::kInvalidArgument, std::format("line {}: expected {}", line.number, kFormat), kAllowListWhere);
         }
         const auto granted = parse_role(f[1]);
         if (!granted) {
-            return fail(errc::kInvalidArgument, std::format("line {}: unknown role '{}' (observe, patch or admin)", line.number, f[1]), kWhere);
+            return fail(errc::kInvalidArgument, std::format("line {}: unknown role '{}' (observe, patch or admin)", line.number, f[1]), kAllowListWhere);
         }
         const auto alg = parse_key_algorithm(f[2]);
         if (!alg) {
-            return fail(errc::kInvalidArgument, std::format("line {}: unknown algorithm '{}' (ed25519 or p256)", line.number, f[2]), kWhere);
+            return fail(errc::kInvalidArgument, std::format("line {}: unknown algorithm '{}' (ed25519 or p256)", line.number, f[2]), kAllowListWhere);
         }
         auto pub = base64_decode(f[3]);
         if (!pub) {
-            return fail(errc::kInvalidArgument, std::format("line {}: {}", line.number, pub.error().message), kWhere);
+            return fail(errc::kInvalidArgument, std::format("line {}: {}", line.number, pub.error().message), kAllowListWhere);
         }
         // After the key: at most one scopes field and at most one env= tag, in either order (as the keyring).
         device_entry entry{std::string{f[0]}, *granted, *alg, std::move(*pub), scope_set{}, std::nullopt};
@@ -71,24 +71,24 @@ result<device_allow_list> device_allow_list::parse(std::string_view text) {
         for (const std::string_view extra : std::span{f}.subspan(4)) {
             auto tag = parse_env_field(extra);
             if (!tag) {
-                return fail(errc::kInvalidArgument, std::format("line {}: {}", line.number, tag.error().message), kWhere);
+                return fail(errc::kInvalidArgument, std::format("line {}: {}", line.number, tag.error().message), kAllowListWhere);
             }
             if (*tag && !entry.env) {
                 entry.env = **tag;
                 continue;
             }
             if (*tag || have_scopes) {
-                return fail(errc::kInvalidArgument, std::format("line {}: unexpected '{}' (expected {})", line.number, extra, kFormat), kWhere);
+                return fail(errc::kInvalidArgument, std::format("line {}: unexpected '{}' (expected {})", line.number, extra, kFormat), kAllowListWhere);
             }
             auto scopes = scope_set::parse(extra);
             if (!scopes) {
-                return fail(errc::kInvalidArgument, std::format("line {}: {}", line.number, scopes.error().message), kWhere);
+                return fail(errc::kInvalidArgument, std::format("line {}: {}", line.number, scopes.error().message), kAllowListWhere);
             }
             entry.scopes = std::move(*scopes);
             have_scopes = true;
         }
         if (auto added = out.add(std::move(entry)); !added) {
-            return fail(added.error().code, std::format("line {}: {}", line.number, added.error().message), kWhere);
+            return fail(added.error().code, std::format("line {}: {}", line.number, added.error().message), kAllowListWhere);
         }
     }
     return out;
@@ -97,7 +97,7 @@ result<device_allow_list> device_allow_list::parse(std::string_view text) {
 result<device_allow_list> device_allow_list::from_file(const std::string& path) {
     const auto text = detail::read_file(path);
     if (!text) {
-        return fail(errc::kNotFound, std::format("can't read device allow-list {}", path), kWhere);
+        return fail(errc::kNotFound, std::format("can't read device allow-list {}", path), kAllowListWhere);
     }
     auto list = parse(*text);
     if (auto warning = list ? detail::exposure_warning(path) : std::nullopt) {
