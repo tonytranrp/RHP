@@ -8,8 +8,11 @@ if(RHP_ENABLE)
     list(APPEND rhp_security_sources psk_keyring.cpp hash.cpp ed25519.cpp http_auth.cpp key_handle.cpp passphrase.cpp)
     # P-256 runs on the TLS backend's crypto (security/tls/p256.hpp).
     set(rhp_security_private_deps Rhp::monocypher Rhp::tls)
+    # Pairing (decision AL10): CPace over X25519.
+    list(APPEND rhp_security_sources pairing_cpace.cpp)
 else()
     list(APPEND rhp_security_sources ed25519_disabled.cpp http_auth_disabled.cpp key_handle_disabled.cpp)
+    list(APPEND rhp_security_sources pairing_cpace_disabled.cpp)
 endif()
 
 rhp_add_module(security
@@ -29,6 +32,7 @@ rhp_add_module(security
         key_store.hpp
         keyring.hpp
         operator_cert.hpp
+        pairing_cpace.hpp
         psk_keyring.hpp
         signer.hpp
     SOURCES

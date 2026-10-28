@@ -87,6 +87,7 @@ if(RHP_ENABLE)
             security/split_key_file_tests.cpp
             security/tls_tests.cpp
             security/http_auth_tests.cpp
+            security/pairing_cpace_tests.cpp
         LINKS
             Rhp::security
             Rhp::tls
