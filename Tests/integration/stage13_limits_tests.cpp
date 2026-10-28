@@ -324,6 +324,9 @@ TEST_CASE("stage13: limits.pump_requests serves identities in turn", "[host][lim
     for (std::size_t i = 0; i < kFew; ++i) {
         patch.exec_async("s13l.turn('p')", done);
     }
+    // Let every request reach the host's inbox before the first pump: on a loaded machine (TSan) they
+    // trickle in otherwise, and early pumps see only one identity's queue.
+    std::this_thread::sleep_for(300ms);
     g_turns.clear();
     std::vector<std::string> pumps; // what each pump started
     const auto deadline = std::chrono::steady_clock::now() + 10s;
