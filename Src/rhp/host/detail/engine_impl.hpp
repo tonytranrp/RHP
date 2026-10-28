@@ -689,6 +689,10 @@ private:
     // release_apply / confirm / deactivate / status, revoke: the served release manager answers.
     void op_release(request_ctx& c);
 
+    // The served manager's root of trust changed version (or was never handed on): its operator CAs
+    // and identity revocations go to the signer policy (setup_.operator_trust).
+    void refresh_operator_trust();
+
     void op_exec(request_ctx& c);
 
     void op_load(request_ctx& c);
@@ -803,6 +807,9 @@ private:
     std::vector<script::async_leftovers> async_leftovers_; // of identities that went (teardown)
     Rhp::subscription release_events_;                     // to the served manager's events
     release_bridge releases_;                              // host.serve: the release manager, if any
+    // setup_.operator_trust's revocation check, and the root version whose operator CAs it last got.
+    std::function<bool(const security::operator_cert&)> operator_revoked_;
+    std::optional<std::uint64_t> root_version_;
     std::map<std::string, blob_sink, std::less<>> blob_sinks_;
     std::deque<outbound> outbox_backlog_;
     std::atomic<std::size_t> identity_count_{0};

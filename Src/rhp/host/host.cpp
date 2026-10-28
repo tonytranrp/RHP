@@ -253,6 +253,13 @@ result<void> engine::serve_releases(release_bridge bridge) {
         }
     }
     releases_ = std::move(bridge);
+    // Operator certificates (decision AL12): revoked serials from the manager's identity revocations,
+    // operator CAs from its root of trust (refreshed when the root changes: refresh_operator_trust).
+    if (setup_.operator_trust && releases_.revoked_serial) {
+        operator_revoked_ = [revoked = releases_.revoked_serial](const security::operator_cert& cert) { return revoked(std::to_string(cert.fields.serial)); };
+        root_version_ = std::nullopt;
+        refresh_operator_trust();
+    }
     if (releases_.on_event) {
         release_events_ = releases_.on_event([this](event::release_changed e) {
             if (wants<event::release_changed>()) {
@@ -261,6 +268,18 @@ result<void> engine::serve_releases(release_bridge bridge) {
         });
     }
     return {};
+}
+
+void engine::refresh_operator_trust() {
+    if (!operator_revoked_ || !releases_.root_version) {
+        return;
+    }
+    const std::uint64_t version = releases_.root_version();
+    if (root_version_ == version) {
+        return; // a root changes only by version (a restore, update_root, a kTrust request)
+    }
+    root_version_ = version;
+    setup_.operator_trust(releases_.operator_cas ? releases_.operator_cas() : std::nullopt, operator_revoked_);
 }
 
 result<void> engine::add_blob_sink(std::string_view name, blob_fn fn, role need) {
@@ -395,6 +414,7 @@ void engine::pump() {
     if (enabled && releases_.pump) {
         releases_.pump();
     }
+    refresh_operator_trust();
     flush_outbox();
     if (!setup_.io_thread) {
         io_.poll();

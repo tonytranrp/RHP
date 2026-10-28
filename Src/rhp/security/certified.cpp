@@ -9,6 +9,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -173,6 +174,14 @@ struct certified::trust::state {
     std::unordered_map<std::string, std::uint64_t> nonces; // nonce bytes -> claims.not_after (guarded by mutex)
     std::vector<std::uint64_t> revoked;                    // serials (guarded by mutex)
     std::function<bool(const operator_cert&)> revocation_check;
+    std::shared_ptr<const trusted_cas> root_cas;            // set_root_of_trust (guarded by mutex)
+    std::function<bool(const operator_cert&)> root_revoked; // (guarded by mutex)
+
+    // The CAs certificates chain to right now: the root's when it names any, else the trust's own.
+    [[nodiscard]] std::shared_ptr<const trusted_cas> current_root_cas() {
+        const std::scoped_lock lock{mutex};
+        return root_cas;
+    }
 
     // Records a nonce until `not_after`; false if it was seen. kLimitExceeded when the cache is full
     // of live nonces.
@@ -197,14 +206,16 @@ struct certified::trust::state {
 
     [[nodiscard]] bool is_revoked(const operator_cert& cert) {
         std::function<bool(const operator_cert&)> check;
+        std::function<bool(const operator_cert&)> root_check;
         {
             const std::scoped_lock lock{mutex};
             if (std::ranges::find(revoked, cert.fields.serial) != revoked.end()) {
                 return true;
             }
             check = revocation_check;
+            root_check = root_revoked;
         }
-        return check && check(cert);
+        return (check && check(cert)) || (root_check && root_check(cert));
     }
 };
 
@@ -225,8 +236,19 @@ void certified::trust::set_revocation_check(std::function<bool(const operator_ce
     state_->revocation_check = std::move(revoked);
 }
 
+void certified::trust::set_root_of_trust(std::optional<trusted_cas> cas, std::function<bool(const operator_cert&)> revoked) {
+    std::shared_ptr<const trusted_cas> root = cas ? std::make_shared<const trusted_cas>(std::move(*cas)) : nullptr;
+    const std::scoped_lock lock{state_->mutex};
+    state_->root_cas = std::move(root);
+    state_->root_revoked = std::move(revoked);
+}
+
 const trusted_cas& certified::trust::cas() const noexcept {
     return state_->cas;
+}
+
+std::shared_ptr<const trusted_cas> certified::trust::root_cas() const {
+    return state_->current_root_cas();
 }
 
 result<std::string> certified::trust::verify(std::string_view source, const value& signature) const {
@@ -255,7 +277,8 @@ result<std::string> certified::trust::verify(std::string_view source, const valu
         if (!cert) {
             return refuse(errc::kBadSignature, std::format("malformed operator certificate: {}", cert.error().message));
         }
-        RHP_TRY(ca, verify_operator_cert(*cert, state_->cas, context.now));
+        const auto root_cas = state_->current_root_cas(); // a root of trust's operator CAs replace the trust's own
+        RHP_TRY(ca, verify_operator_cert(*cert, root_cas ? *root_cas : state_->cas, context.now));
         const std::string who = cert->id();
         if (context.level == hardening::kProduction && (ca->env == kEnvDev || listed(cert->fields.envs, kEnvDev))) {
             return refuse(errc::kForbidden, std::format("certificate {} (CA '{}') is tagged dev; a production host refuses dev keys", who, ca->name));

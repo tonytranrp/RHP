@@ -27,6 +27,7 @@
 #include <rhp/security/ed25519.hpp>
 #include <rhp/security/http_auth.hpp>
 #include <rhp/security/identity_file.hpp>
+#include <rhp/security/operator_cert.hpp>
 #include <rhp/security/signer.hpp>
 #include <rhp/security/tls/tls.hpp>
 #include <rhp/wire/codec.hpp>
@@ -113,6 +114,9 @@ struct setup {
     // The Ed25519 key a signer name stands for (trusted_signers::find); empty when the policy has no
     // such lookup. Lets identity revocations (host.serve) withdraw a script signer's key.
     std::function<std::optional<security::ed25519_public_key>(std::string_view signer)> signer_key;
+    // Hands the signer policy what a served release manager's root of trust says of operator
+    // certificates (certified::trust::set_root_of_trust); empty when the policy takes none.
+    std::function<void(std::optional<security::trusted_cas> cas, std::function<bool(const security::operator_cert&)> revoked)> operator_trust;
     std::shared_ptr<event::hub> events;
     std::shared_ptr<event::script_hub> script_events;
     Rhp::limits limits{};
@@ -147,6 +151,12 @@ struct release_bridge {
     std::function<Rhp::subscription(std::function<void(event::release_changed)>)> on_event;
     // True when the manager's identity revocations name this script signer key (pump thread).
     std::function<bool(const security::ed25519_public_key&)> revoked_signer;
+    // True when they name this operator certificate serial (decimal text). Any thread.
+    std::function<bool(std::string_view serial)> revoked_serial;
+    // The version of the root of trust the manager holds (0: none), and the operator CAs its
+    // operator_ca role names (nullopt: none). Pump thread.
+    std::function<std::uint64_t()> root_version;
+    std::function<std::optional<security::trusted_cas>()> operator_cas;
 };
 
 template <script::installable L>

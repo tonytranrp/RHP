@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -130,7 +131,16 @@ struct certified {
         // the host's network thread: it must be thread-safe.
         void set_revocation_check(std::function<bool(const operator_cert&)> revoked);
 
+        // What a root of trust says (decision AL12; host.serve sets it from a release manager, again
+        // whenever its root changes): `cas`, when set, are the operator CAs from now on instead of
+        // the ones the trust was made with (nullopt: the root names none, those stay); `revoked`
+        // refuses certificates (kRevoked) besides revoke() and set_revocation_check's, and must be
+        // thread-safe. In every copy.
+        void set_root_of_trust(std::optional<trusted_cas> cas, std::function<bool(const operator_cert&)> revoked);
+
+        // The CAs the trust was made with; root_cas() what set_root_of_trust replaced them with.
         [[nodiscard]] const trusted_cas& cas() const noexcept;
+        [[nodiscard]] std::shared_ptr<const trusted_cas> root_cas() const;
 
     private:
         struct state;

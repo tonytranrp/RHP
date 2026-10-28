@@ -18,6 +18,9 @@
 #include <rhp/host/detail/releases.hpp>
 #include <rhp/release/manager.hpp>
 #include <rhp/release/manifest.hpp>
+#include <rhp/release/root_of_trust.hpp>
+#include <rhp/security/ed25519.hpp>
+#include <rhp/security/operator_cert.hpp>
 #include <rhp/wire/messages.hpp>
 #include <rhp/wire/ops.hpp>
 
@@ -74,6 +77,30 @@ wire::release_status_reply to_message(const release::manager& m) {
         out.channels.push_back(std::move(c));
     }
     return out;
+}
+
+// The operator CAs the held root's operator_ca role names (Ed25519 keys; compromised ones are in no
+// role), named "root:<key id>"; nullopt without a root or when the role names none.
+std::optional<security::trusted_cas> operator_cas(const release::manager& m) {
+    const release::signed_root* root = m.root();
+    if (root == nullptr) {
+        return std::nullopt;
+    }
+    const release::root_document& doc = root->body;
+    security::trusted_cas cas;
+    for (const std::string& id : doc.role(release::root_role::kOperatorCa).keys) {
+        const auto key = doc.keys.find(id);
+        if (key == doc.keys.end() || key->second.alg != release::kEd25519Alg) {
+            continue;
+        }
+        if (auto pub = security::ed25519_public_key::from_bytes(key->second.pub)) {
+            (void)cas.add({std::format("root:{}", id), *pub, std::string{}}); // a key listed twice counts once
+        }
+    }
+    if (cas.size() == 0) {
+        return std::nullopt;
+    }
+    return cas;
 }
 
 result<value> handle(release::manager& m, wire::op code, const value& body) {
@@ -151,6 +178,9 @@ release_bridge bridge(release::manager& m) {
     b.pump = [&m] { m.pump(); };
     b.harden = [&m](hardening level) { return m.harden(level); };
     b.revoked_signer = [ids = m.identities()](const security::ed25519_public_key& key) { return ids->is_revoked_signer(key); };
+    b.revoked_serial = [ids = m.identities()](std::string_view serial) { return ids->is_revoked_serial(serial); };
+    b.root_version = [&m] { return m.trust_held().root_version; };
+    b.operator_cas = [&m] { return operator_cas(m); };
     b.on_event = [&m](std::function<void(event::release_changed)> publish) {
         return m.on_event([publish = std::move(publish)](const release::release_event& e) {
             event::release_changed out;

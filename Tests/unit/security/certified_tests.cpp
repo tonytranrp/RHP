@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -13,6 +14,7 @@
 #include <rhp/core/error.hpp>
 #include <rhp/core/hardening.hpp>
 #include <rhp/core/role.hpp>
+#include <rhp/core/scopes.hpp>
 #include <rhp/core/value.hpp>
 #include <rhp/security/certified.hpp>
 #include <rhp/security/ed25519.hpp>
@@ -238,6 +240,56 @@ TEST_CASE("certified: revoked serials are refused", "[security][certified]") {
     trust.set_revocation_check([](const operator_cert& c) { return c.fields.serial == 42; });
     CHECK(copy.verify(kSource, *k.key(k.cert(role::kPatch, {}, {}, 42)).sign(kSource), here()).error().code == errc::kRevoked);
     CHECK(copy.verify(kSource, *k.key(k.cert(role::kPatch, {}, {}, 43)).sign(kSource), here()));
+}
+
+TEST_CASE("certified: a root of trust replaces the CAs and adds a revocation check", "[security][certified]") {
+    pki k;
+    pki other;
+    auto trust = k.trust();
+    const auto copy = trust;
+    const auto mine = k.key(k.cert());
+    const auto theirs = other.key(other.cert());
+    trusted_cas root;
+    REQUIRE(root.add({"root:ca-2", other.ca.public_key(), {}}));
+    trust.set_root_of_trust(root, [](const operator_cert& c) { return c.fields.serial == 7; });
+    CHECK(copy.verify(kSource, *mine.sign(kSource), here()).error().code == errc::kBadSignature);
+    CHECK(copy.verify(kSource, *theirs.sign(kSource), here()));
+    CHECK(copy.verify(kSource, *other.key(other.cert(role::kPatch, {}, {}, 7)).sign(kSource), here()).error().code == errc::kRevoked);
+    REQUIRE(copy.root_cas());
+    CHECK(copy.root_cas()->size() == 1);
+    // A root naming no CAs: the trust's own are back.
+    trust.set_root_of_trust(std::nullopt, {});
+    CHECK(copy.verify(kSource, *mine.sign(kSource), here()));
+    CHECK(copy.verify(kSource, *theirs.sign(kSource), here()).error().code == errc::kBadSignature);
+}
+
+TEST_CASE("certified: the certificate's scopes reach the context", "[security][certified]") {
+    pki k;
+    const auto trust = k.trust();
+    const auto now = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count());
+    operator_cert_fields f;
+    f.serial = 5;
+    f.principal = "alice";
+    const auto pub = k.op.public_key().bytes();
+    f.pub.assign(pub.begin(), pub.end());
+    f.not_before = now - 60;
+    f.not_after = now + 3600;
+    f.scopes = {"op:exec", "!cap:economy.*"};
+    const auto key = k.key(*issue_operator_cert(k.ca, f));
+    Rhp::scope_set scopes;
+    auto context = here();
+    context.scopes = &scopes;
+    REQUIRE(trust.verify(kSource, *key.sign(kSource), context));
+    CHECK(scopes == *Rhp::scope_set::parse("op:exec,!cap:economy.*"));
+    // A certificate without scopes leaves them as they are; one with a malformed pattern isn't issued.
+    Rhp::scope_set untouched;
+    context.scopes = &untouched;
+    REQUIRE(trust.verify(kSource, *k.key(k.cert()).sign(kSource), context));
+    CHECK(untouched.unrestricted());
+    f.scopes = {"lib:a,lib:b"};
+    CHECK(issue_operator_cert(k.ca, f).error().code == errc::kInvalidArgument);
+    f.scopes = {"nonsense"};
+    CHECK(issue_operator_cert(k.ca, f).error().code == errc::kInvalidArgument);
 }
 
 TEST_CASE("certified: without a context the strictest defaults apply", "[security][certified]") {

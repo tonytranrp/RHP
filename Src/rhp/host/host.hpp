@@ -3,6 +3,7 @@
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <stop_token>
@@ -28,6 +29,7 @@
 #include <rhp/script/sandbox.hpp>
 #include <rhp/security/ed25519.hpp>
 #include <rhp/security/identity_file.hpp>
+#include <rhp/security/operator_cert.hpp>
 #include <rhp/security/psk_keyring.hpp>
 #include <rhp/security/signer.hpp>
 
@@ -119,6 +121,14 @@ public:
                 return key != nullptr ? std::optional{*key} : std::nullopt;
             };
         }
+        if constexpr (requires(typename Cfg::trust_t& t, std::optional<security::trusted_cas> cas, std::function<bool(const security::operator_cert&)> revoked) {
+                          t.set_root_of_trust(std::move(cas), std::move(revoked));
+                      }) {
+            // Copies of the trust share its state: this one updates the one that verifies.
+            s.operator_trust = [trust](std::optional<security::trusted_cas> cas, std::function<bool(const security::operator_cert&)> revoked) mutable {
+                trust.set_root_of_trust(std::move(cas), std::move(revoked));
+            };
+        }
         s.verify = [trust = std::move(trust)](std::string_view source, const value& signature, const security::signature_context& context) {
             return security::verify_in_context(trust, source, signature, context);
         };
@@ -193,8 +203,12 @@ public:
     // Serves a release manager: clients apply, confirm and deactivate releases (admin) and read
     // their status or send revocation lists (observe) through it, and pump() pumps it (with every
     // release_changed reported as a host event). Its channels run at the host's hardening level at
-    // least (release::manager::harden). The manager must outlive the host. Call from the pump
-    // thread. kAlreadyLoaded if one is served already.
+    // least (release::manager::harden). With signer<security::certified>, operator certificates
+    // whose serial the manager's identity revocations name are refused, and the operator CAs come
+    // from the operator_ca role of the manager's root of trust when it names any (instead of the
+    // trust's own; a root update takes effect at the next pump, a CA it drops stops verifying).
+    // The manager must outlive the host. Call from the pump thread. kAlreadyLoaded if one is served
+    // already.
     return_t<void> serve(release::manager& releases) {
 #if RHP_ENABLE
         return Cfg::errors_t::finish(host_detail::serve_releases(*engine_, host_detail::bridge(releases)));

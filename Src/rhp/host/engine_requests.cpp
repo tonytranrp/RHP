@@ -440,6 +440,7 @@ void engine::op_release(request_ctx& c) {
         return reject(c, make_error(errc::kNotFound, "this host serves no releases (host.serve)", std::string{wire::to_string(c.in.code)}));
     }
     answer(c, releases_.handle(c.in.code, c.in.body));
+    refresh_operator_trust(); // a kTrust request may have brought a new root
 }
 
 void engine::op_exec(request_ctx& c) {
