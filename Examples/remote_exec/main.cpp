@@ -142,8 +142,9 @@ void tour(std::string_view title, const Rhp::endpoint& listen_at, const Rhp::sec
     }};
 
     {
-        // Observe runs unsigned code (it can't change anything); patch and admin sign every script.
-        Rhp::client<Cfg> viewer_client{dial_at, viewer, printing("viewer")};
+        // Observe can't change anything (below production hardening it may even run unsigned code);
+        // patch and admin sign every script.
+        Rhp::client<Cfg> viewer_client{dial_at, viewer, developer, printing("viewer")};
         auto g = viewer_client.template exec<double>("return game.gravity");
         expect("observe reads game.gravity", g);
         expect_error("observe may not write game.gravity", viewer_client.exec("game.gravity = 0"), Rhp::errc::kForbidden);

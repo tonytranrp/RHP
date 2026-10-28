@@ -57,17 +57,19 @@ struct transport {
 
 } // namespace metered
 
-// This example is about transports, so it turns script signing off — explicitly, by type (the
-// default config requires Ed25519-signed scripts from patch and admin sessions).
-using metered_cfg = Rhp::config<>::transport<metered::transport>::signer<Rhp::security::unsigned_scripts>::logger<Rhp::core::null_logger>;
+using metered_cfg = Rhp::config<>::transport<metered::transport>::logger<Rhp::core::null_logger>;
 
 int main() {
+    // The session's key, and a key that signs this run's scripts (the default config runs only signed
+    // code from patch and admin sessions).
     auto secret = Rhp::security::key::generate();
-    if (!secret) {
+    auto signing = Rhp::security::ed25519_secret_key::generate();
+    if (!secret || !signing) {
         std::println(stderr, "no OS randomness");
         return 1;
     }
-    Rhp::host<metered_cfg> host{Rhp::endpoint::listen("custom_transport", 1), Rhp::security::keyring{{"dev", *secret, Rhp::role::kPatch}}};
+    Rhp::host<metered_cfg> host{Rhp::endpoint::listen("custom_transport", 1), Rhp::security::keyring{{"dev", *secret, Rhp::role::kPatch}},
+                                Rhp::security::trusted_signers{{"dev", signing->public_key()}}};
     std::jthread frame_loop{[&host](std::stop_token stop) {
         while (!stop.stop_requested()) {
             host.pump();
@@ -75,7 +77,7 @@ int main() {
         }
     }};
 
-    Rhp::client<metered_cfg> client{Rhp::endpoint::dial("custom_transport", 1), Rhp::security::psk_identity{"dev", *secret}};
+    Rhp::client<metered_cfg> client{Rhp::endpoint::dial("custom_transport", 1), Rhp::security::psk_identity{"dev", *secret}, Rhp::security::signing_key{"dev", *signing}};
     auto answer = client.exec<int>("local t = 0 for i = 1, 10 do t = t + i end return t");
     if (!answer) {
         std::println(stderr, "exec failed: {}", answer.error());

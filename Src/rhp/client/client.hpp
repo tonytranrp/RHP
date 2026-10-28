@@ -410,6 +410,7 @@ private:
         s.limits = Cfg::limits_v;
         s.io_thread = Cfg::io_t::kOwnsThread;
         s.options = std::move(options);
+        s.hardening = Cfg::hardening_v;
         if (key) {
             s.sign = [signer = std::move(*key)](std::string_view source) -> result<value> { return signer.sign(source); };
         }

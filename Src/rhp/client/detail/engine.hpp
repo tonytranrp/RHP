@@ -12,6 +12,7 @@
 
 #include <rhp/client/detail/requests.hpp>
 #include <rhp/core/error.hpp>
+#include <rhp/core/hardening.hpp>
 #include <rhp/core/ids.hpp>
 #include <rhp/core/limits.hpp>
 #include <rhp/core/result.hpp>
@@ -78,6 +79,8 @@ struct setup {
     Rhp::limits limits{};
     bool io_thread = true; // false: the calling thread runs the network while it waits
     client_options options;
+    // The config's hardening (the engine adds the build's): above kDev an insecure_lan endpoint is refused.
+    Rhp::hardening hardening = kBuildHardening;
     // Signs the scripts this client sends (the client's signing key); empty sends them unsigned.
     sign_fn sign;
     // A reactor shared with other engines (a fleet's) instead of one of the engine's own. Its owner

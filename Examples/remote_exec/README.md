@@ -4,7 +4,7 @@ A host and its clients in one process: a "game" thread pumps `Rhp::host`, the ma
 
 | Key | Role | Tries |
 |---|---|---|
-| `viewer` | observe (unsigned) | reads `game.gravity`; writing it and loading a module fail with `kForbidden` |
+| `viewer` | observe (signed: a production-hardened host runs no unsigned code) | reads `game.gravity`; writing it and loading a module fail with `kForbidden` |
 | `qa` | patch | loads `scripts/moon.lua` (gravity -1.6), calls a reversible binding, reads `status` and the LuaLS stubs (`describe`) over the wire, starts `while true do end` and cancels it with `client.cancel()` while the game thread is stuck in it, then disconnects: everything it did is reverted |
 | `dev` | admin | prints (the line streams back through `client_options::on_output`), lists modules, calls `revert_all` |
 

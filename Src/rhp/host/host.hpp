@@ -13,6 +13,7 @@
 #include <rhp/build_config.hpp>
 #include <rhp/config/config.hpp>
 #include <rhp/core/error.hpp>
+#include <rhp/core/hardening.hpp>
 #include <rhp/core/log.hpp>
 #include <rhp/core/result.hpp>
 #include <rhp/core/role.hpp>
@@ -24,8 +25,18 @@
 #include <rhp/release/manager.hpp>
 #include <rhp/script/lib.hpp>
 #include <rhp/script/sandbox.hpp>
+#include <rhp/security/signer.hpp>
 
 namespace Rhp {
+
+// Scripts may go unsigned (signer<unsigned_scripts>) only in a config at hardening kDev (decision
+// AL2): in a lan or production build, or with config<>::hardening above kDev, name a real signer.
+template <class C>
+concept signed_unless_dev = C::hardening_v == hardening::kDev || !std::same_as<typename C::signer_t, security::unsigned_scripts>;
+
+// What Rhp::host takes: a Rhp::config<> that signs its scripts unless it is at hardening kDev.
+template <class C>
+concept host_configuration = configuration<C> && signed_unless_dev<C>;
 
 // A program that accepts remote Lua: it listens on an endpoint (or, in reverse mode, dials one),
 // authenticates every connection against its authenticator (keys -> identities -> roles), checks
@@ -50,8 +61,14 @@ namespace Rhp {
 // the developer's PC) and dials again, with capped exponential backoff and full jitter, whenever
 // that fails or the session ends.
 //
+// Hardening (decisions AL1 and AL2): the host runs at the strictest of RHP_HARDENING,
+// config<>::hardening and host_options::hardening. Above kDev it refuses insecure_lan endpoints, gives
+// admin patch's libraries and caps observe limits; at kProduction it also refuses
+// unsigned observe code, the remote debugger and advertise(), caps every role's limits and opens the
+// HTTP gateway only with http_require_binding. A refused endpoint or setting is reported by port().
+//
 // With RHP_ENABLE=0 the host is inert: it never listens, and every result-bearing call reports kDisabled.
-template <configuration Cfg = config<>>
+template <host_configuration Cfg = config<>>
 class host {
 public:
     template <class T>
@@ -60,6 +77,8 @@ public:
     host(net::endpoint ep, typename Cfg::auth_t auth, typename Cfg::trust_t trust, host_options options = {}) {
 #if RHP_ENABLE
         host_detail::setup s;
+        s.hardening = strictest(Cfg::hardening_v, options.hardening);
+        s.unsigned_scripts = std::same_as<typename Cfg::signer_t, security::unsigned_scripts>;
         s.ep = std::move(ep);
         s.transport = net::transport_ops_for<typename Cfg::transport_t>;
         s.tls = security::tls::backend_ops_for<typename Cfg::tls_t>;

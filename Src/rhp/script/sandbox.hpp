@@ -219,6 +219,11 @@ using clock_fn = std::function<std::chrono::steady_clock::time_point()>;
 struct sandbox_options {
     // Role of the identity this sandbox runs for. Local C++ callers default to kPatch.
     role caller_role = role::kPatch;
+    // An admin sandbox opens Lua's whole standard library (io, os, package, debug, collectgarbage,
+    // string.dump, dofile, loadfile, __gc finalizers) while this is true - in a dev build only
+    // (RHP_HARDENING=dev: the others leave that code out). false, or another build: admin gets
+    // patch's libraries. A host sets it from its hardening level (kDev only).
+    bool admin_stdlib = true;
     Rhp::limits limits{};
     // Every Lua allocation of this sandbox; nullptr = the C heap (malloc / realloc / free, as Lua's own
     // allocator: blocks grow in place). Either way limits.memory is enforced.

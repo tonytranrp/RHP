@@ -189,7 +189,8 @@ void engine::release(identity_runtime& rt) {
 script::sandbox_options engine::sandbox_options_for(const std::string& identity, role granted) {
     script::sandbox_options o;
     o.caller_role = granted;
-    o.limits = setup_.limits;
+    o.limits = limits_for(granted);
+    o.admin_stdlib = setup_.hardening == hardening::kDev;
     o.identity = identity;
     o.clock = setup_.clock;
     o.on_output = [this, identity](request_id r, module_id, std::string_view line) {

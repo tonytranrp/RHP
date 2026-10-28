@@ -27,6 +27,7 @@
 #include <lua.h>
 #include <lualib.h>
 
+#include <rhp/core/hardening.hpp>
 #include <rhp/platform/random.hpp>
 #include <rhp/script/detail/event_registry.hpp>
 #include <rhp/script/detail/patch_layers.hpp>
@@ -164,7 +165,7 @@ int lua_safe_setmetatable(lua_State* L) {
         const bool finalizer = lua_rawget(L, 2) != LUA_TNIL;
         lua_pop(L, 1);
         if (finalizer) {
-            stack{L}.raise(make_error(errc::kForbidden, std::format("a metatable with __gc needs role {}", role::kAdmin), "setmetatable"));
+            stack{L}.raise(make_error(errc::kForbidden, std::format("a metatable with __gc needs role {} at hardening {}", role::kAdmin, hardening::kDev), "setmetatable"));
         }
     }
     lua_pushvalue(L, lua_upvalueindex(1));
@@ -441,10 +442,15 @@ sandbox_impl::~sandbox_impl() {
 
 void sandbox_impl::open_libraries() {
     lua_State* L = state_;
-    const bool admin = options_.caller_role == role::kAdmin;
-    if (admin) {
-        luaL_openselectedlibs(L, ~0, 0);
-    } else {
+    // Admin's whole standard library exists in a dev build only (decision AL2).
+    bool full = false;
+    if constexpr (kBuildHardening == hardening::kDev) {
+        full = options_.caller_role == role::kAdmin && options_.admin_stdlib;
+        if (full) {
+            luaL_openselectedlibs(L, ~0, 0);
+        }
+    }
+    if (!full) {
         luaL_openselectedlibs(L, LUA_GLIBK | LUA_COLIBK | LUA_MATHLIBK | LUA_OSLIBK | LUA_STRLIBK | LUA_TABLIBK | LUA_UTF8LIBK, 0);
         for (const char* name : {"dofile", "loadfile", "collectgarbage"}) {
             lua_pushnil(L);
