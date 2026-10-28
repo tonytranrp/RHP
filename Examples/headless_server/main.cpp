@@ -9,9 +9,19 @@
 //   headless_server --port 7777 --keys keys.txt --signers signers.pub --audit audit.log
 //   rhp-cli connect 127.0.0.1:7777 -i dev.rhpid
 //
+// Device keys instead (the host holds public keys only; TLS always):
+//
+//   rhp-cli keygen phone --device             # prints the allow-list line: put it into devices.txt
+//   headless_server --port 7777 --allow-list devices.txt --signers signers.pub
+//   rhp-cli connect 127.0.0.1:7777 -i phone.rhpid   # asks once to trust the host key (known_hosts)
+//
 // Options:
 //   --host H --port N        listen address (default 127.0.0.1, port required; 0 = any free port)
-//   --keys FILE              keyring: `name role base64-psk` per line (required without --dev-session)
+//   --keys FILE              keyring: `name role base64-psk` per line (or --allow-list or --dev-session)
+//   --allow-list FILE        device keys instead: `name role alg base64-public-key` per line (rhp-cli keygen --device);
+//                            connections need TLS, and a device that the served releases' identity revocations name is refused
+//   --host-key FILE          with --allow-list: this host's device key, an identity file (created when missing;
+//                            default FILE = the allow-list's path + ".hostkey")
 //   --dev-session APP        a dev session: `rhp-cli connect --dev APP` needs no key files (dev builds, loopback)
 //   --signers FILE           trusted signers: `name base64-public-key` per line
 //   --audit FILE             append every host event as a JSON line
@@ -100,6 +110,8 @@ struct options {
     std::string host = "127.0.0.1";
     std::optional<std::uint16_t> port;
     std::string keys;
+    std::string allow_list;
+    std::string host_key;
     std::string dev_session;
     std::string signers;
     std::string audit;
@@ -169,6 +181,10 @@ template <std::integral T>
             o.port = p;
         } else if (arg == "--keys") {
             o.keys = *v;
+        } else if (arg == "--allow-list") {
+            o.allow_list = *v;
+        } else if (arg == "--host-key") {
+            o.host_key = *v;
         } else if (arg == "--dev-session") {
             o.dev_session = *v;
         } else if (arg == "--signers") {
@@ -216,9 +232,16 @@ template <std::integral T>
             return std::nullopt;
         }
     }
-    if ((o.keys.empty() && o.dev_session.empty()) || (!o.port && o.reverse.empty())) {
-        std::println(stderr, "usage: headless_server --port N (--keys FILE | --dev-session APP) [--signers FILE] [--audit FILE] [--blobs DIR] [--reverse H:N] [--port-file FILE] [--stop-file FILE] [--seconds N] [--insecure-lan] [--tls] [--cert FILE --key FILE] [--ca FILE] [--advertise [--name N] [--app A] [--build B] [--advertise-libs]] [--http-port N] [--releases DIR --release-signers FILE]");
+    if ((o.keys.empty() && o.dev_session.empty() && o.allow_list.empty()) || (!o.port && o.reverse.empty())) {
+        std::println(stderr, "usage: headless_server --port N (--keys FILE | --allow-list FILE [--host-key FILE] | --dev-session APP) [--signers FILE] [--audit FILE] [--blobs DIR] [--reverse H:N] [--port-file FILE] [--stop-file FILE] [--seconds N] [--insecure-lan] [--tls] [--cert FILE --key FILE] [--ca FILE] [--advertise [--name N] [--app A] [--build B] [--advertise-libs]] [--http-port N] [--releases DIR --release-signers FILE]");
         return std::nullopt;
+    }
+    if (!o.allow_list.empty() && !o.keys.empty()) {
+        std::println(stderr, "--keys and --allow-list exclude each other");
+        return std::nullopt;
+    }
+    if (!o.allow_list.empty() && o.host_key.empty()) {
+        o.host_key = o.allow_list + ".hostkey";
     }
     if (o.discovery.include_libs && !o.advertise) {
         std::println(stderr, "--advertise-libs requires --advertise");
@@ -265,7 +288,7 @@ template <std::integral T>
         const std::string host = o.reverse.substr(0, colon);
         ep = o.insecure_lan ? Rhp::endpoint::dial(host, p, Rhp::net::insecure_lan) : Rhp::endpoint::dial(host, p);
     }
-    if (o.tls) {
+    if (o.tls || !o.allow_list.empty()) { // device keys need TLS, loopback included
         ep->tls = Rhp::net::tls_mode::kRequire;
     }
     return ep;
@@ -280,97 +303,40 @@ template <std::integral T>
     return std::string{std::istreambuf_iterator<char>{in}, {}};
 }
 
-} // namespace
+using psk_cfg = Rhp::config<>::logger<Rhp::core::stderr_logger>;
+using device_cfg = psk_cfg::auth<Rhp::security::device_keys>;
 
-int main(int argc, char** argv) {
-    const auto o = parse(argc, argv);
-    if (!o) {
-        return 2;
+// This host's device key: the identity file at `path`, made (owner-only) when there is none.
+[[nodiscard]] std::optional<Rhp::security::key_handle> host_device_key(const std::string& path) {
+    std::error_code ec;
+    if (!std::filesystem::exists(path, ec)) {
+        auto made = Rhp::security::identity_file::generate_device("host");
+        if (!made) {
+            std::println(stderr, "{}", made.error());
+            return std::nullopt;
+        }
+        made->signing.reset(); // a connection key only
+        if (auto saved = made->save(path); !saved) {
+            std::println(stderr, "{}", saved.error());
+            return std::nullopt;
+        }
     }
-    auto keys = o->keys.empty() ? Rhp::result<Rhp::security::keyring>{} : Rhp::security::keyring::from_file(o->keys);
-    if (!keys) {
-        std::println(stderr, "{}", keys.error());
-        return 1;
+    auto id = Rhp::security::identity_file::load(path);
+    auto key = id ? id->device_key() : Rhp::result<Rhp::security::key_handle>{std::unexpected{id.error()}};
+    if (!key) {
+        std::println(stderr, "{}: {}", path, key.error());
+        return std::nullopt;
     }
-    for (const std::string& warning : keys->warnings()) {
+    for (const std::string& warning : id->warnings) {
         std::println(stderr, "warning: {}", warning);
     }
-    Rhp::security::trusted_signers signers;
-    if (!o->signers.empty()) {
-        auto loaded = Rhp::security::trusted_signers::from_file(o->signers);
-        if (!loaded) {
-            std::println(stderr, "{}", loaded.error());
-            return 1;
-        }
-        signers = std::move(*loaded);
-    }
-    const auto ep = endpoint_of(*o);
-    if (!ep) {
-        return 2;
-    }
+    return std::move(*key);
+}
 
-    Rhp::host_options host_opts;
-    host_opts.dev_session = o->dev_session; // writes the connect file once listening
-    if (o->http_port) {
-        host_opts.gateway = Rhp::endpoint::listen(o->host, *o->http_port);
-        host_opts.gateway->tls = o->tls ? Rhp::net::tls_mode::kRequire : Rhp::net::tls_mode::kAuto;
-        host_opts.gateway->insecure_lan = o->insecure_lan;
-    }
-    for (const auto& [path, field] : {std::pair{&o->cert, &host_opts.tls.cert_pem}, std::pair{&o->key, &host_opts.tls.key_pem}, std::pair{&o->ca, &host_opts.tls.ca_pem}}) {
-        if (!path->empty()) {
-            auto text = read_text(*path);
-            if (!text) {
-                return 1;
-            }
-            *field = std::move(*text);
-        }
-    }
-
-    using cfg = Rhp::config<>::logger<Rhp::core::stderr_logger>;
-    // Releases (optional): a manager that keeps what it runs in the --releases folder. Declared
-    // before the host, which serves it, so it outlives the host.
-    std::optional<Rhp::release::manager> releases;
-    if (!o->releases.empty()) {
-        if (o->release_signers.empty()) {
-            std::println(stderr, "--releases needs --release-signers");
-            return 2;
-        }
-        auto trust = Rhp::release::trust::from_file(o->release_signers);
-        if (!trust) {
-            std::println(stderr, "{}", trust.error());
-            return 1;
-        }
-        Rhp::release::manager_options ro;
-        ro.app = o->discovery.app;
-        ro.build = o->discovery.build;
-        ro.output = [](std::string_view channel, std::string_view line) { std::println("[{}] {}", channel, line); };
-        releases.emplace(std::move(*trust), std::move(ro), Rhp::release::directory_store{o->releases});
-        if (auto installed = releases->install<game::game_lib>(); !installed) {
-            std::println(stderr, "{}", installed.error());
-            return 1;
-        }
-        auto restored = releases->restore();
-        if (!restored) {
-            std::println(stderr, "releases: {}", restored.error());
-            return 1;
-        }
-        for (const auto& channel : restored->restored) {
-            std::println("releases: {} runs again", channel);
-        }
-        for (const auto& [channel, err] : restored->failed) {
-            std::println(stderr, "releases: {}: {}", channel, err);
-        }
-        for (const auto& [channel, err] : restored->deferred) {
-            std::println(stderr, "releases: {} runs nothing until the next start: {}", channel, err);
-        }
-        for (const auto& [channel, id] : restored->quarantined) {
-            std::println(stderr, "releases: {}: candidate {} quarantined", channel, Rhp::release::short_id(id));
-        }
-    }
-    // Declared before the host so it outlives it: the reverts the host does when it shuts down are logged too.
-    Rhp::event::subscription audit;
-    Rhp::host<cfg> host{*ep, std::move(*keys), std::move(signers), host_opts};
-    if (auto installed = host.install<game::game_lib>(); !installed) {
+// Everything after the host is made: libraries, releases, gateway, audit, blobs, then the frame loop.
+template <class Cfg>
+[[nodiscard]] int serve(Rhp::host<Cfg>& host, const options* o, std::optional<Rhp::release::manager>& releases, Rhp::event::subscription& audit) {
+    if (auto installed = host.template install<game::game_lib>(); !installed) {
         std::println(stderr, "{}", installed.error());
         return 1;
     }
@@ -486,4 +452,115 @@ int main(int argc, char** argv) {
     const auto ran = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started);
     std::println("headless_server stopping after {} ms ({}; gravity {}, score {}, entities {})", ran.count(), reason, game::g_gravity, game::g_score, game::g_entities);
     return 0;
+}
+
+} // namespace
+
+int main(int argc, char** argv) {
+    const auto o = parse(argc, argv);
+    if (!o) {
+        return 2;
+    }
+    auto keys = o->keys.empty() ? Rhp::result<Rhp::security::keyring>{} : Rhp::security::keyring::from_file(o->keys);
+    if (!keys) {
+        std::println(stderr, "{}", keys.error());
+        return 1;
+    }
+    for (const std::string& warning : keys->warnings()) {
+        std::println(stderr, "warning: {}", warning);
+    }
+    Rhp::security::trusted_signers signers;
+    if (!o->signers.empty()) {
+        auto loaded = Rhp::security::trusted_signers::from_file(o->signers);
+        if (!loaded) {
+            std::println(stderr, "{}", loaded.error());
+            return 1;
+        }
+        signers = std::move(*loaded);
+    }
+    const auto ep = endpoint_of(*o);
+    if (!ep) {
+        return 2;
+    }
+
+    Rhp::host_options host_opts;
+    host_opts.dev_session = o->dev_session; // writes the connect file once listening
+    if (o->http_port) {
+        host_opts.gateway = Rhp::endpoint::listen(o->host, *o->http_port);
+        host_opts.gateway->tls = o->tls ? Rhp::net::tls_mode::kRequire : Rhp::net::tls_mode::kAuto;
+        host_opts.gateway->insecure_lan = o->insecure_lan;
+    }
+    for (const auto& [path, field] : {std::pair{&o->cert, &host_opts.tls.cert_pem}, std::pair{&o->key, &host_opts.tls.key_pem}, std::pair{&o->ca, &host_opts.tls.ca_pem}}) {
+        if (!path->empty()) {
+            auto text = read_text(*path);
+            if (!text) {
+                return 1;
+            }
+            *field = std::move(*text);
+        }
+    }
+
+    // Releases (optional): a manager that keeps what it runs in the --releases folder. Declared
+    // before the host, which serves it, so it outlives the host.
+    std::optional<Rhp::release::manager> releases;
+    if (!o->releases.empty()) {
+        if (o->release_signers.empty()) {
+            std::println(stderr, "--releases needs --release-signers");
+            return 2;
+        }
+        auto trust = Rhp::release::trust::from_file(o->release_signers);
+        if (!trust) {
+            std::println(stderr, "{}", trust.error());
+            return 1;
+        }
+        Rhp::release::manager_options ro;
+        ro.app = o->discovery.app;
+        ro.build = o->discovery.build;
+        ro.output = [](std::string_view channel, std::string_view line) { std::println("[{}] {}", channel, line); };
+        releases.emplace(std::move(*trust), std::move(ro), Rhp::release::directory_store{o->releases});
+        if (auto installed = releases->install<game::game_lib>(); !installed) {
+            std::println(stderr, "{}", installed.error());
+            return 1;
+        }
+        auto restored = releases->restore();
+        if (!restored) {
+            std::println(stderr, "releases: {}", restored.error());
+            return 1;
+        }
+        for (const auto& channel : restored->restored) {
+            std::println("releases: {} runs again", channel);
+        }
+        for (const auto& [channel, err] : restored->failed) {
+            std::println(stderr, "releases: {}: {}", channel, err);
+        }
+        for (const auto& [channel, err] : restored->deferred) {
+            std::println(stderr, "releases: {} runs nothing until the next start: {}", channel, err);
+        }
+        for (const auto& [channel, id] : restored->quarantined) {
+            std::println(stderr, "releases: {}: candidate {} quarantined", channel, Rhp::release::short_id(id));
+        }
+    }
+    // Declared before the host so it outlives it: the reverts the host does when it shuts down are logged too.
+    Rhp::event::subscription audit;
+    if (!o->allow_list.empty()) {
+        auto allowed = Rhp::security::device_allow_list::from_file(o->allow_list);
+        if (!allowed) {
+            std::println(stderr, "{}", allowed.error());
+            return 1;
+        }
+        for (const std::string& warning : allowed->warnings()) {
+            std::println(stderr, "warning: {}", warning);
+        }
+        auto key = host_device_key(o->host_key);
+        if (!key) {
+            return 1;
+        }
+        std::println("host key {} ({})", key->fingerprint(), o->host_key);
+        // A device the served releases' identity revocations name is refused at its next handshake.
+        Rhp::security::device_keys devices{std::move(*allowed), std::move(*key), releases ? releases->identities() : nullptr};
+        Rhp::host<device_cfg> host{*ep, std::move(devices), std::move(signers), host_opts};
+        return serve(host, &*o, releases, audit);
+    }
+    Rhp::host<psk_cfg> host{*ep, std::move(*keys), std::move(signers), host_opts};
+    return serve(host, &*o, releases, audit);
 }

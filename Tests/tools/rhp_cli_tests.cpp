@@ -740,8 +740,7 @@ TEST_CASE("rhp-cli: ca init and cert issue make what a certified host takes", "[
     REQUIRE(identity);
     auto cas = Rhp::security::trusted_cas::from_file((dir.path / "cas.txt").string());
     REQUIRE(cas);
-    Rhp::host<cert_host_cfg> host{Rhp::endpoint::listen("127.0.0.1", 0), Rhp::security::keyring{{"alice", identity->psk, Rhp::role::kPatch}},
-                                  Rhp::security::certified::trust{std::move(*cas)}, {.app = "game"}};
+    Rhp::host<cert_host_cfg> host{Rhp::endpoint::listen("127.0.0.1", 0), Rhp::security::keyring{{"alice", identity->psk, Rhp::role::kPatch}}, Rhp::security::certified::trust{std::move(*cas)}, {.app = "game"}};
     std::string signer;
     std::mutex signer_mutex;
     auto audit = host.on<Rhp::event::script_executed>([&](const Rhp::event::script_executed& e) {
@@ -982,6 +981,56 @@ TEST_CASE("rhp-cli: TLS against a headless_server that requires it", "[cli][proc
     server.join();
     CHECK(dir.read("server.log").find("TLS") != std::string::npos);
     CHECK(dir.read("audit.log").find(R"("tls":true)") != std::string::npos);
+}
+
+TEST_CASE("rhp-cli: a device-key identity pins the host key in known_hosts", "[cli][process][device]") {
+    scratch_dir dir;
+    const auto phone = dir.path / "phone.rhpid";
+    REQUIRE(run(std::format("{} keygen phone --device --out {} > {}", kCli, q(phone), q(dir.path / "keygen.txt"))) == 0);
+    const auto identity = Rhp::security::identity_file::load(phone.string());
+    REQUIRE(identity);
+    REQUIRE(identity->device_line(Rhp::role::kPatch));
+    REQUIRE(identity->signers_line());
+    dir.write("devices.txt", *identity->device_line(Rhp::role::kPatch) + "\n");
+    dir.write("signers.pub", *identity->signers_line() + "\n");
+    dir.write("empty.txt", "");
+
+    std::jthread server{[&] {
+        (void)run(std::format("{} --port 0 --allow-list {} --host-key {} --signers {} --port-file {} --stop-file {} --seconds 120 > {} 2>&1", kHost,
+                              q(dir.path / "devices.txt"), q(dir.path / "host.rhpid"), q(dir.path / "signers.pub"), q(dir.path / "port.txt"), q(dir.path / "stop"),
+                              q(dir.path / "server.log")));
+    }};
+    REQUIRE(eventually([&] { return fs::exists(dir.path / "port.txt") && !dir.read("port.txt").empty(); }));
+    const std::string at = "127.0.0.1:" + std::to_string(std::stoi(dir.read("port.txt")));
+    const auto host_key = Rhp::security::identity_file::load((dir.path / "host.rhpid").string());
+    REQUIRE(host_key);
+    const std::string fingerprint = host_key->device_key()->fingerprint();
+    const auto exec = [&](std::string_view flags, std::string_view out) {
+        return run(std::format("{} exec \"return 6 * 7\" -c {} -i {} --known-hosts {} --timeout 5000 {} < {} > {} 2>&1", kCli, at, q(phone), q(dir.path / "known_hosts"), flags,
+                               q(dir.path / "empty.txt"), q(dir.path / out)));
+    };
+
+    // A new host key with no terminal to ask on: refused unless --trust-new-host.
+    CHECK(exec("", "new.txt") == 1);
+    CHECK(dir.read("new.txt").find(fingerprint) != std::string::npos);
+    CHECK(dir.read("new.txt").find("--trust-new-host") != std::string::npos);
+    CHECK_FALSE(fs::exists(dir.path / "known_hosts"));
+    CHECK(exec("--trust-new-host", "trusted.txt") == 0);
+    CHECK(dir.read("trusted.txt").find("42") != std::string::npos);
+    CHECK(dir.read("trusted.txt").find("host key " + fingerprint) != std::string::npos);
+    REQUIRE(fs::exists(dir.path / "known_hosts"));
+    CHECK_FALSE(Rhp::platform::readable_by_others(dir.path / "known_hosts"));
+    CHECK(dir.read("known_hosts").starts_with(at + " ed25519 "));
+    // Pinned now: no flag needed.
+    CHECK(exec("", "pinned.txt") == 0);
+    // Another key pinned for this endpoint: refused, with or without the flag.
+    dir.write("known_hosts", std::format("{} ed25519 {}\n", at, Rhp::security::base64_encode(identity->device_key()->public_key())));
+    CHECK(exec("--trust-new-host", "changed.txt") == 1);
+    CHECK(dir.read("changed.txt").find("changed") != std::string::npos);
+
+    dir.write("stop", "");
+    server.join();
+    CHECK(dir.read("server.log").find("host key " + fingerprint) != std::string::npos);
 }
 
 TEST_CASE("stage6: the CLI discovers separate hosts and broadcasts a signed script", "[cli][process][stage6][multicast]") {

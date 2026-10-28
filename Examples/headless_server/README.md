@@ -36,10 +36,20 @@ headless_server --port 0 --dev-session my_game
 rhp-cli connect --dev my_game
 ```
 
+Device keys instead of a shared PSK ([decision AL10](../../Docs/decisions/stage13-security.md)): the host keeps only public keys, and connections always use TLS.
+
+```bash
+rhp-cli keygen phone --device --role patch   # prints the allow-list line: put it into devices.txt
+headless_server --port 7777 --allow-list devices.txt --signers signers.pub   # makes devices.txt.hostkey on the first run
+rhp-cli exec "return 1" -c 127.0.0.1:7777 -i phone.rhpid   # asks to trust the host key once (or --trust-new-host)
+```
+
 | Option | What |
 |---|---|
 | `--host H --port N` | listen address (default `127.0.0.1`; port 0 = any free port). `--port` is required unless `--reverse` is given |
-| `--keys FILE` | keyring: `name role base64-psk` per line (required without `--dev-session`) |
+| `--keys FILE` | keyring: `name role base64-psk` per line (one of `--keys`, `--allow-list` and `--dev-session` is required) |
+| `--allow-list FILE` | device keys instead of `--keys`: `name role alg base64-public-key [scopes] [env=dev\|prod]` per line (`rhp-cli keygen --device` prints it); connections need TLS, and a device the served releases' identity revocations name is refused |
+| `--host-key FILE` | with `--allow-list`: this host's device key, an identity file (made owner-only when missing; default the allow-list's path + `.hostkey`) |
 | `--dev-session APP` | a dev session (dev builds, listening on loopback): the host makes an admin identity for this run and writes a connect file, so `rhp-cli connect --dev APP` needs no key files ([dev sessions](../../Docs/guide/security.md#dev-sessions)) |
 | `--signers FILE` | trusted signers: `name base64-public-key` per line; without it only observe sessions can run code |
 | `--audit FILE` | every host event as a JSON line |

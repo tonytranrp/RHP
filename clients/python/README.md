@@ -1,6 +1,6 @@
 # rhp-client (Python)
 
-A pure-Python client for RHP hosts: connect with an identity file, run signed Lua, load and call modules, push blobs, watch events, drive releases and trust documents, tunables, the profiler and the debugger. It speaks RHP's native protocol (revision 7) itself over TCP, or TLS 1.3 with pyOpenSSL, so it needs no C++ build, and it interoperates with `Rhp::host<>`, `rhp-cli` and `headless_server`. Python 3.9 or newer; no required dependencies.
+A pure-Python client for RHP hosts: connect with an identity file, run signed Lua, load and call modules, push blobs, watch events, drive releases and trust documents, tunables, the profiler and the debugger. It speaks RHP's native protocol (revision 7) itself over TCP, or TLS 1.3 with pyOpenSSL, so it needs no C++ build, and it interoperates with `Rhp::host<>`, `rhp-cli` and `headless_server`. Python 3.9 or newer; no required dependencies. Identities are PSK identities: device-key identities (`rhp-cli keygen --device`, hosts with `config<>::auth<Rhp::security::device_keys>`) aren't supported yet (use `rhp-cli`); the welcome's `host_key` field, which such hosts send, is passed through in `welcome`.
 
 ```python
 import rhp_client as rhp
