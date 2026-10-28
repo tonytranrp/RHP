@@ -152,6 +152,7 @@ struct session_info {
     std::string identity;
     role granted = role::kObserve;
     std::string host_platform;
+    std::string host_key; // the host's device-key fingerprint (security::device_keys); empty otherwise
     bool tls = false;          // the current connection is TLS
     std::uint64_t resumes = 0; // times the session continued on a new connection
 };

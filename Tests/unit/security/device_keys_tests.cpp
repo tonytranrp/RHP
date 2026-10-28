@@ -66,7 +66,7 @@ struct fixture {
     }
 
     [[nodiscard]] device_keys host(std::shared_ptr<const revoked_identities> revoked = {}) const { return {allowed, host_key, std::move(revoked)}; }
-    [[nodiscard]] device_credential as(const key_handle& k) const { return {k, pins, "lab:7777", {}}; }
+    [[nodiscard]] device_credential as(const key_handle& k) const { return {"phone", k, pins, "lab:7777", {}}; }
 };
 
 struct outcome {

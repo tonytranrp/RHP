@@ -45,6 +45,9 @@ struct welcome {
     role granted = role::kObserve;
     std::uint32_t heartbeat_ms = 0;
     std::string platform;
+    // The fingerprint of the host's device key (security::key_fingerprint) when the handshake used
+    // one (security::device_keys; wire revision 7); empty, and left out on the wire, otherwise.
+    std::string host_key{};
 };
 
 // The payload of kResume (dialing side, on a new connection) and of the kWelcome that answers it:

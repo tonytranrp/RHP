@@ -58,6 +58,7 @@
 #include <rhp/script/stubs.hpp>
 #include <rhp/script/testing.hpp>
 #include <rhp/security/authenticator.hpp>
+#include <rhp/security/device_keys.hpp>
 #include <rhp/security/ed25519.hpp>
 #include <rhp/security/hash.hpp>
 #include <rhp/security/http_auth.hpp>
@@ -65,6 +66,7 @@
 #include <rhp/security/identity_revocations.hpp>
 #include <rhp/security/key.hpp>
 #include <rhp/security/keyring.hpp>
+#include <rhp/security/known_hosts.hpp>
 #include <rhp/security/psk_keyring.hpp>
 #include <rhp/security/signer.hpp>
 #include <rhp/security/tls/auto_backend.hpp>

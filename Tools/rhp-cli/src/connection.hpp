@@ -3,6 +3,7 @@
 // rhp-cli's connections: the terminal its network commands print to, the options they share,
 // opening a client (or a dev session's), and loading the identity that signs.
 
+#include <filesystem>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -61,6 +62,10 @@ struct connection_options {
     std::string claim_app;
     std::string claim_env;
     std::string claim_audience;
+    // Device-key identities: the pinned host keys (default <config>/rhp/known_hosts) and whether a
+    // host whose key isn't pinned yet is trusted without asking (no terminal to ask on).
+    std::string known_hosts;
+    bool trust_new_host = false;
     int timeout_ms = 0; // 0: 10 s when dialing, 10 min when listening
 };
 
@@ -102,5 +107,9 @@ struct signer {
 // The identity file at `path` with its signing key; nullopt, after printing why, when it can't be
 // loaded (the load's own error) or has no signing_key.
 [[nodiscard]] std::optional<signer> load_signer(const std::string& path);
+
+// Where rhp-cli keeps the host keys device-key identities pinned: `path` when given, else
+// <config>/rhp/known_hosts (platform::user_config_dir). Its folder is created owner-only.
+[[nodiscard]] Rhp::result<std::filesystem::path> known_hosts_path(const std::string& path);
 
 } // namespace rhp_cli

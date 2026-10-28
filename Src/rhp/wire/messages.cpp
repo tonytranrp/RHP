@@ -231,13 +231,16 @@ result<wire::response> convert<wire::response>::from_value(const value& v) {
 }
 
 value convert<wire::welcome>::to_value(const wire::welcome& m) {
-    return wire::map_builder{}
-        .set("session", m.session)
+    wire::map_builder b;
+    b.set("session", m.session)
         .set("identity", m.identity)
         .set("role", value{to_string(m.granted)})
         .set("heartbeat_ms", m.heartbeat_ms)
-        .set("platform", m.platform)
-        .done();
+        .set("platform", m.platform);
+    if (!m.host_key.empty()) {
+        b.set("host_key", m.host_key);
+    }
+    return b.done();
 }
 
 result<wire::welcome> convert<wire::welcome>::from_value(const value& v) {
@@ -252,7 +255,8 @@ result<wire::welcome> convert<wire::welcome>::from_value(const value& v) {
     }
     RHP_WIRE_READ(heartbeat, in->field_or<std::uint32_t>("heartbeat_ms", 0));
     RHP_WIRE_READ(platform, in->field_or<std::string>("platform", {}));
-    return wire::welcome{*session, std::move(*identity), *granted, *heartbeat, std::move(*platform)};
+    RHP_WIRE_READ(host_key, in->field_or<std::string>("host_key", {}));
+    return wire::welcome{*session, std::move(*identity), *granted, *heartbeat, std::move(*platform), std::move(*host_key)};
 }
 
 value convert<wire::resume>::to_value(const wire::resume& m) {

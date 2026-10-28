@@ -40,12 +40,15 @@ TEST_CASE("messages: handshake round trips", "[wire][messages]") {
     CHECK(h2.platform == "linux");
     CHECK(h2.auth == h.auth);
 
-    const wire::welcome w{Rhp::session_id{42}, "dev", Rhp::role::kPatch, 2000, "windows"};
+    const wire::welcome w{Rhp::session_id{42}, "dev", Rhp::role::kPatch, 2000, "windows", ""};
     const auto w2 = roundtrip(w);
     CHECK(w2.session == Rhp::session_id{42});
     CHECK(w2.identity == "dev");
     CHECK(w2.granted == Rhp::role::kPatch);
     CHECK(w2.heartbeat_ms == 2000);
+    CHECK(Rhp::to_value(w).find("host_key") == nullptr); // left out without a device key
+    const wire::welcome keyed{Rhp::session_id{1}, "phone", Rhp::role::kObserve, 0, "", "abcdefghijklmnopqrstuv"};
+    CHECK(roundtrip(keyed).host_key == "abcdefghijklmnopqrstuv");
 }
 
 TEST_CASE("messages: envelope keeps req / idem and body", "[wire][messages]") {

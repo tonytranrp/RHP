@@ -52,6 +52,8 @@ Every network subcommand takes `-c/--connect host:port` (`connect` takes the add
 | `--cert pem` / `--key pem` | with `--listen`: this side's certificate (default: ephemeral self-signed) |
 | `--insecure-lan` | plaintext to a non-loopback address (trusted networks only) |
 | `--cert-file rhpcert` | sign scripts with this operator certificate and the identity's signing key (the key the certificate names); `--claim-app`, `--claim-env`, `--claim-audience` add claims (default: any) |
+| `--known-hosts file` | device-key identities (`keygen --device`): the host keys pinned so far (default `<config>/rhp/known_hosts`, lines `endpoint alg base64-public-key`). A device-key connection always uses TLS; a host key that changed for an endpoint is refused |
+| `--trust-new-host` | device-key identities: pin a host key seen for the first time without asking. Without it rhp-cli prints the key's fingerprint and asks y/n on a terminal (then connects again), and refuses when there is no terminal |
 
 A dropped connection is redialed and the session resumed on its own. When rhp-cli exits its session ends, and the host reverts what it did except pinned modules. Exit status: 0 when every command succeeded, 1 otherwise, 2 for usage errors.
 
@@ -173,6 +175,7 @@ rhp-cli test -s scripts tests/combat_spec.lua --reporter junit:report.xml
 | `src/dev.hpp/.cpp` | `connect --dev`: which dev session file (`pick_dev_session`) and where it may point (`dev_endpoint`) |
 | `src/keys.cpp` | `keygen`, `pubkey`, `sign` |
 | `src/certs.cpp` | `ca init`, `cert issue`, `cert show` |
+| `src/cli_auth.hpp` | `rhp_cli::cli_auth`: rhp-cli's authenticator policy, a PSK identity or a device key (`security::device_keys`) behind one credential type |
 | `src/cli_signer.hpp` | `rhp_cli::cli_signer`: rhp-cli's signer policy, an identity's Ed25519 key or a certified key behind one type |
 | `src/fleet.cpp` | `discover`, `fleet`, `rollout` |
 | `src/releases.cpp` | `release ...`, `revoke ...` |

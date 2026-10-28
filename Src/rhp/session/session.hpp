@@ -149,6 +149,9 @@ public:
     [[nodiscard]] const scope_set& scopes() const noexcept { return scopes_; }
     [[nodiscard]] const std::string& peer() const noexcept { return peer_; }
     [[nodiscard]] const std::string& peer_platform() const noexcept { return peer_platform_; }
+    // The fingerprint of the host's device key when the handshake proved one (security::device_keys;
+    // the welcome carries it); empty otherwise.
+    [[nodiscard]] const std::string& host_key() const noexcept { return host_key_; }
     // Host side: the key name the client's hello offered (the `key` field of its authenticator's
     // hello, as the PSK authenticator sends it), authenticated or not; empty before the hello, or
     // when it named none. For reports of failed handshakes.
@@ -264,6 +267,7 @@ private:
     scope_set scopes_;
     std::string peer_;
     std::string peer_platform_;
+    std::string host_key_;
     std::string offered_key_;
     std::unique_ptr<wire::frame_sealer> outgoing_;
     std::unique_ptr<wire::frame_sealer> incoming_;

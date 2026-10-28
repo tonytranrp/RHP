@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <format>
+#include <iostream>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -26,6 +27,8 @@
 #include <rhp/rhp.hpp>
 #include <rhp/security/certified.hpp>
 #include <rhp/security/dev_session.hpp>
+#include <rhp/security/device_keys.hpp>
+#include <rhp/security/known_hosts.hpp>
 #include <rhp/security/operator_cert.hpp>
 
 namespace rhp_cli {
@@ -70,6 +73,8 @@ void add_connection_options(CLI::App& cmd, connection_options& o, bool positiona
     cmd.add_option("--claim-app", o.claim_app, "with --cert-file: the app the scripts are for (default: any)");
     cmd.add_option("--claim-env", o.claim_env, "with --cert-file: the host environment they are for, dev or prod (default: any)");
     cmd.add_option("--claim-audience", o.claim_audience, "with --cert-file: the host id they are for (host_options::host_id; default: any)");
+    cmd.add_option("--known-hosts", o.known_hosts, "device-key identities: the pinned host keys (default <config>/rhp/known_hosts)");
+    cmd.add_flag("--trust-new-host", o.trust_new_host, "device-key identities: pin a host key seen for the first time without asking");
     cmd.add_flag("--listen", o.listen, "reverse mode: listen at the address and wait for the host to dial in");
     cmd.add_option("--timeout", o.timeout_ms, "ms to wait for the session (default 10000, 600000 with --listen)");
 }
@@ -94,12 +99,13 @@ void print_warnings(const Rhp::security::identity_file& id, terminal* out) {
 
 // Makes the client, connects and says to whom.
 template <class Cfg>
-std::optional<connection<Cfg>> start(const Rhp::endpoint& ep, const Rhp::security::identity_file& id, Rhp::client_options options, std::unique_ptr<terminal> out,
+std::optional<connection<Cfg>> start(const Rhp::endpoint& ep, typename Cfg::credential_t credential, Rhp::client_options options, std::unique_ptr<terminal>& out,
                                      std::optional<typename Cfg::signing_key_t> signer) {
     terminal* sink = out.get();
     options.on_output = [sink](std::uint64_t, std::string_view line) { (*sink)(style::kOutput, line); };
     options.on_emit = [sink](std::uint64_t, Rhp::module_id, const Rhp::value& v) { (*sink)(style::kOutput, "emit " + format_value(v)); };
-    auto c = signer ? std::make_unique<Rhp::client<Cfg>>(ep, id.credential(), std::move(*signer), options) : std::make_unique<Rhp::client<Cfg>>(ep, id.credential(), options);
+    auto c = signer ? std::make_unique<Rhp::client<Cfg>>(ep, std::move(credential), std::move(*signer), options)
+                    : std::make_unique<Rhp::client<Cfg>>(ep, std::move(credential), options);
     if (!signer) {
         (*out)(style::kInfo, "this identity has no signing_key: only observe hosts will run its scripts");
     }
@@ -116,8 +122,68 @@ std::optional<connection<Cfg>> start(const Rhp::endpoint& ep, const Rhp::securit
         return std::nullopt;
     }
     const auto who = c->info();
-    (*out)(style::kInfo, std::format("connected as {} ({}) to a {} host{}", who.identity, who.granted, who.host_platform, who.tls ? " over TLS" : ""));
+    (*out)(style::kInfo, std::format("connected as {} ({}) to a {} host{}{}", who.identity, who.granted, who.host_platform, who.tls ? " over TLS" : "",
+                                     who.host_key.empty() ? std::string{} : std::format(", host key {}", who.host_key)));
     return connection<Cfg>{std::move(c), std::move(out)};
+}
+
+// The fingerprint of a host key known_hosts didn't have (trust on first use), set on the network thread.
+struct offered_host {
+    std::mutex mutex;
+    std::string fingerprint;
+};
+
+// A device-key identity's connection: always TLS (device keys need it), the host's key pinned in
+// known_hosts or trusted on first use: with --trust-new-host, else asked on a terminal and then
+// connected again (the handshake can't wait for a person: the host would time it out).
+std::optional<connected> start_device(const connection_options& o, const Rhp::security::identity_file& id, Rhp::endpoint ep, Rhp::client_options options,
+                                      std::unique_ptr<terminal>& out, std::optional<cli_cfg::signing_key_t> signer) {
+    auto key = id.device_key();
+    auto path = key ? known_hosts_path(o.known_hosts) : Rhp::result<std::filesystem::path>{std::unexpected{key.error()}};
+    auto pins = path ? Rhp::security::known_hosts::load(*path) : Rhp::result<Rhp::security::known_hosts>{std::unexpected{path.error()}};
+    if (!pins) {
+        (*out)(style::kError, std::format("{}", pins.error()));
+        return std::nullopt;
+    }
+    ep.tls = Rhp::net::tls_mode::kRequire;
+    auto offered = std::make_shared<offered_host>();
+    const bool accept = o.trust_new_host;
+    Rhp::security::device_credential credential{id.name, *key, *pins, o.address, {}};
+    credential.trust_new = [offered, accept](std::string_view, std::string_view fingerprint) {
+        const std::scoped_lock lock{offered->mutex};
+        offered->fingerprint = fingerprint;
+        return accept;
+    };
+    auto c = start<cli_cfg>(ep, credential, options, out, signer);
+    std::string fingerprint;
+    {
+        const std::scoped_lock lock{offered->mutex};
+        fingerprint = offered->fingerprint;
+    }
+    if (c || fingerprint.empty() || accept) {
+        if (c && !fingerprint.empty()) {
+            (*c->out)(style::kInfo, std::format("pinned host key {} for {} in {}", fingerprint, o.address, path->string()));
+        }
+        return c;
+    }
+    if (!Rhp::platform::stdin_is_terminal()) {
+        (*out)(style::kError, std::format("the host key {} of {} is new: pass --trust-new-host to pin it (no terminal to ask on)", fingerprint, o.address));
+        return std::nullopt;
+    }
+    std::print("The host at {} has the key {}, which {} doesn't have. Trust it? [y/N] ", o.address, fingerprint, path->string());
+    std::fflush(stdout);
+    std::string answer;
+    if (!std::getline(std::cin, answer) || (answer != "y" && answer != "Y" && answer != "yes")) {
+        (*out)(style::kError, "host key not trusted");
+        return std::nullopt;
+    }
+    // Only the key just shown: a host that answers with another one this time is refused.
+    credential.trust_new = [fingerprint](std::string_view, std::string_view now) { return now == fingerprint; };
+    auto again = start<cli_cfg>(ep, std::move(credential), std::move(options), out, std::move(signer));
+    if (again) {
+        (*again->out)(style::kInfo, std::format("pinned host key {} for {} in {}", fingerprint, o.address, path->string()));
+    }
+    return again;
 }
 
 } // namespace
@@ -169,7 +235,10 @@ std::optional<connected> open_connection(const connection_options& o, replxx::Re
     } else if (auto key = id->signer_key()) {
         signer.emplace(std::move(*key));
     }
-    return start<cli_cfg>(*ep, *id, std::move(options), std::move(out), std::move(signer));
+    if (!id->device) {
+        return start<cli_cfg>(*ep, id->credential(), std::move(options), out, std::move(signer));
+    }
+    return start_device(o, *id, *ep, std::move(options), out, std::move(signer));
 }
 
 std::optional<dev_connected> open_dev_connection(std::string_view app, int timeout_ms, replxx::Replxx* rx) {
@@ -191,11 +260,11 @@ std::optional<dev_connected> open_dev_connection(std::string_view app, int timeo
     Rhp::client_options options;
     options.connect_timeout = std::chrono::milliseconds{timeout_ms > 0 ? timeout_ms : 10'000};
     if (target->ipc) {
-        auto c = start<cli_ipc_cfg>(target->ep, session->identity, std::move(options), std::move(out), session->identity.signer_key());
+        auto c = start<cli_ipc_cfg>(target->ep, session->identity.credential(), std::move(options), out, session->identity.signer_key());
         return c ? std::optional<dev_connected>{std::move(*c)} : std::nullopt;
     }
     auto key = session->identity.signer_key();
-    auto c = start<cli_cfg>(target->ep, session->identity, std::move(options), std::move(out),
+    auto c = start<cli_cfg>(target->ep, session->identity.credential(), std::move(options), out,
                             key ? std::optional<cli_cfg::signing_key_t>{std::move(*key)} : std::nullopt);
     return c ? std::optional<dev_connected>{std::move(*c)} : std::nullopt;
 }
@@ -226,6 +295,23 @@ std::optional<Rhp::security::identity_file> load_identity(const std::string& pat
     }
     print_warnings(*id, out);
     return std::move(*id);
+}
+
+Rhp::result<std::filesystem::path> known_hosts_path(const std::string& path) {
+    std::filesystem::path file{path};
+    if (path.empty()) {
+        auto dir = Rhp::platform::user_config_dir();
+        if (!dir) {
+            return std::unexpected{std::move(dir).error()};
+        }
+        file = *dir / "rhp" / "known_hosts";
+    }
+    if (file.has_parent_path()) {
+        if (auto made = Rhp::platform::make_private_directory(file.parent_path()); !made) {
+            return std::unexpected{std::move(made).error()};
+        }
+    }
+    return file;
 }
 
 std::optional<signer> load_signer(const std::string& path) {

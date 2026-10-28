@@ -4,7 +4,7 @@ add_library(rhp_cli_core STATIC src/text.cpp src/release_files.cpp src/dev.cpp)
 target_sources(rhp_cli_core PUBLIC
     FILE_SET HEADERS
     BASE_DIRS src
-    FILES src/cli_signer.hpp src/text.hpp src/shell.hpp src/release_files.hpp src/json.hpp src/dap.hpp src/dev.hpp
+    FILES src/cli_auth.hpp src/cli_signer.hpp src/text.hpp src/shell.hpp src/release_files.hpp src/json.hpp src/dap.hpp src/dev.hpp
 )
 target_link_libraries(rhp_cli_core PUBLIC Rhp::rhp)
 target_compile_features(rhp_cli_core PUBLIC cxx_std_23)

@@ -756,6 +756,7 @@ private:
             info_.identity = s.identity();
             info_.granted = s.granted();
             info_.host_platform = s.peer_platform();
+            info_.host_key = s.host_key();
             info_.tls = s.encrypted();
         }
         cv_.notify_all();

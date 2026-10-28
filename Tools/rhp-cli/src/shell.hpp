@@ -23,6 +23,7 @@
 #include <utility>
 #include <vector>
 
+#include "cli_auth.hpp"
 #include "cli_signer.hpp"
 #include "text.hpp"
 
@@ -1000,8 +1001,9 @@ Ctrl+C cancels a running script.)");
     std::jthread watcher_;
 };
 
-// rhp-cli's own configuration (its shell is instantiated in main.cpp): scripts are signed with an
-// identity's key or an operator certificate's (cli_signer).
-using cli_cfg = Rhp::config<>::logger<Rhp::core::null_logger>::signer<cli_signer>;
+// rhp-cli's own configuration (its shell is instantiated in main.cpp): it connects with a PSK or a
+// device key (cli_auth) and signs scripts with an identity's key or an operator certificate's
+// (cli_signer).
+using cli_cfg = Rhp::config<>::logger<Rhp::core::null_logger>::auth<cli_auth>::signer<cli_signer>;
 
 } // namespace rhp_cli

@@ -75,6 +75,9 @@ struct device_credential {
     // for a person here (rhp-cli refuses, asks, and connects again).
     using trust_function = std::function<bool(std::string_view endpoint, std::string_view fingerprint)>;
 
+    // The client's own name for itself (an identity file's `name`): what certified script claims
+    // carry. The host names the session from its allow-list entry.
+    std::string name{};
     key_handle key{};
     known_hosts pins{};
     // The name the host is pinned under in `pins` ("192.168.1.5:7777").

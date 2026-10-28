@@ -396,7 +396,8 @@ void session::host_response(const value& body) {
     scopes_ = std::move(grant->scopes);
     outgoing_ = std::move(grant->outgoing);
     incoming_ = std::move(grant->incoming);
-    const wire::welcome welcome{id_, identity_, granted_, opts_.limits.heartbeat_ms, opts_.platform};
+    host_key_ = std::move(grant->host_key);
+    const wire::welcome welcome{id_, identity_, granted_, opts_.limits.heartbeat_ms, opts_.platform, host_key_};
     if (auto sent = write_value(wire::op::kWelcome, Rhp::to_value(welcome), true); !sent) {
         fail_with(std::move(sent).error());
         return;
@@ -446,6 +447,7 @@ void session::client_challenge(const wire::frame_view& frame) {
         return;
     }
     identity_ = std::move(grant->identity);
+    host_key_ = std::move(grant->host_key);
     outgoing_ = std::move(grant->outgoing);
     incoming_ = std::move(grant->incoming);
     challenged_ = true;
@@ -468,6 +470,11 @@ void session::client_welcome(const wire::frame_view& frame) {
     auto welcome = Rhp::from_value<wire::welcome>(*body);
     if (!welcome) {
         fail_with(std::move(welcome).error());
+        return;
+    }
+    // The handshake checked the host's key itself; the welcome, sealed under the agreed keys, must name the same one.
+    if (welcome->host_key != host_key_) {
+        fail_with(make_error(errc::kAuth, "the host's welcome names another device key than its handshake proved", peer_));
         return;
     }
     id_ = welcome->session;
