@@ -8,6 +8,7 @@
 
 #include <rhp/config/config.hpp>
 #include <rhp/core/errors_mode.hpp>
+#include <rhp/core/hardening.hpp>
 #include <rhp/core/limits.hpp>
 #include <rhp/core/log.hpp>
 #include <rhp/exec/executor.hpp>
@@ -136,4 +137,16 @@ TEST_CASE("config: a config user sees the TLS backends RHP was built with", "[co
     STATIC_REQUIRE(std::is_same_v<Rhp::config<>::tls_t, Rhp::security::tls::none>);
 #endif
     CHECK(Rhp::security::tls::backend_ops_for<Rhp::config<>::tls_t>.available() == (RHP_TEST_EXPECT_TLS_OPENSSL || RHP_TEST_EXPECT_TLS_MBEDTLS));
+}
+
+TEST_CASE("config: the hardening slot starts at the build's level and may only raise it", "[config][hardening]") {
+    using base = Rhp::config<>;
+    STATIC_REQUIRE(base::hardening_v == Rhp::kBuildHardening);
+    using production = base::hardening<Rhp::hardening::kProduction>::transport<Rhp::net::loopback>;
+    STATIC_REQUIRE(production::hardening_v == Rhp::hardening::kProduction);
+    STATIC_REQUIRE(std::is_same_v<production::transport_t, Rhp::net::loopback>);
+    // A level below the build's doesn't compile (Tests/compile_fail/config_hardening_below_build.cpp).
+    STATIC_REQUIRE(Rhp::config_detail::no_weaker_than_build<Rhp::kBuildHardening>);
+    STATIC_REQUIRE(Rhp::config_detail::no_weaker_than_build<Rhp::hardening::kProduction>);
+    STATIC_REQUIRE(Rhp::config_detail::no_weaker_than_build<Rhp::hardening::kDev> == (Rhp::kBuildHardening == Rhp::hardening::kDev));
 }
