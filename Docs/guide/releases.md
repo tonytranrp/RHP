@@ -21,8 +21,10 @@
 | **manifest** | The signed part: channel, `seq`, label, the app / builds / platforms it is meant for, a validity window, the role its sandbox runs as (`patch` or `admin`), the libs it needs, its modules (name + BLAKE2b-256 of the source) and its health policy. Canonical MessagePack: one manifest, one byte string, so its hash is its id. |
 | **envelope** (`.rhprel`) | The manifest's bytes, the module sources, the signatures, and optionally a revocation list to apply first. |
 | **revocation list** (`.rhprev`) | Release ids and signing keys to stop trusting, and channel floors at or below which every release is revoked. A host adds each list it accepts (higher `seq`) to what it revoked already: nothing a list revoked comes back. |
-| **trust** | The keys that may sign releases (separate from script signers), each limited to channel patterns (`game.*`, `*`), with a threshold of distinct signers. |
-| **store** | Where a manager keeps its state (`state`), every revocation list it accepted (`revocations/<seq>`), the envelopes it may run again (`releases/<id>`) and, with a bytecode key, their compiled chunks (`bytecode/<id>`): `memory_store` or `directory_store` (one file per key, written through a synced rename). Anything that models `Rhp::release::storage` works. |
+| **trust** | The keys that may sign releases (separate from script signers), each limited to channel patterns (`game.*`, `*`), with a threshold of distinct signers. Either a file the app ships, or the release role of a root of trust. |
+| **root of trust** (`.rhproot`) | Optional, Stage 13b: a versioned document signed by a threshold of offline root keys that names the release, revocation and operator-CA keys. The app embeds one version as its anchor; newer versions reach a host over the wire ([below](#root-of-trust)). |
+| **identity revocation list** (`.rhpidrev`) | Optional, Stage 13b: operator certificate serials, script signer keys and device keys to stop trusting, signed by the root's revocation role. |
+| **store** | Where a manager keeps its state (`state`), every revocation list it accepted (`revocations/<seq>`), the envelopes it may run again (`releases/<id>`), the root versions and identity revocation lists it accepted (`trust/root/<version>`, `trust/identities/<seq>`) and, with a bytecode key, their compiled chunks (`bytecode/<id>`): `memory_store` or `directory_store` (one file per key, written through a synced rename). Anything that models `Rhp::release::storage` works. |
 
 ## Running releases in C++
 
@@ -116,7 +118,35 @@ A revocation list (signed by keys trusted for `*`) stops what it names: revoked 
 
 Revocations only add up. A host keeps the union of every list it accepted in its state and every list in its store (each under its own key); it takes a list into effect even when it can't be saved (the error says so, and the save is retried); a newer list can't un-revoke anything, and a key any list revoked can't sign a later list (so a stolen key can't forgive itself). Repeating older entries in a new list is harmless. On restore the stored list counts even if its signer has since been removed from the trust: it only ever withdraws trust.
 
-Seqs can't be fast-forwarded. A list's seq may move at most `max_seq_jump` past the last list's (past the host's clock in Unix seconds for its first list), and each floor it raises at most `max_seq_jump` past the highest seq its channel has seen (past the clock when the channel has seen none). A list past a cap is refused whole (`kOutOfRange`, a `refused` event) and applies nothing, so one stolen `*` key can't set a seq or floor near 2^63 and lock out every later list. A refused list isn't remembered: send the real one with a seq inside the cap (`rhp-cli revoke build --seq N`). Recovering from a compromised release key over the air needs the root of trust planned for Stage 13b ([decisions](../decisions/stage13-security.md)).
+Seqs can't be fast-forwarded. A list's seq may move at most `max_seq_jump` past the last list's (past the host's clock in Unix seconds for its first list), and each floor it raises at most `max_seq_jump` past the highest seq its channel has seen (past the clock when the channel has seen none). A list past a cap is refused whole (`kOutOfRange`, a `refused` event) and applies nothing, so one stolen `*` key can't set a seq or floor near 2^63 and lock out every later list. A refused list isn't remembered: send the real one with a seq inside the cap (`rhp-cli revoke build --seq N`). Recovering from a compromised release key over the air is what the [root of trust](#root-of-trust) is for.
+
+## Root of trust
+
+A trust file can't change once the app ships: a stolen release key stays trusted until the next build. A root of trust (decision AL12, `<rhp/release/root_of_trust.hpp>`) moves that decision to keys kept offline. It names keys and four roles, each with a threshold:
+
+| Role | Signs |
+|---|---|
+| `root` | the next version of the root |
+| `release` | releases (each key limited to channel patterns, like a trust file) |
+| `revocation` | revocation lists and identity revocation lists |
+| `operator_ca` | operator certificates ([security](security.md#keys-certificates-and-the-root-of-trust)) |
+
+Make the first version offline and embed it in the app; the manager takes its release and revocation trust from it:
+
+```bash
+rhp-cli root init --root-key a.rhpid --root-key b.rhpid --root-threshold 2 --release-key rel.rhpid@game.* --revocation-key rev.rhpid --expires-in 365 --sign a.rhpid --sign b.rhpid
+```
+
+```cpp
+auto anchor = Rhp::release::decode_root(embedded_root_bytes);   // root.1.rhproot, shipped with the app
+Rhp::release::manager releases{std::move(*anchor), options, Rhp::release::directory_store{"save/releases"}};
+```
+
+- **Rotation.** `rhp-cli root next root.1.rhproot ...` makes version 2, which must be signed by a threshold of version 1's root keys and of its own. `rhp-cli trust push host:7777 root.2.rhproot -i ops.rhpid` (or `client.trust({...})`, `manager.update_root`) walks a host to it; versions must follow one another, and a host keeps each one in its store and walks them again from the anchor on restore. An expired root is refused as an update, but the root a host holds stays in force after it expires, so a late operator can't lock devices out.
+- **Compromise.** `--compromise <key id>` in the next version takes the key out of every role and drops what it signed: revocation lists signed only by it are thrown away and what they raised (seqs, floors, revoked releases and keys) is taken back, and releases signed only by it stop. A key that is simply left out (`--retire`) keeps what it signed.
+- **Identity revocations.** `rhp-cli revoke-identity --serial 1001 --signer ops.rhpid --device phone.rhpid --sign rev.rhpid` makes a list signed by the revocation role; `trust push` sends it. `manager.identities()` holds what every accepted list revoked; a served host refuses scripts from revoked signer keys (`kRevoked`), and certificate and device-key checks ask it too. Lists add up and their seqs are capped like revocation lists.
+- `trust push` (op `kTrust`) needs only observe: the documents carry their own signatures. `release_status` reports the root version and identity revocation seq a host holds.
+- A manager made from a trust file (no root) behaves as before; `update_root` reports `kNotFound`, and identity revocation lists are signed by its `*` keys.
 
 ## rhp-cli
 
@@ -186,4 +216,5 @@ The state document is checksummed (BLAKE2b-256) and every write goes through a t
 - `--seq auto` is the Unix time in seconds: two builds of one channel in the same second share a seq (pass `--seq`). Counters (1, 2, 3) and Unix-time seqs pass the `max_seq_jump` caps; seqs that are neither (milliseconds, a date with the time) need a larger `max_seq_jump` for a channel's first release and a host's first revocation list. A host whose clock is far behind refuses a first Unix-time seq until its clock is right.
 - A module's top level must finish while loading: a release whose module suspends (`rhp.wait`) is refused.
 - `directory_store` syncs files and directories on POSIX and flushes with `_commit` on Windows; a store on a network share is only as durable as the share.
-- The Python client doesn't speak releases yet.
+- `headless_server` takes a release-signers file, not a root of trust.
+- Release state in the store is checksummed, not authenticated ([above](#what-the-store-protects-against)); MAC'd release state and pulling releases over HTTPS with a signed channel index are Stage 13c.

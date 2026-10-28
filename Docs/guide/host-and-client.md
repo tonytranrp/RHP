@@ -9,11 +9,13 @@ Rhp::host<> host{endpoint, authenticator, trusted_signers, Rhp::host_options{}};
 Rhp::host<> observe_only{endpoint, authenticator}; // no signers: only observe sessions can run code
 ```
 
+The authenticator is whatever the config's `auth<>` policy takes: a `security::keyring` of PSKs (the default) or, with `config<>::auth<Rhp::security::device_keys>`, a device allow-list and the host's own key; the trusted signers are `security::trusted_signers` or, with `config<>::signer<Rhp::security::certified>`, the trusted operator CAs ([security](security.md#keys-certificates-and-the-root-of-trust)). At effective hardening `production` the host drops every key and signer tagged `env=dev` from both.
+
 | Member | What |
 |---|---|
 | `install<Lib>()` | make a lib visible to every identity (call from the pump thread). `kAlreadyLoaded` on a duplicate name |
 | `on_blob(sink, fn, role = admin)` | register a blob sink: `fn(const blob_view&) -> result<void>` runs on the pump thread once a whole blob (≤ `limits.max_blob`) has arrived. The role is checked before a byte is buffered |
-| `serve(manager)` | serve a [`release::manager`](releases.md): clients may apply, confirm, deactivate and inspect releases, and `pump()` pumps it. Raises the manager to the host's hardening level ([`manager::harden`](releases.md#hardening)). The manager must outlive the host; `kAlreadyLoaded` if one is served already |
+| `serve(manager)` | serve a [`release::manager`](releases.md): clients may apply, confirm, deactivate and inspect releases and push trust documents, and `pump()` pumps it. Raises the manager to the host's hardening level ([`manager::harden`](releases.md#hardening)); the host then refuses scripts from signer keys the manager's [identity revocations](releases.md#root-of-trust) name, and a `certified` signer takes its operator CAs and revoked serials from the manager's root. The manager must outlive the host; `kAlreadyLoaded` if one is served already |
 | `on<Event>(fn)` / `on_any(fn)` | subscribe to host events; returns a `[[nodiscard]] event::subscription` that unsubscribes when destroyed. Handlers run on the pump thread |
 | `on_script_event(name, fn)` | every `rhp.publish` of `name` (`"*"`: all, `rhp.handler_failed` included) in any identity's sandbox, as an `event::script_event` (`identity`, `module`, `event`, `args`), on the pump thread |
 | `pump()` | **call every frame.** Runs requests that arrived, resumes suspended scripts, fires timers and queued events, hands replies to the network. With `io<zero_threads>` it also polls the network. With `limits.pump_requests` set it starts at most that many of each identity's requests, taking turns; the rest wait in the identity's queue, bounded at 4096 requests and 64 MiB (past that a request is answered `kLimitExceeded`) |
@@ -52,6 +54,7 @@ auto registered = host.on_blob("configs", [](const Rhp::blob_view& b) -> Rhp::re
 | `ack_delay_ms` | 5 | how long a received frame's ack waits for an outgoing frame to carry it; 0 acks every read at once |
 | `hardening` | `kDev` | raises the host's [hardening level](security.md#hardening-levels) above its config's, never lowers it: the host runs at the strictest of `RHP_HARDENING`, `config<>::hardening` and this |
 | `observe_limits` | empty (the config's limits) | observe identities' own limits; capped by `Rhp::kObserveCaps` from hardening `lan` up, and by `Rhp::kProductionCaps` at `production` |
+| `app` / `env` / `host_id` | empty | what claims in `certified` script signatures are checked against: the app this host runs, its environment (`"dev"` / `"prod"`; empty: `"prod"` at hardening `production`, `"dev"` below) and an id naming this host (a claim's audience). With an empty `app` / `host_id`, claims naming one are refused |
 | `dev_session` | empty | an app name: in a `dev` build at hardening `dev`, a host listening on loopback or local IPC (and its HTTP gateway, if any, on loopback) adds a [dev session](security.md#dev-sessions) identity and writes its connect file for `rhp-cli connect --dev`; anywhere else the host doesn't start (`kForbidden` from `port()`) |
 
 `Rhp::host<Cfg>` needs a config that signs its scripts unless it is at hardening `dev` (`Rhp::host_configuration`): a `signer<unsigned_scripts>` config doesn't compile in a `lan` or `production` build.
@@ -92,7 +95,8 @@ Result-bearing operations return `Rhp::result<T>` by default (see [errors](confi
 | `profile(action, interval)` | the sampling profiler: `"start"`, `"read"` or `"stop"` ([tools](tools.md#profiler)) | observe |
 | `debug(request)` | the debugger: breakpoints, pause, steps, stacks, variables ([tools](tools.md#over-the-wire)); refused by a host at hardening `production` | patch |
 | `release_apply(envelope, confirm)` / `release_confirm(channel)` / `release_deactivate(channel, hold)` | run a signed release on a host that [serves a manager](releases.md) | admin |
-| `release_status()` / `revoke(envelope)` | what the host's channels run / send a signed revocation list | observe |
+| `release_status()` / `revoke(envelope)` | what the host's channels run (and the root version and identity revocation seq it holds) / send a signed revocation list | observe |
+| `trust(documents)` | send root of trust versions (`.rhproot`) and identity revocation lists (`.rhpidrev`), applied in order; returns the root version and identity revocation seq the host holds ([releases](releases.md#root-of-trust)) | observe |
 
 `mod` is a `module_id` or name (`"low_grav"`) within this identity. `exec<T>` converts the first returned value, or nil if none; untyped `exec` and `call` return a `value_list`. Remote load/reload/call replies wait for suspended Lua to finish. `revert_summary::clean()` checks undo failures, not the `irreversible` count; inspect both before asserting full restoration.
 
@@ -145,6 +149,7 @@ RHP supplies an awaiter, not a coroutine task type. Destroying a suspended await
 | `blob_chunk` / `blob_window` | 1 MiB / 4 | blob chunk size and chunks in flight |
 | `ack_delay_ms` | 5 | how long a received frame's ack waits for an outgoing frame to carry it; 0 acks every read at once |
 | `tls` | empty | `ca_pem` + `server_name` to check the host's certificate; `cert_pem` / `key_pem` when the client listens (reverse mode) |
+| `app` / `env` / `audience` | empty | claims a `certified` signer puts in every script signature, with the identity's name: the host's app, environment and `host_id` the scripts are meant for (empty: any) |
 
 ### Thread rules
 

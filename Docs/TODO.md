@@ -1,6 +1,6 @@
 # Status and TODO
 
-Last updated 2026-10-27. Stages 0–12 are implemented, merged and tagged (`stage-0` … `stage-12`). `stage-13` tags the first part of Stage 13: 13a and the first wave of 13b are merged; the rest of 13b and 13c are open. Progress is tracked as "Stage N" only (no `v1` / `v2` naming anywhere). Known limits are in [the guide's limitations page](guide/limitations.md).
+Last updated 2026-10-28. Stages 0–12 are implemented, merged and tagged (`stage-0` … `stage-12`). `stage-13` tags Stage 13a and 13b (merged as #23, #24 and #25); in 13b, pairing wired into hosts and `--sign-cmd` are open, and 13c is planned. Progress is tracked as "Stage N" only (no `v1` / `v2` naming anywhere). Known limits are in [the guide's limitations page](guide/limitations.md).
 
 ## Stage 13 — security for every deployment
 
@@ -18,7 +18,7 @@ Done when: *one RHP serves a developer's PC, test phones, QA builds and store ap
 - [x] Release and revocation seq caps (`max_seq_jump`) (AL9)
 - [x] Tests: `stage13_hardening_tests`, `stage13_network_tests`, `stage13_limits_tests`, admission / channel-policy / address / hardening / SipHash unit tests, compile-fail fixtures for the levels, every suite at every level; CI's `hardened` job (`production`)
 
-13b — identities and trust (protocol revision 7; the first wave is merged, in `stage-13`):
+13b — identities and trust (protocol revision 7; merged, in `stage-13`, but for the two open items):
 
 - [x] Key handles (Ed25519, P-256 in software or through a sign callback for hardware keys), `key_store` (owner-only files with optional Argon2i passphrase, DPAPI, Apple Keychain, app callbacks), split `.rhpid` / `.rhpsign` files tagged `env=dev|prod`, `rhp-cli keygen --env --passphrase --device` (AL10, AL11)
 - [x] Operator CAs and short-lived operator certificates, the `certified` signer with claims (expiry, app, env, audience, nonce, identity), signature contexts on the host, `rhp-cli ca` / `cert` / `--cert-file` (AL11)
@@ -27,7 +27,8 @@ Done when: *one RHP serves a developer's PC, test phones, QA builds and store ap
 - [x] The device-key authenticator (`security::device_keys`, host allow-lists, client `known_hosts` and trust on first use), and production refusing `env=dev` keys (AL10, AL11)
 - [ ] Pairing wired into hosts: `kEnroll`, `rhp-cli pair`, on-device approval (AL10). The primitives are merged: CPace over X25519 (draft-21 vectors), `rhp-pair://` links, a one-time secret book, six-digit codes.
 - [x] Certificates joined up: certificate scopes narrowing requests, operator CAs and serial revocation from the root, operator keys as key handles (AL11–AL13); `--sign-cmd` still open
-- Untested so far: the Apple Keychain store, the typed passphrase prompt.
+- [x] Tests: `stage13_device_keys_tests`, `stage13_certified_tests`, `stage13_operator_trust_tests`, `stage13_trust_tests`, `stage13_scopes_tests`; unit tests for key handles (RFC 8032, RFC 6979 vectors), key stores, split key files, certificates and claims, device keys, CPace (draft-21 vectors), pairing links and books, roots, root managers, identity revocations and scopes; every suite at every hardening level
+- Untested so far: the Apple Keychain store (only its disabled build off Apple), the typed passphrase prompt, P-256 keys in real hardware (the callback path is tested with software keys).
 
 13c — production delivery (planned):
 
@@ -110,6 +111,7 @@ Done when: *a stranger can install RHP with `find_package`, the reproduced threa
 - [ ] **ARM CRC32C at run time: verify on devices.** Verified on Android (Galaxy SM-S948U1, arm64-v8a, API 37, 2026-10-26: the runtime check compiled in, the CPU reports `crc32`, the CRC32C vector and split tests pass); Linux arm64 hardware, iOS and MSVC ARM64 remain. Linux and Android arm64 builds check the CPU at run time (`__builtin_cpu_supports("crc")`, enabled by a configure check in `Src/rhp/utils/CMakeLists.txt`: NDK 29 passes it); the path is built (android-arm64) but has not run on an ARM device. iOS uses the tables (`__ARM_FEATURE_CRC32` isn't defined for `arm64-apple-ios`, and Xcode's runtime may lack `__aarch64_cpu_features`); MSVC ARM64 isn't handled.
 - [ ] Verify macOS and iOS (simulator and device) on real hardware; update `decisions/platforms-and-toolchains.md` afterwards.
 - [ ] Release-build validation and long libFuzzer runs (recorded checks are Debug builds and replay drivers).
+- [ ] Benchmarks for Stage 13: a Release run of the whole suite against `stage-12`, and a pattern-matching group with a raw twin (the `lstrlib.c` step charge is unmeasured) ([benchmarks](benchmarks.md#stage-13)).
 - [ ] Branch hygiene: completed stage branches (`stage-0-scaffold` … `stage-7-scheduling-events`, `stage-6-finish`, `codex/stage6`) and the agent worktree branch can be pruned once their PRs are merged; inspect the live remote refs first.
 - [ ] Optional: a second script engine behind a `config<>::engine<>` slot (the `engine` concept is deferred until a second engine exists). Luau was re-examined for speed in the Lua speed pass and deferred ([lua-runtime](decisions/lua-runtime.md)): a build-time engine choice if ever, behind a one-week benchmark gate.
 - Stage 7 follow-ups: a per-task `on_error` (tasks take the sandbox default because `rhp.spawn`'s varargs leave no room for an options table); `task:join(timeout)`; remote `stats`; an HTTP event stream; `sandbox.publish(name, values)` from C++ into script events.
@@ -120,6 +122,26 @@ Done when: *a stranger can install RHP with `find_package`, the reproduced threa
 Process for every stage: one branch + PR per stage, conventional commits (`feat:`, `fix:`, `test:`, `docs:`, `ci:`), rebase-merge only when told to.
 
 ## Recorded validation
+
+### Stage 13b (2026-10-28)
+
+Debug builds of `main` after #24 and #25 on this Windows/WSL host:
+
+| Check | Result |
+|---|---|
+| `windows-msvc` | 1182/1182 |
+| `windows-msvc`, unity build | 1182/1182 |
+| `windows-msvc`, `RHP_HARDENING=lan` | 1183/1183 |
+| `windows-msvc`, `RHP_HARDENING=production` | 1183/1183 |
+| `windows-msvc`, `RHP_ENABLE=OFF` | 270/270 |
+| `windows-clang-cl` | 1182/1182 |
+| `windows-msvc-asan` | 1177/1177 |
+| `linux-clang` (WSL, unity build) | 1182/1182 |
+| `linux-clang`, `RHP_HARDENING=production` (WSL) | 1183/1183 |
+| `linux-clang-asan` (WSL, no PCH) | 1180/1180 after the dangling public-key spans were fixed (ASan found them: one in `certified.cpp`, the rest in tests) |
+| `linux-clang-tsan` (WSL) | 1180/1180 |
+
+Hosted CI on `main` after #25: Windows, Linux (plain, ASan, TSan), Apple, Android, fuzz and the Windows package and disabled jobs passed; the Linux `RHP_ENABLE=OFF` builds (`disabled`, `package` OFF) failed on helpers only signing uses (`-Wunneeded-internal-declaration`, which MSVC doesn't have), fixed since (Linux clang `RHP_ENABLE=OFF`: 269/269); `hardened` and `package` ON failed to download `llvm.sh` (a network error, not the code). Not run: Android and Apple hardware, the Apple Keychain store on a device.
 
 ### Stage 13a (2026-10-27)
 

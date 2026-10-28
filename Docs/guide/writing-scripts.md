@@ -39,6 +39,8 @@ Plus whatever libs the host installed (`game.spawn(...)`), and the views their b
 | `patch` | everything above plus write variables, call `undo` / `irreversible` bindings, patch points, timers, handlers and tasks, load / reload / revert modules. Code must be signed |
 | `admin` | plus `revert_all`, blobs, admin-tagged bindings, pin / unpin, and, in a `dev` build at hardening `dev`, the **full Lua standard library** (`io`, `os`, `debug`, `package`). An admin key is fully trusted there |
 
+An identity's [capability scopes](security.md#keys-certificates-and-the-root-of-trust) can narrow any role: a lib its scopes deny isn't there at all (the global is nil), a binding tagged with a denied capability raises `forbidden` ("needs capability economy.write"), and `rhp.patch` / `rhp.on` / `rhp.once` / `rhp.wait_event` refuse denied points and events. Code signed with an operator certificate runs under the certificate's scopes too; such an exec can't register timers, handlers or tasks (load a module for those).
+
 Non-admin states (and admin ones outside a `dev` build at hardening `dev`) get `string`, `table`, `math`, `utf8`, `coroutine`, `os.time`, `os.clock`; no `io`, `package`, `debug`, `dofile`, `loadfile`, `collectgarbage`, `string.dump`; `load` is text-only.
 
 - **No finalizers.** `setmetatable` refuses a metatable with a `__gc` field (`forbidden`: "a metatable with __gc needs role admin at hardening dev"): Lua runs finalizers with its hooks off, where no limit or cancel reaches. Use a `<close>` variable to clean up; it runs under the usual limits.

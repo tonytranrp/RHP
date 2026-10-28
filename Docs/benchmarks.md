@@ -311,3 +311,14 @@ Measured on 2026-10-27, MSVC Release on the same laptop: `main` before the clean
 - **Every group within noise** (under +-10% and not the same direction across rounds): lua, requests, bindings, views, events, scheduler, wire, security, tunables, the tools and e2e rows.
 - **One real regression, found and fixed:** `test-file rhp: a file with no tests` went from 1.04 ms to 1.53 ms (+60% median over four alternating rounds), and the rows that run a whole file each sample followed (`test-run` +10%, `spy-off` and `assert-off` +36%). Bisected to the commit that moved snapshots out of `runner.cpp`: every file now asked the file system for its snapshot path (`relative()`) even with no snapshots. It is asked only for a file that has snapshots now; three more alternating rounds put all of those rows within +-5% of `main` (`test-file` -2%, `test-run` -2%, `spy-off` -3%, `assert-off` +2%).
 - **`coverage rhp: 100k arithmetic loop`** read +2% to +19% in the alternating rounds. A layout check built `main`, the branch and two commits in between and alternated all four binaries for five rounds: main 4.36 ms, branch 4.51 ms (+3%), while single runs of one binary ranged 3.8-5.9 ms and a commit that only changes key-file reading moved it by +3.7%. The coverage hook and the interpreter are unchanged: it is code layout and noise, not a cost the cleanup added.
+
+## Stage 13
+
+Not re-measured yet: the suite hasn't been run against `stage-13`. What Stage 13 changed on paths the suite times, and what it should cost:
+
+- **Bindings:** a binding without `Rhp::cap<>` compiles to the same role check as before (`if constexpr`); a capped one adds one relaxed load and one AND per call. The `bindings` rows cover only untagged bindings.
+- **Pattern matching and plain `find`:** `lstrlib.c` now counts steps and checks the run's budget every 4096 of them. No benchmark times patterns yet, so this cost is unmeasured.
+- **Requests:** with `request_rate` / `pump_requests` at 0 (the default) the pump does what it did; with them set, each request takes a token-bucket check and a per-identity queue. Capped observe identities run with `cancel_checks = kEverything` (the cancel hook on every handler: see [the cancel hook](guide/performance.md#the-cancel-hook-limitscancel_checks)).
+- **Handshakes:** device keys and certified signatures add Ed25519 (or P-256) signatures per handshake and per script; certified signatures aren't covered by the signature cache.
+
+Open in [Status and TODO](TODO.md): a Release run of the whole suite against `stage-12`, and a pattern-matching group with its raw twin.

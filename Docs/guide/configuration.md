@@ -56,8 +56,8 @@ using cfg = Rhp::config<>::clock<game_clock>::logger<engine_log>;
 | `transport` | `net::tcp` | `net::loopback` (in-process, for tests and embedding), `net::websocket`, `net::udp_reliable`, `net::local_ipc` ([networking](networking.md#transports)), or your own ([guide](connecting.md#your-own-transport)) |
 | `tls` | `tls::auto_backend` | `tls::openssl`, `tls::mbedtls`, or `tls::none` (no TLS; non-loopback endpoints then need `insecure_lan`, which only hardening `dev` allows) |
 | `codec` | `wire::msgpack` | any `wire::codec` (RHP's own MessagePack codec by default) |
-| `auth` | `security::psk_keyring` | any `security::authenticator` (mutual PSK challenge-response by default) |
-| `signer` | `security::ed25519` | `security::unsigned_scripts`: the explicit, typed opt-out of script signing (a host at hardening `dev` only) |
+| `auth` | `security::psk_keyring` | `security::device_keys` (each side holds a key pair, the host an allow-list of public keys; needs TLS), or any `security::authenticator` (mutual PSK challenge-response by default) ([security](security.md#keys-certificates-and-the-root-of-trust)) |
+| `signer` | `security::ed25519` | `security::certified` (operator certificates from a trusted CA and claims for this host in every signature), or `security::unsigned_scripts`: the explicit, typed opt-out of script signing (a host at hardening `dev` only) |
 | `executor` | `exec::pumped` | Lua runs on the thread that calls `pump()` (the only executor today) |
 | `io` | `exec::owned_io_thread` | `exec::zero_threads`: no threads; `pump()` and blocking client calls poll the network |
 | `limits` | `Rhp::limits{}` | see below |
@@ -139,6 +139,7 @@ Passed to the constructors at run time: [`Rhp::host_options`](host-and-client.md
 | `sandbox_options` field | What |
 |---|---|
 | `caller_role` | role of the identity (local default: patch) |
+| `scopes` | the identity's [capability scopes](security.md#keys-certificates-and-the-root-of-trust) (`Rhp::scope_set::parse("lib:game,!cap:economy.grant")`): denied libs aren't installed, denied `Rhp::cap<>` bindings raise `kForbidden`, `rhp.patch` and `rhp.on` refuse denied points and events. Default: everything. A host passes the keyring or allow-list column |
 | `admin_stdlib` | true: an admin sandbox opens Lua's whole standard library (`io`, `os`, `package`, `debug`, `collectgarbage`, `string.dump`, `dofile`, `loadfile`, finalizers). Only a `dev` build has that code; false, or another build, gives admin patch's libraries. A host sets it from its hardening level |
 | `limits` | as above |
 | `memory` | a `std::pmr::memory_resource*` for every Lua allocation; when null, the C heap (`malloc` / `realloc` / `free`, as Lua's own allocator: blocks grow in place). Blocks up to 128 bytes come from the sandbox's small-object slabs, carved from 64 KiB regions taken from the same place. `limits.memory` applies either way, in the bytes Lua asked for |

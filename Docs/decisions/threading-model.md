@@ -47,3 +47,8 @@
 - `host.set_enabled(on)` (any thread) stores its flag at once (an atomic, release order), so `pump()` and the network thread see it on their next check: `pump()` runs no requests (answered `kDisabled`), handlers, tasks or release channels while it is off, and new connections are closed. The network's part (closing every session, native and HTTP, or dialing again in reverse mode) is posted to the network thread and runs there in the order the calls were made; the sessions' ends then reach `pump()` like any disconnect, which reverts the identities. If the post can't be made (out of memory) the flag still holds.
 - Admission control for unauthenticated connections (`session::admission`) runs on the network thread only (its first-byte timer included); a host's native listener and its HTTP gateway share one, a listening client has its own.
 - `limits.request_rate` and `pump_requests` are checked on the pump thread, when `pump()` takes a request from the inbox; the token bucket reads the host's clock there.
+
+**Stage 13b (as built):**
+- The device-key handshake runs on the network thread, the client's trust-on-first-use callback included (inside the handshake, before `limits.handshake_timeout_ms` ends it: it must not wait for a person). `known_hosts` is thread-safe and its copies share their entries.
+- `release::manager::identities()` is a thread-safe set (it outlives the manager): the network thread asks it at every device-key handshake, the pump thread before running a script by a signer key.
+- Operator CAs and revoked serials from a served manager's root are handed to the `certified` signer on the pump thread, after a `kTrust` request and at the next `pump()` after the app rotates the root itself.

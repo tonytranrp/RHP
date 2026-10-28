@@ -87,7 +87,7 @@ You do not code any of this; it is how the session layer behaves.
 The REPL and scripting client. Full command list: [`Tools/rhp-cli/README.md`](../../Tools/rhp-cli/README.md).
 
 ```bash
-rhp-cli keygen dev                                            # dev.rhpid (role patch); rhp-cli pubkey -i dev.rhpid prints the host's lines
+rhp-cli keygen dev                                            # dev.rhpid + dev.rhpsign (role patch); rhp-cli pubkey -i dev.rhpid prints the host's lines
 rhp-cli connect HOST:PORT -i dev.rhpid                        # REPL, every script signed
 rhp-cli connect --dev my_game                                 # a dev session on this machine: no key files
 rhp-cli run scripts/low_grav.lua -c HOST:PORT -i dev.rhpid --pin --name low_grav
@@ -99,7 +99,7 @@ rhp-cli events game.round_over -c HOST:PORT -i dev.rhpid       # print host even
 rhp-cli sign file.lua -i dev.rhpid                             # signature for other tools
 ```
 
-Other commands have their own guides: `discover` and `fleet` ([networking](networking.md#fleets)), `release`, `revoke` and `rollout` ([releases](releases.md#rhp-cli)), `tune`, `profile` and `dap` ([tools](tools.md)), `test` ([testing scripts](testing-scripts.md#rhp-cli-test)).
+Other commands have their own guides: `discover` and `fleet` ([networking](networking.md#fleets)), `release`, `revoke` and `rollout` ([releases](releases.md#rhp-cli)), `root`, `revoke-identity` and `trust push` ([releases](releases.md#root-of-trust)), `ca` and `cert` ([security](security.md#keys-certificates-and-the-root-of-trust)), `tune`, `profile` and `dap` ([tools](tools.md)), `test` ([testing scripts](testing-scripts.md#rhp-cli-test)).
 
 | Option | What |
 |---|---|
@@ -110,13 +110,15 @@ Other commands have their own guides: `discover` and `fleet` ([networking](netwo
 | `--ca pem` + `--server-name` | verify the host's certificate |
 | `--cert` / `--key` | this side's certificate (with `--listen`) |
 | `--insecure-lan` | plaintext to a local (private or link-local) address; refused by an `rhp-cli` built above hardening `dev` |
+| `--cert-file f.rhpcert` | sign scripts with an operator certificate (`rhp-cli cert issue`) and the identity's signing key, for hosts with `signer<certified>`; `--claim-app`, `--claim-env`, `--claim-audience` put those claims in each signature (default: any) |
+| `--known-hosts file` / `--trust-new-host` | device-key identities: the pinned host keys (default `<config>/rhp/known_hosts`) / pin a host key seen for the first time without asking (otherwise asked on a terminal, refused without one) |
 | `--dev [app]` (`connect` only) | a [dev session](security.md#dev-sessions) of a program on this machine: no address or identity file; with no app, the only one open |
 
 Ctrl+C cancels an executing Lua chunk. In the REPL, Ctrl+C at a continuation prompt drops unfinished input; EOF with unfinished Lua is an error. Temporary link loss is resumed within the session window; permanent session failure requires a new CLI connection. One-shot commands disconnect on exit, so use `run --pin` with an admin key when a loaded module must survive the command. `watch` watches saves after it starts; it does not initially load every existing file. `events` (and `subscribe` / `unsubscribe` in the REPL) print the host's C++ events and your identity's script events ([scheduling and events](scheduling-and-events.md#5-watch-events-from-a-tool)). Exit status is 0 on success, 1 on failure and 2 for usage errors.
 
 ## `headless_server`
 
-A ready-made host for `rhp-cli`, and a good template for your own. Options are in [`Examples/headless_server/README.md`](../../Examples/headless_server/README.md): `--host`, `--port`, `--keys`, `--signers`, `--audit`, `--blobs`, `--reverse`, `--tls`, `--cert` / `--key`, `--ca`, `--insecure-lan`.
+A ready-made host for `rhp-cli`, and a good template for your own. Options are in [`Examples/headless_server/README.md`](../../Examples/headless_server/README.md): `--host`, `--port`, `--port-file`, `--keys`, `--signers`, `--allow-list` / `--host-key` (device keys), `--dev-session`, `--audit`, `--blobs`, `--reverse`, `--tls`, `--cert` / `--key`, `--ca`, `--insecure-lan`, `--http-port`, `--advertise` / `--advertise-libs` / `--name`, `--releases` / `--release-signers`, `--seconds` / `--stop-file`.
 
 ## Your own transport
 

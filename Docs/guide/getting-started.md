@@ -103,13 +103,15 @@ Ship and measure Release builds; [performance](performance.md) covers `RHP_LTO` 
 rhp-cli keygen dev --role patch
 ```
 
-This writes `dev.rhpid` (identity name, PSK, signing key; owner-only on every OS) and prints what the host needs, leaving the PSK in the file:
+This writes `dev.rhpid` (the connection identity: name and PSK) and `dev.rhpsign` (the Ed25519 key that signs your scripts), both owner-only on every OS, and prints what the host needs, leaving the PSK in the file:
 
 ```text
-wrote dev.rhpid (keep it private)
-add to the host's keyring file:   dev patch <psk from dev.rhpid>   (rhp-cli pubkey -i dev.rhpid --role patch prints it whole)
-add to the host's signers file:   dev <base64-ed25519-public-key>
+wrote dev.rhpid (connection identity) and dev.rhpsign (signing key): keep them private
+add to the host's keyring file:   dev patch <psk from dev.rhpid> env=dev   (rhp-cli pubkey -i dev.rhpid --role patch prints it whole)
+add to the host's signers file:   dev <base64-ed25519-public-key> env=dev
 ```
+
+`env=dev` tags the keys for development (the default; `--env prod` for keys you ship): a host built at hardening `production` refuses dev keys. `-i dev.rhpid` finds `dev.rhpsign` beside it.
 
 Print the two lines whole and put them into the host's files:
 
@@ -117,7 +119,7 @@ Print the two lines whole and put them into the host's files:
 rhp-cli pubkey -i dev.rhpid --role patch
 ```
 
-The first line it prints goes into `keys.txt` (name role key), the second into `signers.pub` (name public-key). `keygen --show-secret` prints the keyring line whole instead. `keygen` refuses to replace an existing identity unless you pass `--force`. The keyring line contains a secret: keep that output, `keys.txt` and `dev.rhpid` out of source control, and `keys.txt` readable by you alone (the host below warns otherwise).
+The first line it prints goes into `keys.txt` (name role key), the second into `signers.pub` (name public-key). `keygen --show-secret` prints the keyring line whole instead. `keygen` refuses to replace an existing identity unless you pass `--force`. The keyring line contains a secret: keep that output, `keys.txt`, `dev.rhpid` and `dev.rhpsign` out of source control, and `keys.txt` readable by you alone (the host below warns otherwise).
 
 **2. Start the supplied host in another terminal**, in the directory containing those key files:
 

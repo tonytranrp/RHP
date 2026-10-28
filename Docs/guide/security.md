@@ -9,13 +9,14 @@ RHP deliberately accepts remote code. Authentication, roles, signatures and TLS 
 | Hardening | `RHP_HARDENING=dev\|lan\|production` is the most a build allows; a config or a host may only raise it ([hardening levels](#hardening-levels)) |
 | Bind rules | the application chooses the endpoint; tutorials use loopback. A non-loopback endpoint needs a keyring **and** TLS, or an explicit `Rhp::net::insecure_lan` (plaintext with local peers only, `dev` only) |
 | Admission | unauthenticated connections: a total cap, a per-source cap, a first-byte deadline, and a newcomer takes the slot of the oldest silent connection, else of one stalled for a quarter of `handshake_timeout_ms` |
-| Authentication | pre-shared keys; mutual keyed-BLAKE2b challenge-response. The client verifies the host's proof before sending its own. Unknown key names receive the same challenge shape as known ones, rather than an explicit unknown-name response |
-| Identity and role | each key is an **identity** (its own Lua state) with a **role**: `observe`, `patch`, `admin` |
-| Script signing | `patch` and `admin` code must be Ed25519-signed by a key in the host's trusted signers. `observe` may send unsigned code, except at hardening `production`. A signature that is present must verify for every role |
+| Authentication | pre-shared keys (mutual keyed-BLAKE2b challenge-response) or [device keys](#keys-certificates-and-the-root-of-trust) (each side signs the transcript; the host holds only public keys). The client verifies the host's proof before sending its own. Unknown key names receive the same challenge shape as known ones, rather than an explicit unknown-name response |
+| Identity and role | each key is an **identity** (its own Lua state) with a **role**: `observe`, `patch`, `admin`, and optional **capability scopes** that bound which libs, bindings, patch points, events and ops it reaches |
+| Script signing | `patch` and `admin` code must be Ed25519-signed by a key in the host's trusted signers, or by an operator key whose certificate a trusted CA issued, with claims for this host (`certified`). `observe` may send unsigned code, except at hardening `production`. A signature that is present must verify for every role |
 | Channel | TLS 1.3 on networks, bound to the key handshake. Post-authentication frames also have a per-session, per-direction keyed MAC |
 | Sandbox | allow-listed Lua libraries, no `__gc` finalizers, addresses shown as keyed hashes; `admin` gets the full standard library only in a `dev` build at hardening `dev` |
 | Limits | per identity, by role: observe has limits of its own, capped from `lan` up; every role is capped at `production`; per-identity request rates, pump budgets and handler counts |
 | Audit | request events; source-bearing operations include BLAKE2b-256 hash and signer; a suspended request is reported when it finishes, with its final outcome; `auth_failed` names the key a refused peer tried |
+| Trust updates | an offline, threshold-signed root of trust rotates release, revocation and operator-CA keys and revokes certificates, signers and device keys without a new build |
 | Kill switches | compile time `RHP_ENABLE=OFF`; run time `host.set_enabled(false)` (every session closed, no scripts run until it is switched on again) |
 
 ## Setting up keys
@@ -23,7 +24,7 @@ RHP deliberately accepts remote code. Authentication, roles, signatures and TLS 
 Do this once per developer with the CLI:
 
 ```bash
-rhp-cli keygen alice                        # alice.rhpid (private); prints the host's lines, the PSK left in the file (role patch by default)
+rhp-cli keygen alice --env dev              # alice.rhpid + alice.rhpsign (private); prints the host's lines, the PSK left in the file (role patch by default)
 rhp-cli pubkey -i alice.rhpid               # the keyring line (PSK included) and the signers line, whole
 rhp-cli pubkey -i alice.rhpid --role admin  # the keyring line with another role
 ```
@@ -31,32 +32,41 @@ rhp-cli pubkey -i alice.rhpid --role admin  # the keyring line with another role
 Host-file format (one entry per line, `#` starts a comment). Values below are abbreviated illustrations, not valid keys; use the generated CLI lines:
 
 ```text
-# keys.txt          name  role   base64-psk
+# keys.txt          name  role   base64-psk  [scopes]  [env=dev|prod]
 alice  admin  q3J...
-bob    patch  w8K...
+bob    patch  w8K...  lib:game,cap:economy.*   env=dev
 viewer observe e1D...
 ```
 
 ```text
-# signers.pub       name  base64-ed25519-public-key
+# signers.pub       name  base64-ed25519-public-key  [env=dev|prod]
 alice  MCow...
-bob    hF2...
+bob    hF2...  env=dev
 ```
+
+The scopes column is described under capability scopes [below](#keys-certificates-and-the-root-of-trust); `env=` tags a key for an environment, and a host at hardening `production` drops every line tagged `env=dev`.
 
 Load and validate `keyring::from_file` and `trusted_signers::from_file` before constructing the host; the [checked host example](getting-started.md#first-run-host-plus-rhp-cli) shows the full setup. `key::from_env` / `from_file` read a base64-encoded PSK, not an Ed25519 identity file. Keep `keys.txt` owner-only: `keyring::from_file` puts a line in `warnings()` when other users can read it. The host doesn't print that itself; show it, as the example does.
 
 A PSK is 16–64 **decoded bytes**; generation uses 32 bytes, then base64-encodes them. An Ed25519 private key is a 32-byte seed. Managed secret-key buffers are wiped on destruction. `keygen` keeps the PSK in the identity file: its keyring line reads `alice patch <psk from alice.rhpid>` unless you pass `--show-secret`. `pubkey` prints the PSK so the host can be provisioned, so its output is not entirely public: protect it as well as the identity file. `keygen --role admin` prints a warning; an unknown role exits with status 2.
 
-The identity file looks like this and must be kept private. It is written atomically and owner-only on every OS (POSIX: created exclusively with mode 0600, then renamed into place; Windows: an explicit DACL for your account alone, with the folder's permissions blocked):
+Both files must be kept private. They are written atomically and owner-only on every OS (POSIX: created exclusively with mode 0600, then renamed into place; Windows: an explicit DACL for your account alone, with the folder's permissions blocked). The connection identity (`alice.rhpid`):
 
 ```text
-name        = "dev"
-psk         = "base64…"          # shared with the host's keyring
-signing_key = "base64…"          # Ed25519 private key; the host trusts the public half
-signer      = "dev"              # optional: name the host's signers file uses (default: name)
+name        = "alice"
+psk         = "base64…"          # shared with the host's keyring (a device identity has alg + device_key instead)
+env         = "dev"              # optional: "dev" or "prod"
 ```
 
-The PSK identity name and the signer name can differ, so one person can sign with a key whose name is not the connection key's.
+The signing key beside it (`alice.rhpsign`), found by its name when `-i` names the `.rhpid`:
+
+```text
+signer      = "alice"            # the name the host's signers file uses
+signing_key = "base64…"          # Ed25519 private key; the host trusts the public half
+env         = "dev"              # optional
+```
+
+With `--passphrase`, `signing_key` holds `"argon2i:m=65536,t=3:base64…"`: the key sealed with XChaCha20-Poly1305. Files from before Stage 13b, which keep `signing_key` (and an optional `signer`) in the identity file itself, still load, and so do dev session files. The identity name and the signer name can differ, so one person can sign with a key whose name is not the connection key's.
 
 Loading an identity file that other users can read, or whose PSK looks chosen by a person rather than generated (printable text, a repeated pattern), adds a line to `identity_file::warnings`; `rhp-cli` prints them as `warning: ...`. Neither refuses the file.
 
@@ -172,7 +182,7 @@ A host with `config<>::signer<Rhp::security::certified>` checks that a script's 
 - has claims (expiry, app, environment, audience, a one-use nonce, the identity) that match the host: `host_options::app`, `env`, `host_id`, the session's identity;
 - comes from a certificate whose `max_role` covers the request.
 
-A certificate with any critical option is refused, and production refuses dev-tagged CAs and certificates. The audit log names the signer `principal#serial`.
+A certificate with any critical option is refused, and production refuses dev-tagged CAs and certificates. The audit log names the signer `principal#serial`. Claims last 10 minutes by default (`certified_claim_options::lifetime`, never past the certificate); a host accepts claims at most an hour ahead (`certified_trust_options::max_lifetime`) and keeps 4096 live nonces (`replay_entries`): a nonce seen before is a replay (`kBadSignature`), and a full cache refuses new ones (`kLimitExceeded`) until some expire.
 
 **Root of trust.** A root document lists the release, revocation and operator-CA keys with thresholds. It is threshold-signed by offline root keys and embedded in the app as the anchor of a `release::manager`.
 
@@ -200,7 +210,27 @@ A certificate's `--scope`s narrow what its scripts may do on top of the identity
 
 When a host serves a manager whose root names `operator_ca` keys, those replace the trusted-CA file and follow root updates without a restart, and certificate serials in an identity revocation list are refused. Operator keys may be P-256 (`rhp-cli cert issue --device` with a P-256 device identity), so they can live in hardware; that needs a TLS backend.
 
-**Device keys.** With `config<>::auth<Rhp::security::device_keys>` neither side holds the other's secret: the host has an allow-list of client public keys (`name role alg base64-public-key [scopes] [env=dev|prod]`, the line `keygen --device` prints) and a host key of its own; each side signs the handshake transcript, bound to the TLS exporter, so TLS is required and a TLS-terminating relay fails. Clients pin host keys in `known_hosts` (`endpoint alg base64-public-key`; `rhp-cli --known-hosts`, default `<config>/rhp/known_hosts`): an unknown host key is refused unless confirmed on a terminal or with `--trust-new-host`, a changed one always. Pass `manager.identities()` to `device_keys` so revoked device keys are refused. `headless_server --allow-list FILE [--host-key FILE]` runs one. The Python client and `rhp-cli fleet` / `rollout` stay PSK-only.
+**Device keys.** With `config<>::auth<Rhp::security::device_keys>` neither side holds the other's secret: the host has an allow-list of client public keys (`name role alg base64-public-key [scopes] [env=dev|prod]`, the line `keygen --device` prints) and a host key of its own; each side signs the handshake transcript, bound to the TLS exporter, so TLS is required and a TLS-terminating relay fails (on loopback, where TLS isn't automatic, give the endpoint `Rhp::net::require_tls`). Clients pin host keys in `known_hosts` (`endpoint alg base64-public-key`; `rhp-cli --known-hosts`, default `<config>/rhp/known_hosts`): an unknown host key is refused unless confirmed on a terminal or with `--trust-new-host`, a changed one always.
+
+```cpp
+using device_cfg = Rhp::config<>::auth<Rhp::security::device_keys>;
+
+// Host: the allow-list, its own key (an identity file made by identity_file::generate_device), revocations.
+auto allowed = Rhp::security::device_allow_list::from_file("devices.txt");
+auto host_id = Rhp::security::identity_file::load("host.rhpid");
+Rhp::security::device_keys devices{std::move(*allowed), *host_id->device_key(), releases.identities()};
+Rhp::host<device_cfg> host{Rhp::endpoint::listen("0.0.0.0", 7777), std::move(devices), std::move(signers)};
+
+// Client: its key, the host keys it pinned, and what to do with a host it has never seen.
+auto me = Rhp::security::identity_file::load("phone.rhpid");
+Rhp::security::device_credential credential{me->name, *me->device_key(), *Rhp::security::known_hosts::load("known_hosts"),
+                                            "192.168.1.5:7777", {}}; // no trust-on-first-use callback: an unknown host is refused
+Rhp::client<device_cfg> dev{Rhp::endpoint::dial("192.168.1.5", 7777), std::move(credential), *me->signer_key()};
+```
+
+Check each `result` before using it, as the [first run](getting-started.md#first-run-host-plus-rhp-cli) does. A trust-on-first-use callback runs on the client's network thread inside the handshake: don't wait for a person there (`rhp-cli` refuses, asks, and connects again). Passing `manager.identities()` makes a revoked device key fail its next handshake. `headless_server --allow-list FILE [--host-key FILE]` runs one. The Python client and `rhp-cli fleet` / `rollout` stay PSK-only.
+
+**Pairing (planned).** Enrolling a phone without copying files: a `rhp-pair://` QR link with a one-time secret and the host key's fingerprint, or a six-digit code over CPace, then approval on the device. The primitives are built and tested (`<rhp/security/pairing.hpp>`, `<rhp/security/pairing_cpace.hpp>`: CPace over X25519 checked against draft-irtf-cfrg-cpace-21's vectors, link parsing, a one-time secret book), but hosts don't speak `kEnroll` and `rhp-cli pair` doesn't exist yet. Until then add the line `keygen --device` prints to the host's allow-list, and reach a phone over USB with `adb forward tcp:7777 tcp:7777` (the phone listens) or `adb reverse tcp:7777 tcp:7777` (the phone dials the PC).
 
 **Production refuses dev keys.** At production hardening a host drops every `env=dev` keyring entry, device key and trusted signer: tag what you ship `--env prod`.
 
@@ -208,7 +238,8 @@ When a host serves a manager whose root names `operator_ca` keys, those replace 
 
 - Choose the level: `production` for anything you ship, `lan` for test devices and QA builds, `dev` for your own machine only. One build can serve several hosts: raise each with `config<>::hardening` or `host_options::hardening`.
 - Keep the host on loopback unless you need the network. If you need the network, leave TLS on. `insecure_lan` exists only at `dev`, and even there speaks plaintext only with loopback, private (RFC 1918, RFC 4193) and link-local peers.
-- One key per person, so the audit log and revert scopes mean something. Revoke by removing the line and restarting the host.
+- One key per person, so the audit log and revert scopes mean something. Revoke by removing the line and restarting the host or, on a host that serves a release manager, with an identity revocation list (`rhp-cli revoke-identity`, `trust push`) that takes effect without a restart.
+- Tag shipped keys `--env prod`: production builds drop every `env=dev` key and signer. On phones prefer device keys to PSKs (the host's file then holds no secret); prefer short-lived operator certificates to long-lived signer keys, and give every identity that doesn't need everything a scopes column.
 - Give `admin` sparingly. Prefer `Rhp::requires_role<Rhp::role::kAdmin>` on only the dangerous bindings.
 - Set `limits` (`instructions`, `wall_ms`, `memory`, and `slice_us` for games) on any host that hands out keys to people you do not fully trust; in a `dev` build the defaults are unlimited. Observe identities run under `host_options::observe_limits` (default: the config's limits), capped by `kObserveCaps` from `lan` up; `production` caps every role. `limits.request_rate`, `pump_requests` and `handlers` bound how often one identity runs and how much it keeps scheduled. `observe` code is unsigned below `production` and can otherwise hold the pump thread or grow memory until someone cancels it.
 - Remote event subscription (`client.on`, `kSubscribe`) needs only observe and covers every C++ `lua_event` in the process: don't put secrets in C++ event arguments, or don't hand keys to untrusted readers.
@@ -230,4 +261,8 @@ When a host serves a manager whose root names `operator_ca` keys, those replace 
 - Caps bound one identity, not the host: under `kObserveCaps` an observe identity can still take 40 ms of a `pump()` (2 runs of 20 ms) and 200 ms of every second (10 runs), and each observe key gets as much.
 - A dev session's connect file can be read by any process of the same user.
 - Identity files the Python client writes on Windows get their folder's permissions (`rhp-cli keygen` sets an owner-only DACL).
-- Stage 13b (device keys and pairing, operator certificates, a root of trust, capability scopes; protocol revision 7) and 13c (signed releases pulled over HTTPS, support sessions through a relay, a hash-chained audit, a signed remote disable) are planned, not built ([decisions](../decisions/stage13-security.md)).
+- `table.sort` without a comparator, `load` of a huge chunk and `<` between long strings run in C without a limit or cancel check: a script can hold the pump for as long as one such call takes.
+- Pairing isn't wired into hosts, and `rhp-cli --sign-cmd` (external signers: a YubiKey, a KMS, Vault) isn't built; hardware keys work through a `key_handle` callback in your own code.
+- The Apple Keychain key store and the typed passphrase prompt haven't run in the tests (no device, no terminal).
+- The Python client and `rhp-cli fleet` / `rollout` are PSK-only.
+- Stage 13c (signed releases pulled over HTTPS, MAC'd release state, support sessions through a relay, a mobile preset with pause / resume, a hash-chained audit, attestation hooks, a signed remote disable) is planned, not built ([decisions](../decisions/stage13-security.md)).

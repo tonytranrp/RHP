@@ -4,7 +4,7 @@
 > **Targets:** Windows 10 1809+ · Linux (glibc 2.31+) · macOS 13.3+ · iOS 16.3+ · Android API 26+ — x86_64 + arm64
 > **Compilers:** MSVC (VS 2026) · clang-cl · Clang 17+ · AppleClang · Android NDK Clang
 > **Root namespace:** `Rhp::` · **Include root:** `<rhp/...>`
-> **Current usage:** [user guide](guide/README.md) · **Open issues / verification:** [Status and TODO](TODO.md). The current implementation includes Stages 0–7; §0–§16 describe it as built. The historical decision logs (§17–§33) keep the decisions made at each stage; per-topic reasoning lives in [`decisions/`](decisions/README.md), the latest in [networking](decisions/stage6-networking.md) and [scheduling and events](decisions/stage7-scheduling-events.md).
+> **Current usage:** [user guide](guide/README.md) · **Open issues / verification:** [Status and TODO](TODO.md). The current implementation includes Stages 0–12 and Stage 13a and 13b (tag `stage-13`); §0–§16 describe it as built. The decision logs (§17–§39) keep the decisions made at each stage; per-topic reasoning lives in [`decisions/`](decisions/README.md), the latest in [Stage 13 security](decisions/stage13-security.md).
 > **Progress model:** work advances in **stages** (Stage 0, Stage 1, …). Nothing in code, files, tags, or APIs is ever named `v1`/`v2`/`V*`. The only numbers on the wire are a plain `protocol_revision` integer and per-module `revision` counters.
 
 ---
@@ -595,7 +595,7 @@ sequenceDiagram
 |---|---|
 | `magic`, `protocol_rev` | reject garbage; `protocol_rev` is a plain integer agreed in `hello` |
 | `flags` | `kMac` (1), `kAckRequested` (2), `kMore` (4, reserved and unused), `kCrcOmitted` (8) |
-| `op` | 16 bits: handshake 1–5 `hello, challenge, response, welcome, resume` · requests 16–43 `exec, load, call, reload, rollback, unload, revert, revert_to, checkpoint, revert_all, cancel, list, status, describe, pin, unpin, blob, subscribe, unsubscribe, release_apply, release_confirm, release_deactivate, release_status, revoke, tunables, tune, profile, debug` · replies 48–52 `output, emit, result, error, event` · control 64–67 `ping, pong, ack, nack` (see X5 and [reference](guide/reference.md#wire-protocol)) |
+| `op` | 16 bits: handshake 1–5 `hello, challenge, response, welcome, resume` · requests 16–44 `exec, load, call, reload, rollback, unload, revert, revert_to, checkpoint, revert_all, cancel, list, status, describe, pin, unpin, blob, subscribe, unsubscribe, release_apply, release_confirm, release_deactivate, release_status, revoke, tunables, tune, profile, debug, trust` · replies 48–52 `output, emit, result, error, event` · control 64–67 `ping, pong, ack, nack` (see X5 and [reference](guide/reference.md#wire-protocol)) |
 | `seq` / `ack` | per-session monotonic + cumulative ack; control frames carry a per-direction counter in `seq` |
 | `length` | ≤ `max_frame` (4 MiB; 16 KiB before the handshake), checked **before** allocating; a blob is sent as a series of `kBlob` requests (chunks of `client_options::blob_chunk`, 1 MiB) |
 | `crc32c` | catches corruption TCP's checksum misses; dropped under TLS (AEAD covers it) — as built, flag `kCrcOmitted`, accepted only on encrypted links (AA6) |
@@ -659,9 +659,11 @@ stateDiagram-v2
 |---|---|
 | Hardening | *Stage 13a (AL1, AL2):* `RHP_HARDENING=dev\|lan\|production` is the most a build allows; `config<>::hardening` and `host_options::hardening` only raise it, and what the build's level doesn't allow is compiled out. `lan` refuses `insecure_lan`, dev sessions and `unsigned_scripts`, gives admin patch's libraries and caps observe limits; `production` also requires signed observe code, refuses the debugger and advertising, needs channel-bound HTTP and caps every role |
 | Bind address | chosen by the application (there is no default endpoint; tutorials use loopback); non-loopback requires a keyring **and** TLS (or an explicit `insecure_lan` opt-in: since Stage 13a plaintext with loopback, private and link-local peers only, at hardening `dev` only) |
-| Authentication | `psk_keyring`: mutual challenge-response, keyed BLAKE2b (Monocypher); each key maps to an **identity** and a **role** |
+| Authentication | `psk_keyring`: mutual challenge-response, keyed BLAKE2b (Monocypher); each key maps to an **identity** and a **role**. *Stage 13b (AL10):* `device_keys`: each side signs the handshake transcript (bound to the TLS exporter, so TLS is required) with an Ed25519 or P-256 key; the host keeps an allow-list of public keys, clients pin host keys (`known_hosts`, trust on first use); keys live behind `key_handle` (software or a sign callback for hardware keys) and `key_store` (owner-only files with an optional passphrase seal, DPAPI, Apple Keychain, app callbacks) |
+| Capability scopes | *Stage 13b (AL13):* `lib:`, `cap:`, `patch:`, `event:`, `op:` patterns per identity (a keyring or allow-list column) and per operator certificate (narrowing the request it signs); bindings tag `Rhp::cap<"economy.write">`; checked at lib install, `rhp.patch`, subscription and request dispatch; a capped call costs one mask test |
 | Roles | `observe` (read, pure calls, client subscriptions; no timers, handlers or tasks since Stage 13a) · `patch` (mutations, load/revert) · `admin` (revert_all, pin/unpin, blobs, admin-tagged bindings, and the full standard library in a `dev` build at hardening `dev`) |
-| Script signing | Ed25519 (Monocypher): host only runs code signed by a trusted developer key; `rhp-cli` signs automatically with the identity's private key |
+| Script signing | Ed25519 (Monocypher): host only runs code signed by a trusted developer key; `rhp-cli` signs automatically with the identity's private key. *Stage 13b (AL11):* the signing key is a file of its own (`.rhpsign`); keys carry `env=dev\|prod` and a production host drops dev ones; `certified`: an offline operator CA issues short-lived certificates (principal, max role, apps, environments, scopes, serial), and every signature carries claims (expiry, app, environment, audience, one-use nonce, identity) checked against the host |
+| Root of trust | *Stage 13b (AL12):* a versioned root document signed by an offline threshold names the release, revocation and operator-CA keys; a version needs the thresholds of the previous root and its own; compromised keys lose what they signed; identity revocation lists withdraw certificate serials, signer keys and device keys; delivered by `kTrust` (op 44) to `release::manager` |
 | Channel | TLS 1.3 on networks: the system's OpenSSL (desktop) or Mbed TLS (iOS, Android, and wherever OpenSSL isn't found) behind `tls::auto_backend`; keyed-BLAKE2b MAC on every frame after the handshake. *As built (Stage 5):* the PSK handshake is bound to the TLS connection (RFC 9266 tls-exporter), so the host's certificate needs no PKI; `ca_pem` adds certificate checks (AA4) |
 | Sandbox | non-admin: `string`, `table`, `math`, `utf8`, `coroutine`, `os.time`/`os.clock`; no `io`, `package`, `debug`, `dofile`, `loadfile`, `collectgarbage`, `string.dump`. **Admin: the full standard library** — `io`, `os` (incl. `execute`, `getenv`, `remove`, `rename`), `package.loadlib`, `debug` (decided: an admin key is fully trusted; `package.loadlib` can't load unsigned native code on iOS anyway); *since Stage 13a* only in a `dev` build at hardening `dev`, otherwise admin gets the non-admin libraries. Every role: text-only `load` (binary chunks refused) and RHP's `require` (loaded modules only). *Stage 13a (AL3):* non-admin `setmetatable` refuses `__gc`, pattern matching is charged to the run, `tostring` / `%p` show keyed hashes, changes to the shared library tables are undone by `revert_all` |
 | Limits | unlimited, run to completion by default; cancel always works; optional sticky totals / slicing per host config. *Stage 13a (AL4):* observe identities have their own (`observe_limits`), capped from `lan` up (`kObserveCaps`); `production` caps every role (`kProductionCaps`); per-identity `request_rate`, `pump_requests` and `handlers` |
@@ -673,7 +675,7 @@ stateDiagram-v2
 | Dev sessions | *Stage 13a (AL7):* `host_options::dev_session` in a `dev` build on loopback or local IPC: a generated admin identity and signer, an owner-only connect file for `rhp-cli connect --dev` |
 | Key files | *Stage 13a (AL8):* identity and dev session files atomic and owner-only on every OS; loaders warn when others can read them; `keygen` defaults to patch and keeps the PSK in the file |
 
-> **iOS/App Store:** remote code that changes app behavior is restricted by store policy. Target dev/QA/enterprise builds; compile out with `RHP_ENABLE=OFF` for store builds. Check current Apple guidelines before shipping.
+> **iOS/App Store:** remote code that changes app behavior is restricted by store policy. Target dev/QA/enterprise builds; compile out with `RHP_ENABLE=OFF` for store builds, or use `RHP_HARDENING=production` with signed releases where the store's rules allow it (Stage 13c, AL16, will add disclosure guidance). Check current Apple guidelines before shipping.
 
 ---
 
@@ -728,18 +730,21 @@ RHP/
 │   ├── utils/      fixed_string · type_list · function_traits · scope_guard · spsc_ring · byte_buffer
 │   │               crc32c(.cpp) · siphash · base64 · units · overloaded
 │   ├── core/       error · result · errors_mode · value(.cpp) · convert · ids · log(.cpp) · limits · hardening · role
-│   │               subscription · json(.cpp)
+│   │               scopes · async · listener_table · subscription · json(.cpp)
 │   ├── platform/   os · random(.cpp) · files(.cpp) · process(.cpp)   ← general OS facts
 │   ├── wire/       ops · frame(.cpp) · codec · codec/msgpack(.cpp) · messages(.cpp)
 │   ├── net/        address · endpoint · io_context(.cpp) · link · discovery · loopback/ · tcp/ · websocket/ · udp_reliable/
 │   │               local/ · mdns/ · detail/http                  ← Asio and OS APIs only in their .cpp files
 │   ├── security/   authenticator · key · keyring · psk_keyring · signer · ed25519 · signing_keys · identity_file
-│   │               dev_session(.cpp) · hash · http_auth                 tls/: tls · openssl(.cpp) · mbedtls(.cpp) · auto_backend
+│   │               dev_session(.cpp) · hash · http_auth · key_handle · key_store · passphrase(.cpp) · device_keys
+│   │               known_hosts · operator_cert · certified · identity_revocations · pairing · pairing_cpace
+│   │               tls/: tls · openssl(.cpp) · mbedtls(.cpp) · auto_backend
 │   ├── exec/       executor (pumped, steady_clock) · io_runner (owned_io_thread, zero_threads)
 │   ├── script/     stack · marshal · lib · patch_point · lua_event · ledger · sandbox · stubs · detail/
 │   │               testing · api   puc_lua/: sandbox · schedule · script_events · tasks · lib_proxy · stack · debug
 │   │               testing · lua_internals (.cpp, lua.h never leaks)
 │   ├── test/       runner · options · reporter · report · cli · fake · fake_registry · lua/*.lua (the framework)
+│   ├── release/    manifest · release · trust · store · manager · bytecode · root_of_trust · identity_revocations
 │   ├── event/      events(.cpp) · hub — typed host events, subscriptions, JSON
 │   ├── audit/      sinks(.cpp) — file_sink, ostream_sink
 │   ├── session/    session(.cpp): handshake · seq/ack/nack · MAC · heartbeat · resume · secure_link(.cpp) · admission(.cpp)
@@ -752,11 +757,13 @@ RHP/
 ├── Tests/
 │   ├── unit/          mirrors Src/rhp/* — files named `<thing>_tests.cpp`
 │   ├── integration/   host_client · stage4 · stage5 · stage6 · stage6_fleet · stage7 · stage9 · stage10 · stage11
-│   │                  stage13_hardening · stage13_network · stage13_limits
+│   │                  stage13_hardening · stage13_network · stage13_limits · stage13_device_keys · stage13_certified
+│   │                  stage13_operator_trust · stage13_trust · stage13_scopes
 │   ├── tools/         rhp-cli in-process + as a process against headless_server
 │   ├── package/       a consumer project built against the installed package (find_package / subdirectory)
 │   ├── compile_fail/  bad concepts, duplicate names, hardening below the build — the build must fail naming the concept
-│   ├── fuzz/          frame · envelope · msgpack · sandbox_escape · network (replay drivers / libFuzzer)
+│   ├── fuzz/          frame · envelope · msgpack · sandbox_escape · network · release (replay drivers / libFuzzer)
+│   ├── bench/         rhp_bench: every hot path next to a raw-Lua twin
 │   └── support/       header-only test helpers (`rhp_test/…`)
 ├── Examples/
 │   ├── hello_console/     exec · expose · patch points · load / call / revert, locally
@@ -768,7 +775,9 @@ RHP/
 ├── Tools/
 │   ├── rhp-cli/           REPL and subcommands (replxx, CLI11): keygen · pubkey · sign · connect · run · exec · stubs
 │   │                      blob · watch · events · discover · fleet · release · revoke · rollout · tune · profile · dap · test
+│   │                      ca · cert · root · revoke-identity · trust
 │   ├── android/           run_tests.py — the test executables on a device / emulator over adb
+│   ├── bench/             summarize.py · compare.py — benchmark reports
 │   └── ios/               simctl_run.sh — the ios-sim preset's test runner
 ├── clients/
 │   ├── python/            rhp_client, a pure-Python client
@@ -953,7 +962,8 @@ enum class errc : std::uint16_t {
     kOk, kTransport, kProtocol, kProtocolRevisionMismatch, kAuth, kForbidden, kBadSignature, kIntegrity, kTimeout,
     kCompile, kRuntime, kBudgetExceeded, kMemoryExceeded, kStaleHandle,
     kNotFound, kAlreadyLoaded, kHasDependents, kRevertPartial, kIrreversible, kCancelled, kLimitExceeded, kDisabled,
-    kInvalidArgument, kTypeMismatch, kOutOfRange, kUnloaded
+    kInvalidArgument, kTypeMismatch, kOutOfRange, kUnloaded,
+    kExpired, kRevoked, kSuperseded, kOutOfScope // Stage 10 releases; Stage 13b certificates, claims, roots
 };
 struct error { errc code; std::string message; std::string where; std::string traceback; };
 template <class T> using result = std::expected<T, error>;
@@ -982,15 +992,15 @@ All PRIVATE; none of their headers appear in `Src/rhp/**/*.hpp`.
 | Binding | own concept binder (`Rhp::lib<>`) | — |
 | Async I/O | standalone Asio 1.38.2 (Stage 3) | BSL-1.0 |
 | Payload | own MessagePack codec for `Rhp::value` (`Rhp::wire::msgpack`; msgpack-c dropped at Stage 3, W2) | — |
-| Integrity | CRC32C (own software slicing-by-8; hardware dispatch not implemented) | — |
-| Crypto | Monocypher 4.0.3, compiled as C++ (BLAKE2b handshake + frame MAC from Stage 3; its optional RFC 8032 Ed25519 for script signatures and BLAKE2b-256 audit hashes from Stage 4) | CC0 / BSD-2 |
+| Integrity | CRC32C (own: SSE4.2 or the ARM CRC instructions where the CPU has them, checked at run time on Linux and Android arm64; slicing-by-8 otherwise) | — |
+| Crypto | Monocypher 4.0.3, compiled as C++ (BLAKE2b handshake + frame MAC from Stage 3; its optional RFC 8032 Ed25519 for script signatures and BLAKE2b-256 audit hashes from Stage 4; Argon2i, XChaCha20-Poly1305 and X25519 for sealed keys and CPace from Stage 13b). P-256 (ECDSA with SHA-256) goes through the TLS backend's crypto | CC0 / BSD-2 |
 | CLI | CLI11 2.7.2 (header-only) · replxx `release-0.0.4` (line editing; upstream quiet since 2021, built by our own target) — `rhp-cli` only | BSD-3 · BSD-3 |
 | TLS | the system's OpenSSL ≥ 3.0 (desktop) and Mbed TLS 4.2.0 (release tarball, SHA-256 pinned), both behind one sans-IO engine (no Asio SSL streams) | Apache-2.0 |
 | WebSocket | own RFC 6455 framing on Asio | — |
 | HTTP gateway | own minimal HTTP/1.1 parser on Asio | — |
 | mDNS / DNS-SD | behind `Rhp::net::discovery`: Windows DNS-SD API, Apple `dns_sd`, own multicast responder on Linux/native Android; app NSD bridges can supply a policy (see Stage 6 decisions) | — |
 | Tests | Catch2 v3.16.1 | BSL-1.0 |
-| Bench (planned; not fetched) | Google Benchmark | Apache-2.0 |
+| Bench | Catch2's benchmarks (`rhp_bench`, `RHP_BUILD_BENCH=ON`) | BSL-1.0 |
 | Fetching | CPM.cmake 0.42.3 | MIT |
 
 Apache-2.0 for RHP is compatible with all of the above.
@@ -1008,6 +1018,12 @@ flowchart LR
     S4 --> S5["Stage 5<br/>TLS · reconnect/resume<br/>fuzzing · mobile presets"]
     S5 --> S6["Stage 6<br/>WebSocket · UDP-reliable<br/>HTTP gateway · mDNS · fleet"]
     S6 --> S7["Stage 7<br/>frame callbacks · tasks<br/>script events · remote subscribe<br/>handler errors"]
+    S7 --> S8["Stage 8<br/>find_package · hardening<br/>benchmarks"]
+    S8 --> S9["Stage 9<br/>async bindings<br/>methods on handles"]
+    S9 --> S10["Stage 10<br/>signed releases · rollout"]
+    S10 --> S11["Stage 11<br/>tunables · profiler<br/>debugger · DAP"]
+    S11 --> S12["Stage 12<br/>Rhp::test"]
+    S12 --> S13["Stage 13<br/>hardening levels · device keys<br/>certificates · root of trust · scopes"]
 ```
 
 | Stage | Done when |
@@ -1020,6 +1036,12 @@ flowchart LR
 | 5 ✅ | TLS on all 5 OS presets; kill-the-socket test resumes exactly-once — done: TLS 1.3 through OpenSSL (system) and Mbed TLS 4.2 behind `config<>::tls<>`, the PSK handshake bound to the TLS channel (a TLS-terminating relay fails it), resume after a lost link (200 calls through 20 socket cuts run exactly once, over TLS too, reverse mode too), libFuzzer targets for frame / envelope / msgpack / sandbox_escape (the sandbox fuzzer found and fixed a Lua stack overrun); 398 tests green on MSVC, clang-cl, MSVC-ASan, Linux Clang, Clang ASan+UBSan, Clang TSan; the `RHP_ENABLE=OFF` build (155 tests) is green without Lua, Asio, Monocypher or TLS; Android: `android-arm64` / `android-x64` build with NDK 29 and every suite passed on an arm64 phone (Android 16) through `Tools/android/run_tests.py`; libFuzzer ran ~13 million inputs across the four targets clean; macOS and the iOS simulator are covered by the CI workflow, which couldn't run yet (the account's Actions billing blocks jobs) |
 | 6 ✅ | fleet finds hosts via mDNS and broadcasts a script — the separate-process CLI discovers two hosts and collects both signed results over TLS; transports, gateway, discovery, fleet and tools are implemented. The review follow-ups are finished (§32): HTTP answer proofs and channel binding, host-clock idle expiry, per-request audit peers, a compiled fleet engine on one shared reactor with `load`/`call` broadcasts, and the four earlier runtime defects. Exact checks and platform limits: [Status and TODO](TODO.md). |
 | 7 ✅ | scripts schedule work and talk through events without a client request held open (560 tests green on MSVC, clang-cl, MSVC-ASan, Linux Clang 21, Clang ASan+UBSan, Clang TSan; `RHP_ENABLE=OFF` 169) — done: `rhp.every_frame(s)` / `rhp.after` / `rhp.every` with pause, resume, reschedule and `rhp.timers()`; `rhp.spawn` tasks with status / cancel / join; `rhp.publish` / `rhp.once` / priorities / `rhp.wait_event`; `sandbox` and `host.on_script_event`; `client.on` / `rhp-cli events` subscribe to host events (protocol revision 4); a failing handler is reported and undoes only its own call (`handler_failed`). Decisions §33, checks: [Status and TODO](TODO.md). |
+| 8 ✅ | a stranger can install RHP with `find_package`, the reproduced threading and lifetime defects are fixed with regressions, and the hot paths have benchmarks and the optimizations they justify — done: installed package and consumer test, a generated `<rhp/build_config.hpp>`, the review's threading and lifetime fixes, `rhp_bench` with raw-Lua twins and `cancel_checks`. Decisions §34 |
+| 9 ✅ | a binding can finish later on any thread while its script waits without blocking the game, everything it did stays revertible, and a handle carries its own methods and properties — done: `Rhp::async<T>` / `Rhp::promise<T>`, `lib::method<>` / `lib::property<>`. Decisions §35 |
+| 10 ✅ | a host keeps a signed release across restarts, refuses old, foreign, expired or revoked ones, can watch a candidate and roll it back, and a fleet can spread a release stage by stage and pull it back — done: `Rhp::release`, `release::manager`, protocol revision 5, `fleet::rollout`, `rhp-cli release` / `revoke` / `rollout`. Decisions §36 |
+| 11 ✅ | a developer can see and change a running program's tunables, see where its scripts spend their instructions, and stop one script at a breakpoint while the program keeps running, from rhp-cli and an editor — done: tagged lib variables, a sampling profiler, a debugger, protocol revision 6, `rhp-cli tune` / `profile` / `dap`. Decisions §37 |
+| 12 ✅ | the Lua a user writes against their API can be tested offline like any modern codebase, with exact costs, coverage, snapshots, property tests and fuzzing, from a test executable, `rhp-cli`, ctest and an editor — done: `Rhp::test`, `rhp-cli test`, `rhp_add_lua_tests`, the VS Code extension. Decisions §38 |
+| 13 (13a ✅, 13b ✅ but pairing wired into hosts, 13c open) | one RHP serves a developer's PC, test phones, QA builds and store apps, each with the posture it needs — 13a: hardening levels, sandbox and network fixes, per-identity rates, dev sessions; 13b: key handles and stores, split and tagged key files, device keys, operator certificates and claims, the root of trust and identity revocations, capability scopes, protocol revision 7 (1182 tests on MSVC, every hardening level, clang-cl, ASan, Linux unity / ASan / TSan / production). Decisions §39 |
 
 ---
 
@@ -1470,7 +1492,7 @@ Taken without a questionnaire: the user asked for a native test engine for the L
 
 ## 39. Decision log (round 15, Stage 13)
 
-Taken through a questionnaire (2026-10-27) after five research passes (a code audit, deployment to phones, secure update prior art, channel and authentication cryptography, the Lua sandbox and dev tooling): RHP now runs on one developer PC, against test phones, in internal / QA builds and in store apps driven from an operator's server, and one posture can't fit all four. Threat model: remote attackers, stolen operator keys, malicious script authors and the device owner. Stage 13 lands as three PRs. **13a (AL1–AL9) is implemented** on `stage-13a-hardening`; **13b (AL10–AL13) and 13c (AL14–AL16) are planned**. Per-topic reasoning: [Stage 13 decisions](decisions/stage13-security.md); usage: [Security](guide/security.md).
+Taken through a questionnaire (2026-10-27) after five research passes (a code audit, deployment to phones, secure update prior art, channel and authentication cryptography, the Lua sandbox and dev tooling): RHP now runs on one developer PC, against test phones, in internal / QA builds and in store apps driven from an operator's server, and one posture can't fit all four. Threat model: remote attackers, stolen operator keys, malicious script authors and the device owner. Stage 13 lands in parts. **13a (AL1–AL9) and 13b (AL10–AL13) are implemented** (tag `stage-13`; 13b's pairing has its primitives but isn't wired into hosts, and `--sign-cmd` is open); **13c (AL14–AL16) is planned**. Per-topic reasoning: [Stage 13 decisions](decisions/stage13-security.md); usage: [Security](guide/security.md).
 
 | # | Topic | Decision |
 |---|---|---|
@@ -1483,10 +1505,10 @@ Taken through a questionnaire (2026-10-27) after five research passes (a code au
 | AL7 | Dev sessions | *13a, built.* `host_options::dev_session` (dev build, hardening `dev`, loopback or local IPC, an HTTP gateway on loopback too, `psk_keyring` + `ed25519`): a generated admin identity and signer `dev-session`, connect file `<config>/rhp/dev/<app>.rhpdev` owner-only (`security/dev_session`), removed with the host; `rhp-cli connect --dev [app]`. Phone pairing is 13b. |
 | AL8 | Key files | *13a, built.* `platform::write_private_file` (POSIX `O_EXCL` 0600 + rename, Windows explicit DACL); `identity_file::warnings` and `keyring::warnings()` for files others can read and PSKs that look chosen by a person; `rhp-cli keygen` / the Python client default to patch and keep the PSK out of their output. |
 | AL9 | Release seq caps | *13a, built.* `manager_options::max_seq_jump` (2^32) caps how far a release seq, a revocation list seq and the floors it raises move at once (from the host's clock where nothing was seen); refusals are `kOutOfRange`; restores take stored state as it is. |
-| AL10 | Device keys | *13b, planned.* Key-pair authenticator with host-side allow-lists of client public keys, pinned host keys, hardware keys through a sign callback, `key_store` interface; pairing by QR secret, CPace code, trust on first use, `adb forward`. Protocol revision 7. |
-| AL11 | Operator certificates | *13b, planned.* An offline operator CA, short-lived certificates (principal, max role, apps, environments, scopes, serial); script signatures with claims (expiry, app, environment, audience, nonce); `env=dev\|prod` keys; key custody options. |
-| AL12 | Root of trust | *13b, planned.* A versioned, threshold-signed root document listing release, revocation and operator-CA keys; TUF-style rotation and compromise recovery; revocation of certificates, signers and device keys. |
-| AL13 | Capability scopes | *13b, planned.* `lib:`, `cap:`, `patch:`, `event:`, `op:` patterns (deny wins) per identity and certificate; `Rhp::cap<"...">` tags on bindings. |
+| AL10 | Device keys | *13b, built.* `security::device_keys` (`config<>::auth<>`): host allow-lists of client public keys (`name role alg key [scopes] [env=]`), a host key, the transcript bound to the TLS exporter (TLS required), client `known_hosts` with trust on first use, revoked device keys refused through `manager.identities()`; `key_handle` (Ed25519, P-256, sign callbacks for hardware keys) and `key_store` (files with an Argon2i passphrase seal, DPAPI, Apple Keychain, callbacks). Pairing: CPace over X25519 (draft-21 vectors), `rhp-pair://` links and a one-time secret book are built; `kEnroll` and `rhp-cli pair` are open. Protocol revision 7. |
+| AL11 | Operator certificates | *13b, built.* `rhp-cli ca` / `cert`; `security::certified` checks the chain, validity, `max_role`, critical options, claims (expiry, app, env, audience, one-use nonce, identity) against `host_options::app` / `env` / `host_id`; split `.rhpid` / `.rhpsign` files, `env=dev\|prod` tags with production hosts dropping dev keys and signers; operator keys may be P-256 key handles. `--sign-cmd` is open. |
+| AL12 | Root of trust | *13b, built.* `release::root_of_trust`: threshold-signed versions, rotation needing the old and new root thresholds, compromised keys' lists dropped and their fast-forwards undone on restore, retired keys keeping what they signed, expired roots refused only as updates; identity revocations (serials, signer keys, device keys); `kTrust` (op 44), `rhp-cli root` / `revoke-identity` / `trust push`; operator CAs and revoked serials follow the served root. |
+| AL13 | Capability scopes | *13b, built.* `Rhp::scope_set` (`lib:`, `cap:`, `patch:`, `event:`, `op:`, deny wins) per identity and per certificate (`sandbox::narrow`, per request or module revision); `Rhp::cap<"...">` on bindings (one bit test per call). |
 | AL14 | Production delivery | *13c, planned.* Releases pulled over HTTPS by the app, a signed channel index against freeze attacks, keystore-MAC'd release state; opt-in support sessions through `Tools/rhp-relay`; a `mobile` limits preset, `pause_network()` / `resume_network()`. |
 | AL15 | Operations | *13c, planned.* Hash-chained, forwarded audit; attestation hooks; a signed, persisted remote disable; hybrid ML-KEM with OpenSSL 3.5+. |
 | AL16 | Store tiers | *13c, planned.* dev, store (production hardening: releases and support sessions) and off (`RHP_ENABLE=OFF`); store-policy disclosure guidance in the guide. |

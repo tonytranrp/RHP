@@ -1,6 +1,6 @@
 # Limitations
 
-What RHP does not do, or does only partly, as of Stage 13a. Most of these are deliberate design limits; the rest are open work tracked in [Status and TODO](../TODO.md). Read this before putting RHP in front of anyone you don't fully trust.
+What RHP does not do, or does only partly, as of `stage-13` (Stage 13a and 13b). Most of these are deliberate design limits; the rest are open work tracked in [Status and TODO](../TODO.md). Read this before putting RHP in front of anyone you don't fully trust.
 
 ## Safety and trust
 
@@ -13,7 +13,11 @@ What RHP does not do, or does only partly, as of Stage 13a. Most of these are de
 - **`RHP_ENABLE=OFF` for builds that must not accept code.** Enabled builds need their own deployment and distribution review, `production` hardening included.
 - **Probing and stalled handshakes.** A connection that has sent something keeps its handshake slot until it authenticates or `handshake_timeout_ms` (5 s) closes it; when every slot under a cap (`pending_handshakes`, `handshakes_per_source`) is held that way, new connections, resumes included, are refused until one times out. Silent connections are evicted. A probe can tell a known session id from an unknown one.
 - **Dev session files.** Any process of the same user can read a dev session's connect file and connect as admin while the host runs: development machines only.
-- **Stage 13b and 13c are planned.** Device keys and pairing, operator certificates, a root of trust and capability scopes (13b, protocol revision 7), and production delivery (signed releases pulled over HTTPS, support sessions through a relay, a hash-chained audit, a signed remote disable; 13c) aren't built yet ([decisions](../decisions/stage13-security.md)).
+- **Some work in C isn't checked.** `table.sort` without a comparator, `load` of a huge chunk and `<` between long strings run inside one C call with no limit or cancel check, so one such call holds the pump until it returns ([script README](../../Src/rhp/script/README.md#what-untrusted-code-cant-do-stage-13-al3)). Pattern matching and plain `find` are charged.
+- **Pairing isn't wired into hosts.** The CPace six-digit code, `rhp-pair://` links and the one-time secret book are built and tested, but there is no `kEnroll` op or `rhp-cli pair` yet: device keys are enrolled by adding a line to the host's allow-list ([security](security.md#keys-certificates-and-the-root-of-trust)).
+- **No external signer command.** `rhp-cli --sign-cmd` (a YubiKey, a KMS, Vault) isn't built; hardware keys sign through a `key_handle` callback in your own code. The Apple Keychain key store hasn't run on a device.
+- **PSK-only clients.** The Python client and `rhp-cli fleet` / `rollout` authenticate with pre-shared keys only, not device keys.
+- **Stage 13c is planned.** Production delivery (signed releases pulled over HTTPS with a signed channel index, MAC'd release state, support sessions through a relay, a `mobile` preset with pause / resume, a hash-chained, forwarded audit, attestation hooks, a signed remote disable) isn't built yet ([decisions](../decisions/stage13-security.md)).
 
 ## Scheduling and events
 
@@ -57,8 +61,9 @@ What RHP does not do, or does only partly, as of Stage 13a. Most of these are de
 ## Networking
 
 - **Session state doesn't survive a host restart.** Resume covers a dropped connection within `limits.resume_ms` (6 s by default). A restarted host starts fresh, and identities without pins are reverted when their last session ends.
-- **Protocol revisions must match exactly.** Stages 11, 12 and 13a speak revision 6 (Stage 10 spoke 5, Stages 7 to 9 spoke 4). Older hosts, clients and `rhp-cli` builds are refused at connect time.
-- **Reliable UDP changed its packets in Stage 13a.** Its own packet revision is 2 (the stateless cookie): a Stage 13a listener drops revision 1 packets, so reliable UDP peers from before Stage 13a can't talk to it even though the protocol revision is the same.
+- **Protocol revisions must match exactly.** Stage 13 speaks revision 7 (Stages 11 and 12 spoke 6, Stage 10 spoke 5, Stages 7 to 9 spoke 4). Older hosts, clients, `rhp-cli` builds and Python clients are refused at connect time.
+- **Reliable UDP changed its packets in Stage 13.** Its own packet revision is 2 (the stateless cookie): a Stage 13 listener drops revision 1 packets.
+- **Device keys need TLS.** A device-key handshake over plaintext fails, loopback included.
 - **Custom transports without `address()`.** A link that doesn't report its peer's IP address counts only toward `pending_handshakes` (no per-source cap) and gets no `insecure_lan` plaintext.
 - **`io<zero_threads>` stops the network inside a stuck script.** A zero-thread host whose script is stuck in `pump()` also stops serving the network, so cancel can't reach it.
 - **Mbed TLS is serialized.** Its calls go through one process-wide lock, because its PSA core isn't thread-safe in the default build.
