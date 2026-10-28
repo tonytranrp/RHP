@@ -308,18 +308,44 @@ const void* rhp_lua_topointer(lua_State* L, int idx) {
     return rhp_lua_hide_address(L, lua_topointer(L, idx));
 }
 
+// Libraries. Above dev (RHP_HARDENING, which Rhp::utils defines for whoever links it) no sandbox opens
+// io, package or debug, nor os beyond time and clock (sandbox_impl::open_libraries, decision AL2), so
+// they aren't compiled in: this chooses sources, not behavior. linit.c's table opens nothing for the
+// missing ones (luaL_openlibs leaves their globals nil), and the patched loslib.c keeps only what reads
+// the time (cmake/RhpLua.cmake).
+#if !defined(RHP_HARDENING)
+#error "RHP: RHP_HARDENING is undefined (Rhp::lua links Rhp::utils, which defines it)"
+#elif RHP_HARDENING == 0
+#define RHP_LUA_FULL_STDLIB 1
+#else
+#define RHP_LUA_FULL_STDLIB 0
+#endif
+
 // clang-format off
 #include "rhp_lauxlib.c" // lauxlib.c, tostring showing rhp_lua_topointer (cmake/RhpLua.cmake)
 
 #include "lbaselib.c"
 #include "lcorolib.c"
+#if RHP_LUA_FULL_STDLIB
 #include "ldblib.c"
 #include "liolib.c"
+#endif
 #include "lmathlib.c"
+#if RHP_LUA_FULL_STDLIB
 #include "loadlib.c"
-#include "loslib.c"
+#endif
+#include "rhp_loslib.c" // loslib.c, only what reads the time above dev (cmake/RhpLua.cmake)
 #include "rhp_lstrlib.c" // lstrlib.c with the step counting and %p showing rhp_lua_topointer (cmake/RhpLua.cmake)
 #include "ltablib.c"
 #include "lutf8lib.c"
-#include "linit.c"
 // clang-format on
+
+#if !RHP_LUA_FULL_STDLIB
+static int rhp_lua_left_out(lua_State*) {
+    return 0; // the library's global stays nil
+}
+#define luaopen_package rhp_lua_left_out
+#define luaopen_debug rhp_lua_left_out
+#define luaopen_io rhp_lua_left_out
+#endif
+#include "linit.c"

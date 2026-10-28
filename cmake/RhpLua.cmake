@@ -85,6 +85,24 @@ _rhp_lua_patch(lstrlib.c "lmemfind(s + init, ls - init, p, lp)"
 _rhp_lua_patch(lstrlib.c "          const void *p = lua_topointer(L, arg);\n"
                          "          const void *p = rhp_lua_topointer(L, arg);\n")
 _rhp_lua_write(lstrlib.c)
+# os above dev: only what reads the time (RHP_LUA_FULL_STDLIB, cmake/lua/lua_cxx.cpp). execute, exit,
+# getenv, remove, rename, setlocale and tmpname are left out of the binary, functions and entries.
+_rhp_lua_read(loslib.c)
+_rhp_lua_patch(loslib.c "static int os_execute (lua_State *L) {\n"
+                        "#if RHP_LUA_FULL_STDLIB\nstatic int os_execute (lua_State *L) {\n")
+_rhp_lua_patch(loslib.c "static int os_clock (lua_State *L) {\n"
+                        "#endif\nstatic int os_clock (lua_State *L) {\n")
+_rhp_lua_patch(loslib.c "static int os_setlocale (lua_State *L) {\n"
+                        "#if RHP_LUA_FULL_STDLIB\nstatic int os_setlocale (lua_State *L) {\n")
+_rhp_lua_patch(loslib.c "static const luaL_Reg syslib[] = {\n"
+                        "#endif\nstatic const luaL_Reg syslib[] = {\n")
+_rhp_lua_patch(loslib.c "  {\"execute\",   os_execute},\n"
+                        "#if RHP_LUA_FULL_STDLIB\n  {\"execute\",   os_execute},\n")
+_rhp_lua_patch(loslib.c "  {\"setlocale\", os_setlocale},\n"
+                        "  {\"setlocale\", os_setlocale},\n#endif\n")
+_rhp_lua_patch(loslib.c "  {\"tmpname\",   os_tmpname},\n"
+                        "#if RHP_LUA_FULL_STDLIB\n  {\"tmpname\",   os_tmpname},\n#endif\n")
+_rhp_lua_write(loslib.c)
 _rhp_lua_read(lauxlib.c)
 _rhp_lua_patch(lauxlib.c "lua_pushfstring(L, \"%s: %p\", kind, lua_topointer(L, idx));"
                          "lua_pushfstring(L, \"%s: %p\", kind, rhp_lua_topointer(L, idx));")
