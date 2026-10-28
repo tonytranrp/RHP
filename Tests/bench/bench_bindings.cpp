@@ -2,7 +2,9 @@
 // property), next to the same work as a plain lua_CFunction registered by hand (what RHP's DSL
 // replaces); and an asynchronous binding whose result is already there. "unchecked" runs the same
 // calls in a sandbox with limits.cancel_checks = kNone: the gap between raw and unchecked is what
-// the binding layer costs, the gap between unchecked and rhp what the cancel hook costs.
+// the binding layer costs, the gap between unchecked and rhp what the cancel hook costs. "with a
+// capability" calls a twin of bench.add tagged Rhp::cap<> (one bit test against the sandbox's mask,
+// decision AL13), "scoped" bench.add itself in a sandbox whose scopes deny other capabilities.
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -14,6 +16,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <rhp/core/async.hpp>
+#include <rhp/core/scopes.hpp>
 #include <rhp/script/lib.hpp>
 
 namespace bench_bindings_fixture {
@@ -71,6 +74,8 @@ using bench_lib = Rhp::lib<"bench">                                             
     ::fn<"first_unit", &first_unit>::fn<"unit_number", &unit_number>::method<"number", &unit_number> //
     ::property<"id", &unit_number>                                                                   //
     ::fn<"ready_add", &ready_add>                                                                    //
+    ::fn<"add_capped", &add, Rhp::cap<"bench.write">>                                                //
+    ::fn<"refused", &add, Rhp::cap<"bench.denied">>                                                  //
     ::handle<"tag", tag_id, &tag_alive>::fn<"first_tag", &first_tag>::method<"number", &tag_number>;
 
 // The raw twin of a handle: a userdata holding the id, a methods table as __index; the property
@@ -141,6 +146,7 @@ function M.method() local t = bench.first_tag() local s = 0 for i = 1, 10000 do 
 function M.method_with_properties() local u = bench.first_unit() local s = 0 for i = 1, 10000 do s = s + u:number() end return s end
 function M.property() local u = bench.first_unit() local s = 0 for i = 1, 10000 do s = s + u.id end return s end
 function M.ready() local s = 0 for i = 1, 10000 do s = bench.ready_add(s, 1) end return s end
+function M.capped() local add = bench.add_capped local s = 0 for i = 1, 10000 do s = add(s, 1) end return s end
 return M
 )";
 
@@ -155,6 +161,7 @@ function M.read_var_local() local b = bench local s = 0 for i = 1, 10000 do s = 
 function M.method() local u = bench.first_unit() local s = 0 for i = 1, 10000 do s = s + u:number() end return s end
 function M.property() local u = bench.first_prop_unit() local s = 0 for i = 1, 10000 do s = s + u.id end return s end
 function M.ready() local s = 0 for i = 1, 10000 do s = bench.add(s, 1) end return s end
+function M.capped() local add = bench.add local s = 0 for i = 1, 10000 do s = add(s, 1) end return s end
 return M
 )";
 
@@ -228,6 +235,18 @@ TEST_CASE("bench bindings: Rhp::lib calls next to hand-written C functions", "[b
     BENCHMARK("bindings unchecked: 10k calls of bench.add") {
         return call_unchecked("add");
     };
+    Rhp::script::sandbox_options narrow = rhp_bench::quiet();
+    narrow.scopes = *Rhp::scope_set::parse("!cap:bench.denied");
+    Rhp::script::sandbox scoped{std::move(narrow)};
+    REQUIRE(scoped.install<bench_lib>());
+    const auto scoped_mod = rhp_bench::load(scoped, "bench.calls", kCalls);
+    const auto call_scoped = [&](std::string_view fn) {
+        auto r = scoped.call(scoped_mod, fn);
+        REQUIRE(r);
+        return r->size();
+    };
+    REQUIRE_FALSE(scoped.exec("bench.refused(1, 2)"));
+
     BENCHMARK("bindings raw: 10k calls of bench.add held in a local") {
         return call_raw("add_local");
     };
@@ -236,6 +255,25 @@ TEST_CASE("bench bindings: Rhp::lib calls next to hand-written C functions", "[b
     };
     BENCHMARK("bindings unchecked: 10k calls of bench.add held in a local") {
         return call_unchecked("add_local");
+    };
+    // The twins: bench.add's raw C function for both.
+    BENCHMARK("bindings raw: 10k calls of a binding with a capability") {
+        return call_raw("capped");
+    };
+    BENCHMARK("bindings rhp: 10k calls of a binding with a capability") {
+        return call_box("capped");
+    };
+    BENCHMARK("bindings raw: 10k calls of a binding with a capability in a scoped sandbox") {
+        return call_raw("capped");
+    };
+    BENCHMARK("bindings rhp: 10k calls of a binding with a capability in a scoped sandbox") {
+        return call_scoped("capped");
+    };
+    BENCHMARK("bindings raw: 10k calls of bench.add held in a local in a scoped sandbox") {
+        return call_raw("add_local");
+    };
+    BENCHMARK("bindings rhp: 10k calls of bench.add held in a local in a scoped sandbox") {
+        return call_scoped("add_local");
     };
     BENCHMARK("bindings raw: 10k calls with a string argument") {
         return call_raw("length");
