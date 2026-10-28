@@ -141,6 +141,63 @@ rhp-cli connect --dev my_game     # or --dev alone while one program has a sessi
 
 The [getting started](getting-started.md#first-run-shortcut-a-dev-session) page has a complete program.
 
+## Keys, certificates and the root of trust
+
+Stage 13 (decisions AL10–AL13, [Stage 13](../decisions/stage13-security.md)) separates who may connect from who may sign, and lets operators rotate and revoke without shipping a new build. Protocol revision 7.
+
+**Key files.** `rhp-cli keygen dev` writes two owner-only files: `dev.rhpid` (the connection identity: name and PSK) and `dev.rhpsign` (the signing key). `-i` still takes the `.rhpid`; the `.rhpsign` beside it is read too, and old combined files still load.
+
+- `--env dev|prod` tags both files and the host lines keygen prints (`... env=prod`).
+- `--passphrase` seals the signing key (Argon2i, 64 MiB and 3 passes by default, then XChaCha20-Poly1305); signing commands ask for it on a terminal or read `RHP_PASSPHRASE`.
+- `--device` makes an Ed25519 device key instead of a PSK and prints its allow-list line. The device-key authenticator that uses it is not merged yet.
+
+**Key handles and stores** (`<rhp/security/key_handle.hpp>`, `<rhp/security/key_store.hpp>`). A `key_handle` signs with Ed25519 or P-256 (ECDSA with SHA-256, raw r||s), either in software or through a callback, so a key held by the Secure Enclave, StrongBox, a TPM or a YubiKey never enters RHP. P-256 needs a TLS backend. Keys are stored by a `key_store`:
+
+- `file_key_store`: owner-only files, optionally sealed with a passphrase;
+- `dpapi_key_store`: Windows, the current user;
+- `keychain_key_store`: Apple, not yet run on a device;
+- `callback_key_store`: an app's own store, such as Android Keystore wrapping.
+
+**Operator certificates.** Instead of every host trusting every operator key for ever, hosts trust an operator CA, and operators carry short-lived certificates:
+
+```bash
+rhp-cli ca init ops --env prod             # the CA key (keep it offline); prints the trusted-CA line
+rhp-cli cert issue --ca ops.rhpca --principal alice --key alice.rhpid --hours 8 --max-role patch --app game
+rhp-cli exec "return 1" -c host:7777 -i alice.rhpid --cert-file alice.rhpcert --claim-app game
+```
+
+A host with `config<>::signer<Rhp::security::certified>` checks that a script's signature:
+
+- chains to a trusted CA and is within the certificate's validity;
+- has claims (expiry, app, environment, audience, a one-use nonce, the identity) that match the host: `host_options::app`, `env`, `host_id`, the session's identity;
+- comes from a certificate whose `max_role` covers the request.
+
+A certificate with any critical option is refused, and production refuses dev-tagged CAs and certificates. The audit log names the signer `principal#serial`.
+
+**Root of trust.** A root document lists the release, revocation and operator-CA keys with thresholds. It is threshold-signed by offline root keys and embedded in the app as the anchor of a `release::manager`.
+
+- **Rotation:** `rhp-cli root next` makes version N+1, which needs signatures from both the old and the new root keys.
+- **Compromise:** `--compromise <key>` marks a key compromised. Hosts that receive that root drop what the key signed and take back what it raised.
+- **Delivery:** `rhp-cli trust push host:port root.rhproot` sends roots and identity revocations through `kTrust`. An expired root is refused as an update, but the one a host holds stays in force.
+- **Revocation:** `rhp-cli revoke-identity --serial / --signer / --device ... --sign <revocation key>` revokes certificate serials, script-signer keys and device keys. A host that serves the manager refuses scripts from revoked signers.
+
+**Capability scopes.** A keyring line may carry a fourth column of comma-separated scopes:
+
+```text
+shop  patch  <psk>  lib:game,cap:economy.*,!cap:economy.grant
+watch observe <psk> op:exec,op:subscribe,op:unsubscribe
+```
+
+Patterns are `lib:`, `cap:`, `patch:`, `event:` and `op:` with `*` or `prefix.*`; `!` denies, and deny wins. A kind with no allow patterns allows all of its names, and no column means everything. Here is what each kind gates:
+
+- `lib:` decides which libs are installed for the identity.
+- `cap:` decides which bindings tagged `Rhp::cap<"economy.write">` may be called.
+- `patch:` applies when `rhp.patch` attaches.
+- `event:` covers `rhp.on`, `once` and `wait_event`, and remote subscriptions (so observe can't read C++ events its scopes deny).
+- `op:` covers requests, by their wire name.
+
+The scopes in operator certificates are carried and signed, but not enforced yet.
+
 ## Hardening checklist
 
 - Choose the level: `production` for anything you ship, `lan` for test devices and QA builds, `dev` for your own machine only. One build can serve several hosts: raise each with `config<>::hardening` or `host_options::hardening`.

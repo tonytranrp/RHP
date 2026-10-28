@@ -1,12 +1,12 @@
 # Status and TODO
 
-Last updated 2026-10-27. Stages 0–12 are implemented, merged and tagged (`stage-0` … `stage-12`); Stage 13a is implemented on its branch (`stage-13a-hardening`), and 13b and 13c are planned. Progress is tracked as "Stage N" only (no `v1` / `v2` naming anywhere). Known limits are in [the guide's limitations page](guide/limitations.md).
+Last updated 2026-10-27. Stages 0–12 are implemented, merged and tagged (`stage-0` … `stage-12`). `stage-13` tags the first part of Stage 13: 13a and the first wave of 13b are merged; the rest of 13b and 13c are open. Progress is tracked as "Stage N" only (no `v1` / `v2` naming anywhere). Known limits are in [the guide's limitations page](guide/limitations.md).
 
 ## Stage 13 — security for every deployment
 
 Done when: *one RHP serves a developer's PC, test phones, QA builds and store apps, each with the posture it needs: what a build doesn't allow isn't in it, untrusted code is bounded, and production devices trust only what an offline root of trust allows.* Decisions: [Stage 13](decisions/stage13-security.md), ARCHITECTURE §39 (AL1–AL16). Usage: [Security](guide/security.md).
 
-13a — hardening, sandbox, network, dev (implemented, branch `stage-13a-hardening`):
+13a — hardening, sandbox, network, dev (implemented, merged, in `stage-13`):
 
 - [x] Hardening levels: `RHP_HARDENING=dev|lan|production`, `config<>::hardening`, `host_options::hardening` (strictest wins; a config below the build doesn't compile); dev-only and production-excluded code compiled out (AL1, AL2)
 - [x] Sandbox: no `__gc` for non-admin, pattern matching and plain find charged to the run (`lstrlib.c` patch), observe can't register handlers, hashed addresses, shared library tables restored on `revert_all` (AL3)
@@ -18,12 +18,16 @@ Done when: *one RHP serves a developer's PC, test phones, QA builds and store ap
 - [x] Release and revocation seq caps (`max_seq_jump`) (AL9)
 - [x] Tests: `stage13_hardening_tests`, `stage13_network_tests`, `stage13_limits_tests`, admission / channel-policy / address / hardening / SipHash unit tests, compile-fail fixtures for the levels, every suite at every level; CI's `hardened` job (`production`)
 
-13b — identities and trust (planned, protocol revision 7):
+13b — identities and trust (protocol revision 7; the first wave is merged, in `stage-13`):
 
-- [ ] Device keys and a key-pair authenticator, `key_store` (file, DPAPI, Keychain, app callback), hardware keys through a sign callback; pairing (QR secret, CPace code, trust on first use) (AL10)
-- [ ] Operator CA and short-lived certificates; script signatures with claims; `env=dev|prod` keys; key custody (AL11)
-- [ ] A threshold-signed root of trust with rotation and compromise recovery (AL12)
-- [ ] Capability scopes (`Rhp::cap<>`, scope patterns per identity and certificate) (AL13)
+- [x] Key handles (Ed25519, P-256 in software or through a sign callback for hardware keys), `key_store` (owner-only files with optional Argon2i passphrase, DPAPI, Apple Keychain, app callbacks), split `.rhpid` / `.rhpsign` files tagged `env=dev|prod`, `rhp-cli keygen --env --passphrase --device` (AL10, AL11)
+- [x] Operator CAs and short-lived operator certificates, the `certified` signer with claims (expiry, app, env, audience, nonce, identity), signature contexts on the host, `rhp-cli ca` / `cert` / `--cert-file` (AL11)
+- [x] Root of trust (threshold-signed, rotation with old and new thresholds, compromised keys' lists dropped on restore), identity revocations, `kTrust` (op 44), `rhp-cli root` / `revoke-identity` / `trust push` (AL12)
+- [x] Capability scopes (`Rhp::scope_set`, `Rhp::cap<>`, a keyring scopes column; lib, cap, patch, event and op checks) (AL13)
+- [ ] The device-key authenticator (`security::device_keys`, host allow-lists, client `known_hosts` and trust on first use), and production refusing `env=dev` keys (AL10, AL11)
+- [ ] Pairing: QR one-time secret, CPace six-digit code, trust on first use, `kEnroll`, `rhp-cli pair` (AL10)
+- [ ] Certificates joined up: certificate scopes narrowing requests, operator CAs and serial revocation from the root, operator keys as key handles, `--sign-cmd` (AL11–AL13)
+- Untested so far: the Apple Keychain store, the typed passphrase prompt.
 
 13c — production delivery (planned):
 

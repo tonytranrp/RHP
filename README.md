@@ -98,11 +98,11 @@ Then follow the [first run](Docs/guide/getting-started.md#first-run-host-plus-rh
 ## Use it in your project
 
 ```cmake
-CPMAddPackage(NAME rhp GITHUB_REPOSITORY tonytranrp/RHP GIT_TAG stage-12)   # or a commit sha
+CPMAddPackage(NAME rhp GITHUB_REPOSITORY tonytranrp/RHP GIT_TAG stage-13)   # or a commit sha
 target_link_libraries(my_app PRIVATE Rhp::rhp)
 ```
 
-`add_subdirectory` works the same way. Or install RHP once and use `find_package(rhp CONFIG REQUIRED)` with no version ([installed package](Docs/guide/getting-started.md#installed-package)). Releases are tagged by stage (`stage-0` ... `stage-12`); there are no version numbers. Hosts, clients and `rhp-cli` must speak the same protocol revision (Stages 7 to 9: revision 4; Stage 10: 5; Stages 11, 12 and 13a: 6).
+`add_subdirectory` works the same way. Or install RHP once and use `find_package(rhp CONFIG REQUIRED)` with no version ([installed package](Docs/guide/getting-started.md#installed-package)). Releases are tagged by stage (`stage-0` ... `stage-13`); there are no version numbers. Hosts, clients and `rhp-cli` must speak the same protocol revision (Stages 7 to 9: revision 4; Stage 10: 5; Stages 11 and 12: 6; Stage 13: 7).
 
 ## Documentation
 
@@ -161,9 +161,9 @@ The short list; the full one is [Docs/guide/limitations.md](Docs/guide/limitatio
 | 10 | signed releases, persistence, revocation, staged rollout |
 | 11 | tunables, sampling profiler, debugger, `rhp-cli dap` |
 | 12 | `Rhp::test`: a test engine for Lua scripts |
-| 13 | security for every deployment: 13a hardening levels, sandbox and network fixes, rate limits, dev sessions (implemented on branch `stage-13a-hardening`); 13b identities and trust, 13c production delivery (planned) |
+| 13 | security for every deployment: 13a hardening levels, sandbox and network fixes, rate limits, dev sessions; 13b key handles and stores, operator certificates, a root of trust, capability scopes (`stage-13`); the device-key authenticator, pairing and 13c production delivery are open |
 
-Stages 0–12 are implemented and tagged; Stage 13a is implemented on its branch, 13b and 13c are planned. Open validation and platform items are in [Status and TODO](Docs/TODO.md).
+Stages 0–12 are implemented and tagged; `stage-13` tags the first part of Stage 13 (13a and the first wave of 13b). Open validation and platform items are in [Status and TODO](Docs/TODO.md).
 
 ## Layout
 
