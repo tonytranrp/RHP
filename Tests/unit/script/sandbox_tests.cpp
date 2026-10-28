@@ -2,6 +2,7 @@
 #include <charconv>
 #include <cstddef>
 #include <cstdint>
+#include <format>
 #include <memory_resource>
 #include <optional>
 #include <span>
@@ -41,6 +42,33 @@ namespace sandbox_tests_fixtures {
 inline int g_counter = 0;
 
 using counter_lib = Rhp::lib<"counter">::var<"value", &g_counter>;
+
+// A handle type std::format can't show, and a struct view of a host object: tostring shows hashes.
+struct opaque {
+    int id = 0;
+    bool operator==(const opaque&) const = default;
+};
+
+inline bool opaque_alive(const opaque&) {
+    return true;
+}
+
+inline opaque make_opaque() {
+    return opaque{7};
+}
+
+struct spot {
+    float x = 0;
+};
+
+inline spot g_spot{};
+
+inline spot& the_spot() {
+    return g_spot;
+}
+
+using shown_lib = Rhp::lib<"shown">::handle<"opaque", opaque, &opaque_alive>::fn<"make", &make_opaque> //
+    ::view<"spot", spot>::field<"x", &spot::x>::fn<"where", &the_spot>;
 
 } // namespace sandbox_tests_fixtures
 
@@ -317,6 +345,29 @@ TEST_CASE("tostring and %p show a keyed hash instead of an address", "[script][s
     REQUIRE(described.has_value());
     REQUIRE(described->front().is_string());
     CHECK(shown_number(*described->front().get_if<std::string>()) == shown_number(*shown));
+}
+
+TEST_CASE("handles and struct views show a keyed hash instead of an address", "[script][sandbox][addresses]") {
+    output_capture out;
+    sandbox box = make_box(out, role::kObserve);
+    REQUIRE(box.install<fx::shown_lib>());
+    // A handle shows what %p shows for its userdata (a hash), not the userdata's address.
+    REQUIRE(box.exec("local h = shown.make() print(tostring(h)) print(string.format('%p', h))"));
+    REQUIRE(out.lines.size() == 2);
+    CHECK(out.lines[0].starts_with("opaque: "));
+    CHECK(shown_number(out.lines[0]) == shown_number(out.lines[1]));
+    // A struct view hashes its object's address: two views of it agree, and the address never shows.
+    const auto address = reinterpret_cast<std::uintptr_t>(&fx::g_spot);
+    const auto shown_spot = box.exec<std::string>("return tostring(shown.where())");
+    REQUIRE(shown_spot.has_value());
+    const std::string& first = *shown_spot;
+    CHECK(first.starts_with("spot: "));
+    CHECK(box.exec<std::string>("return tostring(shown.where())") == first);
+    CHECK(shown_number(first) != address);
+    CHECK_FALSE(contains(first, std::format("{}", static_cast<const void*>(&fx::g_spot))));
+    sandbox other = make_box(out, role::kObserve);
+    REQUIRE(other.install<fx::shown_lib>());
+    CHECK(other.exec<std::string>("return tostring(shown.where())") != first); // each sandbox has its own key
 }
 
 TEST_CASE("the value shown for an address is SipHash-2-4 under the sandbox's key", "[script][sandbox][addresses]") {

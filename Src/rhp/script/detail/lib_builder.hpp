@@ -54,7 +54,7 @@ int handle_tostring(lua_State* L) {
     if constexpr (std::formattable<H, char>) {
         s.push_string(h != nullptr ? std::format("{}({})", Entry::name, *h) : std::string{Entry::name});
     } else {
-        s.push_string(std::format("{}: {}", Entry::name, static_cast<const void*>(h)));
+        s.push_string(std::format("{}: {}", Entry::name, s.shown_address(h)));
     }
     return 1;
 }

@@ -23,6 +23,7 @@ int rhp_lua_hook_at_safepoints(lua_State* L);
 void rhp_lua_set_step_function(lua_State* L, int (*f)(lua_State*));
 void rhp_lua_set_address_key(lua_State* L, const char* key);
 const void* rhp_lua_topointer(lua_State* L, int idx);
+const void* rhp_lua_hide_address(lua_State* L, const void* p);
 
 namespace Rhp::script::detail::internals {
 
@@ -47,6 +48,9 @@ void set_address_key(lua_State* L, std::span<const std::byte, 16> key);
 
 // What tostring shows as the address of the value at `index` (nullptr for a value without one).
 [[nodiscard]] const void* shown_pointer(lua_State* L, int index);
+
+// What tostring would show for address `p` (another C++ object's, say): its keyed hash in a sandbox.
+[[nodiscard]] const void* shown_address(lua_State* L, const void* p);
 
 // Instructions L ran since its count hook last fired (or was set), and restarts the countdown so they
 // aren't reported twice. 0 while L's hook doesn't count.

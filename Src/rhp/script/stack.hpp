@@ -137,6 +137,9 @@ public:
     [[nodiscard]] void* push_userdata(std::size_t size, std::string_view key) const;
     // The userdata's memory if the value at `index` carries the metatable registered under `key`.
     [[nodiscard]] void* to_userdata(int index, std::string_view key) const noexcept;
+    // What a __tostring shows for address `p`: the sandbox's keyed hash of it, as tostring and %p
+    // show addresses (p itself in a plain state), so scripts never see where C++ objects live.
+    [[nodiscard]] const void* shown_address(const void* p) const;
     // Methods and properties of the handle type registered under `key` (defined first). The
     // function on top (popped) becomes method `name` (h:name(...)) or property `name` (h.name,
     // read-only: called with the handle; a C function without upvalues runs in __index's own frame,

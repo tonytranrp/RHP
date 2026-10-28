@@ -276,7 +276,8 @@ static ptrdiff_t rhp_lua_steps_due(lua_State* L, ptrdiff_t left) {
 // (rhp_lua_set_address_key), so code learns nothing of the address space layout from them (a C
 // function's address is the program's). Lua never moves an object, so the value stays the object's
 // for its life, and at 64 bits two live objects practically never share one. A state without a key
-// (not a sandbox) shows the address, as upstream does.
+// (not a sandbox) shows the address, as upstream does. rhp_lua_hide_address does the same for any
+// address (a C++ object's, for RHP's own __tostring functions).
 #include <stdint.h> // NOLINT(modernize-deprecated-headers): uint64_t, uintptr_t, like the C sources around
 
 static const char rhp_lua_address_key = 'a'; // its address: the registry key of the key
@@ -286,8 +287,7 @@ void rhp_lua_set_address_key(lua_State* L, const char* key) {
     lua_rawsetp(L, LUA_REGISTRYINDEX, &rhp_lua_address_key);
 }
 
-const void* rhp_lua_topointer(lua_State* L, int idx) {
-    const void* p = lua_topointer(L, idx);
+const void* rhp_lua_hide_address(lua_State* L, const void* p) {
     if (p == NULL) {
         return NULL;
     }
@@ -302,6 +302,10 @@ const void* rhp_lua_topointer(lua_State* L, int idx) {
     Rhp::utils::store_le<uint64_t>(address, (uint64_t)(uintptr_t)p);
     const uint64_t h = Rhp::utils::siphash24(key, address);
     return (const void*)(uintptr_t)(h != 0 ? h : 1); // never NULL: %p shows that as "(null)"
+}
+
+const void* rhp_lua_topointer(lua_State* L, int idx) {
+    return rhp_lua_hide_address(L, lua_topointer(L, idx));
 }
 
 // clang-format off
