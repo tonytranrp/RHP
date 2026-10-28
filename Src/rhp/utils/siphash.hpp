@@ -17,28 +17,28 @@ namespace Rhp::utils {
     const auto rotl = [](std::uint64_t x, int bits) { return (x << bits) | (x >> (64 - bits)); };
     const std::uint64_t k0 = word(key.first<8>());
     const std::uint64_t k1 = word(key.last<8>());
-    std::uint64_t v0 = 0x736f'6d65'7073'6575u ^ k0;
-    std::uint64_t v1 = 0x646f'7261'6e64'6f6du ^ k1;
-    std::uint64_t v2 = 0x6c79'6765'6e65'7261u ^ k0;
-    std::uint64_t v3 = 0x7465'6462'7974'6573u ^ k1;
+    std::uint64_t s0 = 0x736f'6d65'7073'6575u ^ k0;
+    std::uint64_t s1 = 0x646f'7261'6e64'6f6du ^ k1;
+    std::uint64_t s2 = 0x6c79'6765'6e65'7261u ^ k0;
+    std::uint64_t s3 = 0x7465'6462'7974'6573u ^ k1;
     const auto rounds = [&](int n) {
         for (int i = 0; i < n; ++i) {
-            v0 += v1;
-            v1 = rotl(v1, 13) ^ v0;
-            v0 = rotl(v0, 32);
-            v2 += v3;
-            v3 = rotl(v3, 16) ^ v2;
-            v0 += v3;
-            v3 = rotl(v3, 21) ^ v0;
-            v2 += v1;
-            v1 = rotl(v1, 17) ^ v2;
-            v2 = rotl(v2, 32);
+            s0 += s1;
+            s1 = rotl(s1, 13) ^ s0;
+            s0 = rotl(s0, 32);
+            s2 += s3;
+            s3 = rotl(s3, 16) ^ s2;
+            s0 += s3;
+            s3 = rotl(s3, 21) ^ s0;
+            s2 += s1;
+            s1 = rotl(s1, 17) ^ s2;
+            s2 = rotl(s2, 32);
         }
     };
     const auto compress = [&](std::uint64_t m) {
-        v3 ^= m;
+        s3 ^= m;
         rounds(2);
-        v0 ^= m;
+        s0 ^= m;
     };
     const std::size_t whole = data.size() - data.size() % 8;
     for (std::size_t at = 0; at < whole; at += 8) {
@@ -50,9 +50,9 @@ namespace Rhp::utils {
         last |= std::to_integer<std::uint64_t>(data[i]) << (8 * (i - whole));
     }
     compress(last);
-    v2 ^= 0xff;
+    s2 ^= 0xff;
     rounds(4);
-    return v0 ^ v1 ^ v2 ^ v3;
+    return s0 ^ s1 ^ s2 ^ s3;
 }
 
 } // namespace Rhp::utils
