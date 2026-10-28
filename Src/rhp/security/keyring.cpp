@@ -66,7 +66,8 @@ result<keyring> keyring::parse(std::string_view text) {
                 continue;
             }
             if (*tag || scopes) {
-                return fail(errc::kInvalidArgument, std::format("line {}: unexpected '{}'", line.number, extra), "security.keyring");
+                return fail(errc::kInvalidArgument, std::format("line {}: unexpected '{}' (expected `name role base64-key [scopes] [env=dev|prod]`)", line.number, extra),
+                            "security.keyring");
             }
             auto parsed = scope_set::parse(extra);
             if (!parsed) {
