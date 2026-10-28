@@ -42,6 +42,7 @@ void engine::opened(inbound& in) {
     pump_session fresh;
     fresh.identity = in.identity;
     fresh.granted = in.granted;
+    fresh.scopes = in.scopes;
     fresh.peer = in.peer;
     pump_sessions_[in.session] = std::move(fresh);
     auto it = identities_.find(in.identity);
@@ -49,7 +50,7 @@ void engine::opened(inbound& in) {
         identity_runtime rt;
         rt.name = in.identity;
         rt.relay = in.relay;
-        rt.box = std::make_unique<script::sandbox>(sandbox_options_for(in.identity, in.granted));
+        rt.box = std::make_unique<script::sandbox>(sandbox_options_for(in.identity, in.granted, in.scopes));
         for (const auto& [name, fn] : installers_) {
             if (auto ok = fn(*rt.box); !ok) {
                 log(log_level::kWarn, "install {} into identity {}: {}", name, in.identity, ok.error());
@@ -187,9 +188,10 @@ void engine::release(identity_runtime& rt) {
     }
 }
 
-script::sandbox_options engine::sandbox_options_for(const std::string& identity, role granted) {
+script::sandbox_options engine::sandbox_options_for(const std::string& identity, role granted, const scope_set& scopes) {
     script::sandbox_options o;
     o.caller_role = granted;
+    o.scopes = scopes; // libs, caps, patch points and events the identity's scripts may reach
     o.limits = limits_for(granted);
     o.admin_stdlib = setup_.hardening == hardening::kDev;
     o.identity = identity;
@@ -235,7 +237,8 @@ void engine::forward_script_event(const std::string& identity, const script::scr
     }
     for (const session_id s : it->second.sessions) {
         const auto ps = pump_sessions_.find(s);
-        if (ps != pump_sessions_.end() && (ps->second.script_subs.contains(e.name) || ps->second.script_subs.contains("*"))) {
+        if (ps != pump_sessions_.end() && (ps->second.script_subs.contains(e.name) || ps->second.script_subs.contains("*")) &&
+            ps->second.scopes.allows(scope_kind::kEvent, e.name)) {
             send_event(s, ps->second, e.name, e.module, e.args);
         }
     }
@@ -316,6 +319,12 @@ void engine::subscription_request(pump_session& sess, const inbound& in) {
     if (name != "*" && !utils::is_dotted_name(name)) {
         return reply_error(in.session, in.req,
                            make_error(errc::kInvalidArgument, std::format("'{}' is not an event name (dotted lowercase, or *)", name), std::string{op}));
+    }
+    // The identity's scopes (decision AL13): C++ lua_events and script events alike. "*" (every
+    // script event of the identity) is delivered only for the names they allow (forward_script_event).
+    if (in.code == wire::op::kSubscribe && name != "*" && !sess.scopes.allows(scope_kind::kEvent, name)) {
+        return reply_error(in.session, in.req,
+                           make_error(errc::kForbidden, std::format("{} needs scope event:{}, {} lacks it", op, name, sess.identity), std::string{op}));
     }
     script::detail::event_state* state = nullptr;
     if (name != "*") {

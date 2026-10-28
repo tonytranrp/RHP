@@ -251,6 +251,12 @@ void engine::request(const inbound& in, const error* refused) {
                                std::string{wire::to_string(in.code)}));
         return;
     }
+    if (!sess.scopes.allows(scope_kind::kOp, wire::to_string(in.code))) { // decision AL13
+        reply_error(in.session, in.req,
+                    make_error(errc::kForbidden, std::format("{} needs scope op:{}, {} lacks it", in.code, in.code, sess.identity),
+                               std::string{wire::to_string(in.code)}));
+        return;
+    }
     const auto it = identities_.find(sess.identity);
     if (it == identities_.end()) {
         return;

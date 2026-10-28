@@ -15,6 +15,7 @@
 #include <rhp/core/limits.hpp>
 #include <rhp/core/result.hpp>
 #include <rhp/core/role.hpp>
+#include <rhp/core/scopes.hpp>
 #include <rhp/core/value.hpp>
 #include <rhp/net/io_context.hpp>
 #include <rhp/net/link.hpp>
@@ -144,6 +145,8 @@ public:
     [[nodiscard]] bool usable() const noexcept { return state_ == state::kReady || state_ == state::kDetached; }
     [[nodiscard]] const std::string& identity() const noexcept { return identity_; }
     [[nodiscard]] role granted() const noexcept { return granted_; }
+    // Host side: what the identity may reach (its authenticator's grant; decision AL13).
+    [[nodiscard]] const scope_set& scopes() const noexcept { return scopes_; }
     [[nodiscard]] const std::string& peer() const noexcept { return peer_; }
     [[nodiscard]] const std::string& peer_platform() const noexcept { return peer_platform_; }
     // Host side: the key name the client's hello offered (the `key` field of its authenticator's
@@ -258,6 +261,7 @@ private:
     session_id id_;
     std::string identity_;
     role granted_ = role::kObserve;
+    scope_set scopes_;
     std::string peer_;
     std::string peer_platform_;
     std::string offered_key_;

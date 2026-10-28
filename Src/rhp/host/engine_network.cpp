@@ -89,7 +89,7 @@ result<security::http_grant> engine::authorize(const security::http_proof& reque
 session_id engine::open_http(const security::http_grant& grant, const http_peer& peer) {
     const session_id id = session_ids_.next();
     http_sessions_[id] = grant.identity;
-    register_session(id, grant.identity, grant.granted, peer.address, "http", peer.tls);
+    register_session(id, grant.identity, grant.granted, grant.scopes, peer.address, "http", peer.tls);
     return id;
 }
 
@@ -304,7 +304,7 @@ void engine::on_ready(session::session& s) {
     it->second.ready = true;
     it->second.identity = s.identity();
     log(log_level::kInfo, "session {} from {} ({}) authenticated as {} ({})", s.id(), s.peer(), s.peer_platform(), s.identity(), s.granted());
-    register_session(s.id(), s.identity(), s.granted(), s.peer(), s.peer_platform(), s.encrypted());
+    register_session(s.id(), s.identity(), s.granted(), s.scopes(), s.peer(), s.peer_platform(), s.encrypted());
 }
 
 void engine::on_message(session::session& s, wire::op code, value body) {
@@ -398,7 +398,8 @@ void engine::on_closed(session::session& s, const error& why) {
     }
 }
 
-void engine::register_session(session_id id, const std::string& identity, role granted, std::string peer, std::string platform, bool tls) {
+void engine::register_session(session_id id, const std::string& identity, role granted, const scope_set& scopes, std::string peer, std::string platform,
+                              bool tls) {
     io_identity& ident = io_identities_[identity];
     if (ident.relay == nullptr) {
         ident.relay = std::make_shared<cancel_relay>();
@@ -410,6 +411,7 @@ void engine::register_session(session_id id, const std::string& identity, role g
     in.session = id;
     in.identity = identity;
     in.granted = granted;
+    in.scopes = scopes;
     in.relay = ident.relay;
     in.peer = std::move(peer);
     in.platform = std::move(platform);

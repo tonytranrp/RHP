@@ -14,6 +14,7 @@ rhp_add_test_suite(rhp_integration_tests
         stage13_network_tests.cpp
         stage13_limits_tests.cpp
         stage13_certified_tests.cpp
+        stage13_scopes_tests.cpp
     LINKS
         Rhp::host
         Rhp::client

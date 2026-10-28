@@ -155,6 +155,7 @@ struct inbound {
     session_id session;
     std::string identity; // kAuthFailed: the key name the peer tried, if it named one
     role granted = role::kObserve;
+    scope_set scopes;     // kOpened: what the identity may reach (decision AL13)
     std::shared_ptr<cancel_relay> relay;
     wire::op code = wire::op::kExec;
     std::uint64_t req = 0;
@@ -361,6 +362,7 @@ private:
     struct pump_session {
         std::string identity;
         role granted = role::kObserve;
+        scope_set scopes; // checked per request (op:) and per subscription (event:)
         std::string peer;
         std::optional<blob_transfer> blob;
         std::uint64_t failed_transfer = 0;               // later chunks of a refused blob are refused quietly
@@ -454,7 +456,7 @@ private:
     // A session authenticated (a native one, or an HTTP identity's logical one): counted in its
     // identity (whose cancel relay it gets) and handed to pump(), which gives the identity a sandbox
     // if it has none.
-    void register_session(session_id id, const std::string& identity, role granted, std::string peer, std::string platform, bool tls);
+    void register_session(session_id id, const std::string& identity, role granted, const scope_set& scopes, std::string peer, std::string platform, bool tls);
 
     // An authenticated session ended: nobody is left to answer it, so what it runs, has suspended or
     // queued is stopped, and pump() hears of it.
@@ -510,7 +512,7 @@ private:
     // every module they require), revert and unload the rest, keep the sandbox.
     void release(identity_runtime& rt);
 
-    script::sandbox_options sandbox_options_for(const std::string& identity, role granted);
+    script::sandbox_options sandbox_options_for(const std::string& identity, role granted, const scope_set& scopes);
 
     // A script's handler failed: a host event, a log line and an output line for its sessions.
     void handler_failed(const std::string& identity, const script::handler_failure& f);

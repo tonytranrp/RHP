@@ -393,6 +393,7 @@ void session::host_response(const value& body) {
     }
     identity_ = std::move(grant->identity);
     granted_ = grant->granted;
+    scopes_ = std::move(grant->scopes);
     outgoing_ = std::move(grant->outgoing);
     incoming_ = std::move(grant->incoming);
     const wire::welcome welcome{id_, identity_, granted_, opts_.limits.heartbeat_ms, opts_.platform};
