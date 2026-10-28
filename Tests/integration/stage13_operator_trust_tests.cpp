@@ -63,7 +63,8 @@ struct world {
         Rhp::security::operator_cert_fields f;
         f.serial = serial;
         f.principal = "alice";
-        const auto pub = op.public_key().bytes();
+        const auto pub_key = op.public_key(); // bytes() views it: keep it alive
+        const auto pub = pub_key.bytes();
         f.pub.assign(pub.begin(), pub.end());
         f.not_before = now - 60;
         f.not_after = now + 3600;
@@ -71,7 +72,8 @@ struct world {
     }
 
     static Rhp::release::root_key root_key_of(const signer& s) {
-        const auto pub = s.secret.public_key().bytes();
+        const auto pub_key = s.secret.public_key(); // bytes() views it: keep it alive
+        const auto pub = pub_key.bytes();
         return Rhp::release::root_key{"ed25519", std::vector<std::byte>(pub.begin(), pub.end()), {}};
     }
 

@@ -272,7 +272,8 @@ TEST_CASE("certified: the certificate's scopes reach the context", "[security][c
     operator_cert_fields f;
     f.serial = 5;
     f.principal = "alice";
-    const auto pub = k.op.public_key().bytes();
+    const auto pub_key = k.op.public_key(); // bytes() views it: keep it alive
+    const auto pub = pub_key.bytes();
     f.pub.assign(pub.begin(), pub.end());
     f.not_before = now - 60;
     f.not_after = now + 3600;
