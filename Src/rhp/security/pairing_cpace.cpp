@@ -158,7 +158,7 @@ result<std::array<std::byte, cpace::kMessageSize>> cpace_generator(std::span<con
     return generator(prs, ci, sid);
 }
 
-result<cpace> cpace::start(cpace_role role, const inputs& in) {
+result<cpace> cpace::start(cpace_role role, const cpace_inputs& in) {
     auto scalar = platform::random_array<kScalarSize>();
     if (!scalar) {
         return std::unexpected{std::move(scalar).error()};
@@ -168,7 +168,7 @@ result<cpace> cpace::start(cpace_role role, const inputs& in) {
     return run;
 }
 
-result<cpace> cpace::start(cpace_role role, const inputs& in, std::span<const std::byte, kScalarSize> scalar) {
+result<cpace> cpace::start(cpace_role role, const cpace_inputs& in, std::span<const std::byte, kScalarSize> scalar) {
     auto secret = key::from_bytes(scalar);
     if (!secret) {
         return std::unexpected{std::move(secret).error()};

@@ -88,6 +88,7 @@ if(RHP_ENABLE)
             security/tls_tests.cpp
             security/http_auth_tests.cpp
             security/pairing_cpace_tests.cpp
+            security/pairing_tests.cpp
         LINKS
             Rhp::security
             Rhp::tls
@@ -145,6 +146,7 @@ else()
         SOURCES
             security/key_file_tests.cpp
             security/key_tests.cpp
+            security/pairing_tests.cpp
             security/signing_disabled_tests.cpp
         LINKS
             Rhp::security

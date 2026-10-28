@@ -21,11 +21,11 @@ result<std::array<std::byte, cpace::kMessageSize>> cpace_generator(std::span<con
     return fail(errc::kDisabled, kDisabledMessage, kCpaceWhere);
 }
 
-result<cpace> cpace::start(cpace_role, const inputs&) {
+result<cpace> cpace::start(cpace_role, const cpace_inputs&) {
     return fail(errc::kDisabled, kDisabledMessage, kCpaceWhere);
 }
 
-result<cpace> cpace::start(cpace_role, const inputs&, std::span<const std::byte, kScalarSize>) {
+result<cpace> cpace::start(cpace_role, const cpace_inputs&, std::span<const std::byte, kScalarSize>) {
     return fail(errc::kDisabled, kDisabledMessage, kCpaceWhere);
 }
 

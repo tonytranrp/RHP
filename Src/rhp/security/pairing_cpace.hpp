@@ -37,6 +37,14 @@ enum class cpace_role : unsigned char {
     kResponder  // B: answers with Yb (the host)
 };
 
+// What both sides must agree on, and this side's associated data. Copied by cpace::start().
+struct cpace_inputs {
+    std::span<const std::byte> prs{}; // the password-related string
+    std::span<const std::byte> ci{};  // channel identifier: never sent, may be secret
+    std::span<const std::byte> sid{}; // session identifier: unique per run when there is one
+    std::span<const std::byte> ad{};  // this side's ADa (initiator) or ADb (responder)
+};
+
 class cpace {
 public:
     static constexpr std::size_t kMessageSize = 32; // Ya, Yb: an X25519 u-coordinate
@@ -44,18 +52,10 @@ public:
     static constexpr std::size_t kIskSize = 64;
     static constexpr std::string_view kDsi = "CPace255";
 
-    // What both sides must agree on, and this side's associated data. Copied by start().
-    struct inputs {
-        std::span<const std::byte> prs{}; // the password-related string
-        std::span<const std::byte> ci{};  // channel identifier: never sent, may be secret
-        std::span<const std::byte> sid{}; // session identifier: unique per run when there is one
-        std::span<const std::byte> ad{};  // this side's ADa (initiator) or ADb (responder)
-    };
-
     // A run with a fresh random scalar.
-    [[nodiscard]] static result<cpace> start(cpace_role role, const inputs& in);
+    [[nodiscard]] static result<cpace> start(cpace_role role, const cpace_inputs& in);
     // A run with a given scalar (the draft's test vectors). Never reuse a scalar.
-    [[nodiscard]] static result<cpace> start(cpace_role role, const inputs& in, std::span<const std::byte, kScalarSize> scalar);
+    [[nodiscard]] static result<cpace> start(cpace_role role, const cpace_inputs& in, std::span<const std::byte, kScalarSize> scalar);
 
     cpace(const cpace&) = delete;
     cpace& operator=(const cpace&) = delete;
