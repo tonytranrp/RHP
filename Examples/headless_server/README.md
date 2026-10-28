@@ -16,9 +16,10 @@ The executables are `build/windows-msvc/Examples/headless_server/Debug/headless_
 
 ```bash
 rhp-cli keygen dev --role patch
+rhp-cli pubkey -i dev.rhpid --role patch
 ```
 
-Put the two printed lines (the text after each colon) into `keys.txt` and `signers.pub`, then:
+`keygen` writes `dev.rhpid` and shows the keyring line with `<psk from dev.rhpid>` in place of the key; `pubkey` prints both lines whole. Put the first into `keys.txt` and the second into `signers.pub` (keep `keys.txt` readable by you alone: the server prints a `warning:` otherwise), then:
 
 ```bash
 headless_server --port 7777 --keys keys.txt --signers signers.pub --audit audit.log --blobs incoming
@@ -39,13 +40,13 @@ rhp-cli connect --dev my_game
 |---|---|
 | `--host H --port N` | listen address (default `127.0.0.1`; port 0 = any free port). `--port` is required unless `--reverse` is given |
 | `--keys FILE` | keyring: `name role base64-psk` per line (required without `--dev-session`) |
-| `--dev-session APP` | a dev session (dev builds, listening on loopback): the host makes an admin identity for this run and writes a connect file, so `rhp-cli connect --dev APP` needs no key files |
+| `--dev-session APP` | a dev session (dev builds, listening on loopback): the host makes an admin identity for this run and writes a connect file, so `rhp-cli connect --dev APP` needs no key files ([dev sessions](../../Docs/guide/security.md#dev-sessions)) |
 | `--signers FILE` | trusted signers: `name base64-public-key` per line; without it only observe sessions can run code |
 | `--audit FILE` | every host event as a JSON line |
 | `--blobs DIR` | blob sink `files` (admin): pushed files land in `DIR` (file name only) |
 | `--reverse H:N` | reverse mode: dial a listening `rhp-cli ... --listen` instead of listening |
 | `--port-file FILE`, `--stop-file FILE`, `--seconds N` | for scripts and tests: write the bound port, stop when a file appears, stop after N seconds |
-| `--insecure-lan` | plaintext to and from non-loopback addresses (no TLS) |
+| `--insecure-lan` | plaintext with local (private and link-local) peers (no TLS); refused by a build above hardening `dev` |
 | `--tls` | TLS on every connection, loopback included (non-loopback peers always get it) |
 | `--cert FILE --key FILE` | the host's certificate chain and key (PEM); default: an ephemeral self-signed certificate |
 | `--ca FILE` | reverse mode: check the listening `rhp-cli`'s certificate against this CA |
@@ -56,7 +57,7 @@ rhp-cli connect --dev my_game
 | `--releases DIR` | serve signed releases (`rhp-cli release apply`, `rollout`) and keep what runs in `DIR` across restarts (needs `--release-signers`) |
 | `--release-signers FILE` | who may sign releases: `name base64-public-key [pattern,...]` per line |
 
-Some sessions to try, with a second identity made by `rhp-cli keygen admin` (role admin) added to both files:
+Some sessions to try, with a second identity made by `rhp-cli keygen admin --role admin` added to both files (`rhp-cli pubkey -i admin.rhpid --role admin` prints its lines):
 
 ```bash
 rhp-cli run low_grav.lua -c 127.0.0.1:7777 -i admin.rhpid --pin --name low_grav   # stays after rhp-cli exits

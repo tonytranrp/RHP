@@ -178,7 +178,7 @@ if(RHP_ENABLE)
             script/yield_tests.cpp
         LINKS
             Rhp::script
-            Rhp::lua # testing_tests compares the meter with a plain Lua state
+            Rhp::lua # a plain Lua state to compare with: the meter (testing_tests), pattern matching (limits_tests), shown addresses (sandbox_tests)
     )
     # x64 MSVC: the yield tests again in an executable linked /CETCOMPAT. On a CPU with CET the
     # process runs with a shadow stack, where coroutine yields must throw instead of jumping.

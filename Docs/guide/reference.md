@@ -10,8 +10,8 @@ Result-bearing operations report `Rhp::error { code, message, where, traceback }
 | `protocol` | malformed frame or message |
 | `protocol_revision_mismatch` | host and client speak different protocol revisions (currently 6) |
 | `auth` | authentication/MAC/resume-proof failure, or a certificate verification failure when certificate checks are enabled |
-| `forbidden` | role too low, pinned module, or a non-loopback address without TLS or `insecure_lan` |
-| `bad_signature` | script unsigned (and not observe), unknown signer, or signature does not verify |
+| `forbidden` | role too low, pinned module, a non-loopback address without TLS or `insecure_lan`, a plaintext peer `insecure_lan` doesn't count as local, a metatable with `__gc` outside admin's full standard library, a handler builtin (`rhp.timer`, `rhp.on`, `rhp.spawn`, ...) called by observe; a [hardening](security.md#hardening-levels) refusal: `insecure_lan`, `unsigned_scripts` or a dev session the level doesn't allow (from `port()`), the debugger, `advertise()` or an unbound gateway at `production` |
+| `bad_signature` | script unsigned (and not observe, or observe at hardening `production`), unknown signer, or signature does not verify |
 | `integrity` | checksum failure during handshake; a ready session normally nacks a bad CRC; bad MACs are `auth` |
 | `timeout` | connect, request or `wall_ms` exceeded |
 | `compile` | Lua syntax error |
@@ -25,11 +25,11 @@ Result-bearing operations report `Rhp::error { code, message, where, traceback }
 | `revert_partial` | some effects could not be undone |
 | `irreversible` | reported effect that cannot be undone |
 | `cancelled` | stopped by `cancel` |
-| `limit_exceeded` | a size, count or rate limit was hit: a frame or reply over `max_frame`, a peer leaving 64 MiB unacknowledged, MessagePack depth / element limits, too many pending handshakes, requests in flight or backlog, a blob over `max_blob`, a reply too large to cache, HTTP header / replay limits, too many arguments for a coroutine or `rhp.spawn` |
-| `disabled` | `RHP_ENABLE=OFF` or `set_enabled(false)` |
+| `limit_exceeded` | a size, count or rate limit was hit: a frame or reply over `max_frame`, a peer leaving 64 MiB unacknowledged, MessagePack depth / element limits, too many pending handshakes (in total or from one source), requests in flight or backlog, an identity over `request_rate` (HTTP 429) or with 4096 requests waiting for `pump_requests`, a sandbox at its `handlers` cap, a blob over `max_blob`, a reply too large to cache, HTTP header / replay limits, too many arguments for a coroutine or `rhp.spawn` |
+| `disabled` | `RHP_ENABLE=OFF`, or `set_enabled(false)` (the reason a closed session reports, and every call's answer while the host is off) |
 | `invalid_argument` | bad call arguments, or writing a read-only member |
 | `type_mismatch` | value cannot convert to the requested type |
-| `out_of_range` | a number does not fit the target integer type, or is not an integer |
+| `out_of_range` | a number does not fit the target integer type, or is not an integer; a release or revocation seq that moves more than `max_seq_jump` at once |
 | `unloaded` | touched a force-unloaded module |
 | `expired` | a release outside its validity window (`not_before` / `not_after`, with the manager's clock skew) |
 | `revoked` | a release (or the key that signed it) a revocation list withdrew, or one quarantined on this host |
@@ -47,7 +47,7 @@ All carry `time`. `peer` is the transport address of the client. In JSON the `gr
 | `session_opened` | a client authenticated | `session`, `identity`, `granted` role, `peer`, `platform`, `tls` |
 | `session_resumed` | a session continued on a new link | `session`, `identity`, `peer`, `tls` |
 | `session_closed` | an authenticated session ended | `session`, `identity`, `peer`, `reason` |
-| `auth_failed` | a connection never authenticated | `peer`, `reason` |
+| `auth_failed` | a connection never authenticated (refused by admission, the handshake or a disabled host) | `peer`, `reason`, `key` (the key name it tried, from its hello or HTTP proof; empty when none) |
 | `script_executed` | any request that runs code or changes state, refused ones included | `session`, `identity`, `granted`, `peer` (per request; the HTTP caller over the gateway), `op`, `module`, `hash` (BLAKE2b-256 hex), `signer`, `outcome` |
 | `blob_received` | a blob finished or was refused | `session`, `identity`, `sink`, `file`, `size`, `hash`, `outcome` |
 | `identity_reverted` | an identity's last session ended and the host reverted it | `identity`, `undone`, `irreversible`, `failures`, `pinned` |
@@ -58,7 +58,7 @@ All carry `time`. `peer` is the transport address of the client. In JSON the `gr
 
 ## Operations
 
-`exec`, `load`, `call`, `reload`, `rollback`, `checkpoint`, `revert_to`, `revert`, `unload`, `pin`, `unpin`, `revert_all`, `list`, `status`, `describe`, `blob`, `subscribe` / `unsubscribe` (`client.on` / `off`), `release_apply` / `release_confirm` / `release_deactivate` (admin), `release_status` / `revoke` ([releases](releases.md)), `tunables` / `profile` (observe), `tune` / `debug` (patch) ([tools](tools.md)), and `cancel` (client side). Minimum roles are in [Host and client](host-and-client.md#rhpclientcfg).
+`exec`, `load`, `call`, `reload`, `rollback`, `checkpoint`, `revert_to`, `revert`, `unload`, `pin`, `unpin`, `revert_all`, `list`, `status`, `describe`, `blob`, `subscribe` / `unsubscribe` (`client.on` / `off`), `release_apply` / `release_confirm` / `release_deactivate` (admin), `release_status` / `revoke` ([releases](releases.md)), `tunables` / `profile` (observe), `tune` / `debug` (patch; `debug` is refused at hardening `production`) ([tools](tools.md)), and `cancel` (client side). Minimum roles are in [Host and client](host-and-client.md#rhpclientcfg).
 
 ## Wire protocol
 
@@ -75,6 +75,8 @@ Details: [`../decisions/wire-format.md`](../decisions/wire-format.md) and `Docs/
 
 ## What the Lua sandbox contains
 
+The admin column applies in a `dev` build at hardening `dev` (`sandbox_options::admin_stdlib`); otherwise admin gets the observe / patch libraries and keeps its admin rights ([hardening levels](security.md#hardening-levels)).
+
 | | observe / patch | admin |
 |---|---|---|
 | Libraries | `string`, `table`, `math`, `utf8`, `coroutine`, `os.time`, `os.clock` | full standard library: `io`, `os` (incl. `execute`, `getenv`, `remove`, `rename`), `package.loadlib`, `debug` |
@@ -82,6 +84,11 @@ Details: [`../decisions/wire-format.md`](../decisions/wire-format.md) and `Docs/
 | RHP `exec` / `load` / `reload` source | text only | text only |
 | `string.dump` | removed | available (admin's full standard library) |
 | Other capabilities | no `dofile`, `loadfile`, `collectgarbage`, `io`, `package`, `debug` | available; admin file/native-library operations are outside RHP's text-source loader and undo model |
+| Finalizers | `setmetatable` refuses a metatable with `__gc` (`forbidden`); `<close>` variables work | available |
+| `tostring`, `print`, `%p` of tables, functions, userdata | a SipHash-2-4 of the address under the sandbox's own key, not the address | same |
+| Pattern matching, plain `find` | steps charged to `limits.instructions`; `wall_ms` and cancels stop them | same |
+| Changes to `string`, `table`, `math`, `utf8`, `coroutine`, `os`, `rhp` (and `rhp.buffer`) and the string metatable | undone by the identity's full revert (`revert_all`, or its last session's end when it pinned nothing); unloading one module doesn't undo them | same |
+| Handlers (`rhp.timer`, `after`, `every`, `every_frame(s)`, `on`, `once`, `on_error`, `spawn`) | observe: refused (`forbidden`); patch: allowed | allowed |
 | `require` | host loader: only loaded modules of the same identity | same |
 | `rhp.api()` | the installed libs, events and patch points as a value tree (the `rhp-cli test --api-from` source) | same |
 | Test sandboxes (`Rhp::test`) | the scratch environment also holds the test framework (`describe`, `it`, `assert`, `expect`, `spy`, `stub`, `mock`, `match`, `test`, `gen`, `fake`) and the `__rhp_test` bridge; modules don't see them; `os.time` / `os.clock` follow the fake clock | same |
@@ -91,7 +98,7 @@ Details: [`../decisions/wire-format.md`](../decisions/wire-format.md) and `Docs/
 | Thread | Does |
 |---|---|
 | application/sandbox thread | Lua execution, owned patch layers, blob sinks and host events; same-thread `lua_event` fire may deliver synchronously outside pump |
-| RHP network thread | sockets, TLS, framing, acks, resume, cancel relays |
+| RHP network thread | sockets, TLS, admission of unauthenticated connections, framing, acks, resume, cancel relays, the network side of `set_enabled` |
 | any thread | `cancel()`, `set_enabled()`, `sessions()`, `identities()`, `port()`, `gateway_port()`, hitting a patch point (runs the C++ default if its layer belongs to another thread), subscribing to events |
 
 Request/reply traffic crosses two SPSC rings and cancel relays; queued Lua events and pending client results use mutex-protected state. Async callbacks normally complete on the client I/O thread, or immediately on the registration thread if already ready. Owned-I/O and zero-thread operation have different progress rules; see [host/client threading](host-and-client.md#thread-rules). Details: [`../decisions/threading-model.md`](../decisions/threading-model.md).

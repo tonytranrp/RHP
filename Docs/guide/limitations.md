@@ -1,15 +1,19 @@
 # Limitations
 
-What RHP does not do, or does only partly, as of Stage 12. Most of these are deliberate design limits; the rest are open work tracked in [Status and TODO](../TODO.md). Read this before putting RHP in front of anyone you don't fully trust.
+What RHP does not do, or does only partly, as of Stage 13a. Most of these are deliberate design limits; the rest are open work tracked in [Status and TODO](../TODO.md). Read this before putting RHP in front of anyone you don't fully trust.
 
 ## Safety and trust
 
-- **RHP runs remote code on purpose.** Authentication, roles, script signing and TLS decide *who* may run code. They don't make the code harmless. An `admin` identity has Lua's full standard library (files, `os.execute`, native libraries) and is fully trusted.
-- **No execution budgets by default.** Scripts run to completion unless the host sets `limits.instructions`, `wall_ms`, `memory` and optionally `slice_us`. Set them on any host that accepts keys that aren't fully trusted; they apply to every identity of the host ([configuration](configuration.md#limits)).
+- **RHP runs remote code on purpose.** Authentication, roles, script signing and TLS decide *who* may run code. They don't make the code harmless. In a `dev` build at hardening `dev` an `admin` identity has Lua's full standard library (files, `os.execute`, native libraries) and is fully trusted; `lan` and `production` give admin patch's libraries ([hardening levels](security.md#hardening-levels)).
+- **No execution budgets by default in `dev`.** Scripts run to completion unless the host sets `limits.instructions`, `wall_ms`, `memory` and optionally `slice_us` ([configuration](configuration.md#limits)). Set them on any host that accepts keys that aren't fully trusted. Observe identities can have their own (`host_options::observe_limits`); from `lan` up they are capped by `Rhp::kObserveCaps`, and `production` caps every role by `Rhp::kProductionCaps`.
+- **Caps bound one identity, not the host.** Under `kObserveCaps` an observe identity can still take 40 ms of each `pump()` (2 runs of 20 ms) and 200 ms of each second (10 runs), and every observe key gets as much.
+- **Rate limits are off by default.** `limits.request_rate` and `pump_requests` are 0 (unlimited) unless you set them or a cap does. They count per identity: the sessions of one key share them, and a key that reconnects after its last session ended starts with a full bucket. `pump_requests` delays requests rather than dropping them (up to 4096 waiting per identity), and a client's own timeout doesn't stop one that already waits. A blob takes one `request_rate` token, but each of its chunks counts toward `pump_requests`.
 - **Long C++ calls can't be interrupted.** The instruction count hook only runs between Lua instructions. A bound function that blocks blocks the pump.
 - **Undo covers recorded effects only.** RHP undoes variable writes, patches, timers, subscriptions, tasks and functions you gave an inverse (`Rhp::undo<>`). Functions marked `Rhp::irreversible` are reported, untagged functions are assumed pure, and admin standard-library side effects (files written, processes started) are not undone.
-- **`RHP_ENABLE=OFF` for builds that must not accept code.** Enabled builds need their own deployment and distribution review.
-- **Probing.** Idle unauthenticated connections count against `pending_handshakes` and can delay a resume. A probe can tell a known session id from an unknown one.
+- **`RHP_ENABLE=OFF` for builds that must not accept code.** Enabled builds need their own deployment and distribution review, `production` hardening included.
+- **Probing and stalled handshakes.** A connection that has sent something keeps its handshake slot until it authenticates or `handshake_timeout_ms` (5 s) closes it; when every slot under a cap (`pending_handshakes`, `handshakes_per_source`) is held that way, new connections, resumes included, are refused until one times out. Silent connections are evicted. A probe can tell a known session id from an unknown one.
+- **Dev session files.** Any process of the same user can read a dev session's connect file and connect as admin while the host runs: development machines only.
+- **Stage 13b and 13c are planned.** Device keys and pairing, operator certificates, a root of trust and capability scopes (13b, protocol revision 7), and production delivery (signed releases pulled over HTTPS, support sessions through a relay, a hash-chained audit, a signed remote disable; 13c) aren't built yet ([decisions](../decisions/stage13-security.md)).
 
 ## Scheduling and events
 
@@ -25,12 +29,18 @@ What RHP does not do, or does only partly, as of Stage 12. Most of these are del
 - **No event stream over HTTP.** The HTTP gateway serves requests only. Use a native session (`client.on`, `rhp-cli events`) to watch events.
 - **Tasks take the sandbox's error policy.** `rhp.spawn` has no options table. There is no `task:join(timeout)` yet.
 - **Patch handlers always fault their module on error.** The handler error policy covers timers, frame callbacks, event handlers and tasks only.
+- **Observe can't schedule.** Observe identities can't register timers, frame callbacks, subscriptions or tasks (`rhp.timer`, `after`, `every`, `every_frame(s)`, `on`, `once`, `on_error`, `spawn`); what ends with the request (`rhp.wait`, `sleep`, `next_frame`, `wait_event`, `publish`) still works.
+- **`limits.handlers` counts what is registered.** Timers, frame callbacks, subscriptions and unfinished tasks count; requests waiting in `rhp.wait_event` don't.
+- **A disabled host still runs pinned patches.** `set_enabled(false)` stops every script `pump()` would run, but a patch held by a pinned module or a release channel still runs when game code hits its point.
 
 ## Binding and scripting
 
 - **Lua 5.5 only, one script engine.** There is no second engine and no `config<>::engine<>` slot yet.
 - **No class binding.** `Rhp::lib` binds functions, variables and opaque handles with methods and properties. Handles must be trivially copyable, equality-comparable, non-arithmetic value types. There is no inheritance.
-- **Text chunks only.** Binary Lua chunks are always refused, for every role and every client operation. The one exception is C++: `sandbox::exec_cached` loads bytecode it compiled itself from a trusted source (the test framework). Non-admin roles have no `io`, `os` (except `time` / `clock`), `debug`, `package`, `dofile`, `loadfile` or `collectgarbage`.
+- **Text chunks only.** Binary Lua chunks are always refused, for every role and every client operation. The one exception is C++: `sandbox::exec_cached` loads bytecode it compiled itself from a trusted source (the test framework). Non-admin roles (and admin outside a `dev` build at hardening `dev`) have no `io`, `os` (except `time` / `clock`), `debug`, `package`, `dofile`, `loadfile` or `collectgarbage`.
+- **No finalizers below admin's full library.** `setmetatable` refuses a metatable with a `__gc` field (Lua runs finalizers where no limit or cancel reaches); `<close>` variables work.
+- **Addresses are hashed.** `tostring`, `print` and `%p` show a keyed hash of an object's address, stable while the object lives; don't parse it. Table iteration order still depends on addresses.
+- **Pattern costs aren't metered.** Pattern matching and plain `find` charge their steps to `limits.instructions`, but the test runner's exact meter and the profiler don't see them.
 - **`require` finds loaded modules only.** It looks in the same identity's loaded modules, never the file system.
 - **Single-threaded sandboxes.** Lua runs only on the thread that calls `pump()` (or the operation). Patch points hit from another thread run the C++ default.
 
@@ -47,7 +57,9 @@ What RHP does not do, or does only partly, as of Stage 12. Most of these are del
 ## Networking
 
 - **Session state doesn't survive a host restart.** Resume covers a dropped connection within `limits.resume_ms` (6 s by default). A restarted host starts fresh, and identities without pins are reverted when their last session ends.
-- **Protocol revisions must match exactly.** Stages 11 and 12 speak revision 6 (Stage 10 spoke 5, Stages 7 to 9 spoke 4). Older hosts, clients and `rhp-cli` builds are refused at connect time.
+- **Protocol revisions must match exactly.** Stages 11, 12 and 13a speak revision 6 (Stage 10 spoke 5, Stages 7 to 9 spoke 4). Older hosts, clients and `rhp-cli` builds are refused at connect time.
+- **Reliable UDP changed its packets in Stage 13a.** Its own packet revision is 2 (the stateless cookie): a Stage 13a listener drops revision 1 packets, so reliable UDP peers from before Stage 13a can't talk to it even though the protocol revision is the same.
+- **Custom transports without `address()`.** A link that doesn't report its peer's IP address counts only toward `pending_handshakes` (no per-source cap) and gets no `insecure_lan` plaintext.
 - **`io<zero_threads>` stops the network inside a stuck script.** A zero-thread host whose script is stuck in `pump()` also stops serving the network, so cancel can't reach it.
 - **Mbed TLS is serialized.** Its calls go through one process-wide lock, because its PSA core isn't thread-safe in the default build.
 - **Fleet broadcasts cover `exec`, `load` and `call`.** `rhp-cli fleet` runs `exec` only.

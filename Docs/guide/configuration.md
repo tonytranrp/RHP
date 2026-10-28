@@ -18,7 +18,8 @@ using my_cfg = Rhp::config<>::transport<Rhp::net::tcp> // Rhp::net::transport
     ::errors<Rhp::errors::expected>                    // Rhp::errors::mode
     ::clock<Rhp::exec::steady_clock>                   // Rhp::exec::clock_source
     ::logger<Rhp::core::stderr_logger>                 // Rhp::core::logger
-    ::discovery<Rhp::net::mdns>;                       // Rhp::net::discovery
+    ::discovery<Rhp::net::mdns>                        // Rhp::net::discovery
+    ::hardening<Rhp::kBuildHardening>;                 // value: the build's level or stricter
 
 // Use my_cfg as Rhp::host<my_cfg> / Rhp::client<my_cfg>'s template argument.
 ```
@@ -53,10 +54,10 @@ using cfg = Rhp::config<>::clock<game_clock>::logger<engine_log>;
 | Slot | Default | Alternatives and what they do |
 |---|---|---|
 | `transport` | `net::tcp` | `net::loopback` (in-process, for tests and embedding), `net::websocket`, `net::udp_reliable`, `net::local_ipc` ([networking](networking.md#transports)), or your own ([guide](connecting.md#your-own-transport)) |
-| `tls` | `tls::auto_backend` | `tls::openssl`, `tls::mbedtls`, or `tls::none` (no TLS; non-loopback endpoints then need `insecure_lan`) |
+| `tls` | `tls::auto_backend` | `tls::openssl`, `tls::mbedtls`, or `tls::none` (no TLS; non-loopback endpoints then need `insecure_lan`, which only hardening `dev` allows) |
 | `codec` | `wire::msgpack` | any `wire::codec` (RHP's own MessagePack codec by default) |
 | `auth` | `security::psk_keyring` | any `security::authenticator` (mutual PSK challenge-response by default) |
-| `signer` | `security::ed25519` | `security::unsigned_scripts`: the explicit, typed opt-out of script signing |
+| `signer` | `security::ed25519` | `security::unsigned_scripts`: the explicit, typed opt-out of script signing (a host at hardening `dev` only) |
 | `executor` | `exec::pumped` | Lua runs on the thread that calls `pump()` (the only executor today) |
 | `io` | `exec::owned_io_thread` | `exec::zero_threads`: no threads; `pump()` and blocking client calls poll the network |
 | `limits` | `Rhp::limits{}` | see below |
@@ -64,6 +65,7 @@ using cfg = Rhp::config<>::clock<game_clock>::logger<engine_log>;
 | `clock` | `exec::steady_clock` | your game clock or a manual clock, for `rhp.sleep` / `rhp.timer` and deterministic tests |
 | `logger` | `core::stderr_logger` (`set_min_level()`, through `host.logger()`) | `core::null_logger`, or any type with `enabled(level)` and `write(level, msg)` (spdlog, logcat, os_log, your engine log); `log_level::kOff` silences it |
 | `discovery` | `net::mdns` | `net::no_discovery`, explicit `net::mdns_wire`, or a type satisfying `net::discovery`; advertisement remains an explicit runtime opt-in |
+| `hardening` | `Rhp::kBuildHardening` (CMake `RHP_HARDENING`) | `Rhp::hardening::kLan` or `kProduction` makes a host or client stricter than the build; a level below the build's doesn't compile. A host takes `signer<unsigned_scripts>` only at `kDev` ([hardening levels](security.md#hardening-levels)) |
 
 ### Which `io` policy?
 
@@ -94,8 +96,10 @@ using cfg = Rhp::config<>::limits<Rhp::limits{.instructions = 50'000'000, .memor
 | `max_frame` | 4 MiB | maximum payload bytes, excluding the header and trailers; 0 permits only empty payloads |
 | `max_blob` | 256 MiB | largest blob per `on_blob` sink (0 = only empty blobs) |
 | `revisions` | 8 | source revisions kept, including the current one; at least one is retained even when this is 0 |
-| `pending_handshakes` | 64 | host's unauthenticated connection cap; 0 refuses new handshakes |
-| `handshake_timeout_ms` | 5000 | initial-handshake timeout; 0 disables it. Resume attempts have a separate bounded timeout |
+| `pending_handshakes` | 64 | unauthenticated connections a host (or a listening client) keeps at once; a new one takes the place of the oldest that has sent nothing, else it is refused; 0 refuses every connection |
+| `handshakes_per_source` | 8 | unauthenticated connections at once from one IPv4 address or IPv6 /64, with the same eviction; links without an IP address count only toward `pending_handshakes`; 0 = no per-source cap |
+| `handshake_timeout_ms` | 5000 | initial-handshake timeout (also an HTTP gateway request's head); 0 disables it. Resume attempts have a separate bounded timeout |
+| `first_byte_ms` | 2000 | an unauthenticated connection that has sent nothing by then is closed (a TLS ClientHello counts); 0 disables it |
 | `heartbeat_ms` | 2000 | ping/retry interval; 0 disables the heartbeat timer |
 | `heartbeat_misses` | 3 | quiet heartbeat intervals before link loss; 0 disables this dead-peer threshold |
 | `resume_ms` | 6000 | how long a lost link may come back; 0 = a lost link ends the session |
@@ -105,8 +109,19 @@ using cfg = Rhp::config<>::limits<Rhp::limits{.instructions = 50'000'000, .memor
 | `cancel_checks` | `kRequests` | which runs check for `cancel()` (an `Rhp::cancel_scope`): `kRequests` (exec / load / call / reload and tasks, plus the main thread while an operation runs), `kEverything` (handler calls too: timers, frame callbacks, events, patch handlers hit from game code), `kNone` (nothing: a cancel stops a request only before it starts or resumes). The instruction, wall-time and slice limits arm the check for every run whatever this says |
 | `event_queue` | 65536 | events queued per sandbox for its next pump (C++ fires from other threads, `rhp.publish`); more are dropped and counted; 0 = unlimited |
 | `async_ms` | 0 | script time an asynchronous binding (`Rhp::async<T>`) may take before the waiting script gets `kTimeout`; a result that arrives later is taken back through the binding's `undo<G>`; 0 = no limit |
+| `request_rate` | 0 | requests per second per identity, in bursts of up to as many (a token bucket on the host's clock): one that finds no token is answered `kLimitExceeded` (HTTP 429), audited and not run; a blob takes one token, for its first chunk; 0 = no limit |
+| `pump_requests` | 0 | requests started per identity per `pump()`: identities take turns, one request each per round, and the rest wait in arrival order for the next pump (up to 4096 per identity, then `kLimitExceeded`); 0 = every one that arrived |
+| `handlers` | 0 | timers, frame callbacks, subscriptions and unfinished tasks alive at once per sandbox; registering one more raises `kLimitExceeded`, named after the builtin; 0 = no limit |
 
-Instruction, memory and execution-time limits default to unlimited; slicing defaults to off. Set budgets on the **host** that executes code. Instruction/time checks run at hook boundaries and cannot preempt C++ bindings. The hook counts at safe points while it is armed (each loop iteration is charged its body's length, each Lua call 1), so loop-heavy code runs at about raw Lua speed under it, and `instructions` is a bound counted that way rather than an exact instruction count (the test runner's meter and `measure` stay exact). `cancel_checks` confines it to requests by default: a host only ever cancels requests, and a handler that may loop forever needs a limit anyway. `kNone` buys only the last few percent ([performance](performance.md#the-cancel-hook-limitscancel_checks)). A host pump can dispatch several operations and pump several identity sandboxes, so `slice_us` is not a hard bound on the whole application frame.
+Instruction, memory and execution-time limits default to unlimited; slicing defaults to off. Set budgets on the **host** that executes code. Instruction/time checks run at hook boundaries and cannot preempt C++ bindings. The hook counts at safe points while it is armed (each loop iteration is charged its body's length, each Lua call 1), so loop-heavy code runs at about raw Lua speed under it, and `instructions` is a bound counted that way rather than an exact instruction count (the test runner's meter and `measure` stay exact). Pattern matching (`string.find`, `match`, `gmatch`, `gsub`) and plain `find` run in C, so they charge their steps to the run instead (a step is about an instruction, checked every 4096 steps): `instructions`, `wall_ms` and `cancel()` stop a pattern that backtracks for minutes. `cancel_checks` confines the hook to requests by default: a host only ever cancels requests, and a handler that may loop forever needs a limit anyway. `kNone` buys only the last few percent ([performance](performance.md#the-cancel-hook-limitscancel_checks)). A host pump can dispatch several operations and pump several identity sandboxes, so `slice_us` is not a hard bound on the whole application frame.
+
+A host gives observe identities limits of their own (`host_options::observe_limits`, default the config's) and caps them from hardening `lan` up; at `production` it caps every role's ([hardening levels](security.md#hardening-levels)). `request_rate` and `pump_requests` are the host's (a standalone sandbox ignores them); `handlers` applies wherever the sandbox runs.
+
+```cpp
+// A host shared with people who poll it: at most 20 requests a second and 4 runs a pump per key,
+// and no more than 256 timers, callbacks, subscriptions and tasks per sandbox.
+using rated_cfg = Rhp::config<>::limits<Rhp::limits{.request_rate = 20, .pump_requests = 4, .handlers = 256}>;
+```
 
 ```cpp
 // A game host: budgets for every identity, 2 ms slices, handlers stoppable from a watchdog too.
@@ -115,7 +130,7 @@ using game_cfg = Rhp::config<>::limits<Rhp::limits{
     .cancel_checks = Rhp::cancel_scope::kEverything, .async_ms = 5'000}>;
 ```
 
-`executor<pumped>` is the only implemented script execution model; accepting a custom marker does not install a scheduler. `clock` affects script sleep/timer time on a host or local sandbox, and the HTTP listener's idle expiry (`pump()` samples the clock's offset from `steady_clock` for the network thread, so the clock is only ever called on the pump thread); not protocol deadlines, heartbeats or HTTP proof freshness. The client logger/clock slots do not currently supply engine callbacks. `engine<>` is not a slot (Lua 5.5 is the only engine).
+`executor<pumped>` is the only implemented script execution model; accepting a custom marker does not install a scheduler. `clock` affects script sleep/timer time on a host or local sandbox, `limits.request_rate`'s token bucket, and the HTTP listener's idle expiry (`pump()` samples the clock's offset from `steady_clock` for the network thread, so the clock is only ever called on the pump thread); not protocol deadlines, heartbeats or HTTP proof freshness. The client logger/clock slots do not currently supply engine callbacks. `engine<>` is not a slot (Lua 5.5 is the only engine).
 
 ## Option structs
 
@@ -124,6 +139,7 @@ Passed to the constructors at run time: [`Rhp::host_options`](host-and-client.md
 | `sandbox_options` field | What |
 |---|---|
 | `caller_role` | role of the identity (local default: patch) |
+| `admin_stdlib` | true: an admin sandbox opens Lua's whole standard library (`io`, `os`, `package`, `debug`, `collectgarbage`, `string.dump`, `dofile`, `loadfile`, finalizers). Only a `dev` build has that code; false, or another build, gives admin patch's libraries. A host sets it from its hardening level |
 | `limits` | as above |
 | `memory` | a `std::pmr::memory_resource*` for every Lua allocation; when null, the C heap (`malloc` / `realloc` / `free`, as Lua's own allocator: blocks grow in place). Blocks up to 128 bytes come from the sandbox's small-object slabs, carved from 64 KiB regions taken from the same place. `limits.memory` applies either way, in the bytes Lua asked for |
 | `gc` | Lua's collector mode from the start: `gc_mode::kIncremental` (default, a new `lua_State`'s) or `kGenerational`; `sandbox::set_gc_mode` switches it later. See [performance](performance.md#garbage-collection) |
@@ -146,6 +162,7 @@ The supplied memory resource must outlive the sandbox. It covers Lua allocations
 | Option | Default | What |
 |---|---|---|
 | `RHP_ENABLE` | ON | OFF compiles hosts to inert stubs (`kDisabled`), patch points to direct calls, and skips Lua, Asio and Monocypher entirely |
+| `RHP_HARDENING` | `dev` | the most this build allows: `dev` (everything), `lan` or `production` ([hardening levels](security.md#hardening-levels)). Written into `<rhp/build_config.hpp>` (`Rhp::kBuildHardening`); what the level doesn't allow is compiled out, and a config or host may only raise it |
 | `RHP_BUILD_TESTS` | top-level only | build `Tests/` |
 | `RHP_BUILD_EXAMPLES` | top-level only | build `Examples/` |
 | `RHP_BUILD_TOOLS` | top-level only | build `Tools/` (`rhp-cli`; needs `RHP_ENABLE=ON`) |
