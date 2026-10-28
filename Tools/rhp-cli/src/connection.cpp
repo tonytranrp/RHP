@@ -223,15 +223,26 @@ std::optional<connected> open_connection(const connection_options& o, replxx::Re
             (*out)(style::kError, std::format("{}", cert.error()));
             return std::nullopt;
         }
-        if (!id->signing || !std::ranges::equal(id->signing->public_key().bytes(), cert->fields.pub)) {
-            (*out)(style::kError, std::format("certificate {} names another key than {}'s signing_key", cert->id(), o.identity));
+        // The key the certificate names: the identity's signing key, or its device key (Ed25519 or
+        // P-256: `cert issue --device`).
+        std::optional<Rhp::security::key_handle> operator_key;
+        if (id->signing && cert->fields.alg == Rhp::security::kAlgEd25519 && std::ranges::equal(id->signing->public_key().bytes(), cert->fields.pub)) {
+            auto handle = Rhp::security::key_handle::from_ed25519(*id->signing);
+            if (handle) {
+                operator_key = std::move(*handle);
+            }
+        } else if (auto device = id->device_key(); device && Rhp::security::to_string(device->alg()) == cert->fields.alg && std::ranges::equal(device->public_key(), cert->fields.pub)) {
+            operator_key = std::move(*device);
+        }
+        if (!operator_key) {
+            (*out)(style::kError, std::format("certificate {} names another key than {}'s signing_key or device key", cert->id(), o.identity));
             return std::nullopt;
         }
         options.app = o.claim_app;
         options.env = o.claim_env;
         options.audience = o.claim_audience;
         (*out)(style::kInfo, std::format("signing as {} (max role {})", cert->id(), cert->fields.max_role));
-        signer.emplace(Rhp::security::certified::key{*id->signing, std::move(*cert)});
+        signer.emplace(Rhp::security::certified::key{std::move(*operator_key), std::move(*cert)});
     } else if (auto key = id->signer_key()) {
         signer.emplace(std::move(*key));
     }

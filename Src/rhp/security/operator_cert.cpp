@@ -24,6 +24,7 @@
 #include <rhp/security/detail/text.hpp>
 #include <rhp/security/ed25519.hpp>
 #include <rhp/security/key.hpp>
+#include <rhp/security/key_handle.hpp>
 #include <rhp/security/operator_cert.hpp>
 #include <rhp/utils/scope_guard.hpp>
 
@@ -126,9 +127,16 @@ std::string operator_cert::id() const {
 
 result<ed25519_public_key> operator_cert::operator_key() const {
     if (fields.alg != kAlgEd25519) {
-        return invalid(std::format("certificate {} has a '{}' key; this build checks ed25519 keys", id(), fields.alg));
+        return invalid(std::format("certificate {} has a '{}' key, not an ed25519 one", id(), fields.alg));
     }
     return ed25519_public_key::from_bytes(fields.pub);
+}
+
+result<key_algorithm> operator_cert::key_alg() const {
+    if (const auto alg = parse_key_algorithm(fields.alg)) {
+        return *alg;
+    }
+    return invalid(std::format("certificate {} has a key of unknown algorithm '{}'", id(), fields.alg));
 }
 
 result<void> validate_operator_cert(const operator_cert_fields& f) {
@@ -138,11 +146,12 @@ result<void> validate_operator_cert(const operator_cert_fields& f) {
     if (f.principal.empty() || f.principal.size() > kMaxCertText) {
         return invalid(std::format("a certificate needs a principal of 1 to {} bytes", kMaxCertText));
     }
-    if (f.alg != kAlgEd25519) {
-        return invalid(std::format("unknown key algorithm '{}' (ed25519)", f.alg));
+    const auto alg = parse_key_algorithm(f.alg);
+    if (!alg) {
+        return invalid(std::format("unknown key algorithm '{}' (ed25519 or p256)", f.alg));
     }
-    if (f.pub.size() != ed25519_public_key::kSize) {
-        return invalid(std::format("an ed25519 public key is {} bytes, got {}", ed25519_public_key::kSize, f.pub.size()));
+    if (const std::size_t size = key_handle::public_key_size(*alg); f.pub.size() != size || (*alg == key_algorithm::kP256 && f.pub.front() != std::byte{0x04})) {
+        return invalid(std::format("a {} public key is {} bytes{}, got {}", f.alg, size, *alg == key_algorithm::kP256 ? " (0x04 || X || Y)" : "", f.pub.size()));
     }
     if (!fits(f.not_before) || !fits(f.not_after) || f.not_after <= f.not_before) {
         return invalid("not_after must come after not_before (Unix seconds below 2^63)");

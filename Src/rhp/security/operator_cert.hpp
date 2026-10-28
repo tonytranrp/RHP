@@ -12,6 +12,7 @@
 #include <rhp/core/result.hpp>
 #include <rhp/core/role.hpp>
 #include <rhp/security/ed25519.hpp>
+#include <rhp/security/key_handle.hpp>
 
 namespace Rhp::security {
 
@@ -27,8 +28,10 @@ namespace Rhp::security {
 // and a .rhpcert file holds it base64-armored.
 inline constexpr std::string_view kOperatorCertDomain{"rhp/opcert\0", 11};
 
-// Key algorithms by name (the format names them, so P-256 keys can follow).
+// Operator key algorithms by name (key_algorithm's names): Ed25519, or ECDSA P-256 for a key a
+// hardware store holds (a key_handle); P-256 needs the TLS backend's crypto to sign and verify.
 inline constexpr std::string_view kAlgEd25519 = "ed25519";
+inline constexpr std::string_view kAlgP256 = "p256";
 
 // Environment tags of CAs, certificates and claims.
 inline constexpr std::string_view kEnvDev = "dev";
@@ -43,8 +46,8 @@ inline constexpr std::size_t kMaxCertBytes = 16 * 1024;
 struct operator_cert_fields {
     std::uint64_t serial = 0;     // unique per CA: what revocations name
     std::string principal;        // the operator ("alice@ops")
-    std::string alg{kAlgEd25519}; // the operator key's algorithm
-    std::vector<std::byte> pub;   // the operator's public key (32 bytes for ed25519)
+    std::string alg{kAlgEd25519}; // the operator key's algorithm: "ed25519" or "p256"
+    std::vector<std::byte> pub;   // the operator's public key (32 bytes for ed25519, 65 SEC1 uncompressed for p256)
     std::uint64_t not_before = 0;
     std::uint64_t not_after = 0;
     role max_role = role::kPatch;    // the most a script signed under it may run as
@@ -67,11 +70,13 @@ struct operator_cert {
 
     // "<principal>#<serial>": how audit records name it.
     [[nodiscard]] std::string id() const;
-    // The operator's key; kInvalidArgument for another algorithm.
+    // The operator's key as an Ed25519 key; kInvalidArgument for another algorithm.
     [[nodiscard]] result<ed25519_public_key> operator_key() const;
+    // The operator key's algorithm (fields.alg); kInvalidArgument for an unknown one.
+    [[nodiscard]] result<key_algorithm> key_alg() const;
 };
 
-// Checks fields on their own: a serial, a principal, a known alg and key size, not_before <
+// Checks fields on their own: a serial, a principal, a known alg and key size, one scope pattern per entry, not_before <
 // not_after, envs "dev" / "prod", list and text sizes.
 [[nodiscard]] result<void> validate_operator_cert(const operator_cert_fields& f);
 

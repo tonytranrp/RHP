@@ -36,7 +36,7 @@ Hosts with `signer<Rhp::security::certified>` trust an offline operator CA inste
 | Subcommand | Example |
 |---|---|
 | `ca init <name> [-o file] [--env dev\|prod] [--force]` | `rhp-cli ca init ops --env prod` (writes `ops.rhpca` owner-only, prints the host's trusted-CA line `name base64-key [env=...]`) |
-| `cert issue --ca file --principal p --key k [--hours N] [--max-role r] [--app a]... [--env e]... [--scope s]... [--serial n] [-o file]` | `rhp-cli cert issue --ca ops.rhpca --principal alice --key alice.rhpid --hours 8 --max-role patch --app game` (`--key`: an identity file or a `[name] base64-public-key` line; only the public half is used; a dev CA's certificates are tagged `env=dev`) |
+| `cert issue --ca file --principal p --key k [--device] [--hours N] [--max-role r] [--app a]... [--env e]... [--scope s]... [--serial n] [-o file]` | `rhp-cli cert issue --ca ops.rhpca --principal alice --key alice.rhpid --hours 8 --max-role patch --app game` (`--key`: an identity file (its Ed25519 signing key; with `--device` its device key, Ed25519 or P-256, so a hardware-held key can be an operator key) or a `[name] [p256] base64-public-key` line; only the public half is used; a dev CA's certificates are tagged `env=dev`; each `--scope` is one pattern, and hosts narrow what the certificate signs to it). `--cert-file` signs with whichever of the identity's keys the certificate names |
 | `cert show <file> [--trusted cas]` | `rhp-cli cert show alice.rhpcert --trusted rhp_operator_cas.txt` (prints the fields; with `--trusted`, checks it now) |
 
 ## Connection options

@@ -52,6 +52,7 @@
 #include <rhp/security/ed25519.hpp>
 #include <rhp/security/identity_file.hpp>
 #include <rhp/security/key.hpp>
+#include <rhp/security/key_handle.hpp>
 #include <rhp/security/keyring.hpp>
 #include <rhp/security/operator_cert.hpp>
 #include <rhp/security/psk_keyring.hpp>
@@ -770,6 +771,37 @@ TEST_CASE("rhp-cli: ca init and cert issue make what a certified host takes", "[
     CHECK(run(std::format("{} exec \"return 1\" {} > {} 2>&1", kCli, who, q(dir.path / "plain.txt"))) == 1);
     CHECK(dir.read("plain.txt").find("bad_signature") != std::string::npos);
     pump.request_stop();
+}
+
+TEST_CASE("rhp-cli: cert issue --device certifies a P-256 device key", "[cli][process][certified]") {
+    auto device = Rhp::security::identity_file::generate_device("hsm", Rhp::security::key_algorithm::kP256);
+    if (!device) {
+        CHECK(device.error().code == Rhp::errc::kDisabled);
+        SKIP("no TLS backend: P-256 reports kDisabled");
+    }
+    scratch_dir dir;
+    const auto id = dir.path / "hsm.rhpid";
+    REQUIRE(device->save(id.string()));
+    REQUIRE(run(std::format("{} ca init ops --out {} > {}", kCli, q(dir.path / "ops.rhpca"), q(dir.path / "ca.txt"))) == 0);
+    const auto cert = dir.path / "hsm.rhpcert";
+    REQUIRE(run(std::format("{} cert issue --ca {} --principal hsm --key {} --device --serial 9 -o {} > {}", kCli, q(dir.path / "ops.rhpca"), q(id), q(cert),
+                            q(dir.path / "issue.txt"))) == 0);
+    const auto issued = Rhp::security::load_operator_cert(cert.string());
+    REQUIRE(issued);
+    CHECK(issued->fields.alg == "p256");
+    const auto handle = device->device_key();
+    REQUIRE(handle);
+    CHECK(std::ranges::equal(issued->fields.pub, handle->public_key()));
+    // Without --device the identity's Ed25519 signing key is certified.
+    REQUIRE(run(std::format("{} cert issue --ca {} --principal hsm --key {} --serial 10 -o {} > {}", kCli, q(dir.path / "ops.rhpca"), q(id), q(dir.path / "sign.rhpcert"),
+                            q(dir.path / "issue2.txt"))) == 0);
+    CHECK(Rhp::security::load_operator_cert((dir.path / "sign.rhpcert").string())->fields.alg == "ed25519");
+    // The public key as text, named p256.
+    const std::string text = "hsm p256 " + Rhp::security::base64_encode(handle->public_key());
+    dir.write("hsm.pub", text + "\n");
+    REQUIRE(run(std::format("{} cert issue --ca {} --principal hsm --key {} --serial 11 -o {} > {}", kCli, q(dir.path / "ops.rhpca"), q(dir.path / "hsm.pub"),
+                            q(dir.path / "text.rhpcert"), q(dir.path / "issue3.txt"))) == 0);
+    CHECK(Rhp::security::load_operator_cert((dir.path / "text.rhpcert").string())->fields.alg == "p256");
 }
 
 TEST_CASE("rhp-cli: keygen splits identity and signing key and tags them", "[cli][process]") {

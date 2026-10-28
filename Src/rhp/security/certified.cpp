@@ -28,6 +28,7 @@
 #include <rhp/security/certified.hpp>
 #include <rhp/security/detail/canonical.hpp>
 #include <rhp/security/ed25519.hpp>
+#include <rhp/security/key_handle.hpp>
 #include <rhp/security/operator_cert.hpp>
 #include <rhp/security/signer.hpp>
 
@@ -119,8 +120,11 @@ result<script_claims> decode_claims(std::span<const std::byte> bytes) {
 
 // ---- key --------------------------------------------------------------------------------------------
 
-certified::key::key(ed25519_secret_key operator_key, operator_cert cert, claim_options claims)
-    : secret_(std::move(operator_key)), cert_(std::move(cert)), claims_(std::move(claims)) {
+certified::key::key(const ed25519_secret_key& operator_key, operator_cert cert, claim_options claims)
+    : key(key_handle::from_ed25519(operator_key).value_or(key_handle{}), std::move(cert), std::move(claims)) {}
+
+certified::key::key(key_handle operator_key, operator_cert cert, claim_options claims)
+    : key_(std::move(operator_key)), cert_(std::move(cert)), claims_(std::move(claims)) {
     if (auto bytes = encode_operator_cert(cert_)) {
         cert_bytes_ = std::move(*bytes);
     }
@@ -136,12 +140,10 @@ result<value> certified::key::sign(std::string_view source, const signing_contex
         (void)context;
         return fail(errc::kDisabled, "RHP is compiled out (RHP_ENABLE=0)", std::string{kCertifiedWhere});
     } else {
-        if (secret_.empty() || cert_bytes_.empty()) {
+        if (key_.empty() || cert_bytes_.empty()) {
             return refuse(errc::kInvalidArgument, "a certified key needs an operator key and its certificate");
         }
-        const auto pub_key = secret_.public_key(); // bytes() views it: keep it alive
-        const auto pub = pub_key.bytes();
-        if (!std::ranges::equal(pub, cert_.fields.pub)) {
+        if (to_string(key_.alg()) != cert_.fields.alg || !std::ranges::equal(key_.public_key(), cert_.fields.pub)) {
             return refuse(errc::kInvalidArgument, std::format("this key isn't the one certificate {} names", cert_.id()));
         }
         RHP_TRY(nonce, platform::random_array<16>());
@@ -156,7 +158,7 @@ result<value> certified::key::sign(std::string_view source, const signing_contex
         c.nonce = nonce;
         c.identity = pick(context.identity, claims_.identity);
         RHP_TRY(claims_bytes, encode_claims(c));
-        const auto sig = secret_.sign(claims_message(claims_bytes, source));
+        RHP_TRY(sig, key_.sign(claims_message(claims_bytes, source)));
         value::map m;
         m.emplace_back(value{"cert"}, value{value::bytes(cert_bytes_.begin(), cert_bytes_.end())});
         m.emplace_back(value{"claims"}, value{std::move(claims_bytes)});
@@ -286,8 +288,11 @@ result<std::string> certified::trust::verify(std::string_view source, const valu
         if (state_->is_revoked(*cert)) {
             return refuse(errc::kRevoked, std::format("certificate {} is revoked", who));
         }
-        RHP_TRY(operator_key, cert->operator_key());
-        if (!ed25519_check(operator_key, *sig, claims_message(*claims_bytes, source))) {
+        RHP_TRY(alg, cert->key_alg());
+        if (auto checked = security::verify(alg, cert->fields.pub, claims_message(*claims_bytes, source), *sig); !checked) {
+            if (checked.error().code == errc::kDisabled) { // a P-256 key in a build without a TLS backend
+                return refuse(errc::kDisabled, std::format("certificate {} has a {} key, which this build can't check: {}", who, cert->fields.alg, checked.error().message));
+            }
             return refuse(errc::kBadSignature, std::format("the signature by {} doesn't match the script and its claims", who));
         }
         auto claims = decode_claims(*claims_bytes);

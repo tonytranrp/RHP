@@ -26,6 +26,7 @@
 #include <rhp/security/certified.hpp>
 #include <rhp/security/ed25519.hpp>
 #include <rhp/security/key.hpp>
+#include <rhp/security/key_handle.hpp>
 #include <rhp/security/keyring.hpp>
 #include <rhp/security/operator_cert.hpp>
 #include <rhp/security/psk_keyring.hpp>
@@ -185,6 +186,35 @@ TEST_CASE("stage13: a production host refuses dev-tagged CAs and certificates", 
     // A production host's environment is "prod".
     Rhp::client<cert_cfg> prod{at.reversed(), k.as("patch"), k.key(Rhp::role::kPatch, {"prod"}), claims("game", "prod")};
     CHECK(prod.exec<int>("return 1") == 1);
+}
+
+TEST_CASE("stage13: a P-256 operator key signs over the wire", "[stage13][certified][p256]") {
+    pki k;
+    auto secret = Rhp::security::generate_private_key(Rhp::security::key_algorithm::kP256);
+    REQUIRE(secret);
+    auto handle = Rhp::security::key_handle::from_private_key(Rhp::security::key_algorithm::kP256, secret->bytes());
+    if (!handle) {
+        CHECK(handle.error().code == errc::kDisabled);
+        SKIP("no TLS backend: P-256 reports kDisabled");
+    }
+    const auto now = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count());
+    Rhp::security::operator_cert_fields f;
+    f.serial = 256;
+    f.principal = "hsm";
+    f.alg = std::string{Rhp::security::kAlgP256};
+    f.pub.assign(handle->public_key().begin(), handle->public_key().end());
+    f.not_before = now - 60;
+    f.not_after = now + 3600;
+    auto cert = Rhp::security::issue_operator_cert(k.ca, std::move(f));
+    REQUIRE(cert);
+    const auto at = Rhp::endpoint::listen("s13c.p256", 1);
+    running_host host{at, k, {.app = "game"}};
+    std::string signer;
+    auto audit = host->on<Rhp::event::script_executed>([&](const Rhp::event::script_executed& e) { signer = e.signer; });
+    Rhp::client<cert_cfg> c{at.reversed(), k.as("patch"), Rhp::security::certified::key{std::move(*handle), std::move(*cert)}, claims("game")};
+    CHECK(c.exec<int>("return 6 * 7") == 42);
+    CHECK(c.load("s13c_p256", "return {}"));
+    CHECK(signer == "hsm#256");
 }
 
 TEST_CASE("stage13: a certificate's scopes narrow the request it signs", "[stage13][certified][scopes]") {

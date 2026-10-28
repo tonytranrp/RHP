@@ -9,6 +9,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <utility>
 #include <vector>
 
 #include "commands.hpp"
@@ -19,6 +20,8 @@
 #include <rhp/platform/random.hpp>
 #include <rhp/security/ed25519.hpp>
 #include <rhp/security/identity_file.hpp>
+#include <rhp/security/key.hpp>
+#include <rhp/security/key_handle.hpp>
 #include <rhp/security/operator_cert.hpp>
 
 namespace rhp_cli {
@@ -62,16 +65,54 @@ int run_ca_init(const ca_init_options& o) {
     return 0;
 }
 
-// The operator's public key from --key: an identity file's signing key, or a file (or the text
-// itself) holding `[name] base64-public-key`, as `rhp-cli pubkey` prints it.
-[[nodiscard]] Rhp::result<sec::ed25519_public_key> operator_public_key(const std::string& from) {
+struct operator_public {
+    sec::key_algorithm alg = sec::key_algorithm::kEd25519;
+    std::vector<std::byte> pub;
+};
+
+[[nodiscard]] Rhp::result<operator_public> ed25519_public(std::string_view base64) {
+    auto key = sec::ed25519_public_key::from_base64(base64);
+    if (!key) {
+        return std::unexpected{std::move(key).error()};
+    }
+    return operator_public{sec::key_algorithm::kEd25519, std::vector<std::byte>(key->bytes().begin(), key->bytes().end())};
+}
+
+// `[name] [alg] base64-public-key`: Ed25519 unless the word before the key names an algorithm.
+[[nodiscard]] Rhp::result<operator_public> public_from_words(const std::vector<std::string>& words) {
+    if (words.empty()) {
+        return Rhp::fail(Rhp::errc::kInvalidArgument, "no public key", "rhp-cli.cert");
+    }
+    if (words.size() >= 2) {
+        if (const auto alg = sec::parse_key_algorithm(words[words.size() - 2]); alg && *alg != sec::key_algorithm::kEd25519) {
+            auto pub = sec::base64_decode(words.back());
+            if (!pub) {
+                return std::unexpected{std::move(pub).error()};
+            }
+            return operator_public{*alg, std::move(*pub)};
+        }
+    }
+    return ed25519_public(words.back());
+}
+
+// The operator's public key from --key: an identity file's signing key (with --device, its device
+// key, Ed25519 or P-256: a hardware-backed operator key), or a file (or the text itself) holding
+// `[name] [alg] base64-public-key`, as `rhp-cli pubkey` prints it.
+[[nodiscard]] Rhp::result<operator_public> operator_public_key(const std::string& from, bool device) {
     std::error_code ec;
     if (std::filesystem::is_regular_file(from, ec)) {
         if (auto id = sec::identity_file::load(from)) {
-            if (!id->signing) {
-                return Rhp::fail(Rhp::errc::kInvalidArgument, std::format("{} has no signing_key", from), "rhp-cli.cert");
+            if (device) {
+                auto handle = id->device_key();
+                if (!handle) {
+                    return Rhp::fail(Rhp::errc::kInvalidArgument, std::format("{} has no device key: {}", from, handle.error().message), "rhp-cli.cert");
+                }
+                return operator_public{handle->alg(), std::vector<std::byte>(handle->public_key().begin(), handle->public_key().end())};
             }
-            return id->signing->public_key();
+            if (!id->signing) {
+                return Rhp::fail(Rhp::errc::kInvalidArgument, std::format("{} has no signing_key (--device takes its device key)", from), "rhp-cli.cert");
+            }
+            return ed25519_public(id->signing->public_key().to_base64());
         }
         const auto text = read_text_file(from);
         if (!text) {
@@ -79,10 +120,10 @@ int run_ca_init(const ca_init_options& o) {
         }
         const auto words = split_words(*text);
         if (!words.empty()) {
-            return sec::ed25519_public_key::from_base64(words.back());
+            return public_from_words(words);
         }
     }
-    return sec::ed25519_public_key::from_base64(from);
+    return public_from_words(split_words(from));
 }
 
 struct cert_issue_options {
@@ -96,6 +137,7 @@ struct cert_issue_options {
     std::vector<std::string> envs;
     std::vector<std::string> scopes;
     std::uint64_t serial = 0;
+    bool device = false;
     bool force = false;
 };
 
@@ -118,7 +160,7 @@ int run_cert_issue(const cert_issue_options& o) {
         std::println(stderr, "{}", ca.error());
         return 1;
     }
-    auto pub = operator_public_key(o.key);
+    auto pub = operator_public_key(o.key, o.device);
     if (!pub) {
         std::println(stderr, "--key {}: {}", o.key, pub.error().message);
         return 1;
@@ -137,7 +179,8 @@ int run_cert_issue(const cert_issue_options& o) {
         f.serial = (f.serial >> 1) | 1u;
     }
     f.principal = o.principal;
-    f.pub.assign(pub->bytes().begin(), pub->bytes().end());
+    f.alg = std::string{sec::to_string(pub->alg)};
+    f.pub = std::move(pub->pub);
     const auto now = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count());
     f.not_before = now - 60; // a little clock skew
     f.not_after = now + static_cast<std::uint64_t>(o.hours * 3600);
@@ -236,7 +279,8 @@ void add_cert(CLI::App& app, command_list& out) {
     auto* cmd = cert->add_subcommand("issue", "issue a short-lived operator certificate (.rhpcert)");
     cmd->add_option("--ca", issue->ca, "the CA key file (rhp-cli ca init)")->required();
     cmd->add_option("--principal", issue->principal, "who it is for (alice@ops)")->required();
-    cmd->add_option("--key", issue->key, "the operator's key: an identity file, or `[name] base64-public-key`")->required();
+    cmd->add_option("--key", issue->key, "the operator's key: an identity file, or `[name] [p256] base64-public-key`")->required();
+    cmd->add_flag("--device", issue->device, "certify the identity file's device key (ed25519 or p256) instead of its signing key");
     cmd->add_option("-o,--out", issue->out_path, "certificate file to write (default <principal>.rhpcert)");
     cmd->add_option("--hours", issue->hours, "validity in hours (default 8)");
     cmd->add_option("--max-role", issue->max_role, "the most its scripts may run as: observe, patch or admin (default patch)");

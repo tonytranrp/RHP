@@ -15,6 +15,7 @@
 #include <rhp/core/result.hpp>
 #include <rhp/core/value.hpp>
 #include <rhp/security/ed25519.hpp>
+#include <rhp/security/key_handle.hpp>
 #include <rhp/security/operator_cert.hpp>
 #include <rhp/security/signer.hpp>
 
@@ -60,7 +61,8 @@ struct certified_trust_options {
 // short-lived key their operator CA vouches for (an operator certificate); hosts trust the CA.
 //
 // The signature value is {cert = <encoded operator certificate>, claims = <canonical claims>,
-// sig = Ed25519 by the certificate's key over kScriptClaimsDomain || claims || source}.
+// sig = the certificate's key's signature (Ed25519, or P-256 r || s) over kScriptClaimsDomain ||
+// claims || source}.
 //
 // A host checks (trust::verify with the signature_context the host passes): the certificate chains
 // to a trusted CA and is valid now; neither is tagged dev on a host at hardening production; its
@@ -100,7 +102,10 @@ struct certified {
     public:
         key() = default;
         // `operator_key` must be the key the certificate names (sign reports kInvalidArgument otherwise).
-        key(ed25519_secret_key operator_key, operator_cert cert, claim_options claims = {});
+        key(const ed25519_secret_key& operator_key, operator_cert cert, claim_options claims = {});
+        // An operator key held anywhere (decision AL10): software Ed25519 or P-256, or a hardware key
+        // behind a callback (a P-256 key needs the TLS backend's crypto: kDisabled without one).
+        key(key_handle operator_key, operator_cert cert, claim_options claims = {});
 
         [[nodiscard]] result<value> sign(std::string_view source) const;
         [[nodiscard]] result<value> sign(std::string_view source, const signing_context& context) const;
@@ -109,7 +114,7 @@ struct certified {
         [[nodiscard]] const claim_options& claims() const noexcept { return claims_; }
 
     private:
-        ed25519_secret_key secret_;
+        key_handle key_;
         operator_cert cert_;
         std::vector<std::byte> cert_bytes_; // encoded once
         claim_options claims_;

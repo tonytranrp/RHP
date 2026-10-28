@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -18,6 +19,7 @@
 #include <rhp/core/value.hpp>
 #include <rhp/security/certified.hpp>
 #include <rhp/security/ed25519.hpp>
+#include <rhp/security/key_handle.hpp>
 #include <rhp/security/operator_cert.hpp>
 #include <rhp/security/signer.hpp>
 
@@ -290,6 +292,42 @@ TEST_CASE("certified: the certificate's scopes reach the context", "[security][c
     CHECK(issue_operator_cert(k.ca, f).error().code == errc::kInvalidArgument);
     f.scopes = {"nonsense"};
     CHECK(issue_operator_cert(k.ca, f).error().code == errc::kInvalidArgument);
+}
+
+TEST_CASE("certified: a P-256 operator key held by a key handle signs", "[security][certified][p256]") {
+    pki k;
+    const auto now = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count());
+    auto secret = generate_private_key(key_algorithm::kP256);
+    REQUIRE(secret);
+    auto handle = key_handle::from_private_key(key_algorithm::kP256, secret->bytes());
+    if (!handle) {
+        CHECK(handle.error().code == errc::kDisabled);
+        SKIP("no TLS backend: P-256 reports kDisabled");
+    }
+    // A hardware key: only its public half and a sign callback.
+    const key_handle software = *handle;
+    auto hardware = key_handle::from_callback(key_algorithm::kP256, software.public_key(), [software](std::span<const std::byte> m) { return software.sign(m); });
+    REQUIRE(hardware);
+    operator_cert_fields f;
+    f.serial = 256;
+    f.principal = "hsm";
+    f.alg = std::string{kAlgP256};
+    f.pub.assign(hardware->public_key().begin(), hardware->public_key().end());
+    f.not_before = now - 60;
+    f.not_after = now + 3600;
+    auto cert = issue_operator_cert(k.ca, f);
+    REQUIRE(cert);
+    REQUIRE(cert->key_alg() == key_algorithm::kP256);
+    CHECK(cert->operator_key().error().code == errc::kInvalidArgument);
+    const certified::key key{*hardware, *cert};
+    const auto trust = k.trust();
+    auto sig = key.sign(kSource);
+    REQUIRE(sig);
+    CHECK(trust.verify(kSource, *sig, here()) == "hsm#256");
+    CHECK(trust.verify("return 2", *key.sign(kSource), here()).error().code == errc::kBadSignature);
+    // An Ed25519 key with the P-256 certificate, or the other way round: refused before signing.
+    CHECK(certified::key{k.op, *cert}.sign(kSource).error().code == errc::kInvalidArgument);
+    CHECK(certified::key{*hardware, k.cert()}.sign(kSource).error().code == errc::kInvalidArgument);
 }
 
 TEST_CASE("certified: without a context the strictest defaults apply", "[security][certified]") {
