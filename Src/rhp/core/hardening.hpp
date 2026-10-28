@@ -52,17 +52,18 @@ static_assert(kBuildHardening <= hardening::kProduction, "RHP_HARDENING is 0 (de
 // rather than per role) mean nothing in it.
 //
 // Observe identities from kLan up: they run unsigned code there (and read-only code in production),
-// so a run is short and bounded, every run checks for cancels, and one identity's requests can't take
-// the pump thread: at most pump_requests runs of at most wall_ms each per pump().
+// so a run is short and bounded, every run checks for cancels, and one identity can't take the pump
+// thread: at most pump_requests runs of at most wall_ms each per pump() (40 ms a frame), and at most
+// request_rate runs a second (200 ms of every second).
 inline constexpr limits kObserveCaps{
-    .instructions = 10'000'000,    // about 10 to 100 ms of plain Lua: plenty for reading state
+    .instructions = 2'000'000,     // a few ms of plain Lua: plenty for reading state
     .memory = 64ull * 1024 * 1024, // 64 MiB per lua_State
-    .wall_ms = 100,                // a run longer than a frame or two is not a read
+    .wall_ms = 20,                 // a run longer than a frame is not a read
     .cancel_checks = cancel_scope::kEverything,
     .event_queue = 1024, // events waiting for one identity's next pump()
     .async_ms = 0,
-    .request_rate = 20, // a dashboard polling a few values a few times a second, with a burst of 20
-    .pump_requests = 4, // runs one pump() starts for it: a frame waits for at most 4 x wall_ms of observe code
+    .request_rate = 10, // a dashboard polling a few values a few times a second, with a burst of 10
+    .pump_requests = 2, // runs one pump() starts for it
     .handlers = 0,      // no cap: observe can't register lasting handlers at all
 };
 
