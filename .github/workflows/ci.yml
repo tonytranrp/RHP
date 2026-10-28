@@ -1,7 +1,7 @@
 # Builds and tests every preset family: Linux (Clang, ASan+UBSan, TSan), Windows (MSVC, clang-cl,
 # MSVC ASan), macOS, the iOS simulator, and Android (x86_64 tests on an emulator, arm64 build only);
-# RHP_ENABLE=OFF on Linux and Windows; a libFuzzer smoke run; the installed package, consumed with
-# find_package and as a subdirectory.
+# RHP_ENABLE=OFF on Linux and Windows; RHP_HARDENING=production on Linux; a libFuzzer smoke run; the
+# installed package, consumed with find_package and as a subdirectory.
 name: ci
 
 on:
@@ -115,6 +115,34 @@ jobs:
           cmake --preset $preset -B build/off -DRHP_ENABLE=OFF $extra
           cmake --build build/off --config Debug
           ctest --test-dir build/off -C Debug -j 4 --timeout 600 --output-on-failure
+
+  # RHP_HARDENING=production: the dev-only code, unsigned observe code and the remote debugger are
+  # compiled out and every role's limits are capped (Docs/decisions/stage13-security.md, AL1). Every
+  # suite must pass or skip, saying why, what the build leaves out.
+  hardened:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: .cpm-cache
+          # Its own key: the linux jobs save cpm-Linux-* at the same time.
+          key: cpm-hardened-${{ runner.os }}-${{ hashFiles('cmake/Dependencies.cmake') }}
+          restore-keys: |
+            cpm-hardened-${{ runner.os }}-
+            cpm-${{ runner.os }}-
+      - name: Toolchain (Clang 21, libstdc++ 14, OpenSSL)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build g++-14 libssl-dev
+          wget -q https://apt.llvm.org/llvm.sh
+          sudo bash llvm.sh 21
+      - name: Configure, build, test
+        run: |
+          cmake --preset linux-clang -B build/hardened -DRHP_HARDENING=production -DRHP_UNITY_BUILD=ON -DCMAKE_C_COMPILER=clang-21 -DCMAKE_CXX_COMPILER=clang++-21
+          cmake --build build/hardened --config Debug
+          ctest --test-dir build/hardened -C Debug -j 4 --timeout 600 --output-on-failure
 
   # libFuzzer smoke run: every target for a minute from the replay drivers' seed corpus.
   fuzz:
