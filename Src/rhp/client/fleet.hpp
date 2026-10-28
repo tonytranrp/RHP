@@ -244,6 +244,9 @@ private:
     fleet(typename Cfg::credential_t identity, std::optional<signing_key_t> signing, fleet_options options) {
 #if RHP_ENABLE
         fleet_detail::setup s;
+        if (signing) {
+            s.sign = client_detail::make_sign(std::move(*signing), client_detail::credential_name(identity), options.client);
+        }
         s.member.transport = net::transport_ops_for<typename Cfg::transport_t>;
         s.member.tls = security::tls::backend_ops_for<typename Cfg::tls_t>;
         s.member.codec = wire::codec_ops_for<typename Cfg::codec_t>;
@@ -252,9 +255,6 @@ private:
         s.member.hardening = Cfg::hardening_v;
         s.member.io_thread = Cfg::io_t::kOwnsThread;
         s.member.options = std::move(options.client);
-        if (signing) {
-            s.sign = [key = std::move(*signing)](std::string_view source) -> result<value> { return key.sign(source); };
-        }
         s.transport = std::string{Cfg::transport_t::name};
         s.timeout = options.timeout;
         s.tls = options.tls;

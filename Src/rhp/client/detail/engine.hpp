@@ -50,6 +50,12 @@ struct client_options {
     // handshake is bound to the TLS channel instead) and, in reverse mode where the client listens,
     // its own certificate (cert_pem + key_pem; empty = ephemeral self-signed).
     security::tls::settings tls{};
+    // Claims a signer that takes them (security::certified) puts in every script signature, with
+    // the identity's name: the host's app, environment ("dev" / "prod") and id (its
+    // host_options::host_id) the scripts are meant for. Empty: any.
+    std::string app{};
+    std::string env{};
+    std::string audience{};
 };
 
 // One delivery of a subscribed event (client.on). Views are valid during the callback only.

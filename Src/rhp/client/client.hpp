@@ -402,6 +402,9 @@ private:
     client(net::endpoint ep, typename Cfg::credential_t identity, std::optional<signing_key_t> key, client_options options) {
 #if RHP_ENABLE
         client_detail::setup s;
+        if (key) {
+            s.sign = client_detail::make_sign(std::move(*key), client_detail::credential_name(identity), options);
+        }
         s.ep = std::move(ep);
         s.transport = net::transport_ops_for<typename Cfg::transport_t>;
         s.tls = security::tls::backend_ops_for<typename Cfg::tls_t>;
@@ -411,9 +414,6 @@ private:
         s.io_thread = Cfg::io_t::kOwnsThread;
         s.options = std::move(options);
         s.hardening = Cfg::hardening_v;
-        if (key) {
-            s.sign = [signer = std::move(*key)](std::string_view source) -> result<value> { return signer.sign(source); };
-        }
         engine_ = client_detail::make_engine(std::move(s));
         if constexpr (Cfg::io_t::kOwnsThread) {
             // The I/O thread shares the engine: a client destroyed from one of its own callbacks

@@ -13,6 +13,7 @@
 #include <rhp/core/convert.hpp>
 #include <rhp/core/result.hpp>
 #include <rhp/core/value.hpp>
+#include <rhp/security/signer.hpp>
 #include <rhp/wire/messages.hpp>
 
 namespace Rhp::client_detail {
@@ -20,6 +21,31 @@ namespace Rhp::client_detail {
 // Signs a script's source (Cfg::signing_key_t::sign, type-erased); empty: scripts go unsigned.
 using sign_fn = std::function<result<value>(std::string_view source)>;
 
+// The sign_fn of a signing key. A key that puts claims in its signature (security::context_key,
+// security::certified) gets the identity the client connects as and `claims`' app, env and audience.
+template <class Key, class Claims>
+[[nodiscard]] sign_fn make_sign(Key key, std::string identity, const Claims& claims) {
+    if constexpr (security::context_key<Key>) {
+        return [key = std::move(key), identity = std::move(identity), app = claims.app, env = claims.env, audience = claims.audience](std::string_view source) {
+            return key.sign(source, security::signing_context{.identity = identity, .app = app, .env = env, .audience = audience});
+        };
+    } else {
+        (void)identity;
+        (void)claims;
+        return [key = std::move(key)](std::string_view source) -> result<value> { return key.sign(source); };
+    }
+}
+
+// A credential's name when it has one (psk_identity::name): what claims name as the identity.
+template <class Credential>
+[[nodiscard]] std::string credential_name(const Credential& c) {
+    if constexpr (requires { std::string{c.name}; }) {
+        return std::string{c.name};
+    } else {
+        (void)c;
+        return {};
+    }
+}
 // What `sign` makes of `source`: its signature, nil without a signer, or why it couldn't sign.
 [[nodiscard]] inline result<value> signature(const sign_fn& sign, std::string_view source) {
     if (!sign) {
