@@ -21,6 +21,7 @@ add_executable(rhp-cli
     src/keys.cpp
     src/releases.cpp
     src/test_command.cpp
+    src/trust.cpp
 )
 target_link_libraries(rhp-cli PRIVATE rhp_cli_core Rhp::cli11 Rhp::replxx)
 rhp_set_warnings(rhp-cli)

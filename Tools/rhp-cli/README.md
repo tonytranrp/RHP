@@ -138,6 +138,19 @@ Discovery requires the host's explicit `advertise()`. Discovery grants no author
 | `revoke sign <file> -i id` / `revoke apply <file>` | `rhp-cli revoke apply revocations.1761400000.rhprev -c host:7777 -i dev.rhpid` |
 | `rollout <file> -i id [--host h:p ...] [--canary name] [--stage fraction:ms ...] [--max-failures n] [--keep-on-failure] [discovery filters] [--tls] [--ca pem] [--server-name name] [--insecure-lan]` | `rhp-cli rollout balance.rhprel -i admin.rhpid --stage 0.5:30000 --stage 1:0` (hosts discovered when no `--host`; default stages `0.1:30000 0.5:30000 1:0`) |
 
+## Root of trust and identity revocations
+
+Keys are `id=base64` (an Ed25519 public key), `id=alg:base64`, or an identity file (its signer name is the key id, its public key the key); a release key may end in `@game.*,ui.menu` (the channels it signs). A role given replaces that role's keys; a threshold of 0 keeps the earlier one (1 for a new role). Keys no role names any more are retired (what they signed stays valid).
+
+| Subcommand | Example |
+|---|---|
+| `root init --root-key K ... [--root-threshold n] [--release-key K[@patterns] ...] [--revocation-key K ...] [--operator-ca-key K ...] [--<role>-threshold n] [--expires unix \| --expires-in days] [--sign id ...] [-o out]` | `rhp-cli root init --root-key a.rhpid --root-key b.rhpid --root-threshold 2 --release-key rel.rhpid@game.* --revocation-key rev.rhpid --expires-in 365 --sign a.rhpid --sign b.rhpid` (writes `root.1.rhproot`) |
+| `root next <file> [role options] [--compromise id ...] [--retire id ...] [--sign id ...] [-o out]` | `rhp-cli root next root.1.rhproot --compromise rev --revocation-key rev2.rhpid --expires-in 365 --sign a.rhpid --sign b.rhpid` (version N+1; signed by the root keys of both versions) |
+| `root sign <file> -i id ...` | `rhp-cli root sign root.2.rhproot -i c.rhpid` (offline signers add theirs in turn) |
+| `root show <file> [--previous file]` | `rhp-cli root show root.2.rhproot --previous root.1.rhproot` (keys, roles, signers, whether the thresholds hold) |
+| `revoke-identity [--seq n] [--serial s ...] [--signer K ...] [--device K ...] --sign id ... [-o out]` | `rhp-cli revoke-identity --signer ops.rhpid --serial 1001 --sign rev.rhpid` (writes `identities.<seq>.rhpidrev`; K: base64, `alg:base64` or an identity file) |
+| `trust push <host:port> <file> ... -i id` | `rhp-cli trust push host:7777 root.2.rhproot identities.1761400000.rhpidrev -i ops.rhpid` (observe is enough; prints the root version and identity revocation seq the host holds) |
+
 ## Lua tests
 
 `rhp-cli test` is the offline test runner (`Rhp::test`) with the `rhp` API only, or with fakes: `--api FILE.json`, or `--api-from host:port` (with `--api-identity`, `--api-tls`, `--api-ca`, `--api-server-name`, `--api-insecure-lan`) to fake the libs of a running host. `--exe program` runs a program's own test executable (its real libs) with the other arguments instead. `rhp-cli test --help` lists the runner's options.
@@ -153,7 +166,7 @@ rhp-cli test -s scripts tests/combat_spec.lua --reporter junit:report.xml
 | `src/text.hpp/.cpp` | endpoints, the Lua-completeness heuristic, value formatting, words and literals, names from stubs |
 | `src/shell.hpp` | `rhp_cli::shell<Cfg>`: the command language over one client (tests run it in-process over loopback; rhp-cli instantiates it in `main.cpp`) |
 | `src/dap.hpp` | `rhp_cli::dap_server<Cfg>`: the Debug Adapter Protocol server (`rhp-cli dap`) |
-| `src/release_files.hpp/.cpp` | building, signing and describing `.rhprel` / `.rhprev` files; rollout stage parsing |
+| `src/release_files.hpp/.cpp` | building, signing and describing `.rhprel` / `.rhprev` / `.rhproot` / `.rhpidrev` files; rollout stage parsing |
 | `src/json.hpp` | rhp-cli's names for `Rhp::json` |
 | `src/commands.hpp` | `rhp_cli::command` and every family's `add_<name>`: each subcommand adds itself with an options struct of its own and the function that runs it |
 | `src/connection.hpp/.cpp` | the terminal, the connection options network subcommands share, `open_connection`, `open_dev_connection` (TCP or local IPC), `load_identity` (prints its warnings), `load_signer` |
@@ -163,6 +176,7 @@ rhp-cli test -s scripts tests/combat_spec.lua --reporter junit:report.xml
 | `src/cli_signer.hpp` | `rhp_cli::cli_signer`: rhp-cli's signer policy, an identity's Ed25519 key or a certified key behind one type |
 | `src/fleet.cpp` | `discover`, `fleet`, `rollout` |
 | `src/releases.cpp` | `release ...`, `revoke ...` |
+| `src/trust.cpp` | `root ...`, `revoke-identity`, `trust push` |
 | `src/test_command.cpp` | `test` |
 | `src/main.cpp` | the replxx REPL (`connect`), the subcommands that run through the shell (`run`, `exec`, `stubs`, `blob`, `events`, `watch`, `tune`, `profile`, `dap`), Ctrl+C, and running the subcommand parsed |
 

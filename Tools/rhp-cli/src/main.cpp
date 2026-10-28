@@ -427,6 +427,9 @@ int main(int argc, char** argv) {
     add_profile(app, commands);
     add_dap(app, commands);
     rhp_cli::add_revoke(app, commands);
+    rhp_cli::add_root(app, commands);
+    rhp_cli::add_revoke_identity(app, commands);
+    rhp_cli::add_trust(app, commands);
     rhp_cli::add_test(app, commands);
 
     try {

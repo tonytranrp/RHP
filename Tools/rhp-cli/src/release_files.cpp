@@ -26,8 +26,12 @@
 #include <rhp/core/role.hpp>
 #include <rhp/platform/files.hpp>
 #include <rhp/release/manifest.hpp>
+#include <rhp/release/identity_revocations.hpp>
 #include <rhp/release/release.hpp>
+#include <rhp/release/root_of_trust.hpp>
 #include <rhp/security/ed25519.hpp>
+#include <rhp/security/identity_revocations.hpp>
+#include <rhp/security/key.hpp>
 #include <rhp/utils/byte_buffer.hpp>
 #include <rhp/wire/codec/msgpack.hpp>
 #include <rhp/security/identity_file.hpp>
@@ -73,7 +77,176 @@ std::string list_text(const std::vector<std::string>& items) {
     return out;
 }
 
+// A key on the command line: "id=base64", "id=alg:base64" or an identity file (its signer name and
+// public key); `channels` after a last '@' when allowed.
+struct cli_key {
+    std::string id;
+    Rhp::security::public_key_ref key;
+    std::vector<std::string> channels;
+};
+
+Rhp::result<Rhp::security::public_key_ref> key_text(std::string_view text) {
+    std::string alg = "ed25519";
+    if (const auto colon = text.find(':'); colon != std::string_view::npos) {
+        alg = std::string{text.substr(0, colon)};
+        text.remove_prefix(colon + 1);
+    }
+    auto bytes = Rhp::security::base64_decode(text);
+    if (!bytes) {
+        return std::unexpected{usage(std::format("'{}' is not a base64 public key", text))};
+    }
+    return Rhp::security::public_key_ref{std::move(alg), std::vector<std::byte>(bytes->begin(), bytes->end())};
+}
+
+Rhp::result<cli_key> key_from_file(const std::string& path) {
+    auto id = Rhp::security::identity_file::load(path);
+    if (!id) {
+        return std::unexpected{std::move(id).error()};
+    }
+    if (!id->signing) {
+        return std::unexpected{usage(std::format("{} has no signing key", path))};
+    }
+    return cli_key{id->signer.empty() ? id->name : id->signer, Rhp::security::key_ref(id->signing->public_key()), {}};
+}
+
+Rhp::result<cli_key> parse_cli_key(std::string_view text, bool with_id, bool channels_allowed) {
+    std::vector<std::string> channels;
+    if (const auto at = text.rfind('@'); channels_allowed && at != std::string_view::npos) {
+        for (std::string_view rest = text.substr(at + 1); !rest.empty();) {
+            const auto comma = rest.find(',');
+            channels.emplace_back(rest.substr(0, comma));
+            rest = comma == std::string_view::npos ? std::string_view{} : rest.substr(comma + 1);
+        }
+        text = text.substr(0, at);
+    }
+    std::error_code ec;
+    if (std::filesystem::is_regular_file(std::filesystem::path{std::string{text}}, ec)) {
+        auto k = key_from_file(std::string{text});
+        if (k) {
+            k->channels = std::move(channels);
+        }
+        return k;
+    }
+    std::string id;
+    if (with_id) {
+        const auto eq = text.find('=');
+        if (eq == std::string_view::npos || eq == 0) {
+            return std::unexpected{usage(std::format("a key is id=base64, id=alg:base64 or an identity file (got '{}')", text))};
+        }
+        id = std::string{text.substr(0, eq)};
+        text.remove_prefix(eq + 1);
+    }
+    auto key = key_text(text);
+    if (!key) {
+        return std::unexpected{std::move(key).error()};
+    }
+    return cli_key{std::move(id), std::move(*key), std::move(channels)};
+}
+
+// Gives `role` the spec's keys (adding them to the root) when it names any, and its threshold.
+Rhp::result<void> apply_role(Rhp::release::root_document& d, Rhp::release::root_role role, const root_role_spec& spec) {
+    using Rhp::release::root_role;
+    Rhp::release::role_keys& keys = d.role(role);
+    if (!spec.keys.empty()) {
+        keys.keys.clear();
+        for (const std::string& text : spec.keys) {
+            auto k = parse_cli_key(text, true, role == root_role::kRelease);
+            if (!k) {
+                return std::unexpected{std::move(k).error()};
+            }
+            Rhp::release::root_key entry{k->key.alg, k->key.pub, std::move(k->channels)};
+            if (const auto it = d.keys.find(k->id); it != d.keys.end() && (it->second.alg != entry.alg || it->second.pub != entry.pub)) {
+                return std::unexpected{usage(std::format("key id '{}' already names another key", k->id))};
+            }
+            if (role == root_role::kRelease || !d.keys.contains(k->id)) {
+                d.keys[k->id] = std::move(entry);
+            }
+            keys.keys.push_back(k->id);
+        }
+    }
+    std::vector<std::string> ids = keys.keys;
+    std::ranges::sort(ids);
+    const std::size_t distinct = static_cast<std::size_t>(std::ranges::distance(ids.begin(), std::ranges::unique(ids).begin()));
+    if (spec.threshold != 0) {
+        keys.threshold = spec.threshold;
+    } else if (keys.threshold == 0 || keys.threshold > distinct) {
+        keys.threshold = 1;
+    }
+    return {};
+}
+
 } // namespace
+
+Rhp::result<Rhp::release::root_document> build_root(const root_spec& spec, const Rhp::release::root_document* base, std::chrono::system_clock::time_point now) {
+    using Rhp::release::root_role;
+    Rhp::release::root_document d = base != nullptr ? *base : Rhp::release::root_document{};
+    d.version = base != nullptr ? base->version + 1 : 1;
+    const auto now_s = static_cast<std::uint64_t>(std::max<std::int64_t>(std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count(), 0));
+    if (spec.expires_in != 0) {
+        d.expires = now_s + spec.expires_in * 86'400;
+    } else if (spec.expires != 0 || base == nullptr) {
+        d.expires = spec.expires;
+    }
+    const auto drop_from_roles = [&d](const std::string& id) {
+        for (const root_role r : Rhp::release::kRootRoles) {
+            std::erase(d.role(r).keys, id);
+        }
+    };
+    for (const std::string& id : spec.retire) {
+        if (!d.keys.contains(id)) {
+            return std::unexpected{usage(std::format("--retire: the root has no key '{}'", id))};
+        }
+        d.keys.erase(id);
+        drop_from_roles(id);
+        std::erase(d.compromised, id);
+    }
+    for (const std::string& id : spec.compromise) {
+        if (!d.keys.contains(id)) {
+            return std::unexpected{usage(std::format("--compromise: the root has no key '{}'", id))};
+        }
+        drop_from_roles(id);
+        if (std::ranges::find(d.compromised, id) == d.compromised.end()) {
+            d.compromised.push_back(id);
+        }
+    }
+    const std::pair<root_role, const root_role_spec*> roles[] = {
+        {root_role::kRoot, &spec.root}, {root_role::kRelease, &spec.release}, {root_role::kRevocation, &spec.revocation}, {root_role::kOperatorCa, &spec.operator_ca}};
+    for (const auto& [role, role_spec] : roles) {
+        if (auto ok = apply_role(d, role, *role_spec); !ok) {
+            return std::unexpected{std::move(ok).error()};
+        }
+    }
+    // Keys no role names any more (and not compromised) leave the root: retired.
+    std::erase_if(d.keys, [&d](const auto& entry) {
+        const bool used = std::ranges::any_of(Rhp::release::kRootRoles, [&](root_role r) { return std::ranges::find(d.role(r).keys, entry.first) != d.role(r).keys.end(); });
+        return !used && std::ranges::find(d.compromised, entry.first) == d.compromised.end();
+    });
+    if (auto ok = Rhp::release::validate(d); !ok) {
+        return std::unexpected{usage(ok.error().message)};
+    }
+    return d;
+}
+
+Rhp::result<Rhp::release::signed_identity_revocations> build_identity_revocations(const identity_revocation_spec& spec, std::chrono::system_clock::time_point now) {
+    Rhp::security::identity_revocation_list list;
+    auto seq = parse_seq(spec.seq, now);
+    if (!seq) {
+        return std::unexpected{std::move(seq).error()};
+    }
+    list.seq = *seq;
+    list.issued_at = static_cast<std::uint64_t>(std::max<std::int64_t>(std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count(), 0));
+    list.cert_serials = spec.serials;
+    for (const auto& [from, into] : {std::pair{&spec.signers, &list.signer_keys}, std::pair{&spec.devices, &list.device_keys}}) {
+        for (const std::string& text : *from) {
+            auto k = parse_cli_key(text, false, false);
+            if (!k) {
+                return std::unexpected{std::move(k).error()};
+            }
+            into->push_back(std::move(k->key));
+        }
+    }
+    return Rhp::release::make_identity_revocations(std::move(list));
+}
 
 Rhp::result<Rhp::release::release> build_release(const release_spec& spec, std::chrono::system_clock::time_point now) {
     Rhp::release::manifest m;
@@ -230,9 +403,54 @@ std::string describe(const Rhp::release::signed_revocations& r) {
     return out;
 }
 
+std::string describe(const Rhp::release::signed_root& r, const Rhp::release::signed_root* previous) {
+    using Rhp::release::root_role;
+    const Rhp::release::root_document& d = r.body;
+    std::string out = std::format("root version {} (expires {})\n", d.version, d.expires == 0 ? std::string{"never"} : std::to_string(d.expires));
+    for (const auto& [id, k] : d.keys) {
+        const bool bad = std::ranges::find(d.compromised, id) != d.compromised.end();
+        out += std::format("  key {:<20} {} {}{}{}\n", id, k.alg, Rhp::security::base64_encode(k.pub), k.channels.empty() ? "" : " @" + list_text(k.channels),
+                           bad ? "  COMPROMISED" : "");
+    }
+    for (const root_role role : Rhp::release::kRootRoles) {
+        const Rhp::release::role_keys& keys = d.role(role);
+        out += std::format("  role {:<12} {} of [{}]\n", Rhp::release::to_string(role), keys.threshold, keys.keys.empty() ? std::string{"-"} : list_text(keys.keys));
+    }
+    for (const auto& s : r.signatures) {
+        out += std::format("  signed by {}\n", s.signer);
+    }
+    const auto own = Rhp::release::verify_root(r);
+    out += own ? "  its own root keys' threshold holds\n" : std::format("  not yet valid alone: {}\n", own.error().message);
+    if (previous != nullptr) {
+        const auto follows = Rhp::release::verify_next_root(*previous, r);
+        out += follows ? std::format("  follows version {}\n", previous->body.version) : std::format("  doesn't follow version {}: {}\n", previous->body.version, follows.error().message);
+    }
+    return out;
+}
+
+std::string describe(const Rhp::release::signed_identity_revocations& r) {
+    std::string out = std::format("identity revocations {} (issued {})\n", r.body.seq, r.body.issued_at);
+    for (const auto& s : r.body.cert_serials) {
+        out += std::format("  certificate serial {}\n", s);
+    }
+    for (const auto& k : r.body.signer_keys) {
+        out += std::format("  signer key  {}:{}\n", k.alg, Rhp::security::base64_encode(k.pub));
+    }
+    for (const auto& k : r.body.device_keys) {
+        out += std::format("  device key  {}:{}\n", k.alg, Rhp::security::base64_encode(k.pub));
+    }
+    for (const auto& s : r.signatures) {
+        out += std::format("  signed by {}\n", s.signer);
+    }
+    return out;
+}
+
 std::string describe(const Rhp::wire::release_status_reply& status) {
     std::string out = std::format("app {} build {} on {}; revocation list {}\n", status.app.empty() ? "-" : status.app,
                                   status.build.empty() ? "-" : status.build, status.platform, status.revocation_seq);
+    if (status.root_version != 0 || status.identity_seq != 0) {
+        out += std::format("root of trust version {}; identity revocations {}\n", status.root_version, status.identity_seq);
+    }
     if (status.channels.empty()) {
         out += "  no channels\n";
     }

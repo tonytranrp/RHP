@@ -43,6 +43,9 @@
 #include <rhp/net/tcp/tcp.hpp>
 #include <rhp/platform/files.hpp>
 #include <rhp/platform/random.hpp>
+#include <rhp/release/manager.hpp>
+#include <rhp/release/root_of_trust.hpp>
+#include <rhp/release/store.hpp>
 #include <rhp/script/lib.hpp>
 #include <rhp/security/certified.hpp>
 #include <rhp/security/dev_session.hpp>
@@ -1100,6 +1103,66 @@ TEST_CASE("rhp-cli: releases are built and applied then kept across a restart an
         CHECK(dir.read("again.txt").find("revoked") != std::string::npos);
         dir.write("second.stop", "");
     }
+}
+
+TEST_CASE("rhp-cli: roots of trust and identity revocations are made and pushed to a host", "[cli][process][trust]") {
+    scratch_dir dir;
+    for (const char* name : {"root-a", "root-b", "rel", "rel2", "rev", "ops"}) {
+        REQUIRE(run(std::format("{} keygen {} --out {} > {}", kCli, name, q(dir.path / (std::string{name} + ".rhpid")), q(dir.path / "keygen.txt"))) == 0);
+    }
+    const auto id = [&](std::string_view name) { return q(dir.path / (std::string{name} + ".rhpid")); };
+
+    // Genesis: two root keys (both must sign), a release key for game.*, a revocation key.
+    REQUIRE(run(std::format("{} root init --root-key {} --root-key {} --root-threshold 2 --release-key {}@game.* --revocation-key {} --expires-in 30 --sign {} -o {} > {} 2>&1",
+                            kCli, id("root-a"), id("root-b"), id("rel"), id("rev"), id("root-a"), q(dir.path / "root.1.rhproot"), q(dir.path / "init.txt"))) == 0);
+    INFO(dir.read("init.txt"));
+    CHECK(dir.read("init.txt").find("not yet valid alone") != std::string::npos); // one of two signatures
+    REQUIRE(run(std::format("{} root sign {} -i {} > {} 2>&1", kCli, q(dir.path / "root.1.rhproot"), id("root-b"), q(dir.path / "sign.txt"))) == 0);
+    CHECK(dir.read("sign.txt").find("its own root keys' threshold holds") != std::string::npos);
+    CHECK(dir.read("sign.txt").find("role release      1 of [rel]") != std::string::npos);
+
+    // Version 2: rel2 replaces rel (rel is retired); signed by the root keys of both versions.
+    REQUIRE(run(std::format("{} root next {} --release-key {} --expires-in 30 --sign {} --sign {} -o {} > {} 2>&1", kCli, q(dir.path / "root.1.rhproot"), id("rel2"),
+                            id("root-a"), id("root-b"), q(dir.path / "root.2.rhproot"), q(dir.path / "next.txt"))) == 0);
+    INFO(dir.read("next.txt"));
+    CHECK(dir.read("next.txt").find("follows version 1") != std::string::npos);
+    REQUIRE(run(std::format("{} root show {} --previous {} > {}", kCli, q(dir.path / "root.2.rhproot"), q(dir.path / "root.1.rhproot"), q(dir.path / "show.txt"))) == 0);
+    CHECK(dir.read("show.txt").find("root version 2") != std::string::npos);
+    CHECK(dir.read("show.txt").find("rel2") != std::string::npos);
+
+    // An identity revocation list naming ops's script signing key, signed by the revocation key.
+    REQUIRE(run(std::format("{} revoke-identity --seq 1 --signer {} --serial 1001 --sign {} -o {} > {} 2>&1", kCli, id("ops"), id("rev"), q(dir.path / "ids.rhpidrev"),
+                            q(dir.path / "ids.txt"))) == 0);
+    CHECK(dir.read("ids.txt").find("certificate serial 1001") != std::string::npos);
+
+    // A host whose release manager is anchored on version 1; ops is admin and a trusted script signer.
+    const auto ops = Rhp::security::identity_file::load((dir.path / "ops.rhpid").string());
+    REQUIRE(ops);
+    const auto anchor = Rhp::release::decode_root(*Rhp::platform::read_file(dir.path / "root.1.rhproot"));
+    REQUIRE(anchor);
+    Rhp::release::manager releases{*anchor, {}, Rhp::release::memory_store{}};
+    REQUIRE(releases.restore());
+    using tcp_cfg = Rhp::config<>::logger<Rhp::core::null_logger>;
+    Rhp::host<tcp_cfg> host{Rhp::endpoint::listen("127.0.0.1", 0), Rhp::security::keyring{{ops->name, ops->psk, Rhp::role::kAdmin}},
+                            Rhp::security::trusted_signers{{"ops", ops->signing->public_key()}}};
+    REQUIRE(host.serve(releases));
+    const auto port = host.port();
+    REQUIRE(port);
+    std::jthread pump{[&](std::stop_token stop) {
+        while (!stop.stop_requested()) {
+            host.pump();
+            std::this_thread::sleep_for(1ms);
+        }
+    }};
+    const std::string who = std::format("127.0.0.1:{} -i {}", *port, id("ops"));
+    REQUIRE(run(std::format("{} exec \"return 1\" -c {} > {} 2>&1", kCli, who, q(dir.path / "before.txt"))) == 0);
+    REQUIRE(run(std::format("{} trust push {} {} {} > {} 2>&1", kCli, who, q(dir.path / "root.2.rhproot"), q(dir.path / "ids.rhpidrev"), q(dir.path / "push.txt"))) == 0);
+    INFO(dir.read("push.txt"));
+    CHECK(dir.read("push.txt").find("root of trust version 2 and identity revocations 1") != std::string::npos);
+    CHECK(run(std::format("{} exec \"return 2\" -c {} > {} 2>&1", kCli, who, q(dir.path / "after.txt"))) == 1);
+    CHECK(dir.read("after.txt").find("revoked") != std::string::npos);
+    CHECK(releases.root() != nullptr);
+    pump.request_stop();
 }
 
 #endif

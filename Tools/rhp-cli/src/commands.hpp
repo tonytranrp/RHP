@@ -41,6 +41,11 @@ void add_rollout(CLI::App& app, command_list& out);
 void add_release(CLI::App& app, command_list& out);
 void add_revoke(CLI::App& app, command_list& out);
 
+// trust.cpp: `root init|next|sign|show`, `revoke-identity`, `trust push`.
+void add_root(CLI::App& app, command_list& out);
+void add_revoke_identity(CLI::App& app, command_list& out);
+void add_trust(CLI::App& app, command_list& out);
+
 // test_command.cpp: the offline Lua test runner.
 void add_test(CLI::App& app, command_list& out);
 
