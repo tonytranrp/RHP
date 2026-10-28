@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -87,5 +88,42 @@ private:
     std::size_t capacity_;
     std::vector<pairing_secret> secrets_;
 };
+
+// ---- 6-digit codes over CPace -------------------------------------------------------------------
+//
+// The host shows a code; the person types it on the device; both run CPace (pairing_cpace.hpp)
+// with PRS = pairing_code_prs(code) and CI = pairing_channel_id(tls exporter value), the client as
+// initiator. The wire step sends Ya and Yb as 32 bytes each (with ADa / ADb, e.g. the device name
+// and the host's key fingerprint) and proves the ISK both ways before kEnroll is accepted.
+//
+// Binding (the ADB-pairing idea): the TLS exporter of the connection goes into CI, so a CPace run
+// relayed between two TLS connections (a TLS-terminating middlebox) has different CIs on its two
+// sides and ends with unrelated ISKs. sid can stay empty or carry a host nonce.
+//
+// Rate limiting is the wiring step's: a code gives an online attacker one guess per CPace run, so
+// accept one run per connection and retire the code after 5 failed runs (5 in 10^6).
+
+inline constexpr std::size_t kPairingCodeDigits = 6;
+inline constexpr std::string_view kPairingCodeDomain{"rhp/pair-code\0", 14};
+inline constexpr std::string_view kPairingChannelDomain{"rhp/pair-ci\0", 12};
+
+// A uniform code of kPairingCodeDigits decimal digits (leading zeros kept), drawn from the OS
+// random source by rejection sampling.
+[[nodiscard]] result<std::string> generate_pairing_code();
+// Exactly kPairingCodeDigits ASCII digits.
+[[nodiscard]] bool valid_pairing_code(std::string_view code) noexcept;
+// CPace's PRS for a code: kPairingCodeDomain || the digits. kInvalidArgument for anything but a
+// valid code (spaces and dashes a person typed are the caller's to strip).
+[[nodiscard]] result<key> pairing_code_prs(std::string_view code);
+// CPace's CI for a connection: kPairingChannelDomain || its tls-exporter value.
+[[nodiscard]] std::vector<std::byte> pairing_channel_id(std::span<const std::byte> channel_binding);
+
+namespace detail {
+
+// The code for one 32-bit draw, or nullopt when the draw is rejected (at or above the largest
+// multiple of 10^6 that fits, so every code is equally likely).
+[[nodiscard]] std::optional<std::string> pairing_code_from(std::uint32_t draw);
+
+} // namespace detail
 
 } // namespace Rhp::security

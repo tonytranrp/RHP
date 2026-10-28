@@ -1,6 +1,7 @@
 // Pairing formats (decision AL10): the QR link and the host's book of one-time secrets. No
 // cryptography beyond the OS random source, so this builds with RHP_ENABLE=OFF too.
 #include <algorithm>
+#include <array>
 #include <charconv>
 #include <chrono>
 #include <cstddef>
@@ -425,6 +426,64 @@ std::size_t pairing_book::outstanding(clock::time_point now) const {
 void pairing_book::clear() {
     const std::scoped_lock lock{mutex_};
     secrets_.clear();
+}
+
+// ---- 6-digit codes -------------------------------------------------------------------------------
+
+namespace detail {
+
+std::optional<std::string> pairing_code_from(std::uint32_t draw) {
+    constexpr std::uint32_t kCodes = 1'000'000;
+    constexpr std::uint32_t kLimit = static_cast<std::uint32_t>((std::uint64_t{1} << 32) / kCodes * kCodes); // 4'294'000'000
+    if (draw >= kLimit) {
+        return std::nullopt;
+    }
+    return std::format("{:06}", draw % kCodes);
+}
+
+} // namespace detail
+
+result<std::string> generate_pairing_code() {
+    while (true) {
+        auto bytes = platform::random_array<4>();
+        if (!bytes) {
+            return std::unexpected{std::move(bytes).error()};
+        }
+        std::uint32_t draw = 0;
+        for (const std::byte b : *bytes) {
+            draw = (draw << 8) | std::to_integer<std::uint32_t>(b);
+        }
+        secure_wipe(bytes->data(), bytes->size());
+        if (auto code = detail::pairing_code_from(draw)) {
+            return std::move(*code);
+        }
+    }
+}
+
+bool valid_pairing_code(std::string_view code) noexcept {
+    return code.size() == kPairingCodeDigits && std::ranges::all_of(code, ascii_digit);
+}
+
+result<key> pairing_code_prs(std::string_view code) {
+    if (!valid_pairing_code(code)) {
+        return fail(errc::kInvalidArgument, std::format("a pairing code is {} digits", kPairingCodeDigits), "security.pairing_code");
+    }
+    std::array<std::byte, kPairingCodeDomain.size() + kPairingCodeDigits> prs{};
+    std::ranges::transform(kPairingCodeDomain, prs.begin(), [](char c) { return static_cast<std::byte>(c); });
+    std::ranges::transform(code, prs.begin() + static_cast<std::ptrdiff_t>(kPairingCodeDomain.size()), [](char c) { return static_cast<std::byte>(c); });
+    auto out = key::from_bytes(prs);
+    secure_wipe(prs.data(), prs.size());
+    return out;
+}
+
+std::vector<std::byte> pairing_channel_id(std::span<const std::byte> channel_binding) {
+    std::vector<std::byte> out;
+    out.reserve(kPairingChannelDomain.size() + channel_binding.size());
+    for (const char c : kPairingChannelDomain) {
+        out.push_back(static_cast<std::byte>(c));
+    }
+    out.insert(out.end(), channel_binding.begin(), channel_binding.end());
+    return out;
 }
 
 } // namespace Rhp::security

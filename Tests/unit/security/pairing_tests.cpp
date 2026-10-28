@@ -18,12 +18,12 @@
 using Rhp::errc;
 using namespace Rhp::security;
 
-namespace {
+namespace pairing_fixtures {
 
 // 16 bytes in unpadded base64url (the form of key_fingerprint).
-constexpr std::string_view kFingerprint = "q83vEjRWeJCrze8SNFZ4kA";
+constexpr std::string_view kLinkFingerprint = "q83vEjRWeJCrze8SNFZ4kA";
 
-[[nodiscard]] key secret_bytes(unsigned char first) {
+[[nodiscard]] key link_secret(unsigned char first) {
     std::array<std::byte, kPairingSecretSize> bytes{};
     for (std::size_t i = 0; i < bytes.size(); ++i) {
         bytes[i] = static_cast<std::byte>(first + i * 7);
@@ -31,49 +31,51 @@ constexpr std::string_view kFingerprint = "q83vEjRWeJCrze8SNFZ4kA";
     return *key::from_bytes(bytes);
 }
 
-[[nodiscard]] pairing_link sample_link() {
+[[nodiscard]] pairing_link pair_sample_link() {
     pairing_link link;
     link.host = "game-pc.local";
     link.port = 47100;
-    link.secret = secret_bytes(0xf0);
-    link.fingerprint = kFingerprint;
+    link.secret = link_secret(0xf0);
+    link.fingerprint = kLinkFingerprint;
     link.name = "Living room PC";
     return link;
 }
 
-[[nodiscard]] std::vector<std::byte> bytes_of(const key& k) {
+[[nodiscard]] std::vector<std::byte> key_bytes_of(const key& k) {
     return {k.bytes().begin(), k.bytes().end()};
 }
 
 // The secret's text from a formatted link.
-[[nodiscard]] std::string secret_text() {
-    const std::string text = *sample_link().to_text();
+[[nodiscard]] std::string link_secret_text() {
+    const std::string text = *pair_sample_link().to_text();
     const auto at = text.find("secret=") + 7;
     return text.substr(at, text.find('&', at) - at);
 }
 
-} // namespace
+} // namespace pairing_fixtures
+
+using namespace pairing_fixtures;
 
 TEST_CASE("pairing link: format and parse round trip", "[security][pairing]") {
-    const pairing_link link = sample_link();
+    const pairing_link link = pair_sample_link();
     auto text = link.to_text();
     REQUIRE(text);
     CHECK(text->starts_with("rhp-pair://game-pc.local:47100?secret="));
-    CHECK(text->ends_with(std::format("&fp={}&name=Living%20room%20PC", kFingerprint)));
-    CHECK(secret_text().size() == 43);
+    CHECK(text->ends_with(std::format("&fp={}&name=Living%20room%20PC", kLinkFingerprint)));
+    CHECK(link_secret_text().size() == 43);
 
     auto back = pairing_link::parse(*text);
     REQUIRE(back);
     CHECK(back->host == link.host);
     CHECK(back->port == link.port);
-    CHECK(bytes_of(back->secret) == bytes_of(link.secret));
+    CHECK(key_bytes_of(back->secret) == key_bytes_of(link.secret));
     CHECK(back->fingerprint == link.fingerprint);
     CHECK(back->name == link.name);
     CHECK(*back->to_text() == *text);
 }
 
 TEST_CASE("pairing link: IPv6 hosts go in brackets", "[security][pairing]") {
-    pairing_link link = sample_link();
+    pairing_link link = pair_sample_link();
     link.host = "fe80::1";
     link.name.clear();
     auto text = link.to_text();
@@ -85,14 +87,14 @@ TEST_CASE("pairing link: IPv6 hosts go in brackets", "[security][pairing]") {
     CHECK(back->host == "fe80::1");
     CHECK(back->name.empty());
 
-    auto v4 = pairing_link::parse(std::format("RHP-PAIR://192.168.1.20:1?fp={}&secret={}", kFingerprint, secret_text()));
+    auto v4 = pairing_link::parse(std::format("RHP-PAIR://192.168.1.20:1?fp={}&secret={}", kLinkFingerprint, link_secret_text()));
     REQUIRE(v4);
     CHECK(v4->host == "192.168.1.20");
     CHECK(v4->port == 1);
 }
 
 TEST_CASE("pairing link: names are percent-encoded UTF-8", "[security][pairing]") {
-    pairing_link link = sample_link();
+    pairing_link link = pair_sample_link();
     link.name = "Caf\xc3\xa9 & bar?";
     auto text = link.to_text();
     REQUIRE(text);
@@ -101,8 +103,8 @@ TEST_CASE("pairing link: names are percent-encoded UTF-8", "[security][pairing]"
 }
 
 TEST_CASE("pairing link: malformed links are refused", "[security][pairing]") {
-    const std::string secret = secret_text();
-    const std::string fp{kFingerprint};
+    const std::string secret = link_secret_text();
+    const std::string fp{kLinkFingerprint};
     const std::vector<std::string> bad{
         "",
         std::format("http://host:1?secret={}&fp={}", secret, fp),
@@ -150,19 +152,19 @@ TEST_CASE("pairing link: to_text checks its fields", "[security][pairing]") {
         auto text = link.to_text();
         return !text && text.error().code == errc::kInvalidArgument;
     };
-    pairing_link link = sample_link();
+    pairing_link link = pair_sample_link();
     link.port = 0;
     CHECK(refused(link));
-    link = sample_link();
+    link = pair_sample_link();
     link.host = "bad host";
     CHECK(refused(link));
-    link = sample_link();
+    link = pair_sample_link();
     link.secret = *key::from_bytes(std::vector<std::byte>(16));
     CHECK(refused(link));
-    link = sample_link();
+    link = pair_sample_link();
     link.fingerprint = "abc";
     CHECK(refused(link));
-    link = sample_link();
+    link = pair_sample_link();
     link.name = "a\nb";
     CHECK(refused(link));
 }
@@ -175,7 +177,7 @@ TEST_CASE("pairing book: a secret is accepted once", "[security][pairing]") {
     REQUIRE(first);
     REQUIRE(second);
     CHECK(first->value.bytes().size() == kPairingSecretSize);
-    CHECK(bytes_of(first->value) != bytes_of(second->value));
+    CHECK(key_bytes_of(first->value) != key_bytes_of(second->value));
     CHECK(first->expires == now + std::chrono::minutes{5});
     CHECK(book.outstanding(now) == 2);
 
@@ -183,7 +185,7 @@ TEST_CASE("pairing book: a secret is accepted once", "[security][pairing]") {
     CHECK(book.consume(second->value.bytes(), now).error().code == errc::kAuth);
     CHECK(book.outstanding(now) == 1);
 
-    std::vector<std::byte> wrong = bytes_of(first->value);
+    std::vector<std::byte> wrong = key_bytes_of(first->value);
     wrong.back() ^= std::byte{1};
     CHECK(book.consume(wrong, now).error().code == errc::kAuth);
     CHECK(book.consume(std::span{first->value.bytes()}.first(16), now).error().code == errc::kAuth);
@@ -215,4 +217,56 @@ TEST_CASE("pairing book: capacity counts unexpired secrets", "[security][pairing
     REQUIRE(book.issue(std::chrono::seconds{20}, now));
     CHECK(book.issue(std::chrono::seconds{20}, now).error().code == errc::kLimitExceeded);
     CHECK(book.issue(std::chrono::seconds{20}, now + std::chrono::seconds{10}));
+}
+
+TEST_CASE("pairing code: rejection sampling keeps every code equally likely", "[security][pairing]") {
+    CHECK(detail::pairing_code_from(0) == "000000");
+    CHECK(detail::pairing_code_from(42) == "000042");
+    CHECK(detail::pairing_code_from(1'000'000) == "000000");
+    CHECK(detail::pairing_code_from(4'293'999'999U) == "999999");
+    CHECK_FALSE(detail::pairing_code_from(4'294'000'000U));
+    CHECK_FALSE(detail::pairing_code_from(4'294'967'295U));
+}
+
+TEST_CASE("pairing code: generated codes are six uniform digits", "[security][pairing]") {
+    constexpr int kCodes = 60'000;
+    std::array<std::array<int, 10>, kPairingCodeDigits> counts{};
+    for (int i = 0; i < kCodes; ++i) {
+        auto code = generate_pairing_code();
+        REQUIRE(code);
+        REQUIRE(valid_pairing_code(*code));
+        for (std::size_t d = 0; d < kPairingCodeDigits; ++d) {
+            ++counts[d][static_cast<std::size_t>((*code)[d] - '0')];
+        }
+    }
+    // 6000 expected per digit and position, standard deviation about 73: 600 is over 8 of them.
+    for (const auto& position : counts) {
+        for (const int n : position) {
+            CHECK(n > kCodes / 10 - 600);
+            CHECK(n < kCodes / 10 + 600);
+        }
+    }
+}
+
+TEST_CASE("pairing code: the PRS and channel id carry their domains", "[security][pairing]") {
+    CHECK(valid_pairing_code("012345"));
+    CHECK_FALSE(valid_pairing_code("12345"));
+    CHECK_FALSE(valid_pairing_code("1234567"));
+    CHECK_FALSE(valid_pairing_code("12345a"));
+    CHECK_FALSE(valid_pairing_code("123 45"));
+
+    auto prs = pairing_code_prs("012345");
+    REQUIRE(prs);
+    const std::string_view text{reinterpret_cast<const char*>(prs->bytes().data()), prs->bytes().size()};
+    CHECK(text == std::string_view{"rhp/pair-code\0"
+                                   "012345",
+                                   20});
+    CHECK(pairing_code_prs("01234").error().code == errc::kInvalidArgument);
+
+    const std::array<std::byte, 2> binding{std::byte{0xab}, std::byte{0xcd}};
+    const auto ci = pairing_channel_id(binding);
+    REQUIRE(ci.size() == 14);
+    CHECK(ci[11] == std::byte{0});
+    CHECK(ci[12] == std::byte{0xab});
+    CHECK(ci[13] == std::byte{0xcd});
 }
