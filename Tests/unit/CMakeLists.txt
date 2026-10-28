@@ -79,6 +79,7 @@ if(RHP_ENABLE)
             security/key_tests.cpp
             security/psk_tests.cpp
             security/signing_tests.cpp
+            security/operator_cert_tests.cpp
             security/tls_tests.cpp
             security/http_auth_tests.cpp
         LINKS

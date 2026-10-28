@@ -7,6 +7,7 @@
 #include <rhp/core/value.hpp>
 #include <rhp/security/ed25519.hpp>
 #include <rhp/security/identity_file.hpp>
+#include <rhp/security/operator_cert.hpp>
 
 using Rhp::errc;
 using namespace Rhp::security;
@@ -27,4 +28,19 @@ TEST_CASE("disabled signing: keys load while signing and checking report kDisabl
     auto id = identity_file::generate("dev");
     REQUIRE(id);
     CHECK(identity_file::parse(id->to_text())->name == "dev");
+}
+
+TEST_CASE("disabled signing: operator certificates report kDisabled", "[security][disabled]") {
+    auto ca = operator_ca_key::generate("ops");
+    REQUIRE(ca);
+    CHECK(operator_ca_key::parse(ca->to_text())->name == "ops");
+    auto cas = trusted_cas::parse("ops AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA= env=prod\n");
+    REQUIRE(cas);
+    operator_cert_fields f;
+    f.serial = 1;
+    f.principal = "alice";
+    f.pub.resize(32);
+    f.not_before = 1;
+    f.not_after = 2;
+    CHECK(issue_operator_cert(ca->secret, f).error().code == errc::kDisabled);
 }
