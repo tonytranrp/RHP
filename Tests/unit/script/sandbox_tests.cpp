@@ -209,6 +209,32 @@ TEST_CASE("hardened admin gets patch's standard library", "[script][sandbox][har
     CHECK(box.caller_role() == role::kAdmin); // admin's own rights stay (rhp.patch, admin-tagged bindings)
 }
 
+TEST_CASE("above dev Lua is built without io package debug and os's process and file functions", "[script][sandbox][hardening]") {
+    // A plain state with every library luaL_openlibs opens: what isn't compiled in stays nil.
+    lua_State* L = luaL_newstate();
+    luaL_openlibs(L);
+    constexpr std::string_view probe = R"lua(
+        local seen = {}
+        for _, name in ipairs({"io", "package", "debug", "require"}) do
+            if _G[name] ~= nil then seen[#seen + 1] = name end
+        end
+        for _, name in ipairs({"execute", "exit", "getenv", "remove", "rename", "setlocale", "tmpname"}) do
+            if os[name] ~= nil then seen[#seen + 1] = "os." .. name end
+        end
+        assert(type(os.time()) == "number" and type(os.clock()) == "number" and type(os.date("%Y")) == "string")
+        return table.concat(seen, " ")
+    )lua";
+    REQUIRE(luaL_loadbufferx(L, probe.data(), probe.size(), "=probe", "t") == LUA_OK);
+    REQUIRE(lua_pcall(L, 0, 1, 0) == LUA_OK);
+    const std::string seen = lua_tostring(L, -1);
+    lua_close(L);
+    if constexpr (Rhp::kBuildHardening == Rhp::hardening::kDev) {
+        CHECK(seen == "io package debug require os.execute os.exit os.getenv os.remove os.rename os.setlocale os.tmpname");
+    } else {
+        CHECK(seen == "");
+    }
+}
+
 TEST_CASE("load accepts text only for every role", "[script][sandbox]") {
     SECTION("binary chunks are refused even for admin and mode b") {
         rhp_test::needs(Rhp::hardening::kDev, "admin's full standard library");
