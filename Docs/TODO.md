@@ -41,7 +41,7 @@ Stage 13a follow-ups:
 - The host doesn't print `keyring::warnings()` itself (callers show them).
 - A connection that has sent part of a frame holds its handshake slot for a quarter of `handshake_timeout_ms` before a newcomer may take it, and until `handshake_timeout_ms` when no one needs the slot.
 - Caps bound one identity, not the host.
-- `table.sort` without a comparator, `load` of a huge chunk and `<` between long strings run in C without a cancel or limit check ([script README, "Known limits: other work in C"](../Src/rhp/script/README.md#what-untrusted-code-cant-do-stage-13-al3)).
+- `load` of a huge chunk runs in C without a cancel or limit check ([script README, "Known limits: other work in C"](../Src/rhp/script/README.md#what-untrusted-code-cant-do-stage-13-al3)); the memory limit bounds it. (`table.sort` without a comparator and long-string `<` are charged since the channel-scopes branch.)
 - `lauxlib`'s `luaL_loadfilex` (file I/O) is still compiled and linked above `dev` (`lauxlib.c` is built whole), though no sandbox can reach it.
 - The OpenSSL path of the IP-address certificate check isn't built on the Windows development machine (no OpenSSL there); Linux CI builds and tests it.
 

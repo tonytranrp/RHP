@@ -16,6 +16,7 @@
 #include <rhp/core/limits.hpp>
 #include <rhp/core/result.hpp>
 #include <rhp/core/role.hpp>
+#include <rhp/core/scopes.hpp>
 #include <rhp/core/subscription.hpp>
 #include <rhp/platform/os.hpp>
 #include <rhp/release/manifest.hpp>
@@ -67,6 +68,13 @@ struct manager_options {
     std::chrono::milliseconds health_window{60'000};          // kHealth: confirmed after this long without a failure
     std::uint64_t max_seq_jump = std::uint64_t{1} << 32;      // how far a seq may move at once (see "Seq caps" below)
     Rhp::limits limits{};                                     // the channels' sandboxes (wall_ms 10 s when 0), capped for `hardening`
+    // What each channel's sandbox may reach (decision AL13): the scopes of the first entry whose
+    // pattern matches the channel (channel_matches: "*", "prefix.*" or the name), else everything. A
+    // lib they leave out isn't installed in that channel's sandbox (nor are the bindings, patch points
+    // and events they deny reachable from it), and a release whose manifest needs such a lib is refused
+    // with kForbidden, as one needing a lib the host lacks is with kNotFound. One set per trust level
+    // keeps a less-trusted channel ("ui.*") off what only first-party code may call.
+    std::vector<std::pair<std::string, scope_set>> channel_scopes{};
     // The level the channels run at (decisions AL2, AL4; the build's RHP_HARDENING is always a floor):
     // above kDev an admin channel gets patch's libraries (sandbox_options::admin_stdlib) and an
     // observe channel's limits are capped by kObserveCaps; at kProduction every channel's are capped

@@ -20,6 +20,7 @@
 #include <rhp/core/error.hpp>
 #include <rhp/core/hardening.hpp>
 #include <rhp/core/role.hpp>
+#include <rhp/core/scopes.hpp>
 #include <rhp/core/value.hpp>
 #include <rhp/release/manager.hpp>
 #include <rhp/release/store.hpp>
@@ -44,6 +45,12 @@ inline void despawn(int id) {
 }
 
 using game_lib = Rhp::lib<"game">::var<"speed", &g_speed>::fn<"spawn", &spawn, Rhp::undo<&despawn>>;
+
+inline int open_vault() {
+    return 7;
+}
+
+using vault_lib = Rhp::lib<"vault">::fn<"open", &open_vault, Rhp::cap<"vault.open">>;
 
 } // namespace release_manager_fixture
 
@@ -1287,4 +1294,58 @@ TEST_CASE("a production manager caps its channels' limits", "[release][manager][
     CHECK(stopped.error().code == errc::kTimeout);
     CHECK(std::chrono::steady_clock::now() - started < std::chrono::seconds{30});
     CHECK(fx::g_speed == 3);
+}
+
+// Channel scopes (decision AL13): one manager, channels of different trust.
+TEST_CASE("channel scopes keep a lib out of the channels they name", "[release][manager][scopes]") {
+    fixture f;
+    auto o = f.options();
+    o.channel_scopes = {{"ui.*", *Rhp::scope_set::parse("!lib:game")}};
+    auto m = f.make(std::move(o));
+    REQUIRE(m.apply(envelope("ui.home", 1, {{"probe", "x = 1"}}, f.dev)));
+    REQUIRE(m.apply(envelope("game.balance", 1, {{"probe", "x = 1"}}, f.dev)));
+    REQUIRE(m.sandbox("ui.home") != nullptr);
+    CHECK(m.sandbox("ui.home")->exec<bool>("return game == nil").value_or(false));
+    CHECK(m.sandbox("game.balance")->exec<bool>("return game ~= nil").value_or(false));
+    CHECK(fx::g_spawned.empty());
+
+    // A release that needs the lib is refused where the scopes leave it out, and runs elsewhere.
+    auto ui = manifest_for("ui.home", 2, {{"probe", "x = 1"}});
+    ui.libs = {"game"};
+    const auto refused = m.apply(envelope(ui, {{"probe", "x = 1"}}, {&f.dev}));
+    REQUIRE_FALSE(refused.has_value());
+    CHECK(refused.error().code == errc::kForbidden);
+    CHECK(refused.error().message.contains("scopes leave out"));
+    auto game = manifest_for("game.balance", 2, {{"probe", "x = 1"}});
+    game.libs = {"game"};
+    CHECK(m.apply(envelope(game, {{"probe", "x = 1"}}, {&f.dev})).has_value());
+}
+
+TEST_CASE("channel scopes deny capabilities and the first matching pattern wins", "[release][manager][scopes]") {
+    fixture f;
+    auto o = f.options();
+    o.channel_scopes = {{"ui.trusted", Rhp::scope_set{}}, {"ui.*", *Rhp::scope_set::parse("!cap:vault.open")}};
+    Rhp::release::manager m{trust_of({{&f.dev, {"*"}}}), std::move(o), f.store};
+    REQUIRE(m.install<fx::vault_lib>());
+    for (const char* channel : {"ui.home", "ui.trusted", "game.balance"}) {
+        REQUIRE(m.apply(envelope(channel, 1, {{"probe", "x = 1"}}, f.dev)));
+    }
+    const auto open = [&](std::string_view channel) {
+        return m.sandbox(channel)->exec<std::string>("local ok, got = pcall(vault.open) return tostring(got)").value_or("");
+    };
+    CHECK(open("ui.home").contains("needs capability vault.open"));
+    CHECK(open("ui.trusted") == "7");
+    CHECK(open("game.balance") == "7");
+}
+
+TEST_CASE("a lib installed while channels run follows each channel's scopes", "[release][manager][scopes]") {
+    fixture f;
+    auto o = f.options();
+    o.channel_scopes = {{"ui.*", *Rhp::scope_set::parse("!lib:vault")}};
+    Rhp::release::manager m{trust_of({{&f.dev, {"*"}}}), std::move(o), f.store};
+    REQUIRE(m.apply(envelope("ui.home", 1, {{"probe", "x = 1"}}, f.dev)));
+    REQUIRE(m.apply(envelope("game.balance", 1, {{"probe", "x = 1"}}, f.dev)));
+    REQUIRE(m.install<fx::vault_lib>());
+    CHECK(m.sandbox("ui.home")->exec<bool>("return vault == nil").value_or(false));
+    CHECK(m.sandbox("game.balance")->exec<int>("return vault.open()").value_or(0) == 7);
 }

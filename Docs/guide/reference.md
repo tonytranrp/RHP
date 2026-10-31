@@ -89,7 +89,7 @@ The admin column applies in a `dev` build at hardening `dev` (`sandbox_options::
 | Finalizers | `setmetatable` refuses a metatable with `__gc` (`forbidden`); `<close>` variables work | available |
 | `tostring`, `print`, `%p` of tables, functions, userdata | a SipHash-2-4 of the address under the sandbox's own key, not the address | same |
 | Pattern matching, plain `find` | steps charged to `limits.instructions`; `wall_ms` and cancels stop them | same |
-| `table.sort` without a comparator, `load` of a huge chunk, `<` between long strings | one C call each, not checked by limits or cancels until it returns | same |
+| `load` of a huge chunk | one C call, not checked by limits or cancels until it returns (the memory limit bounds it) | same |
 | Libs, bindings, patch points, events | what the identity's [capability scopes](security.md#keys-certificates-and-the-root-of-trust) allow: a denied lib isn't installed, a denied `Rhp::cap<>` binding raises `forbidden`, `rhp.patch` and `rhp.on` / `once` / `wait_event` refuse denied ids and names (default: everything) | same |
 | Changes to `string`, `table`, `math`, `utf8`, `coroutine`, `os`, `rhp` (and `rhp.buffer`) and the string metatable | undone by the identity's full revert (`revert_all`) and by its last session's end, pinned modules or not (a pinned module must not rely on them); unloading one module doesn't undo them | same |
 | Handlers (`rhp.timer`, `after`, `every`, `every_frame(s)`, `on`, `once`, `on_error`, `spawn`) | observe: refused (`forbidden`); patch: allowed | allowed |

@@ -261,7 +261,7 @@ Check each `result` before using it, as the [first run](getting-started.md#first
 - Caps bound one identity, not the host: under `kObserveCaps` an observe identity can still take 40 ms of a `pump()` (2 runs of 20 ms) and 200 ms of every second (10 runs), and each observe key gets as much.
 - A dev session's connect file can be read by any process of the same user.
 - Identity files the Python client writes on Windows get their folder's permissions (`rhp-cli keygen` sets an owner-only DACL).
-- `table.sort` without a comparator, `load` of a huge chunk and `<` between long strings run in C without a limit or cancel check: a script can hold the pump for as long as one such call takes.
+- `load` of a huge chunk runs in C without a limit or cancel check: a script can hold the pump for as long as parsing it takes, which the memory limit bounds. `table.sort` without a comparator and `<` between long strings are charged like pattern matching.
 - Pairing isn't wired into hosts, and `rhp-cli --sign-cmd` (external signers: a YubiKey, a KMS, Vault) isn't built; hardware keys work through a `key_handle` callback in your own code.
 - The Apple Keychain key store and the typed passphrase prompt haven't run in the tests (no device, no terminal).
 - The Python client and `rhp-cli fleet` / `rollout` are PSK-only.

@@ -64,6 +64,15 @@ constexpr std::string_view kRunawayPatterns[] = {
     R"lua(return ("a"):rep(1 << 20):find(("a"):rep(1 << 20) .. "."))lua",
 };
 
+// String comparisons Lua does in C: table.sort without a comparator over many references to one
+// long string (n log n comparisons, each a scan of both), and `<` / `<=` between two long strings in a
+// loop (one instruction each, however long the strings).
+constexpr std::string_view kRunawayComparisons[] = {
+    R"lua(local s = ("a"):rep(1 << 20) local t = {} for i = 1, 2000 do t[i] = s end table.sort(t))lua",
+    R"lua(local a, b = ("a"):rep(1 << 18), ("a"):rep(1 << 18) for i = 1, 1000000 do local _ = a < b end)lua",
+    R"lua(local a, b = ("a"):rep(1 << 18), ("a"):rep(1 << 18) for i = 1, 1000000 do local _ = a <= b end)lua",
+};
+
 // What `source` (which returns one string) gives in a plain Lua state: no step function, no hook.
 std::string raw_string(std::string_view source) {
     lua_State* L = luaL_newstate();
@@ -347,4 +356,72 @@ TEST_CASE("without limits.handlers a sandbox keeps as many handlers as it regist
             rhp.on("tests.handlers.many", function() end)
         end
     )lua"));
+}
+
+TEST_CASE("an instruction budget stops long string comparisons and table.sort", "[script][limits][compare]") {
+    Rhp::limits limits;
+    limits.instructions = 1'000'000;
+    sandbox box = make_box(limits);
+    for (const std::string_view source : kRunawayComparisons) {
+        CAPTURE(source);
+        const auto r = box.exec(source);
+        REQUIRE_FALSE(r.has_value());
+        CHECK(r.error().code == errc::kBudgetExceeded);
+    }
+    CHECK(box.exec<int>("return 1") == 1);
+}
+
+TEST_CASE("a wall time limit stops long string comparisons and table.sort", "[script][limits][compare]") {
+    Rhp::limits limits;
+    limits.wall_ms = 100;
+    sandbox box = make_box(limits);
+    for (const std::string_view source : kRunawayComparisons) {
+        CAPTURE(source);
+        const auto started = std::chrono::steady_clock::now();
+        const auto r = box.exec(source);
+        REQUIRE_FALSE(r.has_value());
+        CHECK(r.error().code == errc::kTimeout);
+        CHECK(std::chrono::steady_clock::now() - started < std::chrono::seconds{10});
+    }
+}
+
+TEST_CASE("cancel stops long string comparisons and table.sort", "[script][limits][compare]") {
+    sandbox box = make_box();
+    for (const std::string_view source : kRunawayComparisons) {
+        CAPTURE(source);
+        const auto r = exec_cancelled(box, source);
+        REQUIRE_FALSE(r.has_value());
+        CHECK(r.error().code == errc::kCancelled);
+    }
+}
+
+TEST_CASE("charging comparisons doesn't change what they or table.sort return", "[script][limits][compare]") {
+    constexpr std::string_view source = R"lua(
+        local out = {}
+        local t = {}
+        for i = 1, 3000 do t[i] = tostring((i * 7919) % 3001) .. ("x"):rep(i % 97) end
+        table.sort(t)
+        out[#out + 1] = table.concat(t, ",", 1, 40)
+        local n = {}
+        for i = 1, 3000 do n[i] = (i * 7919) % 3001 end
+        table.sort(n)
+        out[#out + 1] = table.concat(n, ",", 1, 40)
+        table.sort(t, function(a, b) return a > b end)
+        out[#out + 1] = t[1] .. t[3000]
+        local long = ("q"):rep(1 << 16)
+        out[#out + 1] = tostring(long < long .. "r") .. tostring(long <= long) .. tostring(long .. "a" < long .. "b")
+        return table.concat(out, " ")
+    )lua";
+    const std::string expected = raw_string(source);
+
+    Rhp::limits limits;
+    limits.instructions = 1'000'000'000; // every run checked: comparisons are charged, and fit
+    sandbox box = make_box(limits);
+    CHECK(box.exec<std::string>(source) == expected);
+    sandbox unchecked = make_box();
+    CHECK(unchecked.exec<std::string>(source) == expected);
+    // A long comparison leaves the countdown at 1 or more: the budget still stops what follows.
+    const auto r = box.exec(R"lua(local a = ("q"):rep(1 << 20) local _ = a < a .. "r" while true do end)lua");
+    REQUIRE_FALSE(r.has_value());
+    CHECK(r.error().code == errc::kBudgetExceeded);
 }

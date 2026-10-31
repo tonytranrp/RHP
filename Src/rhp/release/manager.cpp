@@ -871,6 +871,9 @@ private:
             if (!has_lib(lib)) {
                 return std::unexpected{refused(errc::kNotFound, std::format("needs lib '{}', which this host doesn't have", lib), channel)};
             }
+            if (!scopes_for(m.channel).allows(scope_kind::kLib, lib)) {
+                return std::unexpected{refused(errc::kForbidden, std::format("needs lib '{}', which this channel's scopes leave out", lib), channel)};
+            }
         }
         return checked_release{std::move(r), std::move(*signers)};
     }
@@ -918,6 +921,7 @@ private:
         o.admin_stdlib = level == hardening::kDev;
         o.clock = options_.clock;
         o.identity = std::format("release:{}", channel);
+        o.scopes = scopes_for(channel);
         if (options_.output) {
             o.output = [out = options_.output, channel](std::string_view line) { out(channel, line); };
         }
@@ -1636,6 +1640,17 @@ private:
 
     [[nodiscard]] bool has_lib(std::string_view name) const {
         return std::ranges::any_of(libs_, [&](const auto& l) { return l.first == name; });
+    }
+
+    // A channel's scopes (manager_options::channel_scopes): the first matching entry's, else everything.
+    [[nodiscard]] const scope_set& scopes_for(std::string_view channel) const {
+        static const scope_set everything{};
+        for (const auto& [pattern, scopes] : options_.channel_scopes) {
+            if (channel_matches(pattern, channel)) {
+                return scopes;
+            }
+        }
+        return everything;
     }
 
     // A floor a revocation list sets: the channel (made if new) never runs a seq at or below it.

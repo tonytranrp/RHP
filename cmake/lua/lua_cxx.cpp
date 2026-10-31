@@ -217,6 +217,24 @@ int rhp_lua_hook_at_safepoints(lua_State* L) {
     return (L->hookmask == 0 && L->hook != NULL) || (L->hookmask & RHP_LUA_MASKSAFEPOINT) != 0;
 }
 
+// String comparisons. `<` and `<=` between two strings are one instruction that scans both (l_strcmp),
+// however long they are, so a loop of comparisons between two long strings ran for minutes between
+// safe points. The patched lvm.c charges every RHP_LUA_COMPARE_BYTES bytes compared as an instruction
+// on the safe-point countdown, so the loop's next back-edge sees the work. Only while counting at safe
+// points (the meter, the profiler and line hooks count exact instructions and are left alone), and
+// never below 1: luaG_traceexec fires a count hook only when the countdown reaches exactly 0.
+// table.sort reaches the same comparisons through lua_compare from C, where no safe point follows
+// until it returns: its comparisons are steps (rhp_lua_sort_step below).
+#define RHP_LUA_COMPARE_BYTES 32
+
+static void rhp_lua_charge_compare(lua_State* L, const TString* a, const TString* b) {
+    if (L->hook == NULL || L->hookmask != 0 || L->hookcount <= 1) {
+        return;
+    }
+    const size_t n = (tsslen(a) + tsslen(b)) / RHP_LUA_COMPARE_BYTES;
+    L->hookcount = n < (size_t)L->hookcount ? L->hookcount - (int)n : 1;
+}
+
 // clang-format off
 #include "lfunc.c"
 #include "lobject.c"
@@ -336,7 +354,26 @@ const void* rhp_lua_topointer(lua_State* L, int idx) {
 #endif
 #include "rhp_loslib.c" // loslib.c, only what reads the time above dev (cmake/RhpLua.cmake)
 #include "rhp_lstrlib.c" // lstrlib.c with the step counting and %p showing rhp_lua_topointer (cmake/RhpLua.cmake)
-#include "ltablib.c"
+// clang-format on
+
+// table.sort without a comparator compares in C (sort_comp, lua_compare): n log n comparisons with no
+// hook between them, each a scan of two strings, so 2000 references to one 1 MiB string held the pump
+// for many seconds. The patched ltablib.c counts each comparison as a step, plus a step per
+// RHP_LUA_BYTES_PER_STEP bytes of two strings, on a countdown each sort call starts afresh (a sort
+// that an __lt metamethod starts restarts it: steps then come later, never not at all). With a
+// comparator every comparison is a Lua call and is checked as calls are.
+static thread_local ptrdiff_t rhp_lua_sort_left = RHP_LUA_STEPS;
+
+static void rhp_lua_sort_step(lua_State* L, int a, int b) {
+    size_t bytes = 0;
+    if (lua_type(L, a) == LUA_TSTRING && lua_type(L, b) == LUA_TSTRING) {
+        bytes = lua_rawlen(L, a) + lua_rawlen(L, b);
+    }
+    rhp_lua_step(L, rhp_lua_sort_left, 1 + bytes / RHP_LUA_BYTES_PER_STEP);
+}
+
+// clang-format off
+#include "rhp_ltablib.c" // ltablib.c with sort's comparisons counted as steps (cmake/RhpLua.cmake)
 #include "lutf8lib.c"
 // clang-format on
 

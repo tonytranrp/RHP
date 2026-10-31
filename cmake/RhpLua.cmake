@@ -50,6 +50,12 @@ _rhp_lua_patch(lvm.c "        if (!ttisnil(s2v(ra + 3)))  /* continue loop? */\n
                      "        if (!ttisnil(s2v(ra + 3))) {  /* continue loop? */\n          pc -= GETARG_Bx(i);  /* jump back */\n          rhp_lua_charge(GETARG_Bx(i));\n        }\n")
 _rhp_lua_patch(lvm.c " startfunc:\n  trap = L->hookmask;\n"
                      " startfunc:\n  trap = L->hookmask;\n  rhp_lua_charge(1);\n")
+# `<` and `<=` between two strings scan both in one instruction: charged by their length
+# (rhp_lua_charge_compare), so the next safe point sees a run of long comparisons.
+_rhp_lua_patch(lvm.c "    return l_strcmp(tsvalue(l), tsvalue(r)) < 0;\n"
+                     "    return (rhp_lua_charge_compare(L, tsvalue(l), tsvalue(r)), l_strcmp(tsvalue(l), tsvalue(r)) < 0);\n")
+_rhp_lua_patch(lvm.c "    return l_strcmp(tsvalue(l), tsvalue(r)) <= 0;\n"
+                     "    return (rhp_lua_charge_compare(L, tsvalue(l), tsvalue(r)), l_strcmp(tsvalue(l), tsvalue(r)) <= 0);\n")
 _rhp_lua_write(lvm.c)
 
 # Steps in C: pattern matching (each pattern item match visits, a call or a tail call to `init`, each
@@ -103,6 +109,15 @@ _rhp_lua_patch(loslib.c "  {\"setlocale\", os_setlocale},\n"
 _rhp_lua_patch(loslib.c "  {\"tmpname\",   os_tmpname},\n"
                         "#if RHP_LUA_FULL_STDLIB\n  {\"tmpname\",   os_tmpname},\n#endif\n")
 _rhp_lua_write(loslib.c)
+# table.sort without a comparator compares in C (sort_comp, lua_compare): each comparison is a step,
+# two strings' bytes count as for a plain find, on a countdown each sort call starts afresh
+# (rhp_lua_sort_step).
+_rhp_lua_read(ltablib.c)
+_rhp_lua_patch(ltablib.c "  if (lua_isnil(L, 2))  /* no function? */\n    return lua_compare(L, a, b, LUA_OPLT);  /* a < b */\n"
+                         "  if (lua_isnil(L, 2)) {  /* no function? */\n    rhp_lua_sort_step(L, a, b);\n    return lua_compare(L, a, b, LUA_OPLT);  /* a < b */\n  }\n")
+_rhp_lua_patch(ltablib.c "    lua_settop(L, 2);  /* make sure there are two arguments */\n"
+                         "    lua_settop(L, 2);  /* make sure there are two arguments */\n    rhp_lua_sort_left = RHP_LUA_STEPS;\n")
+_rhp_lua_write(ltablib.c)
 _rhp_lua_read(lauxlib.c)
 _rhp_lua_patch(lauxlib.c "lua_pushfstring(L, \"%s: %p\", kind, lua_topointer(L, idx));"
                          "lua_pushfstring(L, \"%s: %p\", kind, rhp_lua_topointer(L, idx));")
